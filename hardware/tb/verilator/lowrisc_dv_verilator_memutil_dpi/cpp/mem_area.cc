@@ -24,7 +24,7 @@ MemArea::MemArea(const std::string &scope, uint32_t num_words,
     : num_words_(num_words), width_byte_(width_byte) {
   scopes_.push_back(scope);
   num_banks_ = 1;
-  interleaved_bytes_ = width_byte * num_banks_;
+  interleaved_bytes_ = width_byte;
   assert(0 < num_words);
   assert(width_byte <= SV_MEM_WIDTH_BYTES);
 }
@@ -33,7 +33,7 @@ MemArea::MemArea(const std::vector<std::string> &scopes, uint32_t num_words,
                  uint32_t width_byte)
     : scopes_(scopes), num_words_(num_words), width_byte_(width_byte) {
   num_banks_ = scopes_.size();
-  interleaved_bytes_ = width_byte * num_banks_;
+  interleaved_bytes_ = width_byte;
   assert(0 < num_words);
   assert(width_byte <= SV_MEM_WIDTH_BYTES);
 }
@@ -77,9 +77,13 @@ void MemArea::Write(uint32_t word_offset,
     SVScoped scoped(
         scopes_[(phys_addr >>
                  static_cast<uint32_t>(std::ceil(std::log2(
-                     interleaved_bytes_ / num_banks_ / width_byte_)))) %
-                num_banks_]);
-    if (!simutil_set_mem(phys_addr / (interleaved_bytes_ / width_byte_),
+                     interleaved_bytes_)))) % num_banks_]);
+    if (!simutil_set_mem(
+                         (((phys_addr >> static_cast<uint32_t>(std::ceil(std::log2(interleaved_bytes_ * num_banks_))))
+                                      << static_cast<uint32_t>(std::ceil(std::log2(interleaved_bytes_ / width_byte_)))) &
+                              (num_words_ - 1)) |
+                          ((phys_addr >> static_cast<uint32_t>(std::ceil(std::log2(width_byte_)))) &
+                              (static_cast<uint32_t>(std::ceil(std::log2(interleaved_bytes_ / width_byte_))) - 1)),
                          (svBitVecVal *)minibuf)) {
       std::ostringstream oss;
       oss << "Could not set memory at byte offset 0x" << std::hex
@@ -143,11 +147,16 @@ void MemArea::ReadBuffer(std::vector<uint8_t> &data,
 void MemArea::ReadToMinibuf(uint8_t *minibuf, uint32_t phys_addr) const {
   SVScoped scoped(
       scopes_[(phys_addr >>
-               static_cast<uint32_t>(std::ceil(
-                   std::log2(interleaved_bytes_ / num_banks_ / width_byte_)))) %
-              num_banks_]);
-  if (!simutil_set_mem(phys_addr / (interleaved_bytes_ / width_byte_),
-                       (svBitVecVal *)minibuf)) {
+                static_cast<uint32_t>(std::ceil(std::log2(
+                    interleaved_bytes_)))) % num_banks_]);
+
+  if (!simutil_get_mem(
+                        (((phys_addr >> static_cast<uint32_t>(std::ceil(std::log2(interleaved_bytes_ * num_banks_))))
+                                    << static_cast<uint32_t>(std::ceil(std::log2(interleaved_bytes_ / width_byte_)))) &
+                            (num_words_ - 1)) |
+                        ((phys_addr >> static_cast<uint32_t>(std::ceil(std::log2(width_byte_)))) &
+                            (static_cast<uint32_t>(std::ceil(std::log2(interleaved_bytes_ / width_byte_))) - 1)),
+                        (svBitVecVal *)minibuf)) {
     std::ostringstream oss;
     oss << "Could not read memory word at physical index 0x" << std::hex
         << phys_addr << ".";
