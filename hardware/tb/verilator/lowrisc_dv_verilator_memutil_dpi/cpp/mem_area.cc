@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstring>
 #include <sstream>
+#include <iostream>
 
 #include "sv_scoped.h"
 
@@ -74,17 +75,22 @@ void MemArea::Write(uint32_t word_offset,
     // only construct `SVScoped` once they've both been called so they don't
     // interact causing incorrect relative path behaviour. If this fails to set
     // scope, it will throw an error which should be caught at this function's
-    SVScoped scoped(
-        scopes_[(phys_addr >>
-                 static_cast<uint32_t>(std::ceil(std::log2(
-                     interleaved_bytes_)))) % num_banks_]);
-    if (!simutil_set_mem(
-                         (((phys_addr >> static_cast<uint32_t>(std::ceil(std::log2(interleaved_bytes_ * num_banks_))))
-                                      << static_cast<uint32_t>(std::ceil(std::log2(interleaved_bytes_ / width_byte_)))) &
-                              (num_words_ - 1)) |
+
+    uint32_t bank_id    = (phys_addr >> static_cast<uint32_t>(std::ceil(std::log2(interleaved_bytes_)))) % num_banks_;
+    uint32_t bank_index = (((phys_addr >> static_cast<uint32_t>(std::ceil(std::log2(interleaved_bytes_ * num_banks_))))
+                            << static_cast<uint32_t>(std::ceil(std::log2(interleaved_bytes_ / width_byte_)))) &
+                            (num_words_ - 1)) |
                           ((phys_addr >> static_cast<uint32_t>(std::ceil(std::log2(width_byte_)))) &
-                              (static_cast<uint32_t>(std::ceil(std::log2(interleaved_bytes_ / width_byte_))) - 1)),
-                         (svBitVecVal *)minibuf)) {
+                            (static_cast<uint32_t>(std::ceil(std::log2(interleaved_bytes_ / width_byte_))) - 1));
+
+    // Debug: Print the scope and address for simutil_set_mem
+    std::cout << "phys_addr: " << std::hex << phys_addr << std::dec
+              << "bank_id: " << bank_id
+              << "bank_index: " << bank_index
+              << "minibuf: " << std::hex << reinterpret_cast<uintptr_t>(minibuf) << std::dec << std::endl;
+
+    SVScoped scoped(scopes_[bank_id]);
+    if (!simutil_set_mem(bank_index, (svBitVecVal *)minibuf)) {
       std::ostringstream oss;
       oss << "Could not set memory at byte offset 0x" << std::hex
           << dst_word * width_byte_ << ".";
@@ -145,18 +151,16 @@ void MemArea::ReadBuffer(std::vector<uint8_t> &data,
 }
 
 void MemArea::ReadToMinibuf(uint8_t *minibuf, uint32_t phys_addr) const {
-  SVScoped scoped(
-      scopes_[(phys_addr >>
-                static_cast<uint32_t>(std::ceil(std::log2(
-                    interleaved_bytes_)))) % num_banks_]);
-
-  if (!simutil_get_mem(
-                        (((phys_addr >> static_cast<uint32_t>(std::ceil(std::log2(interleaved_bytes_ * num_banks_))))
-                                    << static_cast<uint32_t>(std::ceil(std::log2(interleaved_bytes_ / width_byte_)))) &
+    uint32_t bank_id    = (phys_addr >> static_cast<uint32_t>(std::ceil(std::log2(interleaved_bytes_)))) % num_banks_;
+    uint32_t bank_index = (((phys_addr >> static_cast<uint32_t>(std::ceil(std::log2(interleaved_bytes_ * num_banks_))))
+                            << static_cast<uint32_t>(std::ceil(std::log2(interleaved_bytes_ / width_byte_)))) &
                             (num_words_ - 1)) |
-                        ((phys_addr >> static_cast<uint32_t>(std::ceil(std::log2(width_byte_)))) &
-                            (static_cast<uint32_t>(std::ceil(std::log2(interleaved_bytes_ / width_byte_))) - 1)),
-                        (svBitVecVal *)minibuf)) {
+                          ((phys_addr >> static_cast<uint32_t>(std::ceil(std::log2(width_byte_)))) &
+                            (static_cast<uint32_t>(std::ceil(std::log2(interleaved_bytes_ / width_byte_))) - 1));
+
+  SVScoped scoped(scopes_[bank_id]);
+
+  if (!simutil_get_mem(bank_index, (svBitVecVal *)minibuf)) {
     std::ostringstream oss;
     oss << "Could not read memory word at physical index 0x" << std::hex
         << phys_addr << ".";
