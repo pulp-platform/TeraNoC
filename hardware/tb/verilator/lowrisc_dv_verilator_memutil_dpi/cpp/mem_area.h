@@ -95,7 +95,7 @@ protected:
   uint32_t num_words_;         ///< Size of the memory area in words
   uint32_t width_byte_;        ///< Size of each word in bytes
   uint32_t num_banks_;         ///< Number of interleaved banks for the memory
-  uint32_t interleaved_bytes_; ///< Interleaving factor for the memory
+  uint32_t interleaved_words_; ///< Interleaving factor for the memory
 
   /** Write to buf with the data that should be copied to the physical memory
    * for a single memory word.
