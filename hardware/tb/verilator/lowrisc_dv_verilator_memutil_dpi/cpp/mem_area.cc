@@ -10,6 +10,7 @@
 #include <cstring>
 #include <sstream>
 #include <iostream>
+#include <iomanip>
 
 #include "sv_scoped.h"
 
@@ -25,7 +26,7 @@ MemArea::MemArea(const std::string &scope, uint32_t num_words,
     : num_words_(num_words), width_byte_(width_byte) {
   scopes_.push_back(scope);
   num_banks_ = 1;
-  interleaved_bytes_ = width_byte;
+  interleaved_words_ = 1;
   assert(0 < num_words);
   assert(width_byte <= SV_MEM_WIDTH_BYTES);
 }
@@ -34,19 +35,34 @@ MemArea::MemArea(const std::vector<std::string> &scopes, uint32_t num_words,
                  uint32_t width_byte)
     : scopes_(scopes), num_words_(num_words), width_byte_(width_byte) {
   num_banks_ = scopes_.size();
-  interleaved_bytes_ = width_byte;
+  interleaved_words_ = 1;
   assert(0 < num_words);
   assert(width_byte <= SV_MEM_WIDTH_BYTES);
 }
 
 MemArea::MemArea(const std::vector<std::string> &scopes, uint32_t num_words,
-                 uint32_t width_byte, uint32_t interleaved_bytes)
+                 uint32_t width_byte, uint32_t interleaved_words)
     : scopes_(scopes), num_words_(num_words), width_byte_(width_byte),
-      interleaved_bytes_(interleaved_bytes) {
+      interleaved_words_(interleaved_words) {
   num_banks_ = scopes_.size();
   assert(0 < num_words);
   assert(width_byte <= SV_MEM_WIDTH_BYTES);
-  assert(0 < interleaved_bytes);
+  assert(0 < interleaved_words);
+}
+
+void dump_rv32_words(const uint8_t* buf, std::size_t len, std::ostream& os = std::cout) {
+    auto flags = os.flags(); auto fill = os.fill();
+
+    for (std::size_t i = 0; i + 3 < len; i += 4) {
+        uint32_t w =  (uint32_t)buf[i]
+                    | (uint32_t(buf[i+1]) << 8)
+                    | (uint32_t(buf[i+2]) << 16)
+                    | (uint32_t(buf[i+3]) << 24);   // little-endian load
+        os << std::hex << std::setw(8) << std::setfill('0') << w;
+        if (i + 4 < len) os << ' ';
+    }
+    os << std::dec << '\n';
+    os.flags(flags); os.fill(fill);
 }
 
 void MemArea::Write(uint32_t word_offset,
@@ -71,23 +87,19 @@ void MemArea::Write(uint32_t word_offset,
 
     WriteBuffer(minibuf, data, i * width_byte_, dst_word);
 
-    // Both ToPhysAddr and WriteBuffer might set the scope with `SVScoped` so
-    // only construct `SVScoped` once they've both been called so they don't
-    // interact causing incorrect relative path behaviour. If this fails to set
-    // scope, it will throw an error which should be caught at this function's
-
-    uint32_t bank_id    = (phys_addr >> static_cast<uint32_t>(std::ceil(std::log2(interleaved_bytes_)))) % num_banks_;
-    uint32_t bank_index = (((phys_addr >> static_cast<uint32_t>(std::ceil(std::log2(interleaved_bytes_ * num_banks_))))
-                            << static_cast<uint32_t>(std::ceil(std::log2(interleaved_bytes_ / width_byte_)))) &
+    uint32_t bank_id    = (phys_addr >> static_cast<uint32_t>(std::ceil(std::log2(interleaved_words_)))) % num_banks_;
+    uint32_t bank_index = (((phys_addr >> static_cast<uint32_t>(std::ceil(std::log2(interleaved_words_ * num_banks_))))
+                            << static_cast<uint32_t>(std::ceil(std::log2(interleaved_words_)))) &
                             (num_words_ - 1)) |
-                          ((phys_addr >> static_cast<uint32_t>(std::ceil(std::log2(width_byte_)))) &
-                            (static_cast<uint32_t>(std::ceil(std::log2(interleaved_bytes_ / width_byte_))) - 1));
+                          (phys_addr &
+                            (interleaved_words_ - 1));
 
     // Debug: Print the scope and address for simutil_set_mem
-    std::cout << "phys_addr: " << std::hex << phys_addr << std::dec
-              << "bank_id: " << bank_id
-              << "bank_index: " << bank_index
-              << "minibuf: " << std::hex << reinterpret_cast<uintptr_t>(minibuf) << std::dec << std::endl;
+    std::cout << "Write phys_addr: " << std::hex << phys_addr << std::dec
+              << " bank_id: " << bank_id
+              << " bank_index: " << bank_index
+              << " minibuf: ";
+    dump_rv32_words(minibuf, width_byte_);
 
     SVScoped scoped(scopes_[bank_id]);
     if (!simutil_set_mem(bank_index, (svBitVecVal *)minibuf)) {
@@ -151,12 +163,18 @@ void MemArea::ReadBuffer(std::vector<uint8_t> &data,
 }
 
 void MemArea::ReadToMinibuf(uint8_t *minibuf, uint32_t phys_addr) const {
-    uint32_t bank_id    = (phys_addr >> static_cast<uint32_t>(std::ceil(std::log2(interleaved_bytes_)))) % num_banks_;
-    uint32_t bank_index = (((phys_addr >> static_cast<uint32_t>(std::ceil(std::log2(interleaved_bytes_ * num_banks_))))
-                            << static_cast<uint32_t>(std::ceil(std::log2(interleaved_bytes_ / width_byte_)))) &
-                            (num_words_ - 1)) |
-                          ((phys_addr >> static_cast<uint32_t>(std::ceil(std::log2(width_byte_)))) &
-                            (static_cast<uint32_t>(std::ceil(std::log2(interleaved_bytes_ / width_byte_))) - 1));
+  uint32_t bank_id    = (phys_addr >> static_cast<uint32_t>(std::ceil(std::log2(interleaved_words_)))) % num_banks_;
+  uint32_t bank_index = (((phys_addr >> static_cast<uint32_t>(std::ceil(std::log2(interleaved_words_ * num_banks_))))
+                          << static_cast<uint32_t>(std::ceil(std::log2(interleaved_words_)))) &
+                          (num_words_ - 1)) |
+                        (phys_addr &
+                          (interleaved_words_ - 1));
+
+  // Debug: Print the scope and address for simutil_get_mem
+  std::cout << "ReadToMinibuf phys_addr: " << std::hex << phys_addr << std::dec
+            << "bank_id: " << bank_id
+            << "bank_index: " << bank_index
+            << std::endl;
 
   SVScoped scoped(scopes_[bank_id]);
 
