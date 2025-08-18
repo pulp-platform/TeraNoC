@@ -50,24 +50,6 @@ MemArea::MemArea(const std::vector<std::string> &scopes, uint32_t num_words,
   assert(0 < interleaved_words);
 }
 
-void dump_rv32_words(const uint8_t *buf, std::size_t len,
-                     std::ostream &os = std::cout) {
-  auto flags = os.flags();
-  auto fill = os.fill();
-
-  for (std::size_t i = 0; i + 3 < len; i += 4) {
-    uint32_t w = (uint32_t)buf[i] | (uint32_t(buf[i + 1]) << 8) |
-                 (uint32_t(buf[i + 2]) << 16) |
-                 (uint32_t(buf[i + 3]) << 24); // little-endian load
-    os << std::hex << std::setw(8) << std::setfill('0') << w;
-    if (i + 4 < len)
-      os << ' ';
-  }
-  os << std::dec << '\n';
-  os.flags(flags);
-  os.fill(fill);
-}
-
 void MemArea::Write(uint32_t word_offset,
                     const std::vector<uint8_t> &data) const {
   // This "mini buffer" is used to transfer each write to SystemVerilog.
@@ -100,12 +82,6 @@ void MemArea::Write(uint32_t word_offset,
           << static_cast<uint32_t>(std::ceil(std::log2(interleaved_words_)))) &
          (num_words_ - 1)) |
         (phys_addr & (interleaved_words_ - 1));
-
-    // Debug: Print the scope and address for simutil_set_mem
-    std::cout << "Write phys_addr: " << std::hex << phys_addr << std::dec
-              << " bank_id: " << bank_id << " bank_index: " << bank_index
-              << " minibuf: ";
-    dump_rv32_words(minibuf, width_byte_);
 
     SVScoped scoped(scopes_[bank_id]);
     if (!simutil_set_mem(bank_index, (svBitVecVal *)minibuf)) {
@@ -179,11 +155,6 @@ void MemArea::ReadToMinibuf(uint8_t *minibuf, uint32_t phys_addr) const {
         << static_cast<uint32_t>(std::ceil(std::log2(interleaved_words_)))) &
        (num_words_ - 1)) |
       (phys_addr & (interleaved_words_ - 1));
-
-  // Debug: Print the scope and address for simutil_get_mem
-  std::cout << "ReadToMinibuf phys_addr: " << std::hex << phys_addr << std::dec
-            << "bank_id: " << bank_id << "bank_index: " << bank_index
-            << std::endl;
 
   SVScoped scoped(scopes_[bank_id]);
 
