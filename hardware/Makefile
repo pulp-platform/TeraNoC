@@ -366,7 +366,9 @@ VERILATOR_FLAGS += --Mdir $(verilator_build)
 VERILATOR_FLAGS += -f $(verilator_files)
 VERILATOR_FLAGS += -f $(VERILATOR_CONF)
 VERILATOR_FLAGS += $(VERILATOR_WAIVE)
+# Uncomment the following line to enable verilator waveform dumping
 # VERILATOR_FLAGS += --trace --trace-fst --trace-structs --trace-params --trace-max-array 1024
+# Uncomment the following line to enable verilator debug mode
 # VERILATOR_FLAGS += --debug
 
 # We need to link the verilated model against LLVM's libc++.
