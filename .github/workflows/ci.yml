@@ -180,6 +180,17 @@ jobs:
       with:
         path: install/verilator
         key: ${{ runner.os }}-verilator-llvm-${{ env.tc-verilator-hash }}
+    - name: Free Disk Space (Ubuntu)
+      if: steps.verilator-cache.outputs.cache-hit != 'true'
+      uses: jlumbroso/free-disk-space@main
+      with:
+        tool-cache: true
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: false # to keep clang++ for verilator
+        docker-images: true
+        swap-storage: true
     - name: Download Verilator
       if: steps.verilator-cache.outputs.cache-hit != 'true'
       run: |
