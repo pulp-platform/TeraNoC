@@ -199,6 +199,7 @@ jobs:
       if: steps.verilator-cache.outputs.cache-hit != 'true'
       run: |
         sudo apt install libfl-dev
+        sudo apt install help2man
         make verilator
     - name: Tar verilator
       run: tar --posix --use-compress-program zstd -cf verilator.tzst install/verilator
