@@ -219,7 +219,7 @@ jobs:
     strategy:
       matrix:
         # mempool_config: [minpool]
-        mempool_config: [minpool, test_4x4noc_64core]
+        mempool_config: [minpool, test_4x4noc_64core, mempool]
     steps:
     - uses: actions/checkout@v4
     - name: Cache Verilator Model
@@ -317,7 +317,7 @@ jobs:
     strategy:
       matrix:
         # mempool_config: [minpool]
-        mempool_config: [minpool, test_4x4noc_64core]
+        mempool_config: [minpool, test_4x4noc_64core, mempool]
     steps:
     - uses: actions/checkout@v4
     - name: Get riscv-gnu-toolchain artifacts
@@ -349,7 +349,7 @@ jobs:
     strategy:
       matrix:
         # mempool_config: [minpool]
-        mempool_config: [minpool, test_4x4noc_64core]
+        mempool_config: [minpool, test_4x4noc_64core, mempool]
     steps:
     - uses: actions/checkout@v4
     - name: Get riscv-gnu-toolchain artifacts
@@ -387,7 +387,7 @@ jobs:
     strategy:
       matrix:
         # mempool_config: [minpool]
-        mempool_config: [minpool, test_4x4noc_64core]
+        mempool_config: [minpool, test_4x4noc_64core, mempool]
     steps:
     - uses: actions/checkout@v4
     - name: Get riscv-gnu-toolchain artifacts
@@ -432,7 +432,7 @@ jobs:
     strategy:
       matrix:
         # mempool_config: [minpool]
-        mempool_config: [minpool, test_4x4noc_64core]
+        mempool_config: [minpool, test_4x4noc_64core, mempool]
     steps:
     - uses: actions/checkout@v4
     - name: Get apps-gcc artifacts
@@ -471,7 +471,7 @@ jobs:
     strategy:
       matrix:
         # mempool_config: [minpool]
-        mempool_config: [minpool, test_4x4noc_64core]
+        mempool_config: [minpool, test_4x4noc_64core, mempool]
     steps:
     - uses: actions/checkout@v4
     - name: Get apps-llvm artifacts
@@ -510,7 +510,7 @@ jobs:
     strategy:
       matrix:
         # mempool_config: [minpool]
-        mempool_config: [minpool, test_4x4noc_64core]
+        mempool_config: [minpool, test_4x4noc_64core, mempool]
     steps:
     - uses: actions/checkout@v4
     - name: Get apps-halide artifacts
@@ -616,7 +616,7 @@ jobs:
     strategy:
       matrix:
         # mempool_config: [minpool]
-        mempool_config: [minpool, test_4x4noc_64core]
+        mempool_config: [minpool, test_4x4noc_64core, mempool]
     steps:
     - name: Delete artifacts
       uses: geekyeggo/delete-artifact@v4
