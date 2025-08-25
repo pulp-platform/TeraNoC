@@ -218,7 +218,6 @@ jobs:
     needs: [verilator, bender]
     strategy:
       matrix:
-        # mempool_config: [minpool]
         mempool_config: [minpool, test_4x4noc_64core, mempool]
     steps:
     - uses: actions/checkout@v4
@@ -316,7 +315,6 @@ jobs:
     needs: tc-gcc
     strategy:
       matrix:
-        # mempool_config: [minpool]
         mempool_config: [minpool, test_4x4noc_64core, mempool]
     steps:
     - uses: actions/checkout@v4
@@ -348,7 +346,6 @@ jobs:
     needs: [tc-gcc, tc-llvm]
     strategy:
       matrix:
-        # mempool_config: [minpool]
         mempool_config: [minpool, test_4x4noc_64core, mempool]
     steps:
     - uses: actions/checkout@v4
@@ -386,7 +383,6 @@ jobs:
     needs: [tc-gcc, tc-llvm, tc-halide]
     strategy:
       matrix:
-        # mempool_config: [minpool]
         mempool_config: [minpool, test_4x4noc_64core, mempool]
     steps:
     - uses: actions/checkout@v4
@@ -431,7 +427,6 @@ jobs:
     needs: [build-apps-gcc, riscv-isa-sim, verilator-model]
     strategy:
       matrix:
-        # mempool_config: [minpool]
         mempool_config: [minpool, test_4x4noc_64core, mempool]
     steps:
     - uses: actions/checkout@v4
@@ -470,7 +465,6 @@ jobs:
     needs: [build-apps-llvm, riscv-isa-sim, verilator-model]
     strategy:
       matrix:
-        # mempool_config: [minpool]
         mempool_config: [minpool, test_4x4noc_64core, mempool]
     steps:
     - uses: actions/checkout@v4
@@ -509,7 +503,6 @@ jobs:
     needs: [build-apps-halide, riscv-isa-sim, verilator-model]
     strategy:
       matrix:
-        # mempool_config: [minpool]
         mempool_config: [minpool, test_4x4noc_64core, mempool]
     steps:
     - uses: actions/checkout@v4
@@ -615,7 +608,6 @@ jobs:
       run-apps-llvm, run-apps-halide]
     strategy:
       matrix:
-        # mempool_config: [minpool]
         mempool_config: [minpool, test_4x4noc_64core, mempool]
     steps:
     - name: Delete artifacts
