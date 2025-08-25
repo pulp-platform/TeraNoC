@@ -584,6 +584,7 @@ jobs:
   #  Clean-up  #
   ##############
   clean-up:
+    permissions: write-all
     runs-on: ubuntu-22.04
     if: always()
     needs: [tc-gcc, tc-llvm, riscv-isa-sim, verilator, tc-halide, verilator-model,
@@ -599,8 +600,10 @@ jobs:
           halide
           riscv-isa-sim
           verilator
+          bender
 
   clean-up-compile-runs:
+    permissions: write-all
     runs-on: ubuntu-22.04
     if: always()
     needs: [tc-gcc, tc-llvm, riscv-isa-sim, verilator, tc-halide, verilator-model,
