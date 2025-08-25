@@ -68,7 +68,7 @@ int main() {
   mempool_start_benchmark();
   matmul_4x4_parallel_f32(matrix_a, matrix_b, matrix_c, matrix_M, matrix_N,
                           matrix_P, core_id, num_cores);
-  mempool_log_barrier(8, core_id);
+  mempool_log_barrier(2, core_id);
   mempool_stop_benchmark();
 #endif
 
@@ -76,7 +76,7 @@ int main() {
   mempool_start_benchmark();
   matmul_4x4_parallel_f32_nocopt_asm(matrix_a, matrix_b, matrix_c, matrix_M,
                                      matrix_N, matrix_P, core_id, num_cores);
-  mempool_log_barrier(8, core_id);
+  mempool_log_barrier(2, core_id);
   mempool_stop_benchmark();
 #endif
 
