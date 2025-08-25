@@ -584,7 +584,6 @@ jobs:
   #  Clean-up  #
   ##############
   clean-up:
-    permissions: write-all
     runs-on: ubuntu-22.04
     if: always()
     needs: [tc-gcc, tc-llvm, riscv-isa-sim, verilator, tc-halide, verilator-model,
@@ -592,7 +591,7 @@ jobs:
       run-apps-llvm, run-apps-halide]
     steps:
     - name: Delete artifacts
-      uses: geekyeggo/delete-artifact@v4
+      uses: geekyeggo/delete-artifact@v5
       with:
         name: |
           riscv-gnu-toolchain
@@ -601,9 +600,9 @@ jobs:
           riscv-isa-sim
           verilator
           bender
+        failOnError: false
 
   clean-up-compile-runs:
-    permissions: write-all
     runs-on: ubuntu-22.04
     if: always()
     needs: [tc-gcc, tc-llvm, riscv-isa-sim, verilator, tc-halide, verilator-model,
@@ -614,10 +613,11 @@ jobs:
         mempool_config: [minpool, test_4x4noc_64core, mempool]
     steps:
     - name: Delete artifacts
-      uses: geekyeggo/delete-artifact@v4
+      uses: geekyeggo/delete-artifact@v5
       with:
         name: |
           verilator-model-${{ matrix.mempool_config }}
           apps-gcc-${{ matrix.mempool_config }}
           apps-llvm-${{ matrix.mempool_config }}
           apps-halide-${{ matrix.mempool_config }}
+        failOnError: false
