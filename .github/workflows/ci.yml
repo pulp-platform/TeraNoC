@@ -586,9 +586,7 @@ jobs:
   clean-up:
     runs-on: ubuntu-22.04
     if: always()
-    needs: [tc-gcc, tc-llvm, riscv-isa-sim, verilator, tc-halide, verilator-model,
-      build-apps-llvm, build-apps-gcc, build-apps-halide, unit-test, run-apps-gcc,
-      run-apps-llvm, run-apps-halide]
+    needs: [unit-test, run-apps-gcc, run-apps-llvm, run-apps-halide]
     steps:
     - name: Delete artifacts
       uses: geekyeggo/delete-artifact@v5
@@ -604,10 +602,8 @@ jobs:
 
   clean-up-compile-runs:
     runs-on: ubuntu-22.04
-    if: always()
-    needs: [tc-gcc, tc-llvm, riscv-isa-sim, verilator, tc-halide, verilator-model,
-      build-apps-llvm, build-apps-gcc, build-apps-halide, unit-test, run-apps-gcc,
-      run-apps-llvm, run-apps-halide]
+    if: success()
+    needs: [unit-test, run-apps-gcc, run-apps-llvm, run-apps-halide]
     strategy:
       matrix:
         mempool_config: [minpool, test_4x4noc_64core, mempool]
