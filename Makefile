@@ -147,8 +147,10 @@ $(BENDER_INSTALL_DIR)/bender:
 verilator: $(VERILATOR_INSTALL_DIR)/bin/verilator
 $(VERILATOR_INSTALL_DIR)/bin/verilator: toolchain/verilator Makefile
 	cd $<; unset VERILATOR_ROOT; \
-	autoconf && CC=$(CC) CXX=$(CXX) ./configure --prefix=$(VERILATOR_INSTALL_DIR) $(VERILATOR_CI) && \
+	autoconf && CC=$(CLANG_CC) CXX=$(CLANG_CXX) CXXFLAGS=$(CLANG_CXXFLAGS) LDFLAGS=$(CLANG_LDFLAGS) ./configure --prefix=$(VERILATOR_INSTALL_DIR) $(VERILATOR_CI) && \
 	make -j4 && make install
+	cp toolchain/verilator/bin/verilator_bin $(VERILATOR_INSTALL_DIR)/share/verilator/bin/verilator_bin
+	cp toolchain/verilator/bin/verilator_bin $(VERILATOR_INSTALL_DIR)/bin/verilator_bin
 
 # Update and patch hardware dependencies for MemPool
 # Previous changes will be stashed. Clear all the stashes with `git stash clear`

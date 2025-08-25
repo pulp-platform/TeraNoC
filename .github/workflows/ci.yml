@@ -179,7 +179,18 @@ jobs:
       id: verilator-cache
       with:
         path: install/verilator
-        key: ${{ runner.os }}-verilator-gcc-${{ env.tc-verilator-hash }}
+        key: ${{ runner.os }}-verilator-llvm-${{ env.tc-verilator-hash }}
+    - name: Free Disk Space (Ubuntu)
+      if: steps.verilator-cache.outputs.cache-hit != 'true'
+      uses: jlumbroso/free-disk-space@main
+      with:
+        tool-cache: true
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: false # to keep clang++ for verilator
+        docker-images: true
+        swap-storage: true
     - name: Download Verilator
       if: steps.verilator-cache.outputs.cache-hit != 'true'
       run: |
@@ -188,6 +199,7 @@ jobs:
       if: steps.verilator-cache.outputs.cache-hit != 'true'
       run: |
         sudo apt install libfl-dev
+        sudo apt install help2man
         make verilator
     - name: Tar verilator
       run: tar --posix --use-compress-program zstd -cf verilator.tzst install/verilator
@@ -206,8 +218,7 @@ jobs:
     needs: [verilator, bender]
     strategy:
       matrix:
-        mempool_config: [minpool]
-        # mempool_config: [test_4x4noc_64core]
+        mempool_config: [minpool, test_4x4noc_64core, mempool]
     steps:
     - uses: actions/checkout@v4
     - name: Cache Verilator Model
@@ -224,7 +235,7 @@ jobs:
         android: true
         dotnet: true
         haskell: true
-        large-packages: true
+        large-packages: false # to keep clang++ for verilator
         docker-images: true
         swap-storage: true
     - name: Get Verilator artifacts
@@ -304,8 +315,7 @@ jobs:
     needs: tc-gcc
     strategy:
       matrix:
-        mempool_config: [minpool]
-        # mempool_config: [test_4x4noc_64core]
+        mempool_config: [minpool, test_4x4noc_64core, mempool]
     steps:
     - uses: actions/checkout@v4
     - name: Get riscv-gnu-toolchain artifacts
@@ -336,8 +346,7 @@ jobs:
     needs: [tc-gcc, tc-llvm]
     strategy:
       matrix:
-        mempool_config: [minpool]
-        # mempool_config: [test_4x4noc_64core]
+        mempool_config: [minpool, test_4x4noc_64core, mempool]
     steps:
     - uses: actions/checkout@v4
     - name: Get riscv-gnu-toolchain artifacts
@@ -374,8 +383,7 @@ jobs:
     needs: [tc-gcc, tc-llvm, tc-halide]
     strategy:
       matrix:
-        mempool_config: [minpool]
-        # mempool_config: [test_4x4noc_64core]
+        mempool_config: [minpool, test_4x4noc_64core, mempool]
     steps:
     - uses: actions/checkout@v4
     - name: Get riscv-gnu-toolchain artifacts
@@ -419,8 +427,7 @@ jobs:
     needs: [build-apps-gcc, riscv-isa-sim, verilator-model]
     strategy:
       matrix:
-        mempool_config: [minpool]
-        # mempool_config: [test_4x4noc_64core]
+        mempool_config: [minpool, test_4x4noc_64core, mempool]
     steps:
     - uses: actions/checkout@v4
     - name: Get apps-gcc artifacts
@@ -458,8 +465,7 @@ jobs:
     needs: [build-apps-llvm, riscv-isa-sim, verilator-model]
     strategy:
       matrix:
-        mempool_config: [minpool]
-        # mempool_config: [test_4x4noc_64core]
+        mempool_config: [minpool, test_4x4noc_64core, mempool]
     steps:
     - uses: actions/checkout@v4
     - name: Get apps-llvm artifacts
@@ -497,8 +503,7 @@ jobs:
     needs: [build-apps-halide, riscv-isa-sim, verilator-model]
     strategy:
       matrix:
-        mempool_config: [minpool]
-        # mempool_config: [test_4x4noc_64core]
+        mempool_config: [minpool, test_4x4noc_64core, mempool]
     steps:
     - uses: actions/checkout@v4
     - name: Get apps-halide artifacts
@@ -603,8 +608,7 @@ jobs:
       run-apps-llvm, run-apps-halide]
     strategy:
       matrix:
-        mempool_config: [minpool]
-        # mempool_config: [test_4x4noc_64core]
+        mempool_config: [minpool, test_4x4noc_64core, mempool]
     steps:
     - name: Delete artifacts
       uses: geekyeggo/delete-artifact@v4
