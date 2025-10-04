@@ -49,3 +49,6 @@
 [submodule "hardware/deps/axi_riscv_atomics"]
 	path = hardware/deps/axi_riscv_atomics
   url = https://github.com/pulp-platform/axi_riscv_atomics.git
+[submodule "hardware/deps/cluster_icache"]
+	path = hardware/deps/cluster_icache
+	url = https://github.com/pulp-platform/cluster_icache.git

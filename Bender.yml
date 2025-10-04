@@ -13,6 +13,7 @@ dependencies:
   register_interface:   { git: "https://github.com/pulp-platform/register_interface.git",   version: 0.4.3   }
   reqrsp_interface:     { path: "hardware/deps/reqrsp_interface"                                             }
   snitch:               { path: "hardware/deps/snitch"                                                       }
+  cluster_icache:       { git: "https://github.com/pulp-platform/cluster_icache.git",       version: 0.1.1   }
   tech_cells_generic:   { git: "https://github.com/pulp-platform/tech_cells_generic.git",   version: 0.2.13  }
   fpnew:                { git: "https://github.com/pulp-platform/cvfpu.git",                rev: pulp-v0.1.3 }
   floo_noc:             { git: "https://github.com/pulp-platform/FlooNoC.git",              rev: yr/adaptive_routing}
@@ -37,7 +38,6 @@ sources:
   - hardware/src/axi_L2_interleaver.sv
   - hardware/src/axi2mem.sv
   - hardware/src/bootrom.sv
-  - hardware/src/latch_scm.sv
   - hardware/src/selector.sv
   - hardware/src/mempool_bank_id_remapper.sv
   - hardware/src/mempool_dma_tile_id_remapper.sv
@@ -46,18 +46,18 @@ sources:
   - hardware/src/control_registers/control_registers_reg_top.sv
   # Level 1
   - hardware/src/mempool_tile.sv
-  # Level 3
+  # Level 2
   - hardware/src/floo_remapper.sv
   - hardware/src/routing_table_pkg.sv
   - hardware/src/mempool_group.sv
   - hardware/generated/floo_terapool_noc_pkg.sv
   - hardware/src/mempool_group_floonoc_wrapper.sv
-  # Level 4
+  # Level 3
   - hardware/src/mempool_cluster_floonoc_wrapper.sv
   - hardware/src/terapool_cluster_floonoc_wrapper.sv
-  # Level 5
+  # Level 4
   - hardware/src/ctrl_registers.sv
-  # Level 6
+  # Level 5
   - hardware/src/mempool_system.sv
 
   - target: mempool_vsim
@@ -86,4 +86,3 @@ sources:
     files:
       # Level 1
     - hardware/src/axi_rab_wrap.sv
-
