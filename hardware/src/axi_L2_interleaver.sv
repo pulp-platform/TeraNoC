@@ -52,13 +52,18 @@ module axi_L2_interleaver
       aw_scramble_addr[i] = axi_l2_req_interleaved_o[i].aw.addr;
       ar_scramble_addr[i] = axi_l2_req_interleaved_o[i].ar.addr;
 
+      // Decompose address for scrambling
+      aw_lsb_const[i]     = axi_l2_req_interleaved_o[i].aw.addr[LSBConstantBits-1 : 0];
+      aw_msb_const[i]     = axi_l2_req_interleaved_o[i].aw.addr[AddrWidth-1 -: MSBConstantBits];
+      aw_scramble[i]      = axi_l2_req_interleaved_o[i].aw.addr[ScrambleBits+LSBConstantBits-1 : LSBConstantBits];
+      aw_reminder[i]      = axi_l2_req_interleaved_o[i].aw.addr[AddrWidth-MSBConstantBits-1 : ScrambleBits+LSBConstantBits];
+      ar_lsb_const[i]     = axi_l2_req_interleaved_o[i].ar.addr[LSBConstantBits-1 : 0];
+      ar_msb_const[i]     = axi_l2_req_interleaved_o[i].ar.addr[AddrWidth-1 -: MSBConstantBits];
+      ar_scramble[i]      = axi_l2_req_interleaved_o[i].ar.addr[ScrambleBits+LSBConstantBits-1 : LSBConstantBits];
+      ar_reminder[i]      = axi_l2_req_interleaved_o[i].ar.addr[AddrWidth-MSBConstantBits-1 : ScrambleBits+LSBConstantBits];
+
       // AW Channel
       if ((axi_l2_req_interleaved_o[i].aw.addr >= 32'h80000000) && (axi_l2_req_interleaved_o[i].aw.addr < 32'h90000000)) begin
-        // Decompose address for scrambling
-        aw_lsb_const[i]     = axi_l2_req_interleaved_o[i].aw.addr[LSBConstantBits-1 : 0];
-        aw_msb_const[i]     = axi_l2_req_interleaved_o[i].aw.addr[AddrWidth-1 -: MSBConstantBits];
-        aw_scramble[i]      = axi_l2_req_interleaved_o[i].aw.addr[ScrambleBits+LSBConstantBits-1 : LSBConstantBits];
-        aw_reminder[i]      = axi_l2_req_interleaved_o[i].aw.addr[AddrWidth-MSBConstantBits-1 : ScrambleBits+LSBConstantBits];
         aw_scramble_addr[i] = {aw_msb_const[i], aw_scramble[i], aw_reminder[i], aw_lsb_const[i]};
         // Assign scrambled address back to request
         axi_l2_req_interleaved_o[i].aw.addr = aw_scramble_addr[i];
@@ -66,11 +71,6 @@ module axi_L2_interleaver
 
       // AR Channel
       if ((axi_l2_req_interleaved_o[i].ar.addr >= 32'h80000000) && (axi_l2_req_interleaved_o[i].ar.addr < 32'h90000000)) begin
-        // Decompose address for scrambling
-        ar_lsb_const[i]     = axi_l2_req_interleaved_o[i].ar.addr[LSBConstantBits-1 : 0];
-        ar_msb_const[i]     = axi_l2_req_interleaved_o[i].ar.addr[AddrWidth-1 -: MSBConstantBits];
-        ar_scramble[i]      = axi_l2_req_interleaved_o[i].ar.addr[ScrambleBits+LSBConstantBits-1 : LSBConstantBits];
-        ar_reminder[i]      = axi_l2_req_interleaved_o[i].ar.addr[AddrWidth-MSBConstantBits-1 : ScrambleBits+LSBConstantBits];
         ar_scramble_addr[i] = {ar_msb_const[i], ar_scramble[i], ar_reminder[i], ar_lsb_const[i]};
         // Assign scrambled address back to request
         axi_l2_req_interleaved_o[i].ar.addr = ar_scramble_addr[i];
