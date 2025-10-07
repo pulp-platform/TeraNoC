@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "builtins_v2.h"
 #include "dma.h"
 #include "encoding.h"
 #include "runtime.h"
