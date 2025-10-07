@@ -35,12 +35,12 @@ int main() {
   mempool_barrier(num_cores);
 
   // Benchmark
-#if defined(__XPULPIMG)
+#if defined(NOC_OPT)
   mempool_start_benchmark();
-  matmul_unrolled_2x2_parallel_i32_xpulpv2(matrix_a, matrix_b, matrix_c,
-                                           matrix_M, matrix_N, matrix_P,
-                                           core_id, num_cores);
-  mempool_barrier(num_cores);
+  mat_mul_unrolled_4x4_conflict_nocopt_parallel_asm(
+      matrix_a, matrix_b, matrix_c, matrix_M, matrix_N, matrix_P, core_id,
+      num_cores);
+  mempool_log_barrier(2, core_id);
   mempool_stop_benchmark();
 #elif defined(XBAR_OPT)
   mempool_start_benchmark();
@@ -49,12 +49,12 @@ int main() {
                                                  core_id, num_cores);
   mempool_log_barrier(2, core_id);
   mempool_stop_benchmark();
-#elif defined(NOC_OPT)
+#elif defined(__XPULPIMG)
   mempool_start_benchmark();
-  mat_mul_unrolled_4x4_conflict_nocopt_parallel_asm(
-      matrix_a, matrix_b, matrix_c, matrix_M, matrix_N, matrix_P, core_id,
-      num_cores);
-  mempool_log_barrier(2, core_id);
+  matmul_unrolled_2x2_parallel_i32_xpulpv2(matrix_a, matrix_b, matrix_c,
+                                           matrix_M, matrix_N, matrix_P,
+                                           core_id, num_cores);
+  mempool_barrier(num_cores);
   mempool_stop_benchmark();
 #else
   mempool_start_benchmark();
