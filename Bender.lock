@@ -1,25 +1,25 @@
 packages:
   apb:
-    revision: null
-    version: null
+    revision: 77ddf073f194d44b9119949d2421be59789e69ae
+    version: 0.2.4
     source:
-      Path: hardware/deps/apb
+      Git: https://github.com/pulp-platform/apb.git
     dependencies:
     - common_cells
   axi:
-    revision: null
-    version: null
+    revision: 78831b6feba265d5ee2683bbf42b4150f8a35c43
+    version: 0.39.8
     source:
-      Path: hardware/deps/axi
+      Git: https://github.com/pulp-platform/axi.git
     dependencies:
     - common_cells
     - common_verification
     - tech_cells_generic
   axi_riscv_atomics:
-    revision: null
-    version: null
+    revision: 0ac3a78fe342c5a5b9b10bff49d58897f773059e
+    version: 0.8.2
     source:
-      Path: hardware/deps/axi_riscv_atomics
+      Git: https://github.com/pulp-platform/axi_riscv_atomics.git
     dependencies:
     - axi
     - common_cells
@@ -35,31 +35,31 @@ packages:
     - scm
     - tech_cells_generic
   cluster_interconnect:
-    revision: null
-    version: null
+    revision: 2967d8d17be0a6139229ca8d3d4956e182aec3de
+    version: 1.3.0
     source:
-      Path: hardware/deps/cluster_interconnect
+      Git: https://github.com/pulp-platform/cluster_interconnect.git
     dependencies:
     - common_cells
   common_cells:
-    revision: null
-    version: null
+    revision: 9afda9abb565971649c2aa0985639c096f351171
+    version: 1.38.0
     source:
-      Path: hardware/deps/common_cells
+      Git: https://github.com/pulp-platform/common_cells.git
     dependencies:
     - common_verification
     - tech_cells_generic
   common_verification:
-    revision: null
-    version: null
+    revision: fb1885f48ea46164a10568aeff51884389f67ae3
+    version: 0.2.5
     source:
-      Path: hardware/deps/common_verification
+      Git: https://github.com/pulp-platform/common_verification.git
     dependencies: []
   floo_noc:
-    revision: null
+    revision: 3b2f7bfd1a648d6757b640610ba748cd33904fc7
     version: null
     source:
-      Path: hardware/deps/floo_noc
+      Git: https://github.com/pulp-platform/FlooNoC.git
     dependencies:
     - axi
     - axi_riscv_atomics
@@ -67,18 +67,18 @@ packages:
     - common_verification
     - idma
   fpnew:
-    revision: null
+    revision: a8e0cba6dd50f357ece73c2c955d96efc3c6c315
     version: null
     source:
-      Path: hardware/deps/fpnew
+      Git: https://github.com/pulp-platform/cvfpu.git
     dependencies:
     - common_cells
     - fpu_div_sqrt_mvp
   fpu_div_sqrt_mvp:
-    revision: null
-    version: null
+    revision: 86e1f558b3c95e91577c41b2fc452c86b04e85ac
+    version: 1.0.4
     source:
-      Path: hardware/deps/fpu_div_sqrt_mvp
+      Git: https://github.com/pulp-platform/fpu_div_sqrt_mvp.git
     dependencies:
     - common_cells
   idma:
@@ -92,10 +92,10 @@ packages:
     - common_verification
     - register_interface
   register_interface:
-    revision: null
-    version: null
+    revision: 8e8c209ea559d3b54f45cf30fcce95ce70ff5e49
+    version: 0.4.6
     source:
-      Path: hardware/deps/register_interface
+      Git: https://github.com/pulp-platform/register_interface.git
     dependencies:
     - apb
     - axi
@@ -124,9 +124,9 @@ packages:
     - axi
     - common_cells
   tech_cells_generic:
-    revision: null
-    version: null
+    revision: 7968dd6e6180df2c644636bc6d2908a49f2190cf
+    version: 0.2.13
     source:
-      Path: hardware/deps/tech_cells_generic
+      Git: https://github.com/pulp-platform/tech_cells_generic.git
     dependencies:
     - common_verification

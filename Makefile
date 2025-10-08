@@ -21,6 +21,7 @@ ISA_SIM_INSTALL_DIR   ?= ${INSTALL_DIR}/riscv-isa-sim
 LLVM_INSTALL_DIR      ?= ${INSTALL_DIR}/llvm
 HALIDE_INSTALL_DIR    ?= ${INSTALL_DIR}/halide
 BENDER_INSTALL_DIR    ?= ${INSTALL_DIR}/bender
+BENDER                ?= ${BENDER_INSTALL_DIR}/bender
 VERILATOR_INSTALL_DIR ?= ${INSTALL_DIR}/verilator
 RISCV_TESTS_DIR       ?= ${ROOT_DIR}/${SOFTWARE_DIR}/riscv-tests
 
@@ -54,6 +55,43 @@ else
   CLANG_CXXFLAGS := ""
   CLANG_LDFLAGS  := ""
 endif
+
+################
+# Dependencies #
+################
+# Update Bender dependencies
+BENDER_ROOT ?= $(ROOT_DIR)/hardware/deps
+
+# Ensure both Bender dependencies and (essential) submodules are checked out
+$(BENDER_ROOT)/.teranoc_deps: $(BENDER_INSTALL_DIR)/bender
+	cd $(ROOT_DIR) && $(BENDER) checkout
+# 	cd $(ROOT_DIR) && git submodule update --init --recursive toolchain
+	@touch $@
+
+# Make sure dependencies are more up-to-date than any targets run
+ifeq ($(shell test -f $(BENDER_ROOT)/.teranoc_deps && echo 1),)
+-include $(BENDER_ROOT)/.teranoc_deps
+endif
+
+# Running this target will reset dependencies (without updating the checked-in Bender.lock)
+.PHONY: clean-deps
+clean-deps:
+	cd $(BENDER_ROOT) && rm -rf \
+		apb \
+		axi \
+		axi_riscv_atomics \
+		cluster_icache \
+		cluster_interconnect \
+		common_cells \
+		common_verification \
+		dram_rtl_sim \
+		floo_noc \
+		fpnew \
+		fpu_div_sqrt_mvp \
+		register_interface \
+		tech_cells_generic
+	rm -f $(BENDER_ROOT)/.teranoc_deps
+# 	cd $(ROOT_DIR) && git submodule deinit -f toolchain/*
 
 # Default target
 all: toolchain riscv-isa-sim halide
@@ -156,15 +194,10 @@ $(VERILATOR_INSTALL_DIR)/bin/verilator: toolchain/verilator Makefile
 # Previous changes will be stashed. Clear all the stashes with `git stash clear`
 .PHONY: update-deps
 ifeq ($(CI),true)
-update-deps:
+update-deps: $(BENDER_ROOT)/.teranoc_deps
 else
-update-deps: setup-dram
+update-deps: $(BENDER_ROOT)/.teranoc_deps setup-dram
 endif
-	for dep in $(shell git config --file .gitmodules --get-regexp path \
-	| awk '/hardware/{ print $$2 }'); do \
-	  git -C $${dep} diff --quiet || { echo $${dep}; git -C $${dep} stash -u; }; \
-	  git submodule update --init --recursive -- $${dep}; \
-	done
 	git apply hardware/deps/patches/*
 
 # Build, update and patch the DRAMsys submodule
