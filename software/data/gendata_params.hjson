@@ -45,6 +45,19 @@
     ]
   },
 
+  "axpy_f8": {
+    "type": "float8",
+    "defines": [
+      ("array_N", 4096)
+    ]
+    "arrays": [
+      ("__fp8", "l2_A")
+      ("__fp8", "l2_X")
+      ("__fp8", "l2_Y")
+      ("__fp8", "l2_Z")
+    ]
+  },
+
   "dotp_f16": {
     "type": "float16",
     "defines": [
@@ -243,6 +256,32 @@
     ]
   },
 
+  "gaussjordan_q32": {
+    "type": "int32",
+    "defines": [
+      ("matrix_N", 16)
+      ("FIXED_POINT", 10)
+    ]
+    "arrays": [
+      ("int32_t", "l2_Src")
+      ("int32_t", "l2_Dst")
+    ]
+  },
+
+  "matmul_f8": {
+    "type": "float8",
+    "defines": [
+      ("matrix_M", 64)
+      ("matrix_N", 64)
+      ("matrix_P", 64)
+    ]
+    "arrays": [
+      ("__fp8", "l2_A")
+      ("__fp8", "l2_B")
+      ("__fp8", "l2_C")
+    ]
+  },
+
   "matmul_f16": {
     "type": "float16",
     "defines": [
@@ -372,7 +411,7 @@
   }
 
   "mimo_mmse_f8": {
-    "type": "float8",
+    "type": "float16",
     "defines": [
       ("N_TX", 4)
       ("N_RX", 4)
@@ -403,6 +442,54 @@
       ("int16_t", "l2_x")
     ]
   }
+
+  "batchnorm_f8": {
+    "type": "float8",
+    "defines": [
+      ("matrix_M", 4)
+      ("matrix_N", 4)
+    ]
+    "arrays": [
+      ("__fp8", "l2_A")
+      ("__fp8", "l2_B")
+    ]
+  },
+
+  "batchnorm_f16": {
+    "type": "float16",
+    "defines": [
+      ("matrix_M", 16)
+      ("matrix_N", 16)
+    ]
+    "arrays": [
+      ("__fp16", "l2_A")
+      ("__fp16", "l2_B")
+    ]
+  },
+
+  "layernorm_f8": {
+    "type": "float8",
+    "defines": [
+      ("matrix_M", 4)
+      ("matrix_N", 4)
+    ]
+    "arrays": [
+      ("__fp8", "l2_A")
+      ("__fp8", "l2_B")
+    ]
+  },
+
+  "layernorm_f16": {
+    "type": "float16",
+    "defines": [
+      ("matrix_M", 16)
+      ("matrix_N", 16)
+    ]
+    "arrays": [
+      ("__fp16", "l2_A")
+      ("__fp16", "l2_B")
+    ]
+  },
 
   "ofdm_f16": {
     "type": "float16",
@@ -439,5 +526,41 @@
       ("int32_t", "l2_data")
     ]
   },
+
+  "barriers_test": {
+    "type": "int32",
+    "defines": [
+      ("array_N", 256)
+      ("MAX_delay", 32)
+    ]
+    "arrays": [
+      ("int32_t", "l2_delays")
+    ]
+  },
+
+  "softmax_f8": {
+    "type": "float8",
+    "defines": [
+      ("matrix_M", 2)
+      ("matrix_N", 8)
+    ]
+    "arrays": [
+      ("__fp8", "l2_A")
+      ("__fp8", "l2_B")
+    ]
+  },
+
+  "softmax_f16": {
+    "type": "float16",
+    "defines": [
+      ("matrix_M", 2)
+      ("matrix_N", 8)
+    ]
+    "arrays": [
+      ("__fp16", "l2_A")
+      ("__fp16", "l2_B")
+    ]
+  },
+
 
 }

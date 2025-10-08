@@ -30,10 +30,10 @@ CMAKE ?= cmake
 # CC and CXX are Makefile default variables that are always defined in a Makefile. Hence, overwrite
 # the variable if it is only defined by the Makefile (its origin in the Makefile's default).
 ifeq ($(origin CC),default)
-  CC  ?= gcc
+  CC  := gcc
 endif
 ifeq ($(origin CXX),default)
-  CXX ?= g++
+  CXX := g++
 endif
 BENDER_VERSION = 0.28.2
 CONFIG ?= test_4x4noc_64core

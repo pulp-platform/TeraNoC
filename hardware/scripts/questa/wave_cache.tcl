@@ -23,7 +23,7 @@ for {set i 0} {$i < [examine -radix dec /mempool_tb/dut/i_mempool_cluster/gen_gr
   add wave -noupdate -group cache[$1][$2][$3] -group refill[$i] /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr  ${1}/${4}]\]/gen_groups_y\[[expr  ${1}%${4}]\]/gen_rtl_group/i_group/i_mempool_group/gen_tiles[$2]/i_tile/gen_caches[$3]/i_snitch_icache/gen_prefetcher[$i]/i_snitch_icache_l0/*
 }
 
-add wave -noupdate -group cache[$1][$2][$3] -group lookup  /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr  ${1}/${4}]\]/gen_groups_y\[[expr  ${1}%${4}]\]/gen_rtl_group/i_group/i_mempool_group/gen_tiles[$2]/i_tile/gen_caches[$3]/i_snitch_icache/i_lookup/*
+add wave -noupdate -group cache[$1][$2][$3] -group lookup  /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr  ${1}/${4}]\]/gen_groups_y\[[expr  ${1}%${4}]\]/gen_rtl_group/i_group/i_mempool_group/gen_tiles[$2]/i_tile/gen_caches[$3]/i_snitch_icache/gen_serial_lookup/i_lookup/*
 add wave -noupdate -group cache[$1][$2][$3] -group handler /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr  ${1}/${4}]\]/gen_groups_y\[[expr  ${1}%${4}]\]/gen_rtl_group/i_group/i_mempool_group/gen_tiles[$2]/i_tile/gen_caches[$3]/i_snitch_icache/i_handler/*
 add wave -noupdate -group cache[$1][$2][$3] -group handler /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr  ${1}/${4}]\]/gen_groups_y\[[expr  ${1}%${4}]\]/gen_rtl_group/i_group/i_mempool_group/gen_tiles[$2]/i_tile/gen_caches[$3]/i_snitch_icache/i_handler/pending_q
 add wave -noupdate -group cache[$1][$2][$3] -group refill  /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr  ${1}/${4}]\]/gen_groups_y\[[expr  ${1}%${4}]\]/gen_rtl_group/i_group/i_mempool_group/gen_tiles[$2]/i_tile/gen_caches[$3]/i_snitch_icache/i_refill/*

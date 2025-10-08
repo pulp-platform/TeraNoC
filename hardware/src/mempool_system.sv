@@ -140,7 +140,7 @@ module mempool_system
           ) periph_router (
             .clk_i,
             .rst_ni,
-            .test_enable_i        ( testmode_i                    ),
+            .test_enable_i        ( '0                            ),
             .id_i                 ( '0                            ),
             .id_route_map_i       ( '0                            ),
             .floo_req_i           ( periph_router_req_in          ),
@@ -179,7 +179,7 @@ module mempool_system
           ) hbm_ni_15 (
             .clk_i,
             .rst_ni,
-            .test_enable_i        ( testmode_i                    ),
+            .test_enable_i        ( '0                            ),
             .sram_cfg_i           ( '0                            ),
             .axi_narrow_in_req_i  ( '0                            ),
             .axi_narrow_in_rsp_o  (                               ),
@@ -228,7 +228,7 @@ module mempool_system
           ) peripherals_ni (
             .clk_i,
             .rst_ni,
-            .test_enable_i        ( testmode_i                    ),
+            .test_enable_i        ( '0                            ),
             .sram_cfg_i           ( '0                            ),
             .axi_narrow_in_req_i  ( '0                            ),
             .axi_narrow_in_rsp_o  (                               ),
@@ -277,7 +277,7 @@ module mempool_system
             ) host_ni (
               .clk_i,
               .rst_ni,
-              .test_enable_i        ( testmode_i                  ),
+              .test_enable_i        ( '0                          ),
               .sram_cfg_i           ( '0                          ),
               .axi_narrow_in_req_i  ( '0                          ),
               .axi_narrow_in_rsp_o  (                             ),
@@ -326,7 +326,7 @@ module mempool_system
           ) i_floo_nw_chimney (
             .clk_i,
             .rst_ni,
-            .test_enable_i        ( testmode_i                    ),
+            .test_enable_i        ( '0                            ),
             .sram_cfg_i           ( '0                            ),
             .axi_narrow_in_req_i  ( '0                            ),
             .axi_narrow_in_rsp_o  (                               ),
@@ -390,7 +390,7 @@ module mempool_system
           ) periph_router (
             .clk_i,
             .rst_ni,
-            .test_enable_i        ( testmode_i                    ),
+            .test_enable_i        ( '0                            ),
             .id_i                 ( '0                            ),
             .id_route_map_i       ( '0                            ),
             .floo_req_i           ( periph_router_req_in          ),
@@ -430,7 +430,7 @@ module mempool_system
           ) peripherals_ni (
             .clk_i,
             .rst_ni,
-            .test_enable_i        ( testmode_i                    ),
+            .test_enable_i        ( '0                            ),
             .sram_cfg_i           ( '0                            ),
             .axi_narrow_in_req_i  ( '0                            ),
             .axi_narrow_in_rsp_o  (                               ),
@@ -478,7 +478,7 @@ module mempool_system
           ) host_ni (
             .clk_i,
             .rst_ni,
-            .test_enable_i        ( testmode_i                    ),
+            .test_enable_i        ( '0                            ),
             .sram_cfg_i           ( '0                            ),
             .axi_narrow_in_req_i  ( '0                            ),
             .axi_narrow_in_rsp_o  (                               ),
@@ -527,7 +527,7 @@ module mempool_system
           ) i_floo_nw_chimney (
             .clk_i,
             .rst_ni,
-            .test_enable_i        ( testmode_i                    ),
+            .test_enable_i        ( '0                            ),
             .sram_cfg_i           ( '0                            ),
             .axi_narrow_in_req_i  ( '0                            ),
             .axi_narrow_in_rsp_o  (                               ),
@@ -958,24 +958,20 @@ module mempool_system
   );
 
   ctrl_registers #(
-    .NumRegs          (16 + 16            ),
     .TCDMBaseAddr     (TCDMBaseAddr       ),
     .TCDMSize         (TCDMSize           ),
     .NumCores         (NumCores           ),
-    .axi_lite_req_t (axi_lite_slv_req_t ),
-    .axi_lite_resp_t(axi_lite_slv_resp_t)
+    .axi_lite_req_t   (axi_lite_slv_req_t ),
+    .axi_lite_resp_t  (axi_lite_slv_resp_t)
   ) i_ctrl_registers (
     .clk_i                (clk_i                           ),
     .rst_ni               (rst_ni                          ),
     .axi_lite_slave_req_i (axi_lite_slv_req[CtrlRegisters] ),
     .axi_lite_slave_resp_o(axi_lite_slv_resp[CtrlRegisters]),
-    .ro_cache_ctrl_o      (ro_cache_ctrl                   ),
-    .tcdm_start_address_o (/* Unused */                    ),
-    .tcdm_end_address_o   (/* Unused */                    ),
-    .num_cores_o          (/* Unused */                    ),
-    .wake_up_o            (wake_up                         ),
     .eoc_o                (/* Unused */                    ),
-    .eoc_valid_o          (eoc_valid_o                     )
+    .eoc_valid_o          (eoc_valid_o                     ),
+    .wake_up_o            (wake_up                         ),
+    .ro_cache_ctrl_o      (ro_cache_ctrl                   )
   );
 
   /***************************
