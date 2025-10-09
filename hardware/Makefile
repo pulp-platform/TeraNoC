@@ -232,6 +232,43 @@ cpp_defs += -DL2_BANKS=$(l2_banks)
 cpp_defs += -DAXI_DATA_WIDTH=$(axi_data_width)
 cpp_defs += -DAXI_WIDTH_INTERLEAVED=$(axi_width_interleaved)
 
+################
+# Dependencies #
+################
+
+BENDER_ROOT ?= $(ROOT_DIR)/deps
+
+# Ensure both Bender dependencies and (essential) submodules are checked out
+$(BENDER_ROOT)/.teranoc_deps: $(bender)
+	cd $(ROOT_DIR)/.. $(bender) checkout
+# 	cd $(ROOT_DIR)/.. && git submodule update --init --recursive toolchain
+	@touch $@
+
+# Make sure dependencies are more up-to-date than any targets run
+ifeq ($(shell test -f $(BENDER_ROOT)/.teranoc_deps && echo 1),)
+-include $(BENDER_ROOT)/.teranoc_deps
+endif
+
+# Running this target will reset dependencies (without updating the checked-in Bender.lock)
+.PHONY: clean-deps
+clean-deps:
+	cd $(BENDER_ROOT) && rm -rf \
+		apb \
+		axi \
+		axi_riscv_atomics \
+		cluster_icache \
+		cluster_interconnect \
+		common_cells \
+		common_verification \
+		dram_rtl_sim \
+		floo_noc \
+		fpnew \
+		fpu_div_sqrt_mvp \
+		register_interface \
+		tech_cells_generic
+	rm -f $(BENDER_ROOT)/.teranoc_deps
+# 	cd $(ROOT_DIR)/.. && git submodule deinit -f toolchain/*
+
 ##########################
 ## Default Build Target ##
 ##########################

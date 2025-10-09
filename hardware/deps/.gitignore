@@ -1,0 +1,13 @@
+apb/
+axi/
+axi_riscv_atomics/
+cluster_icache/
+cluster_interconnect/
+common_cells/
+common_verification/
+floo_noc/
+fpnew/
+fpu_div_sqrt_mvp/
+register_interface/
+tech_cells_generic/
+.teranoc_deps
