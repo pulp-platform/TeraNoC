@@ -7,8 +7,8 @@ packages:
     dependencies:
     - common_cells
   axi:
-    revision: 78831b6feba265d5ee2683bbf42b4150f8a35c43
-    version: 0.39.8
+    revision: ac5deb3ff086aa34b168f392c051e92603d6c0e2
+    version: 0.39.2
     source:
       Git: https://github.com/pulp-platform/axi.git
     dependencies:
@@ -35,23 +35,23 @@ packages:
     - scm
     - tech_cells_generic
   cluster_interconnect:
-    revision: 2967d8d17be0a6139229ca8d3d4956e182aec3de
-    version: 1.3.0
+    revision: 7d0a4f8acae71a583a6713cab5554e60b9bb8d27
+    version: null
     source:
       Git: https://github.com/pulp-platform/cluster_interconnect.git
     dependencies:
     - common_cells
   common_cells:
-    revision: 0d67563b6b592549542544f1abc0f43e5d4ee8b4
-    version: 1.35.0
+    revision: 13f28aa0021fc22c0d01a12d618fda58d2c93239
+    version: 1.33.0
     source:
       Git: https://github.com/pulp-platform/common_cells.git
     dependencies:
     - common_verification
     - tech_cells_generic
   common_verification:
-    revision: fb1885f48ea46164a10568aeff51884389f67ae3
-    version: 0.2.5
+    revision: 9c07fa860593b2caabd9b5681740c25fac04b878
+    version: 0.2.3
     source:
       Git: https://github.com/pulp-platform/common_verification.git
     dependencies: []
@@ -67,7 +67,7 @@ packages:
     - common_verification
     - idma
   fpnew:
-    revision: a8e0cba6dd50f357ece73c2c955d96efc3c6c315
+    revision: 9481d57c161bb160fd294eae07279082bff06698
     version: null
     source:
       Git: https://github.com/pulp-platform/cvfpu.git
@@ -75,8 +75,8 @@ packages:
     - common_cells
     - fpu_div_sqrt_mvp
   fpu_div_sqrt_mvp:
-    revision: 86e1f558b3c95e91577c41b2fc452c86b04e85ac
-    version: 1.0.4
+    revision: 917dd79cb2dc1a8f43df1a84e0e4231508a980e9
+    version: null
     source:
       Git: https://github.com/pulp-platform/fpu_div_sqrt_mvp.git
     dependencies:
@@ -92,8 +92,8 @@ packages:
     - common_verification
     - register_interface
   register_interface:
-    revision: 8e8c209ea559d3b54f45cf30fcce95ce70ff5e49
-    version: 0.4.6
+    revision: e25b36670ff7aab3402f40efcc2b11ee0f31cf19
+    version: 0.4.3
     source:
       Git: https://github.com/pulp-platform/register_interface.git
     dependencies:
