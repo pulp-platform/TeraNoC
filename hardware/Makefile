@@ -260,7 +260,6 @@ clean-deps:
 		cluster_interconnect \
 		common_cells \
 		common_verification \
-		dram_rtl_sim \
 		floo_noc \
 		fpnew \
 		fpu_div_sqrt_mvp \

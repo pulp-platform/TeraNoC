@@ -103,7 +103,7 @@ It also supports **LLVM**, which is a dependency for compiling **Halide** — a 
 To build these toolchains, run:
 
 ```bash
-# Build both GCC and LLVM
+# Build both GCC, LLVM, and SPIKE simulator
 make toolchain
 
 # Build only GCC
@@ -114,30 +114,22 @@ make tc-llvm
 
 # Build Halide
 make halide
-```
 
-### 💻 RTL Simulation
+# Build only SPIKE, simulation tracing relies on the **SPIKE** simulator. To build it:
+make riscv-isa-sim
 
-We use [Bender](https://github.com/pulp-platform/bender) to generate simulation scripts.
-Install Bender using:
-
-```bash
+# Build only Bender, we use Bender to generate simulation scripts.
 make bender
 ```
 
-Simulation tracing relies on the **SPIKE** simulator. To build it:
+### 🔧 Simulator
 
-```bash
-make riscv-isa-sim
-```
-
-TeraNoC supports simulation using both **ModelSim** and the open-source **Verilator**.
+TeraNoC also supports simulation using open-source **Verilator** (Optional).
 To build Verilator:
 
 ```bash
 make verilator
 ```
-
 > ℹ️ **Note**: LLVM is required to build Verilator.
 
 
@@ -228,6 +220,43 @@ make format
 
 ---
 
+## DRAMsys Co-Simulation
+
+The cluster supports both on-chip SRAM or off-chip DRAM co-simulation for higher hierarchy memory transfering. For off-chip DRAM co-simulation, it incorporates the `dram_rtl_sim` tool as a submodule, build at `hardware/deps/dram_rtl_sim`. Leveraging DRAMSys5.0, it facilitates an effective co-simulation environment between RTL models and DRAMSys5.0 for the simulation of DRAM + CTRL models, with contemporary off-chip DRAM technologies (e.g., LPDDR, DDR, HBM).
+
+The DRAMsys tool aids are open-sourced and can be found here:
+[https://github.com/pulp-platform/dram_rtl_sim](https://github.com/pulp-platform/dram_rtl_sim)
+
+### Building DRAMsys Co-Simulation
+
+To prepare for DRAMsys co-simulation, adjust the system configuration by setting `l2_sim_type` to `dram` in `config/config.mk`. Then, execute the following command in the project's root directory to establish the DRAMsys tool aids environment:
+
+```bash
+make setup-dram
+```
+
+This makefile target automates several tasks:
+1. Cleans up the existing DRAMSys5.0 repository, if previously built.
+2. Rebuilds the DRAMSys5.0 repository and applies necessary patches within `hardware/deps/dramsys_rtl_sim/dramsys_lib/`.
+3. Applies HBM2 DRAM configuration patches tailored for the cluster simulation.
+4. Compiles the DRAMSys dynamic linkable library located at `hardware/deps/dramsys_rtl_sim/dramsys_lib/DRAMSys`.
+
+**Important:** This environment requires `cmake` version 3.28.1 or higher and GCC version 11.2.0 or above.
+
+### DRAM Chip Configuration
+
+DRAMsys supports a range of contemporary off-chip DRAM technologies, including LPDDR, DDR, and HBM. Configuration files, formatted as `.json`, are accessible in the following directory: `hardware/deps/dramsys_rtl_sim/dramsys_lib/DRAMSys/configs`. Additionally, we provide a recommended HBM2 configuration located within `hardware/deps/dramsys_rtl_sim/dramsys_lib/DRAMSys`. This configuration is automatically applied as the default setting when establishing the DRAMsys tool aids environment. You are encouraged to review and modify these configurations as necessary to meet your specific simulation requirements.
+
+### Testing Cluster-DRAMSys Co-Simulation
+
+For data transfer testing between the shared-memory cluster and higher hierarchy memory through DMA transfer, use the prepared example kernel located in `software/tests/baremetal/memcpy`. For more detailed methods on building applications and setting up RTL simulation, please refer to the sections aboves.
+
+**Note:** Currently, the simulation crafting tool for off-chip DRAM co-simulation is not open-sourced. We utilize the `Questasim` simulator exclusively.
+
+
+
+---
+
 ## 🔬 RTL Simulation
 
 To simulate the TeraNoC system using **ModelSim**, navigate to the `hardware` directory:
@@ -262,9 +291,10 @@ app=apps/baremetal/hello_world make benchmark
 
 System configurations — such as total core count, tile size, and `xpulpimg` support — are set in [`config/config.mk`](config/config.mk).
 
-To simulate using **Verilator**, use the same command format, replacing `sim` with:
+To simulate using **Verilator**, use the same command format, replacing `sim` with `verilate`:
 
 ```bash
+cd hardware
 make verilate
 ```
 
@@ -309,44 +339,29 @@ This uses the `lint_rtl` target with the current configuration in `config/config
 
 ---
 
-## DRAMsys Co-Simulation
-
-The cluster supports both on-chip SRAM or off-chip DRAM co-simulation for higher hierarchy memory transfering. For off-chip DRAM co-simulation, it incorporates the `dram_rtl_sim` tool as a submodule, build at `hardware/deps/dram_rtl_sim`. Leveraging DRAMSys5.0, it facilitates an effective co-simulation environment between RTL models and DRAMSys5.0 for the simulation of DRAM + CTRL models, with contemporary off-chip DRAM technologies (e.g., LPDDR, DDR, HBM).
-
-The DRAMsys tool aids are open-sourced and can be found here:
-[https://github.com/pulp-platform/dram_rtl_sim](https://github.com/pulp-platform/dram_rtl_sim)
-
-### Building DRAMsys Co-Simulation
-
-To prepare for DRAMsys co-simulation, adjust the system configuration by setting `l2_sim_type` to `dram` in `config/config.mk`. Then, execute the following command in the project's root directory to establish the DRAMsys tool aids environment:
-
-```bash
-make setup-dram
-```
-
-This makefile target automates several tasks:
-1. Cleans up the existing DRAMSys5.0 repository, if previously built.
-2. Rebuilds the DRAMSys5.0 repository and applies necessary patches within `hardware/deps/dramsys_rtl_sim/dramsys_lib/`.
-3. Applies HBM2 DRAM configuration patches tailored for the cluster simulation.
-4. Compiles the DRAMSys dynamic linkable library located at `hardware/deps/dramsys_rtl_sim/dramsys_lib/DRAMSys`.
-
-**Important:** This environment requires `cmake` version 3.28.1 or higher and GCC version 11.2.0 or above.
-
-### DRAM Chip Configuration
-
-DRAMsys supports a range of contemporary off-chip DRAM technologies, including LPDDR, DDR, and HBM. Configuration files, formatted as `.json`, are accessible in the following directory: `hardware/deps/dramsys_rtl_sim/dramsys_lib/DRAMSys/configs`. Additionally, we provide a recommended HBM2 configuration located within `hardware/deps/dramsys_rtl_sim/dramsys_lib/DRAMSys`. This configuration is automatically applied as the default setting when establishing the DRAMsys tool aids environment. You are encouraged to review and modify these configurations as necessary to meet your specific simulation requirements.
-
-### Testing Cluster-DRAMSys Co-Simulation
-
-For data transfer testing between the shared-memory cluster and higher hierarchy memory through DMA transfer, use the prepared example kernel located in `software/tests/baremetal/memcpy`. For more detailed methods on building applications and setting up RTL simulation, please refer to the sections aboves.
-
-**Note:** Currently, the simulation crafting tool for off-chip DRAM co-simulation is not open-sourced. We utilize the `Questasim` simulator exclusively.
-
----
 
 ## 📚 Publications
 
-Relevant publications and documentation will be listed here soon. Stay tuned!
+If you use this repo, please cite:
+
+> Y. Zhang, Z. Fu, T. Fischer, Y. Li, M. Bertuletti, and L. Benini.  
+> *TeraNoC: A Multi-Channel 32-bit Fine-Grained, Hybrid Mesh-Crossbar NoC for Efficient Scale-up of 1000+ Core Shared-L1-Memory Clusters.*  
+> In **2025 IEEE 43rd International Conference on Computer Design (ICCD)**, Dallas, TX, USA, Nov. 2025. *(To appear)*. arXiv:2508.02446
+
+```bibtex
+@inproceedings{zhang2025teranoc,
+  author        = {Zhang, Yichao and Fu, Zexin and Fischer, Tim and Li, Yinrong and Bertuletti, Marco and Benini, Luca},
+  title         = {TeraNoC: A Multi-Channel 32-bit Fine-Grained, Hybrid Mesh-Crossbar NoC for Efficient Scale-up of 1000+ Core Shared-{L1}-Memory Clusters},
+  booktitle     = {2025 IEEE 43rd International Conference on Computer Design (ICCD)},
+  year          = {2025},
+  month         = nov,
+  location      = {Dallas, TX, USA},
+  publisher     = {IEEE},
+  note          = {To appear},
+  eprint        = {2508.02446},
+  archiveprefix = {arXiv}
+}
+```
 
 ---
 

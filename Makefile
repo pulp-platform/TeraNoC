@@ -84,7 +84,6 @@ clean-deps:
 		cluster_interconnect \
 		common_cells \
 		common_verification \
-		dram_rtl_sim \
 		floo_noc \
 		fpnew \
 		fpu_div_sqrt_mvp \
@@ -113,7 +112,10 @@ halide:
 	make install
 
 # Toolchain
-toolchain: tc-riscv-gcc tc-llvm
+toolchain: toolchain-submodules tc-riscv-gcc tc-llvm riscv-isa-sim
+
+toolchain-submodules:
+	git submodule update --init --recursive
 
 tc-riscv-gcc:
 	mkdir -p $(GCC_INSTALL_DIR)
