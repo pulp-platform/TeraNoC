@@ -1,0 +1,35 @@
+diff --git a/hardware/deps/floo_noc/hw/floo_router.sv b/hardware/deps/floo_noc/hw/floo_router.sv
+index b1e3695..2521e7f 100644
+--- a/hardware/deps/floo_noc/hw/floo_router.sv
++++ b/hardware/deps/floo_noc/hw/floo_router.sv
+@@ -27,7 +27,8 @@ module floo_router
+   parameter int unsigned NumInput         = NumRoutes,
+   parameter int unsigned NumOutput        = NumRoutes,
+   parameter bit          XYRouteOpt       = 1'b1,
+-  parameter bit          NoLoopback       = 1'b1
++  parameter bit          NoLoopback       = 1'b1,
++  parameter bit          NoInputAssert    = 1'b0
+ ) (
+   input  logic                                       clk_i,
+   input  logic                                       rst_ni,
+@@ -267,12 +268,14 @@ module floo_router
+     );
+   end
+ 
+-  for (genvar i = 0; i < NumInput; i++) begin : gen_input_assert
+-    for (genvar v = 0; v < NumVirtChannels; v++) begin : gen_virt_assert
+-      // Assert that the input data is stable when valid is asserted
+-      // `ASSERT(StableDataIn, valid_i[i][v] && !ready_o[i][v] |=> $stable(data_i[i][v]))
+-      // Assert that valid is stable when ready is not asserted
+-      `ASSERT(StableValidIn, valid_i[i][v] && !ready_o[i][v] |=> $stable(valid_i[i][v]))
++  if (!NoInputAssert) begin
++    for (genvar i = 0; i < NumInput; i++) begin : gen_input_assert
++      for (genvar v = 0; v < NumVirtChannels; v++) begin : gen_virt_assert
++        // Assert that the input data is stable when valid is asserted
++        // `ASSERT(StableDataIn, valid_i[i][v] && !ready_o[i][v] |=> $stable(data_i[i][v]))
++        // Assert that valid is stable when ready is not asserted
++        `ASSERT(StableValidIn, valid_i[i][v] && !ready_o[i][v] |=> $stable(valid_i[i][v]))
++      end
+     end
+   end
+ 
