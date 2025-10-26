@@ -7,7 +7,7 @@ package:
 
 dependencies:
   axi:                  { git: "https://github.com/pulp-platform/axi.git",                  version: 0.39.2  }
-  cluster_interconnect: { git: "https://github.com/pulp-platform/cluster_interconnect.git", version: 1.2.1   }
+  cluster_interconnect: { git: "https://github.com/pulp-platform/cluster_interconnect.git", rev:   resp_wen  }
   common_cells:         { git: "https://github.com/pulp-platform/common_cells.git",         version: 1.33.0  }
   idma:                 { path: "hardware/deps/idma"                                                         }
   register_interface:   { git: "https://github.com/pulp-platform/register_interface.git",   version: 0.4.3   }
@@ -33,12 +33,14 @@ sources:
   - hardware/src/mempool_cc.sv
   - hardware/src/snitch_addr_demux.sv
   - hardware/src/tcdm_adapter.sv
+  - hardware/src/tcdm_id_remapper.sv
   - hardware/src/tcdm_shim.sv
   - hardware/src/tcdm_wide_narrow_mux.sv
   - hardware/src/address_scrambler.sv
   - hardware/src/axi_L2_interleaver.sv
   - hardware/src/axi2mem.sv
   - hardware/src/bootrom.sv
+  - hardware/src/latch_scm.sv
   - hardware/src/selector.sv
   - hardware/src/mempool_bank_id_remapper.sv
   - hardware/src/mempool_dma_tile_id_remapper.sv

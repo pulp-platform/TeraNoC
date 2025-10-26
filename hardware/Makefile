@@ -169,9 +169,10 @@ ifeq ($(spatz), 1)
 	# VLEN, IPU, FPU counts
 	vlog_defs   += -DVLEN=$(vlen) -DN_IPU=$(n_ipu) -DN_FPU=$(n_fpu)
 	vlog_defs 	+= -DN_FU=$(shell awk 'BEGIN{print ($(n_ipu) > $(n_fpu)) ? $(n_ipu) : $(n_fpu)}')
+	vlog_defs 	+= -DRESPWEN=1
 	# spatz need wen signal on TCDM response channel for ACK handling
 	# this bender_def is used to turn on this feature in interconnection
-	bender_defs += -t spatz
+	bender_defs += -t spatz -t mempool
 	SPATZ_DIR 	:= $(shell $(bender) path spatz)
 	SPATZ_CLUSTER_DIR := $(SPATZ_DIR)/hw/system/spatz_cluster
 endif

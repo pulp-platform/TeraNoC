@@ -93,7 +93,7 @@ module mempool_tile
    ************************/
   tcdm_dma_req_t                                  tcdm_dma_req_remapped;
   tcdm_slave_req_t [NumRemoteReqPortsPerTile-1:0] tcdm_slave_req_remapped;
-  tcdm_slave_req_t [NumCoresPerTile-1:0]          local_req_interco_payload_remapped;
+  tcdm_slave_req_t [NumCoresPerTile*NumDataPortsPerCore-1:0]          local_req_interco_payload_remapped;
 
   /***********
    *  Cores  *
@@ -129,77 +129,81 @@ module mempool_tile
   logic                      [NumCoresPerTile-1:0][NumDataPortsPerCore-1:0]                 snitch_data_qready;
   data_t                     [NumCoresPerTile-1:0][NumDataPortsPerCore-1:0]                 snitch_data_pdata;
   logic                      [NumCoresPerTile-1:0][NumDataPortsPerCore-1:0]                 snitch_data_perror;
-  logic                      [NumCoresPerTile-1:0][NumDataPortsPerCore-1:0]                 snitch_data_pready;
+  logic                      [NumCoresPerTile-1:0][NumDataPortsPerCore-1:0]                 snitch_data_pwrite;
   meta_id_t                  [NumCoresPerTile-1:0][NumDataPortsPerCore-1:0]                 snitch_data_pid;
   logic                      [NumCoresPerTile-1:0][NumDataPortsPerCore-1:0]                 snitch_data_pvalid;
   logic                      [NumCoresPerTile-1:0][NumDataPortsPerCore-1:0]                 snitch_data_pready;
 
-  if (snitch_pkg::XDIVSQRT && !TrafficGeneration) begin: gen_divsqrt
-    for (genvar c = 0; unsigned'(c) < NumDivsqrtPerTile; c++) begin: gen_divsqrt
-      logic                     divsqrt_req_valid;
-      logic                     divsqrt_req_ready;
-      logic                     divsqrt_resp_valid;
-      logic                     divsqrt_resp_ready;
-      snitch_pkg::sh_acc_req_t  divsqrt_req;
-      snitch_pkg::sh_acc_resp_t divsqrt_resp;
+  // if (snitch_pkg::XDIVSQRT && !TrafficGeneration) begin: gen_divsqrt
+  //   for (genvar c = 0; unsigned'(c) < NumDivsqrtPerTile; c++) begin: gen_divsqrt
+  //     logic                     divsqrt_req_valid;
+  //     logic                     divsqrt_req_ready;
+  //     logic                     divsqrt_resp_valid;
+  //     logic                     divsqrt_resp_ready;
+  //     snitch_pkg::sh_acc_req_t  divsqrt_req;
+  //     snitch_pkg::sh_acc_resp_t divsqrt_resp;
 
-      // Assign output to shared response
-      for (genvar i = 0; unsigned'(i) < NumCoresPerDivsqrt; i++) begin
-        assign sh_acc_resp[c*NumCoresPerDivsqrt + i] = divsqrt_resp;
-      end
+  //     // Assign output to shared response
+  //     for (genvar i = 0; unsigned'(i) < NumCoresPerDivsqrt; i++) begin
+  //       assign sh_acc_resp[c*NumCoresPerDivsqrt + i] = divsqrt_resp;
+  //     end
 
-      // Shared accelerator arbiter
-      stream_arbiter #(
-        .DATA_T      ( snitch_pkg::sh_acc_req_t                                               ),
-        .N_INP       ( NumCoresPerDivsqrt                                                     ),
-        .ARBITER     ( "rr"                                                                   )
-      ) i_stream_arbiter_offload (
-        .clk_i       ( clk_i                                                                  ),
-        .rst_ni      ( rst_ni                                                                 ),
-        .inp_data_i  ( sh_acc_req[((c+1)*NumCoresPerDivsqrt)-1:(c*NumCoresPerDivsqrt)]        ),
-        .inp_valid_i ( sh_acc_req_valid[((c+1)*NumCoresPerDivsqrt)-1:(c*NumCoresPerDivsqrt)]  ),
-        .inp_ready_o ( sh_acc_req_ready[((c+1)*NumCoresPerDivsqrt)-1:(c*NumCoresPerDivsqrt)]  ),
-        .oup_data_o  ( divsqrt_req                                                            ),
-        .oup_valid_o ( divsqrt_req_valid                                                      ),
-        .oup_ready_i ( divsqrt_req_ready                                                      )
-      );
+  //     // Shared accelerator arbiter
+  //     stream_arbiter #(
+  //       .DATA_T      ( snitch_pkg::sh_acc_req_t                                               ),
+  //       .N_INP       ( NumCoresPerDivsqrt                                                     ),
+  //       .ARBITER     ( "rr"                                                                   )
+  //     ) i_stream_arbiter_offload (
+  //       .clk_i       ( clk_i                                                                  ),
+  //       .rst_ni      ( rst_ni                                                                 ),
+  //       .inp_data_i  ( sh_acc_req[((c+1)*NumCoresPerDivsqrt)-1:(c*NumCoresPerDivsqrt)]        ),
+  //       .inp_valid_i ( sh_acc_req_valid[((c+1)*NumCoresPerDivsqrt)-1:(c*NumCoresPerDivsqrt)]  ),
+  //       .inp_ready_o ( sh_acc_req_ready[((c+1)*NumCoresPerDivsqrt)-1:(c*NumCoresPerDivsqrt)]  ),
+  //       .oup_data_o  ( divsqrt_req                                                            ),
+  //       .oup_valid_o ( divsqrt_req_valid                                                      ),
+  //       .oup_ready_i ( divsqrt_req_ready                                                      )
+  //     );
 
-      // Shared accelerator output demux
-      stream_demux #(
-        .N_OUP ( NumCoresPerDivsqrt                                                               )
-      ) i_stream_demux_offload (
-        .inp_valid_i  ( divsqrt_resp_valid                                                        ),
-        .inp_ready_o  ( divsqrt_resp_ready                                                        ),
-        .oup_sel_i    ( sh_acc_resp[c*NumCoresPerDivsqrt].hart_id[$clog2(NumCoresPerDivsqrt)-1:0] ),
-        .oup_valid_o  ( sh_acc_resp_valid[((c+1)*NumCoresPerDivsqrt)-1:(c*NumCoresPerDivsqrt)]    ),
-        .oup_ready_i  ( sh_acc_resp_ready[((c+1)*NumCoresPerDivsqrt)-1:(c*NumCoresPerDivsqrt)]    )
-      );
+  //     // Shared accelerator output demux
+  //     stream_demux #(
+  //       .N_OUP ( NumCoresPerDivsqrt                                                               )
+  //     ) i_stream_demux_offload (
+  //       .inp_valid_i  ( divsqrt_resp_valid                                                        ),
+  //       .inp_ready_o  ( divsqrt_resp_ready                                                        ),
+  //       .oup_sel_i    ( sh_acc_resp[c*NumCoresPerDivsqrt].hart_id[$clog2(NumCoresPerDivsqrt)-1:0] ),
+  //       .oup_valid_o  ( sh_acc_resp_valid[((c+1)*NumCoresPerDivsqrt)-1:(c*NumCoresPerDivsqrt)]    ),
+  //       .oup_ready_i  ( sh_acc_resp_ready[((c+1)*NumCoresPerDivsqrt)-1:(c*NumCoresPerDivsqrt)]    )
+  //     );
 
-      // Tile shared divsqrt unit
-      snitch_fp_divsqrt #(
-        .FPUImplementation       (snitch_pkg::DIVSQRT_IMPLEMENTATION)
-      ) i_snitch_divsqrt (
-        .clk_i,
-        .rst_i                   (!rst_ni             ),
-        // pragma translate_off
-        .trace_port_o            (                    ),
-        // pragma translate_on
-        .acc_req_i               ( divsqrt_req        ),
-        .acc_req_valid_i         ( divsqrt_req_valid  ),
-        .acc_req_ready_o         ( divsqrt_req_ready  ),
-        .acc_resp_o              ( divsqrt_resp       ),
-        .acc_resp_valid_o        ( divsqrt_resp_valid ),
-        .acc_resp_ready_i        ( divsqrt_resp_ready ),
-        .divsqrt_rnd_mode_i      ( fpnew_pkg::RNE     ),
-        .divsqrt_status_o        (                    ),
-        .core_events_o           (                    )
-      );
-    end
-  end
+  //     // Tile shared divsqrt unit
+  //     snitch_fp_divsqrt #(
+  //       .FPUImplementation       (snitch_pkg::DIVSQRT_IMPLEMENTATION)
+  //     ) i_snitch_divsqrt (
+  //       .clk_i,
+  //       .rst_i                   (!rst_ni             ),
+  //       // pragma translate_off
+  //       .trace_port_o            (                    ),
+  //       // pragma translate_on
+  //       .acc_req_i               ( divsqrt_req        ),
+  //       .acc_req_valid_i         ( divsqrt_req_valid  ),
+  //       .acc_req_ready_o         ( divsqrt_req_ready  ),
+  //       .acc_resp_o              ( divsqrt_resp       ),
+  //       .acc_resp_valid_o        ( divsqrt_resp_valid ),
+  //       .acc_resp_ready_i        ( divsqrt_resp_ready ),
+  //       .divsqrt_rnd_mode_i      ( fpnew_pkg::RNE     ),
+  //       .divsqrt_status_o        (                    ),
+  //       .core_events_o           (                    )
+  //     );
+  //   end
+  // end
 
   for (genvar c = 0; unsigned'(c) < NumCoresPerTile; c++) begin: gen_cores
     logic [31:0] hart_id;
-    assign hart_id = {unsigned'(tile_id_i), c[idx_width(NumCoresPerTile)-1:0]};
+    if (NumCoresPerTile == 1) begin
+      assign hart_id = unsigned'(tile_id_i);
+    end else begin
+      assign hart_id = {unsigned'(tile_id_i), c[idx_width(NumCoresPerTile)-1:0]};
+    end
 
     if (!TrafficGeneration) begin: gen_mempool_cc
     `ifndef TARGET_SPATZ
@@ -222,7 +226,6 @@ module mempool_tile
         .XDivSqrt             ( XDivSqrt            ),
         .NumMemPortsPerSpatz  ( NumMemPortsPerSpatz ),
         .TCDMPorts            ( NumDataPortsPerCore )
-      )
     `endif
       ) riscv_core (
         .clk_i         (clk_i                                                    ),
@@ -792,16 +795,16 @@ module mempool_tile
   tcdm_master_req_t    [NumCoresPerTile*NumDataPortsPerCore-1:0] remote_req_interco;
   logic                [NumCoresPerTile*NumDataPortsPerCore-1:0] remote_req_interco_valid;
   logic                [NumCoresPerTile*NumDataPortsPerCore-1:0] remote_req_interco_ready;
-  logic                [NumCoresPerTile*NumDataPortsPerCore-1:0] remote_req_interco_hsk;
-  logic                [NumCoresPerTile*NumDataPortsPerCore-1:0] remote_req_interco_hsk_q;
+  // logic                [NumCoresPerTile*NumDataPortsPerCore-1:0] remote_req_interco_hsk;
+  // logic                [NumCoresPerTile*NumDataPortsPerCore-1:0] remote_req_interco_hsk_q;
   addr_t               [NumCoresPerTile*NumDataPortsPerCore-1:0] prescramble_tcdm_req_tgt_addr;
   logic                [NumCoresPerTile*NumDataPortsPerCore-1:0] remote_req_interco_wen;
   logic                [NumCoresPerTile*NumDataPortsPerCore-1:0] remote_req_interco_amoen;
   group_id_t           [NumCoresPerTile*NumDataPortsPerCore-1:0] tgt_group_id;
   logic                [NumCoresPerTile*NumDataPortsPerCore-1:0] group_id_is_local;
   remote_ports_index_t [NumCoresPerTile*NumDataPortsPerCore-1:0] remote_req_interco_tgt_sel;
-  remote_ports_index_t [NumCoresPerTile*NumDataPortsPerCore-1:0] remote_req_interco_tgt_sel_q;
-  logic                [NumCoresPerTile*NumDataPortsPerCore-1:0] remote_req_interco_tgt_sel_q_update;
+  // remote_ports_index_t [NumCoresPerTile*NumDataPortsPerCore-1:0] remote_req_interco_tgt_sel_q;
+  // logic                [NumCoresPerTile*NumDataPortsPerCore-1:0] remote_req_interco_tgt_sel_q_update;
   remote_ports_index_t [NumCoresPerTile*NumDataPortsPerCore-1:0] remote_req_interco_tgt_sel_remapped;
 
   tcdm_master_resp_t   [NumCoresPerTile*NumDataPortsPerCore-1:0] remote_resp_interco;
@@ -811,7 +814,7 @@ module mempool_tile
 
 
   logic                [NumCoresPerTile*NumDataPortsPerCore-1:0] remote_req_interco_to_xbar_valid;
-  logic                [NumCoresPerTile*NumDataPortsPerCore-1:0] remote_req_interco_to_xbar_valid_q;
+  // logic                [NumCoresPerTile*NumDataPortsPerCore-1:0] remote_req_interco_to_xbar_valid_q;
   logic                [NumCoresPerTile*NumDataPortsPerCore-1:0] remote_req_interco_to_xbar_ready;
 
   stream_xbar #(
@@ -1076,7 +1079,8 @@ module mempool_tile
           .NumTiles            (NumTiles                          ),
           .NumTilesPerDma      (NumTilesPerDma                    ),
           .NumBanksPerTile     (NumBanksPerTile                   ),
-          .SeqMemSizePerTile   (SeqMemSizePerTile                 )
+          .SeqMemSizePerTile   (SeqMemSizePerTile                 ),
+          .MetaIdWidth         (snitch_pkg::MetaIdWidth           )
         ) i_tcdm_shim (
           .clk_i              (clk_i                                                                              ),
           .rst_ni             (rst_ni                                                                             ),
@@ -1093,6 +1097,7 @@ module mempool_tile
           .tcdm_resp_ready_o  ({local_resp_interco_ready[idx], remote_resp_interco_ready[idx]}                        ),
           .tcdm_resp_rdata_i  ({local_resp_interco_payload[idx].rdata.data, remote_resp_interco[idx].rdata.data}      ),
           .tcdm_resp_id_i     ({local_resp_interco_payload[idx].rdata.meta_id, remote_resp_interco[idx].rdata.meta_id}),
+          .tcdm_resp_wen_i    ({local_resp_interco_payload[idx].wen,           remote_resp_interco[idx].wen}          ),
           // to SoC
           .soc_qaddr_o        (soc_data_q[idx].addr                                                                 ),
           .soc_qwrite_o       (soc_data_q[idx].write                                                                ),
@@ -1116,6 +1121,7 @@ module mempool_tile
           .data_qvalid_i      (snitch_data_qvalid[c][p]                                                             ),
           .data_qready_o      (snitch_data_qready[c][p]                                                             ),
           .data_pdata_o       (snitch_data_pdata[c][p]                                                              ),
+          .data_pwrite_o      (snitch_data_pwrite[c][p]                                                             ),
           .data_perror_o      (snitch_data_perror[c][p]                                                             ),
           .data_pid_o         (snitch_data_pid[c][p]                                                                ),
           .data_pvalid_o      (snitch_data_pvalid[c][p]                                                             ),

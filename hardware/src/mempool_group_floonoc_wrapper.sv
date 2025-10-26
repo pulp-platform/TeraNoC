@@ -572,7 +572,8 @@ if (NocRouterRemapping == 2 || NocRouterRemapping == 3) begin: gen_resp_remappin
       assign floo_tcdm_resp_to_remapper[i][j] = floo_tcdm_resp_t'{
         payload: floo_tcdm_resp_payload_t'{
           amo  : tcdm_slave_resp[i][j].rdata.amo,
-          data : tcdm_slave_resp[i][j].rdata.data
+          data : tcdm_slave_resp[i][j].rdata.data,
+          wen  : tcdm_slave_resp[i][j].wen
         },
         hdr: floo_tcdm_resp_meta_t'{
           meta_id : tcdm_slave_resp[i][j].rdata.meta_id,                          // For Register File
@@ -609,7 +610,8 @@ end else begin: gen_resp_remapping_bypass
       assign floo_tcdm_resp_to_router[i][j] = floo_tcdm_resp_t'{
         payload: floo_tcdm_resp_payload_t'{
           amo : tcdm_slave_resp[i][j].rdata.amo,
-          data: tcdm_slave_resp[i][j].rdata.data
+          data: tcdm_slave_resp[i][j].rdata.data,
+          wen : tcdm_slave_resp[i][j].wen
         },
         hdr: floo_tcdm_resp_meta_t'{
           meta_id : tcdm_slave_resp[i][j].rdata.meta_id,                      // For Register File
@@ -715,7 +717,8 @@ for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_router_resp_to_master_
         core_id : floo_tcdm_resp_from_router_after_xbar[i][j].hdr.core_id, // For Core
         amo     : floo_tcdm_resp_from_router_after_xbar[i][j].payload.amo,
         data    : floo_tcdm_resp_from_router_after_xbar[i][j].payload.data
-      }
+      },
+      wen  : floo_tcdm_resp_from_router_after_xbar[i][j].payload.wen
     };
     assign tcdm_master_resp_valid[i][j] = floo_tcdm_resp_from_router_after_xbar_valid[i][j];
     assign floo_tcdm_resp_from_router_after_xbar_ready[i][j] = tcdm_master_resp_ready[i][j];
