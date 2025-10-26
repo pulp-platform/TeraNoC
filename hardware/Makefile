@@ -48,6 +48,10 @@ verilator_top    ?= mempool_tb_verilator
 python           ?= python3
 # Enable Snitch tracing
 snitch_trace     ?= 1
+
+# Enable spatz (automatically set when using spatz configuration)
+spatz            ?= 0
+
 # DRAMSys Integration
 dramsys_resouces_path ?= $(MEMPOOL_DIR)/hardware/deps/dram_rtl_sim/dramsys_lib/DRAMSys/configs
 dramsys_lib_path      ?= $(MEMPOOL_DIR)/hardware/deps/dram_rtl_sim/dramsys_lib/DRAMSys/build/lib
@@ -155,6 +159,23 @@ vlog_defs += -DZQUARTERINX=$(zquarterinx)
 vlog_defs += -DXDIVSQRT=$(xDivSqrt)
 vlog_defs += -DSNITCH_TRACE=$(snitch_trace)
 # --------------------------
+# Spatz Core Settings
+# --------------------------
+# Use Spatz?
+vlog_defs += -DRVV=$(spatz)
+# 32b or 64b?
+vlog_defs += -DRVF=$(rvf) -DRVD=$(rvd)
+ifeq ($(spatz), 1)
+	# VLEN, IPU, FPU counts
+	vlog_defs   += -DVLEN=$(vlen) -DN_IPU=$(n_ipu) -DN_FPU=$(n_fpu)
+	vlog_defs 	+= -DN_FU=$(shell awk 'BEGIN{print ($(n_ipu) > $(n_fpu)) ? $(n_ipu) : $(n_fpu)}')
+	# spatz need wen signal on TCDM response channel for ACK handling
+	# this bender_def is used to turn on this feature in interconnection
+	bender_defs += -t spatz
+	SPATZ_DIR 	:= $(shell $(bender) path spatz)
+	SPATZ_CLUSTER_DIR := $(SPATZ_DIR)/hw/system/spatz_cluster
+endif
+# --------------------------
 # AXI & DMA Configuration
 # --------------------------
 vlog_defs += -DAXI_DATA_WIDTH=$(axi_data_width)
@@ -249,6 +270,15 @@ ifeq ($(shell test -f $(BENDER_ROOT)/.teranoc_deps && echo 1),)
 -include $(BENDER_ROOT)/.teranoc_deps
 endif
 
+# Generate required Spatz files (spatz_pkg.sv)
+.PHONY: buildspatz
+buildspatz:
+	export PYTHON=$(python);
+	$(MAKE) -BC $(shell $(bender) path spatz)/hw/system/spatz_cluster \
+		SPATZ_CLUSTER_CFG=$(shell $(bender) path spatz)/hw/system/spatz_cluster/cfg/mempool.hjson \
+		generate PYTHON=$(python);
+
+
 # Running this target will reset dependencies (without updating the checked-in Bender.lock)
 .PHONY: clean-deps
 clean-deps:
@@ -264,7 +294,8 @@ clean-deps:
 		fpnew \
 		fpu_div_sqrt_mvp \
 		register_interface \
-		tech_cells_generic
+		tech_cells_generic \
+		spatz
 	rm -f $(BENDER_ROOT)/.teranoc_deps
 # 	cd $(ROOT_DIR)/.. && git submodule deinit -f toolchain/*
 
@@ -307,7 +338,7 @@ gen_selector: scripts/gen_xbar.py
 .PHONY: compile
 compile: update-floogen dpi lib $(buildpath) $(buildpath)/compile.tcl update_opcodes
 $(buildpath)/compile.tcl: $(bender) $(config_mk) Makefile $(MEMPOOL_DIR)/Bender.yml $(shell find {src,tb,deps} -type f)
-	$(bender) script vsim --vlog-arg="$(vlog_args)" $(vlog_defs) -t rtl -t mempool_vsim > $(buildpath)/compile.tcl
+	$(bender) script vsim --vlog-arg="$(vlog_args)" $(vlog_defs) -t rtl -t mempool_vsim $(bender_defs) > $(buildpath)/compile.tcl
 	echo "exit" >> $(buildpath)/compile.tcl
 	cd $(buildpath) && $(questa_cmd) vsim -work $(library) -c -do compile.tcl
 	echo $(questa_config) >> $(buildpath)/modelsim.ini
@@ -344,7 +375,7 @@ $(buildpath)/$(dpi_library)/mempool_dpi.so: $(dpi)
 .PHONY: elabvcs
 elabvcs: dpivcs $(buildpath) $(buildpath)/compilevcs.sh update_opcodes
 $(buildpath)/compilevcs.sh: $(bender) $(config_mk) Makefile $(MEMPOOL_DIR)/Bender.yml $(shell find {src,tb,deps} -type f)
-	$(bender) script vcs --vlogan-bin="$(vcs_cmd) vlogan" --vlog-arg="$(vlogan_args)" $(vlog_defs) -t rtl -t mempool_vsim > $(buildpath)/compilevcs.sh
+	$(bender) script vcs --vlogan-bin="$(vcs_cmd) vlogan" --vlog-arg="$(vlogan_args)" $(vlog_defs) -t rtl -t mempool_vsim $(bender_defs) > $(buildpath)/compilevcs.sh
 	echo "exit" >> $(buildpath)/compilevcs.sh
 	# Call VCS
 	cd $(buildpath) && \
@@ -425,7 +456,7 @@ endif
 	# Overwrite Bootaddress to L2 base while we don't have a DPI to write a wake-up
 	$(eval boot_addr=$(l2_base))
 	# Create Bender script of all RTL files
-	$(bender) script verilator $(vlog_defs) -t rtl -t mempool_verilator -DCOMMON_CELLS_ASSERTS_OFF > $(verilator_files)
+	$(bender) script verilator $(vlog_defs) -t rtl -t mempool_verilator $(bender_defs) -DCOMMON_CELLS_ASSERTS_OFF > $(verilator_files)
 	# Append the verilator library files
 	@echo '' >> $(verilator_files)
 	# Append the verilator library files: Includes
@@ -462,7 +493,7 @@ lint: update-floogen $(SPYGLASS_WORK_DIR)/tmp/files $(SPYGLASS_WORK_DIR)/sdc/fun
 # Build file list, use subst to remove the "32'd" which spyglass can't handle
 $(SPYGLASS_WORK_DIR)/tmp/files%: $(bender)
 	mkdir -p $(SPYGLASS_WORK_DIR)/tmp
-	$(bender) script verilator $(subst 32\'d,,$(vlog_defs)) -t rtl -t mempool_verilator > $@
+	$(bender) script verilator $(subst 32\'d,,$(vlog_defs)) -t rtl -t mempool_verilator $(bender_defs) > $@
 
 ################
 # Tracing      #
