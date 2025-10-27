@@ -7,6 +7,99 @@
 **TeraNoC** is a core-to-L1-memory Network-on-Chip (NoC) design aimed at area-efficiently scaling manycore clusters to thousands of cores, sharing multi-megabytes of L1 scratchpad memory.
 It is an open-source, hybrid mesh–crossbar on-chip interconnect that offers both scalability and low latency, while maintaining very low routing overhead.
 
+## TeraNoC-Spatz – *WIP: This branch is under construction*
+
+This branch contains the **Spatz variant of the TeraNoC system**, following a similar setup to the `mempool-spatz` branch in the MemPool repository.  
+Currently, the only available configuration is **`minpool_spatz4_fpu`**.
+
+---
+
+### Build and Run Instructions
+
+> Throughout this guide, the root path of the repository is referred to as **`${teranoc_root}`**.  
+> Please replace it with your actual path when executing commands.
+
+---
+
+#### 1. Initialize submodules
+```bash
+git submodule update --init --recursive
+```
+
+---
+
+#### 2. Build the toolchain
+Option A – Build locally:
+```bash
+cd ${teranoc_root}
+make toolchain
+```
+
+Option B – Link to a pre-built version (ETH users only):
+```bash
+cd ${teranoc_root}
+ln -sf /usr/scratch2/calanda/diyou/toolchain/teranoc-spatz/install ./install
+```
+
+---
+
+#### 3. Activate the pre-built environment (ETH users only)
+A correctly set up environment is required for **Spatz** and **FlooNoC**.
+```bash
+conda activate /home/dishen/.conda/envs/terapool_noc
+```
+
+---
+
+#### 4. Build software
+Currently, only **dotp** has been adapted to fit the TeraNoC naming conventions.
+
+```bash
+# change directory to Spatz applications
+cd ${teranoc_root}/software/apps/spatz_apps
+
+# (optional) generate input data if needed
+cd ${teranoc_root}/software/apps/spatz_apps/dotp_f32
+python3 script/gen_data.py --cfg script/dotp.json
+
+# return to app root and build software (-B forces opcode rebuild)
+cd ${teranoc_root}/software/apps/spatz_apps
+make dotp_f32 config=minpool_spatz4_fpu -B
+```
+
+---
+
+#### 5. Compile hardware and run simulation
+```bash
+# compile hardware
+cd ${teranoc_root}/hardware
+make clean compile config=minpool_spatz4_fpu
+
+# start simulation
+make sim config=minpool_spatz4_fpu app=apps/spatz_apps/dotp_f32
+```
+
+---
+
+## TODO List
+
+There are several open issues and optimizations to address in this branch:
+
+1. **Fix port/wire width mismatches**  
+   RTL simulation currently fails due to unresponded requests. Some signal width mismatches have been observed at the Tile level and need to be corrected.
+
+2. **Add disassembly support for vector instructions**  
+   The current toolchain does not support vector disassembly.  
+   Refer to the toolchain used in **mempool-spatz** to integrate this functionality for TeraNoC-Spatz.
+
+3. **Restore and adapt auto-benchmarking and kernel naming**  
+   The previous auto-benchmarking flow from **mempool-spatz** is broken due to naming and build changes.  
+   It should be either fixed or merged with the updated Makefile structure.
+
+4. **Add more system configurations**  
+   Currently, only the smallest configuration (**minpool**) is available.  
+   Larger configurations should be added to explore scaling behavior.
+
 ---
 
 ## 🔍 Why TeraNoC?

@@ -5,9 +5,9 @@
 // Parameters for a DOTP
 
 {
-    kernel: "DOTP"
-    M: 32768,
+    kernel: "DOTP",
+    M: 4096,
     prec: 32,
-    core: 64,
+    core: 4,
     expand: 0
 }
