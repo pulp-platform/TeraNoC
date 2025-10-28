@@ -203,7 +203,7 @@ module terapool_cluster_floonoc_wrapper
         assign floo_axi_rsp_in  [x][y][North] = floo_axi_rsp_out  [x][y+1][South];
         assign floo_axi_wide_in [x][y][North] = floo_axi_wide_out [x][y+1][South];
 
-        if (x == 1) begin : gen_normal_chimneys
+        if (x < NumX/2) begin : gen_normal_chimneys
           // AXI South
           assign floo_axi_req_in[x][y][South]  = floo_axi_req_i[5-x];
           assign floo_axi_rsp_in[x][y][South]  = floo_axi_rsp_i[5-x];
@@ -212,7 +212,7 @@ module terapool_cluster_floonoc_wrapper
           assign floo_axi_req_o[5-x]           = floo_axi_req_out[x][y][South];
           assign floo_axi_rsp_o[5-x]           = floo_axi_rsp_out[x][y][South];
 
-        end else if ((x < NumX) && (x != 0)) begin : gen_normal_chimneys_2
+        end else begin : gen_normal_chimneys_2
           // AXI South
           assign floo_axi_req_in[x][y][South]  = floo_axi_req_i[x+6];
           assign floo_axi_rsp_in[x][y][South]  = floo_axi_rsp_i[x+6];
@@ -220,15 +220,6 @@ module terapool_cluster_floonoc_wrapper
           assign floo_axi_wide_o[x+6]          = floo_axi_wide_out[x][y][South];
           assign floo_axi_req_o[x+6]           = floo_axi_req_out[x][y][South];
           assign floo_axi_rsp_o[x+6]           = floo_axi_rsp_out[x][y][South];
-
-        end else begin
-          // AXI South
-          assign floo_axi_req_in[x][y][South]  = floo_axi_req_i[5];
-          assign floo_axi_rsp_in[x][y][South]  = floo_axi_rsp_i[5];
-          assign floo_axi_wide_in[x][y][South] = floo_axi_wide_i[5];
-          assign floo_axi_wide_o[5]            = floo_axi_wide_out[x][y][South];
-          assign floo_axi_req_o[5]             = floo_axi_req_out[x][y][South];
-          assign floo_axi_rsp_o[5]             = floo_axi_rsp_out[x][y][South];
         end
 
       end else if (y == NumY-1) begin

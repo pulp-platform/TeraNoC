@@ -122,6 +122,9 @@ package mempool_pkg;
   localparam AxiSystemIdWidth = $clog2(NumSystemXbarMasters) + AxiTileIdWidth;
   typedef logic [AxiSystemIdWidth-1:0] axi_system_id_t;
 
+  localparam AxiInterIdWidth = 1 + AxiTileIdWidth;
+  typedef logic [AxiInterIdWidth-1:0] axi_inter_id_t;
+
   localparam NumTestbenchXbarMasters = 1;
   localparam AxiTestbenchIdWidth = $clog2(NumTestbenchXbarMasters) + AxiSystemIdWidth;
   typedef logic [AxiTestbenchIdWidth-1:0] axi_tb_id_t;
@@ -149,6 +152,14 @@ package mempool_pkg;
   `AXI_TYPEDEF_R_CHAN_T(axi_tile_r_t, axi_data_t, axi_tile_id_t, logic);
   `AXI_TYPEDEF_REQ_T(axi_tile_req_t, axi_tile_aw_t, axi_tile_w_t, axi_tile_ar_t);
   `AXI_TYPEDEF_RESP_T(axi_tile_resp_t, axi_tile_b_t, axi_tile_r_t );
+
+  `AXI_TYPEDEF_AW_CHAN_T(axi_inter_aw_t, addr_t, axi_inter_id_t, logic);
+  `AXI_TYPEDEF_W_CHAN_T(axi_inter_w_t, axi_data_t, axi_strb_t, logic);
+  `AXI_TYPEDEF_B_CHAN_T(axi_inter_b_t, axi_inter_id_t, logic);
+  `AXI_TYPEDEF_AR_CHAN_T(axi_inter_ar_t, addr_t, axi_inter_id_t, logic);
+  `AXI_TYPEDEF_R_CHAN_T(axi_inter_r_t, axi_data_t, axi_inter_id_t, logic);
+  `AXI_TYPEDEF_REQ_T(axi_inter_req_t, axi_inter_aw_t, axi_inter_w_t, axi_inter_ar_t);
+  `AXI_TYPEDEF_RESP_T(axi_inter_resp_t, axi_inter_b_t, axi_inter_r_t);
 
   `AXI_TYPEDEF_AW_CHAN_T(axi_system_aw_t, addr_t, axi_system_id_t, logic);
   `AXI_TYPEDEF_W_CHAN_T(axi_system_w_t, axi_data_t, axi_strb_t, logic);
