@@ -686,7 +686,7 @@ module mempool_system
   axi_data_t     [NumL2Banks-1:0]   bank_rdata;
 
   for (genvar i = 0; i < NumAXIMasters; i++) begin : gen_l2_adapters
-    axi2mem #(
+    axi_to_mem #(
       .axi_req_t    (axi_tile_req_t ),
       .axi_resp_t   (axi_tile_resp_t),
       .AddrWidth    (L2AddrWidth    ),
@@ -834,7 +834,7 @@ module mempool_system
   addr_t     bootrom_addr;
   axi_data_t bootrom_rdata;
 
-  axi2mem #(
+  axi_to_mem #(
     .axi_req_t  (axi_system_req_t ),
     .axi_resp_t (axi_system_resp_t),
     .AddrWidth  (AddrWidth        ),
