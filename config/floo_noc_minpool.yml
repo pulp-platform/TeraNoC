@@ -54,23 +54,21 @@ endpoints:
       size: 0x0010_0000
     sbr_port_protocol:
       - "wide_out"
-  - name: "periphs"
+  - name: "host_peri"
     addr_range:
       - start: 0x0000_0000
         end: 0x7FFF_FFFF
       - start: 0xA000_0000
         end: 0xC000_FFFF
-    sbr_port_protocol:
-      - "wide_out"
-  - name: "host"
     mgr_port_protocol:
       - "wide_in"
+    sbr_port_protocol:
+      - "wide_out"
 
 routers:
   - name: "group_router"
     array: [2, 2]
     degree: 5
-  - name: "periph_router"
 
 connections:
   - src: "group"
@@ -100,13 +98,8 @@ connections:
     - [1, 1]
     - [1, 0]
     dst_dir: "East"
-  # Attach special peripheral/HBM router to the mesh
-  - src: "periph_router"
+  # Special
+  - src: "host_peri"
     dst: "group_router"
     dst_idx: [0, 0]
     dst_dir: "South"
-  # Attach last HBM channel and peripherals to the special router
-  - src: "periph_router"
-    dst: "periphs"
-  - src: "periph_router"
-    dst: "host"
