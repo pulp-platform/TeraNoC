@@ -88,6 +88,19 @@ module mempool_system
 
   localparam floo_pkg::chimney_cfg_t ChimneyCfgN = floo_pkg::set_ports(floo_pkg::ChimneyDefaultCfg, 1'b0, 1'b0);
   localparam floo_pkg::chimney_cfg_t ChimneyCfgW = floo_pkg::set_ports(floo_pkg::ChimneyDefaultCfg, 1'b1, 1'b0);
+  localparam floo_pkg::chimney_cfg_t ChimneyCfgWSpecial = '{
+    EnSbrPort: 1'b1,
+    EnMgrPort: 1'b1,
+    MaxTxns: 32,
+    MaxUniqueIds: 2,
+    MaxTxnsPerId: 32,
+    BRoBType: NoRoB,
+    BRoBSize: 0,
+    RRoBType: NoRoB,
+    RRoBSize: 0,
+    CutAx: 1'b0,
+    CutRsp: 1'b0
+  };
 
   `ifdef TERAPOOL
     `define CLUSTER_WRAPPER terapool_cluster_floonoc_wrapper
@@ -149,7 +162,7 @@ module mempool_system
             .AxiCfgN              ( AxiCfgN                       ),
             .AxiCfgW              ( AxiCfgW                       ),
             .ChimneyCfgN          ( ChimneyCfgN                   ),
-            .ChimneyCfgW          ( floo_pkg::ChimneyDefaultCfg   ),
+            .ChimneyCfgW          ( ChimneyCfgWSpecial            ),
             .AtopSupport          ( '0                            ),
             .RouteCfg             ( RouteCfg                      ),
             .id_t                 ( id_t                          ),
@@ -225,7 +238,7 @@ module mempool_system
           axi_iw_converter #(
             .AxiSlvPortIdWidth         ( AxiInterIdWidth   ),
             .AxiMstPortIdWidth         ( AxiTileIdWidth    ),
-            .AxiSlvPortMaxUniqIds      ( 2                 ),
+            .AxiSlvPortMaxUniqIds      ( 4                 ),
             .AxiSlvPortMaxTxnsPerId    ( 4                 ),
             .AxiSlvPortMaxTxns         ( 4                 ),
             .AxiMstPortMaxUniqIds      ( 2**AxiTileIdWidth ),
@@ -249,7 +262,7 @@ module mempool_system
           axi_iw_converter #(
             .AxiSlvPortIdWidth         ( AxiInterIdWidth   ),
             .AxiMstPortIdWidth         ( AxiTileIdWidth    ),
-            .AxiSlvPortMaxUniqIds      ( 2                 ),
+            .AxiSlvPortMaxUniqIds      ( 4                 ),
             .AxiSlvPortMaxTxnsPerId    ( 4                 ),
             .AxiSlvPortMaxTxns         ( 4                 ),
             .AxiMstPortMaxUniqIds      ( 2**AxiTileIdWidth ),
@@ -397,7 +410,7 @@ module mempool_system
             .AxiCfgN              ( AxiCfgN                       ),
             .AxiCfgW              ( AxiCfgW                       ),
             .ChimneyCfgN          ( ChimneyCfgN                   ),
-            .ChimneyCfgW          ( floo_pkg::ChimneyDefaultCfg   ),
+            .ChimneyCfgW          ( ChimneyCfgWSpecial            ),
             .AtopSupport          ( '0                            ),
             .RouteCfg             ( RouteCfg                      ),
             .id_t                 ( id_t                          ),
@@ -473,7 +486,7 @@ module mempool_system
           axi_iw_converter #(
             .AxiSlvPortIdWidth         ( AxiInterIdWidth   ),
             .AxiMstPortIdWidth         ( AxiTileIdWidth    ),
-            .AxiSlvPortMaxUniqIds      ( 2                 ),
+            .AxiSlvPortMaxUniqIds      ( 4                 ),
             .AxiSlvPortMaxTxnsPerId    ( 4                 ),
             .AxiSlvPortMaxTxns         ( 4                 ),
             .AxiMstPortMaxUniqIds      ( 2**AxiTileIdWidth ),
