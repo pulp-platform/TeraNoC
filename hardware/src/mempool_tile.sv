@@ -291,8 +291,8 @@ module mempool_tile
       /// Cache Line Width
       .L0_LINE_COUNT      (4                                                   ),
       .LINE_WIDTH         (ICacheLineWidth                                     ),
-      .LINE_COUNT         (ICacheSizeByte / (ICacheSets * ICacheLineWidth / 8) ),
-      .SET_COUNT          (ICacheSets                                          ),
+      .LINE_COUNT         (ICacheSizeByte / (ICacheWays * ICacheLineWidth / 8) ),
+      .WAY_COUNT          (ICacheWays                                          ),
       .FETCH_AW           (AddrWidth                                           ),
       .FETCH_DW           (DataWidth                                           ),
       .FILL_AW            (AddrWidth                                           ),
@@ -301,6 +301,7 @@ module mempool_tile
       .MERGE_FETCHES      (1                                                   ),
       .SERIAL_LOOKUP      (1                                                   ),
       .L1_TAG_SCM         (1                                                   ),
+      .L1_DATA_SCM        (0                                                   ),
       .NUM_AXI_OUTSTANDING(8                                                   ),
       /// Make the early cache latch-based. This reduces latency at the cost of
       /// increased combinatorial path lengths and the hassle of having latches in
@@ -315,7 +316,9 @@ module mempool_tile
       .clk_d2_i             (clk_i                   ),
       .rst_ni               (rst_ni                  ),
       .enable_prefetching_i (1'b1                    ),
-      .icache_events_o      (/* Unused */            ),
+      .enable_branch_pred_i (1'b1                    ),
+      .icache_l0_events_o   (/* Unused */            ),
+      .icache_l1_events_o   (/* Unused */            ),
       .flush_valid_i        ({NumCoresPerCache{1'b0}}),
       .flush_ready_o        (/* Unused */            ),
       .inst_addr_i          (snitch_inst_addr[c]     ),
@@ -326,6 +329,8 @@ module mempool_tile
       .inst_error_o         (/* Unused */            ),
       .sram_cfg_data_i      ('0                      ),
       .sram_cfg_tag_i       ('0                      ),
+      .sram_cfg_out_data_o  (/* Unused */            ),
+      .sram_cfg_out_tag_o   (/* Unused */            ),
       .axi_req_o            (axi_cache_req_d[c]      ),
       .axi_rsp_i            (axi_cache_resp_q[c]     )
     );

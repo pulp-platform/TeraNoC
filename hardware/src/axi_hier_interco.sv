@@ -31,7 +31,7 @@ module axi_hier_interco
   parameter int unsigned EnableCache    = 0,
   parameter int unsigned CacheLineWidth = 0,
   parameter int unsigned CacheSizeByte  = 0,
-  parameter int unsigned CacheSets      = 0,
+  parameter int unsigned CacheWays      = 0,
   parameter int unsigned AddrWidth      = 0,
   parameter int unsigned DataWidth      = 0,
   parameter int unsigned SlvIdWidth     = 0,
@@ -126,7 +126,7 @@ module axi_hier_interco
           .EnableCache    (EnableCache   ),
           .CacheLineWidth (CacheLineWidth),
           .CacheSizeByte  (CacheSizeByte ),
-          .CacheSets      (CacheSets     ),
+          .CacheWays      (CacheWays     ),
           .AddrWidth      (AddrWidth     ),
           .DataWidth      (DataWidth     ),
           .SlvIdWidth     (SlvIdWidth    ),
@@ -155,7 +155,7 @@ module axi_hier_interco
         .EnableCache    (EnableCache>>1),
         .CacheLineWidth (CacheLineWidth),
         .CacheSizeByte  (CacheSizeByte ),
-        .CacheSets      (CacheSets     ),
+        .CacheWays      (CacheWays     ),
         .AddrWidth      (AddrWidth     ),
         .DataWidth      (DataWidth     ),
         .SlvIdWidth     (SlvIdWidth    ),
@@ -223,11 +223,11 @@ module axi_hier_interco
     );
 
     if (EnableCache[0]) begin: gen_ro_cache
-      localparam int unsigned LineCount = CacheSizeByte/(CacheSets*CacheLineWidth/8);
+      localparam int unsigned LineCount = CacheSizeByte/(CacheWays*CacheLineWidth/8);
       snitch_read_only_cache #(
         .LineWidth    (CacheLineWidth),
         .LineCount    (LineCount     ),
-        .SetCount     (CacheSets     ),
+        .WayCount     (CacheWays     ),
         .AxiAddrWidth (AddrWidth     ),
         .AxiDataWidth (DataWidth     ),
         .AxiIdWidth   (IntIdWidth    ),
@@ -245,6 +245,7 @@ module axi_hier_interco
         .enable_i      (ro_cache_ctrl_i.enable     ),
         .flush_valid_i (ro_cache_ctrl_i.flush_valid),
         .flush_ready_o (/*unused*/                 ),
+        .icache_events_o(/*unused*/                ),
         .start_addr_i  (ro_cache_ctrl_i.start_addr ),
         .end_addr_i    (ro_cache_ctrl_i.end_addr   ),
         .axi_slv_req_i (int_req                    ),
@@ -252,7 +253,9 @@ module axi_hier_interco
         .axi_mst_req_o (cache_req                  ),
         .axi_mst_rsp_i (cache_resp                 ),
         .sram_cfg_data_i('0                        ),
-        .sram_cfg_tag_i ('0                        )
+        .sram_cfg_tag_i ('0                        ),
+        .sram_cfg_out_data_o(/*unused*/            ),
+        .sram_cfg_out_tag_o(/*unused*/             )
       );
     end else begin: gen_no_ro_cache
       assign cache_req = int_req;

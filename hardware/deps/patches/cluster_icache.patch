@@ -1,0 +1,12 @@
+diff --git a/hardware/deps/cluster_icache/src/snitch_icache_lookup_serial.sv b/hardware/deps/cluster_icache/src/snitch_icache_lookup_serial.sv
+index 22748c8..3535341 100644
+--- a/hardware/deps/cluster_icache/src/snitch_icache_lookup_serial.sv
++++ b/hardware/deps/cluster_icache/src/snitch_icache_lookup_serial.sv
+@@ -163,7 +163,6 @@ module snitch_icache_lookup_serial
+         .WriteAddr  (tag_addr),
+         .WriteData  (tag_wdata)
+       );
+-      assign sram_cfg_out_tag_o = '0;
+ 
+     end
+   end else begin : gen_sram

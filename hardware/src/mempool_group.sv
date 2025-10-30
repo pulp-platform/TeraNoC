@@ -319,7 +319,7 @@ module mempool_group
     .EnableCache    (32'hFFFFFFFF                    ),
     .CacheLineWidth (ROCacheLineWidth                ),
     .CacheSizeByte  (ROCacheSizeByte                 ),
-    .CacheSets      (ROCacheSets                     ),
+    .CacheWays      (ROCacheWays                     ),
     .AddrWidth      (AddrWidth                       ),
     .DataWidth      (AxiDataWidth                    ),
     .SlvIdWidth     (AxiTileIdWidth                  ),

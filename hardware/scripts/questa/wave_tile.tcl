@@ -10,10 +10,10 @@ add wave -noupdate -group group_[$1] -group Tile_[$2] -group Params /mempool_tb/
 add wave -noupdate -group group_[$1] -group Tile_[$2] -group Params /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr  ${1}/${3}]\]/gen_groups_y\[[expr  ${1}%${3}]\]/gen_rtl_group/i_group/i_mempool_group/gen_tiles[$2]/i_tile/BootAddr
 add wave -noupdate -group group_[$1] -group Tile_[$2] -group Params /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr  ${1}/${3}]\]/gen_groups_y\[[expr  ${1}%${3}]\]/gen_rtl_group/i_group/i_mempool_group/gen_tiles[$2]/i_tile/gen_caches[0].i_snitch_icache.LINE_WIDTH
 add wave -noupdate -group group_[$1] -group Tile_[$2] -group Params /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr  ${1}/${3}]\]/gen_groups_y\[[expr  ${1}%${3}]\]/gen_rtl_group/i_group/i_mempool_group/gen_tiles[$2]/i_tile/gen_caches[0].i_snitch_icache.LINE_COUNT
-add wave -noupdate -group group_[$1] -group Tile_[$2] -group Params /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr  ${1}/${3}]\]/gen_groups_y\[[expr  ${1}%${3}]\]/gen_rtl_group/i_group/i_mempool_group/gen_tiles[$2]/i_tile/gen_caches[0].i_snitch_icache.SET_COUNT
+add wave -noupdate -group group_[$1] -group Tile_[$2] -group Params /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr  ${1}/${3}]\]/gen_groups_y\[[expr  ${1}%${3}]\]/gen_rtl_group/i_group/i_mempool_group/gen_tiles[$2]/i_tile/gen_caches[0].i_snitch_icache.WAY_COUNT
 add wave -noupdate -group group_[$1] -group Tile_[$2] -group Params /mempool_pkg::ICacheLineWidth
 add wave -noupdate -group group_[$1] -group Tile_[$2] -group Params /mempool_pkg::ICacheSizeByte
-add wave -noupdate -group group_[$1] -group Tile_[$2] -group Params /mempool_pkg::ICacheSets
+add wave -noupdate -group group_[$1] -group Tile_[$2] -group Params /mempool_pkg::ICacheWays
 add wave -noupdate -group group_[$1] -group Tile_[$2] -group Params /mempool_pkg::NumCores
 add wave -noupdate -group group_[$1] -group Tile_[$2] /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr  ${1}/${3}]\]/gen_groups_y\[[expr  ${1}%${3}]\]/gen_rtl_group/i_group/i_mempool_group/gen_tiles[$2]/i_tile/clk_i
 add wave -noupdate -group group_[$1] -group Tile_[$2] /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr  ${1}/${3}]\]/gen_groups_y\[[expr  ${1}%${3}]\]/gen_rtl_group/i_group/i_mempool_group/gen_tiles[$2]/i_tile/rst_ni

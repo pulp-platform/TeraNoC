@@ -425,7 +425,7 @@ endif
 	# Overwrite Bootaddress to L2 base while we don't have a DPI to write a wake-up
 	$(eval boot_addr=$(l2_base))
 	# Create Bender script of all RTL files
-	$(bender) script verilator $(vlog_defs) -t rtl -t mempool_verilator -DCOMMON_CELLS_ASSERTS_OFF > $(verilator_files)
+	$(bender) script verilator $(vlog_defs) -t rtl -t mempool_verilator -DASSERTS_OFF > $(verilator_files)
 	# Append the verilator library files
 	@echo '' >> $(verilator_files)
 	# Append the verilator library files: Includes

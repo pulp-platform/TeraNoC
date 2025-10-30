@@ -188,7 +188,7 @@ package mempool_pkg;
    ***********************/
 
   localparam int unsigned ICacheSizeByte  = 512 * NumCoresPerCache;     // Total Size of instruction cache in bytes
-  localparam int unsigned ICacheSets      = (NumCoresPerCache == 2) ? 2 : NumCoresPerCache / 2;       // Number of sets
+  localparam int unsigned ICacheWays      = (NumCoresPerCache == 1) ? 1 : ((NumCoresPerCache < 4) ? 2 : (NumCoresPerCache / 2));       // Number of ways
   localparam int unsigned ICacheLineWidth = 32 * 2 * NumCoresPerCache;  // Size of each cache line in bits
 
   /*********************
@@ -198,7 +198,7 @@ package mempool_pkg;
   localparam int unsigned AxiHierRadix      = `ifdef AXI_HIER_RADIX `AXI_HIER_RADIX `else NumTilesPerGroup `endif;
   localparam int unsigned ROCacheLineWidth  = `ifdef RO_LINE_WIDTH `RO_LINE_WIDTH `else 0 `endif;
   localparam int unsigned ROCacheSizeByte   = 8192;
-  localparam int unsigned ROCacheSets       = 2;
+  localparam int unsigned ROCacheWays       = 2;
 
   localparam int unsigned ROCacheNumAddrRules = 4;
   typedef struct packed {
