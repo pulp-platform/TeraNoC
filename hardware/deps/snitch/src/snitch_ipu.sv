@@ -12,7 +12,7 @@ module snitch_ipu
   parameter int unsigned IdWidth = 5
 ) (
   input  logic                     clk_i,
-  input  logic                     rst_ni,
+  input  logic                     rst_i,
   // Accelerator Interface - Slave
   input  acc_addr_e                acc_qaddr_i,      // unused
   input  logic [IdWidth-1:0]       acc_qid_i,
@@ -74,6 +74,7 @@ module snitch_ipu
         div_valid_op = acc_qvalid_i;
         acc_qready_o = div_ready_op;
       end
+`ifdef XPULPIMG_EXTENSION
       riscv_instr::P_ABS,                 // Xpulpimg: p.abs
       riscv_instr::P_SLET,                // Xpulpimg: p.slet
       riscv_instr::P_SLETU,               // Xpulpimg: p.sletu
@@ -230,6 +231,7 @@ module snitch_ipu
           illegal_instruction = 1'b1;
         end
       end
+`endif
       default: illegal_instruction = 1'b1;
     endcase
   end
@@ -239,8 +241,8 @@ module snitch_ipu
       .WIDTH       ( 32      ),
       .IdWidth     ( IdWidth )
   ) i_div (
-      .clk_i       ( clk_i                  ),
-      .rst_ni      ( rst_ni                 ),
+      .clk_i       ( clk_i                ),
+      .rst_ni      ( ~rst_i               ),
       .id_i        ( acc_qid_i              ),
       .operator_i  ( acc_qdata_op_i         ),
       .op_a_i      ( acc_qdata_arga_i       ),
@@ -260,7 +262,7 @@ module snitch_ipu
         .IdWidth  ( IdWidth )
     ) i_dspu (
         .clk_i       ( clk_i                ),
-        .rst_ni      ( rst_ni               ),
+        .rst_i       ( rst_i                ),
         .id_i        ( acc_qid_i            ),
         .operator_i  ( acc_qdata_op_i       ),
         .op_a_i      ( acc_qdata_arga_i     ),
@@ -279,7 +281,7 @@ module snitch_ipu
       .N_INP  ( 2        )
     ) i_stream_arbiter (
       .clk_i,
-      .rst_ni,
+      .rst_ni      ( ~rst_i                 ),
       .inp_data_i  ( {div, dsp}             ),
       .inp_valid_i ( {div_valid, dsp_valid} ),
       .inp_ready_o ( {div_ready, dsp_ready} ),
@@ -294,7 +296,7 @@ module snitch_ipu
       .IdWidth  ( IdWidth )
     ) i_multiplier (
       .clk_i,
-      .rst_ni,
+      .rst_i,
       .id_i        ( acc_qid_i              ),
       .operator_i  ( acc_qdata_op_i         ),
       .operand_a_i ( acc_qdata_arga_i       ),
@@ -312,7 +314,7 @@ module snitch_ipu
       .N_INP  ( 2        )
     ) i_stream_arbiter (
       .clk_i,
-      .rst_ni,
+      .rst_ni      ( ~rst_i                 ),
       .inp_data_i  ( {div, mul}             ),
       .inp_valid_i ( {div_valid, mul_valid} ),
       .inp_ready_o ( {div_ready, mul_ready} ),
@@ -331,7 +333,7 @@ module dspu #(
   parameter int unsigned IdWidth = 5
 ) (
     input  logic               clk_i,      // unused
-    input  logic               rst_ni,     // unused
+    input  logic               rst_i,      // unused
     input  logic [IdWidth-1:0] id_i,
     input  logic [31:0]        operator_i,
     input  logic [Width-1:0]   op_a_i,
@@ -460,6 +462,7 @@ module dspu #(
         mac_op = MulHigh;
         res_sel = Mac;
       end
+`ifdef XPULPIMG_EXTENSION
       // Instructions from Xpulpimg
       riscv_instr::P_ABS: begin
         cmp_op_b_sel = Zero;
@@ -1301,6 +1304,7 @@ module dspu #(
         simd_mode = High;
         res_sel = Simd;
       end
+`endif
       default: ;
     endcase
   end

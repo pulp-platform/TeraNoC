@@ -11,7 +11,7 @@ module snitch_shared_muldiv #(
   parameter int unsigned IdWidth = 5
 ) (
   input  logic                     clk_i,
-  input  logic                     rst_ni,
+  input  logic                     rst_i,
   // Accelerator Interface - Slave
   input  logic [31:0]              acc_qaddr_i, // unused
   input  logic [IdWidth-1:0]       acc_qid_i,
@@ -73,7 +73,7 @@ module snitch_shared_muldiv #(
     .IdWidth  ( IdWidth )
   ) i_multiplier (
     .clk_i,
-    .rst_ni,
+    .rst_i,
     .id_i        ( acc_qid_i              ),
     .operator_i  ( acc_qdata_op_i         ),
     .operand_a_i ( acc_qdata_arga_i       ),
@@ -90,8 +90,8 @@ module snitch_shared_muldiv #(
       .WIDTH       ( 32      ),
       .IdWidth     ( IdWidth )
   ) i_div (
-      .clk_i       ( clk_i                  ),
-      .rst_ni      ( rst_ni                 ),
+      .clk_i       ( clk_i                ),
+      .rst_ni      ( ~rst_i               ),
       .id_i        ( acc_qid_i              ),
       .operator_i  ( acc_qdata_op_i         ),
       .op_a_i      ( acc_qdata_arga_i       ),
@@ -109,7 +109,7 @@ module snitch_shared_muldiv #(
     .N_INP  ( 2        )
   ) i_stream_arbiter (
     .clk_i,
-    .rst_ni,
+    .rst_ni      ( ~rst_i                 ),
     .inp_data_i  ( {div, mul}             ),
     .inp_valid_i ( {div_valid, mul_valid} ),
     .inp_ready_o ( {div_ready, mul_ready} ),
@@ -126,7 +126,7 @@ module multiplier  #(
   parameter int unsigned IdWidth = 5
 ) (
     input  logic               clk_i,
-    input  logic               rst_ni,
+    input  logic               rst_i,
     input  logic [IdWidth-1:0] id_i,
     input  logic [31:0]        operator_i,
     input  logic [Width-1:0]   operand_a_i,
@@ -192,11 +192,11 @@ module multiplier  #(
     if (valid_i & ready_o)
       valid_d = 1;
   end
-  `FF(valid_q, valid_d, '0, clk_i, rst_ni)
+  `FFAR(valid_q, valid_d, '0, clk_i, rst_i)
   // Pipe-line registers
-  `FFL(id_q,           id_i,           (valid_i & ready_o), '0, clk_i, rst_ni)
-  `FFL(result_q,       result_d,       (valid_i & ready_o), '0, clk_i, rst_ni)
-  `FFL(select_upper_q, select_upper_d, (valid_i & ready_o), '0, clk_i, rst_ni)
+  `FFLAR(id_q,           id_i,           (valid_i & ready_o), '0, clk_i, rst_i)
+  `FFLAR(result_q,       result_d,       (valid_i & ready_o), '0, clk_i, rst_i)
+  `FFLAR(select_upper_q, select_upper_d, (valid_i & ready_o), '0, clk_i, rst_i)
 
   assign id_o = id_q;
   assign valid_o = valid_q;

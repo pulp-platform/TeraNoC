@@ -11,17 +11,21 @@ module snitch_lsu
   import cf_math_pkg::idx_width;
 #(
   parameter type tag_t                       = logic [4:0],
+  parameter type dreq_t                      = logic,
+  parameter type drsp_t                      = logic,
   parameter int unsigned NumOutstandingLoads = 1,
+  // unused here, always 32 in MemPool
+  parameter int unsigned DataWidth           = 32,
   parameter bit NaNBox                       = 0,
   // Dependent parameters. DO NOT CHANGE.
   localparam int unsigned IdWidth = idx_width(NumOutstandingLoads)
 ) (
   input  logic               clk_i,
-  input  logic               rst_ni,
+  input  logic               rst_i,
   // request channel
   input  tag_t               lsu_qtag_i,
-  input  logic               lsu_qwrite,
-  input  logic               lsu_qsigned,
+  input  logic               lsu_qwrite_i,
+  input  logic               lsu_qsigned_i,
   input  logic [31:0]        lsu_qaddr_i,
   input  logic [31:0]        lsu_qdata_i,
   input  logic [1:0]         lsu_qsize_i,
@@ -55,16 +59,6 @@ module snitch_lsu
   // TYPEDEFS
   // ----------------
 
-  typedef struct packed {
-    tag_t         lsu_qtag;
-    logic         lsu_qwrite;
-    logic         lsu_qsigned;
-    logic [31:0]  lsu_qaddr;
-    logic [31:0]  lsu_qdata;
-    logic [1:0]   lsu_qsize;
-    logic [3:0]   lsu_qamo;
-  } lsu_req_t;
-
   typedef logic [IdWidth-1:0] meta_id_t;
 
   typedef struct packed {
@@ -92,11 +86,6 @@ module snitch_lsu
   logic                                id_table_pop;
   logic                                id_table_full;
 
-  // Request
-  lsu_req_t    lsu_req_in, postreg_lsu_req;
-  logic        postreg_lsu_req_valid;
-  logic        postreg_lsu_req_ready;
-
   // Response
   logic [31:0] ld_result;
 
@@ -122,11 +111,11 @@ module snitch_lsu
   end
 
   assign req_metadata = '{
-    write:    postreg_lsu_req.lsu_qwrite,
-    tag:      postreg_lsu_req.lsu_qtag,
-    sign_ext: postreg_lsu_req.lsu_qsigned,
-    offset:   postreg_lsu_req.lsu_qaddr[1:0],
-    size:     postreg_lsu_req.lsu_qsize
+    write:    lsu_qwrite_i,
+    tag:      lsu_qtag_i,
+    sign_ext: lsu_qsigned_i,
+    offset:   lsu_qaddr_i[1:0],
+    size:     lsu_qsize_i
   };
 
   assign resp_metadata = metadata_q[resp_id];
@@ -160,45 +149,19 @@ module snitch_lsu
   // ----------------
   // REQUEST
   // ----------------
-
-  assign lsu_req_in = '{
-    lsu_qtag    : lsu_qtag_i,
-    lsu_qwrite  : lsu_qwrite,
-    lsu_qsigned : lsu_qsigned,
-    lsu_qaddr   : lsu_qaddr_i,
-    lsu_qdata   : lsu_qdata_i,
-    lsu_qsize   : lsu_qsize_i,
-    lsu_qamo    : lsu_qamo_i
-  };
-
-  fall_through_register #(
-    .T( lsu_req_t )
-  ) i_tcdm_master_resp_register (
-    .clk_i     ( clk_i                 ),
-    .rst_ni    ( rst_ni                ),
-    .clr_i     ( 1'b0                  ),
-    .testmode_i( 1'b0                  ),
-    .data_i    ( lsu_req_in            ),
-    .valid_i   ( lsu_qvalid_i          ),
-    .ready_o   ( lsu_qready_o          ),
-    .data_o    ( postreg_lsu_req       ),
-    .valid_o   ( postreg_lsu_req_valid ),
-    .ready_i   ( postreg_lsu_req_ready )
-  );
-
   // only make a request when we got a valid request and if it is a load
   // also check that we can actually store the necessary information to process
   // it in the upcoming cycle(s).
-  assign data_qvalid_o = postreg_lsu_req_valid && (!id_table_full || handshake_pending_q);
-  assign data_qwrite_o = postreg_lsu_req.lsu_qwrite;
-  assign data_qaddr_o  = {postreg_lsu_req.lsu_qaddr[31:2], 2'b0};
-  assign data_qamo_o   = postreg_lsu_req.lsu_qamo;
+  assign data_qvalid_o = lsu_qvalid_i && (!id_table_full || handshake_pending_q);
+  assign data_qwrite_o = lsu_qwrite_i;
+  assign data_qaddr_o  = {lsu_qaddr_i[31:2], 2'b0};
+  assign data_qamo_o   = lsu_qamo_i;
   assign data_qid_o    = handshake_pending_q ? req_id_q : req_id;
   // generate byte enable mask
   always_comb begin
-    unique case (postreg_lsu_req.lsu_qsize)
-      2'b00: data_qstrb_o = (4'b1 << postreg_lsu_req.lsu_qaddr[1:0]);
-      2'b01: data_qstrb_o = (4'b11 << postreg_lsu_req.lsu_qaddr[1:0]);
+    unique case (lsu_qsize_i)
+      2'b00: data_qstrb_o = (4'b1 << lsu_qaddr_i[1:0]);
+      2'b01: data_qstrb_o = (4'b11 << lsu_qaddr_i[1:0]);
       2'b10: data_qstrb_o = '1;
       default: data_qstrb_o = '0;
     endcase
@@ -207,19 +170,19 @@ module snitch_lsu
   // re-align write data
   /* verilator lint_off WIDTH */
   always_comb begin
-    unique case (postreg_lsu_req.lsu_qaddr[1:0])
-      2'b00: data_qdata_o = postreg_lsu_req.lsu_qdata;
-      2'b01: data_qdata_o = {postreg_lsu_req.lsu_qdata[23:0], postreg_lsu_req.lsu_qdata[31:24]};
-      2'b10: data_qdata_o = {postreg_lsu_req.lsu_qdata[15:0], postreg_lsu_req.lsu_qdata[31:16]};
-      2'b11: data_qdata_o = {postreg_lsu_req.lsu_qdata[ 7:0], postreg_lsu_req.lsu_qdata[31: 8]};
-      default: data_qdata_o = postreg_lsu_req.lsu_qdata;
+    unique case (lsu_qaddr_i[1:0])
+      2'b00: data_qdata_o = lsu_qdata_i;
+      2'b01: data_qdata_o = {lsu_qdata_i[23:0], lsu_qdata_i[31:24]};
+      2'b10: data_qdata_o = {lsu_qdata_i[15:0], lsu_qdata_i[31:16]};
+      2'b11: data_qdata_o = {lsu_qdata_i[ 7:0], lsu_qdata_i[31: 8]};
+      default: data_qdata_o = lsu_qdata_i;
     endcase
   end
   /* verilator lint_on WIDTH */
 
   // the interface didn't accept our request yet
   assign handshake_pending_d = data_qvalid_o && !data_qready_i;
-  assign postreg_lsu_req_ready = !handshake_pending_d && (!id_table_full || handshake_pending_q);
+  assign lsu_qready_o = !handshake_pending_d && (!id_table_full || handshake_pending_q);
 
   // ----------------
   // RESPONSE
@@ -247,8 +210,8 @@ module snitch_lsu
   // ----------------
   // SEQUENTIAL
   // ----------------
-  always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni) begin
+  always_ff @(posedge clk_i or posedge rst_i) begin
+    if (rst_i) begin
       id_available_q      <= '1;
       metadata_q          <= 'b0;
       req_id_q            <= 'b0;
@@ -271,13 +234,13 @@ module snitch_lsu
   // pragma translate_off
   `ifndef VERILATOR
     invalid_req_id : assert property(
-      @(posedge clk_i) disable iff (!rst_ni) (!(id_table_push & ~id_available_q[req_id])))
+      @(posedge clk_i) disable iff (rst_i) (!(id_table_push & ~id_available_q[req_id])))
       else $fatal (1, "Request ID is not available.");
   `endif
 
   `ifndef VERILATOR
     invalid_resp_id : assert property(
-      @(posedge clk_i) disable iff (!rst_ni) (!(id_table_pop & id_available_q[resp_id])))
+      @(posedge clk_i) disable iff (rst_i) (!(id_table_pop & id_available_q[resp_id])))
       else $fatal (1, "Response ID does not match with valid metadata.");
   `endif
   // pragma translate_on
