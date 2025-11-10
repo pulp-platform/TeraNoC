@@ -24,17 +24,16 @@ OMP_DIR            ?= $(ROOT_DIR)/omp
 KERNELS_DIR        ?= $(abspath $(ROOT_DIR)/../kernels)
 DATA_DIR           ?= $(abspath $(ROOT_DIR)/../data)
 
-COMPILER      ?= gcc
+COMPILER      ?= llvm
 XPULPIMG      ?= $(xpulpimg)
 ZFINX         ?= $(zfinx)
-XDIVSQRT	    ?= $(xDivSqrt)
+XDIVSQRT	  ?= $(xDivSqrt)
 
 RISCV_XLEN    ?= 32
 
 RISCV_ABI     ?= ilp32
 RISCV_TARGET  ?= riscv$(RISCV_XLEN)-unknown-elf
 ifeq ($(COMPILER),gcc)
-
 	# Use GCC
 	# GCC compiler -march
 	ifeq ($(XPULPIMG),1)
@@ -43,20 +42,34 @@ ifeq ($(COMPILER),gcc)
 		# Define __XPULPIMG if the extension is active
 		DEFINES       += -D__XPULPIMG
 	else
-		RISCV_ARCH_AS ?= rv$(RISCV_ARCH)ima
-		RISCV_ARCH_AS ?= $(RISCV_ARCH)Xpulpv2
+		ifneq ($(n_fpu), 0)
+			RISCV_ARCH    ?= rv$(RISCV_XLEN)imaf
+			RISCV_ARCH_AS ?= $(RISCV_ARCH)
+			RISCV_ABI     := ilp32
+		else
+			RISCV_ARCH_AS ?= rv$(RISCV_ARCH)ima
+			RISCV_ARCH_AS ?= $(RISCV_ARCH)Xpulpv2
+		endif
 	endif
+
 	# GCC Toolchain
 	RISCV_PREFIX  ?= $(GCC_INSTALL_DIR)/bin/$(RISCV_TARGET)-
 	RISCV_CC      ?= $(RISCV_PREFIX)gcc
 	RISCV_CXX     ?= $(RISCV_PREFIX)g++
 	RISCV_OBJDUMP ?= $(RISCV_PREFIX)objdump
-
 else
-
 	# Use LLVM by default
 	# LLVM compiler -march
-	RISCV_ARCH ?= rv$(RISCV_XLEN)ima
+	ifeq ($(spatz), 1)
+		RISCV_ARCH ?= rv$(RISCV_XLEN)ima
+		ifneq ($(n_fpu), 0)
+			RISCV_ARCH := $(addsuffix f, $(RISCV_ARCH))
+			RISCV_ABI  := ilp32
+		endif
+		RISCV_ARCH := $(addsuffix vzfh, $(RISCV_ARCH))
+	else
+		RISCV_ARCH ?= rv$(RISCV_XLEN)ima
+	endif
 	ifeq ($(ZFINX), 1)
 		RISCV_ARCH := $(RISCV_ARCH)_zfinx
 		RISCV_ARCH := $(RISCV_ARCH)_zhinx
@@ -78,7 +91,6 @@ else
 	RISCV_CC      ?= $(LLVM_INSTALL_DIR)/bin/clang
 	RISCV_CXX     ?= $(LLVM_INSTALL_DIR)/bin/clang++
 	RISCV_OBJDUMP ?= $(RISCV_PREFIX)objdump
-
 endif
 RISCV_OBJCOPY ?= $(RISCV_PREFIX)objcopy
 RISCV_AS      ?= $(RISCV_PREFIX)as
@@ -92,7 +104,7 @@ DEFINES += -DNUM_CORES=$(num_cores)
 DEFINES += -DNUM_GROUPS=$(num_groups)
 DEFINES += -DNUM_CORES_PER_TILE=$(num_cores_per_tile)
 DEFINES += -DBANKING_FACTOR=$(banking_factor)
-DEFINES += -DNUM_BANKS=$(shell awk 'BEGIN{print $(banking_factor)*$(num_cores)}')
+DEFINES += -DNUM_BANKS=$(shell awk 'BEGIN{print $(banking_factor)*$(n_fpu)*$(num_cores)}')
 DEFINES += -DNUM_CORES_PER_GROUP=$(shell awk 'BEGIN{print $(num_cores)/$(num_groups)}')
 DEFINES += -DNUM_TILES_PER_GROUP=$(shell awk 'BEGIN{print ($(num_cores)/$(num_groups))/$(num_cores_per_tile)}')
 DEFINES += -DLOG2_NUM_CORES_PER_TILE=$(shell awk 'BEGIN{print log($(num_cores_per_tile))/log(2)}')
@@ -105,6 +117,21 @@ DEFINES += -DLOG2_SEQ_MEM_SIZE=$(shell awk 'BEGIN{print log($(seq_mem_size))/log
 DEFINES += -DSTACK_SIZE=$(stack_size)
 DEFINES += -DLOG2_STACK_SIZE=$(shell awk 'BEGIN{print log($(stack_size))/log(2)}')
 DEFINES += -DXQUEUE_SIZE=$(xqueue_size)
+# Spatz related
+DEFINES += -DRVF=$(rvf) -DRVD=$(rvd)
+DEFINES += -DMEMPOOL
+ifeq ($(spatz), 1)
+	DEFINES += -DVLEN=$(vlen) -DN_IPU=$(n_ipu) -DN_FPU=$(n_fpu) -DN_FU=$(shell awk 'BEGIN{print ($(n_ipu) > $(n_fpu)) ? $(n_ipu) : $(n_fpu)}') -DRVV
+	DEFINES += -DLOG2_N_FU=$(shell awk 'BEGIN{print ($(n_ipu) > $(n_fpu)) ? log($(n_ipu))/log(2) : log($(n_fpu))/log(2)}')
+else
+	DEFINES += -DN_FU=1
+	DEFINES += -DLOG2_N_FU=0
+endif
+ifeq ($(rvd), 1)
+	DEFINES += -DELEN=64
+else
+	DEFINES += -DELEN=32
+endif
 
 # Specify cross compilation target. This can be omitted if LLVM is built with riscv as default target
 RISCV_LLVM_TARGET  ?= --target=$(RISCV_TARGET) --sysroot=$(GCC_INSTALL_DIR)/$(RISCV_TARGET) --gcc-toolchain=$(GCC_INSTALL_DIR)
@@ -114,19 +141,19 @@ RISCV_FLAGS_COMMON_TESTS ?= -march=$(RISCV_ARCH) -mabi=$(RISCV_ABI) -I$(ROOT_DIR
 RISCV_FLAGS_COMMON ?= $(RISCV_FLAGS_COMMON_TESTS) -g -std=gnu99 -O3  -fno-builtin-memcpy -fno-builtin-memset -ffast-math -fno-common -fno-builtin-printf $(DEFINES) $(RISCV_WARNINGS)
 RISCV_FLAGS_GCC    ?= -mcmodel=medany -Wa,-march=$(RISCV_ARCH_AS) -mtune=mempool -fno-tree-loop-distribute-patterns # -falign-loops=32 -falign-jumps=32
 RISCV_FLAGS_LLVM   ?= -mcmodel=small -mcpu=mempool-rv32 -mllvm -misched-topdown -menable-experimental-extensions
-# Enable soft-divsqrt when the hardware is not supported.
-ifeq ($(xDivSqrt), 0)
-	RISCV_FLAGS_LLVM_TESTS := $(RISCV_FLAGS_LLVM)
-	RISCV_FLAGS_LLVM += -mno-fdiv
-endif
+# # Enable soft-divsqrt when the hardware is not supported.
+# ifeq ($(xDivSqrt), 0)
+# 	RISCV_FLAGS_LLVM_TESTS := $(RISCV_FLAGS_LLVM)
+# 	RISCV_FLAGS_LLVM += -mno-fdiv
+# endif
 
-# Disable division and square root
-ifeq ($(XDIVSQRT), 0)
-	RISCV_FLAGS_LLVM += -mno-fdiv
-else
-	# Define if the extension is active
-	DEFINES       += -D__XDIVSQRT
-endif
+# # Disable division and square root
+# ifeq ($(XDIVSQRT), 0)
+# 	RISCV_FLAGS_LLVM += -mno-fdiv
+# else
+# 	# Define if the extension is active
+# 	DEFINES       += -D__XDIVSQRT
+# endif
 
 ifeq ($(COMPILER),gcc)
 	RISCV_CCFLAGS       += $(RISCV_FLAGS_GCC) $(RISCV_FLAGS_COMMON)
@@ -140,10 +167,12 @@ else
 	RISCV_CXXFLAGS      += $(RISCV_CCFLAGS)
 	RISCV_LDFLAGS       += -static -nostartfiles -lm -lgcc -mcmodel=small $(RISCV_LLVM_TARGET) $(RISCV_FLAGS_COMMON) -L$(ROOT_DIR)
 	ifeq ($(XDIVSQRT), 0)
-		RISCV_OBJDUMP_FLAGS += --mcpu=mempool-rv32 --mattr=+m,+a,+xpulpmacsi,+xpulppostmod,+xpulpvect,+xpulpvectshufflepack,+zfinx,+nofdiv
+		RISCV_OBJDUMP_FLAGS += --mcpu=mempool-rv32 --mattr=+m,+a,+v,+zfh,+zfinx,+nofdiv
 	else
-		RISCV_OBJDUMP_FLAGS += --mcpu=mempool-rv32 --mattr=+m,+a,+xpulpmacsi,+xpulppostmod,+xpulpvect,+xpulpvectshufflepack,+zfinx
+		RISCV_OBJDUMP_FLAGS += --mcpu=mempool-rv32 --mattr=+m,+a,+v,+zfh
 	endif
+	RISCV_STRIP_FLAGS   ?= -ffunction-sections -Wl,--gc-sections
+	RISCV_LDFLAGS_TESTS ?= -static -nostartfiles -lm -lgcc -mcmodel=small $(RISCV_LLVM_TARGET) $(RISCV_FLAGS_LLVM) $(RISCV_FLAGS_COMMON_RV) -L$(ROOT_DIR)
 	# For unit tests
 	RISCV_CCFLAGS_TESTS ?= $(RISCV_FLAGS_LLVM_TESTS) $(RISCV_FLAGS_COMMON_TESTS) -fvisibility=hidden -nostdlib $(RISCV_LDFLAGS)
 endif
