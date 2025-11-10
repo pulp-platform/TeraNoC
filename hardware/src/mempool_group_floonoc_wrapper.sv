@@ -572,7 +572,8 @@ if (NocRouterRemapping == 2 || NocRouterRemapping == 3) begin: gen_resp_remappin
       assign floo_tcdm_resp_to_remapper[i][j] = floo_tcdm_resp_t'{
         payload: floo_tcdm_resp_payload_t'{
           amo  : tcdm_slave_resp[i][j].rdata.amo,
-          data : tcdm_slave_resp[i][j].rdata.data
+          data : tcdm_slave_resp[i][j].rdata.data,
+          wen  : tcdm_slave_resp[i][j].wen
         },
         hdr: floo_tcdm_resp_meta_t'{
           meta_id : tcdm_slave_resp[i][j].rdata.meta_id,                          // For Register File
@@ -609,7 +610,8 @@ end else begin: gen_resp_remapping_bypass
       assign floo_tcdm_resp_to_router[i][j] = floo_tcdm_resp_t'{
         payload: floo_tcdm_resp_payload_t'{
           amo : tcdm_slave_resp[i][j].rdata.amo,
-          data: tcdm_slave_resp[i][j].rdata.data
+          data: tcdm_slave_resp[i][j].rdata.data,
+          wen : tcdm_slave_resp[i][j].wen
         },
         hdr: floo_tcdm_resp_meta_t'{
           meta_id : tcdm_slave_resp[i][j].rdata.meta_id,                      // For Register File
@@ -715,7 +717,8 @@ for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_router_resp_to_master_
         core_id : floo_tcdm_resp_from_router_after_xbar[i][j].hdr.core_id, // For Core
         amo     : floo_tcdm_resp_from_router_after_xbar[i][j].payload.amo,
         data    : floo_tcdm_resp_from_router_after_xbar[i][j].payload.data
-      }
+      },
+      wen  : floo_tcdm_resp_from_router_after_xbar[i][j].payload.wen
     };
     assign tcdm_master_resp_valid[i][j] = floo_tcdm_resp_from_router_after_xbar_valid[i][j];
     assign floo_tcdm_resp_from_router_after_xbar_ready[i][j] = tcdm_master_resp_ready[i][j];
@@ -797,16 +800,15 @@ for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_router_router_i
   for (genvar j = 0; j < NumNarrowRemoteReqPortsPerTile; j++) begin : gen_router_narrow_req_router_j
     if (NocTopology == 1) begin: gen_torus
       floo_router #(
-        .NumRoutes        (mempool_pkg::NumDirections                         ),
-        .NumVirtChannels  (1                                                  ),
-        .flit_t           (floo_tcdm_rd_req_t                                 ),
-        .InFifoDepth      (mempool_pkg::NumRouterInFifoDepth                  ), // Input buffer depth
-        .OutFifoDepth     (mempool_pkg::NumRouterOutFifoDepth                 ), // Output buffer depth, can try to set it to 0 for -1 cycle latency
-        .RouteAlgo        (IdTable                                            ),
-        .id_t             (routing_table_pkg::routing_rule_addr_t             ),
-        .NumAddrRules     (NumGroups                                          ),
-        .addr_rule_t      (routing_table_pkg::routing_rule_t                  ),
-        .NoInputAssert    (NocRouterRemapping == 1 || NocRouterRemapping == 3 )
+        .NumRoutes        (mempool_pkg::NumDirections             ),
+        .NumVirtChannels  (1                                      ),
+        .flit_t           (floo_tcdm_rd_req_t                     ),
+        .InFifoDepth      (mempool_pkg::NumRouterInFifoDepth      ), // Input buffer depth
+        .OutFifoDepth     (mempool_pkg::NumRouterOutFifoDepth     ), // Output buffer depth, can try to set it to 0 for -1 cycle latency
+        .RouteAlgo        (IdTable                                ),
+        .id_t             (routing_table_pkg::routing_rule_addr_t ),
+        .NumAddrRules     (NumGroups                              ),
+        .addr_rule_t      (routing_table_pkg::routing_rule_t      )
       ) i_floo_tcdm_narrow_req_router (
         .clk_i,
         .rst_ni,
@@ -824,16 +826,15 @@ for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_router_router_i
       localparam route_algo_e floo_route_algo = (NocRoutingAlgorithm == 1) ? OddEvenRouting :
                                                 (NocRoutingAlgorithm == 2) ? O1Routing : XYRouting;
       floo_router #(
-        .NumRoutes        (mempool_pkg::NumDirections                         ),
-        .NumVirtChannels  (1                                                  ),
-        .flit_t           (floo_tcdm_rd_req_t                                 ),
-        .InFifoDepth      (mempool_pkg::NumRouterInFifoDepth                  ), // Input buffer depth
-        .OutFifoDepth     (mempool_pkg::NumRouterOutFifoDepth                 ), // Output buffer depth, can try to set it to 0 for -1 cycle latency
-        .RouteAlgo        (floo_route_algo                                    ),
-        .id_t             (group_xy_id_t                                      ),
-        .NumAddrRules     (1                                                  ),
-        .addr_rule_t      (logic                                              ),
-        .NoInputAssert    (NocRouterRemapping == 1 || NocRouterRemapping == 3 )
+        .NumRoutes        (mempool_pkg::NumDirections         ),
+        .NumVirtChannels  (1                                  ),
+        .flit_t           (floo_tcdm_rd_req_t                 ),
+        .InFifoDepth      (mempool_pkg::NumRouterInFifoDepth  ), // Input buffer depth
+        .OutFifoDepth     (mempool_pkg::NumRouterOutFifoDepth ), // Output buffer depth, can try to set it to 0 for -1 cycle latency
+        .RouteAlgo        (floo_route_algo                    ),
+        .id_t             (group_xy_id_t                      ),
+        .NumAddrRules     (1                                  ),
+        .addr_rule_t      (logic                              )
       ) i_floo_tcdm_narrow_req_router (
         .clk_i,
         .rst_ni,
@@ -857,16 +858,15 @@ for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_router_router_i
   for (genvar j = 0; j < NumWideRemoteReqPortsPerTile; j++) begin : gen_router_wide_req_router_j
     if (NocTopology == 1) begin: gen_torus
       floo_router #(
-        .NumRoutes        (mempool_pkg::NumDirections                         ),
-        .NumVirtChannels  (1                                                  ),
-        .flit_t           (floo_tcdm_rdwr_req_t                               ),
-        .InFifoDepth      (mempool_pkg::NumRouterInFifoDepth                  ), // Input buffer depth
-        .OutFifoDepth     (mempool_pkg::NumRouterOutFifoDepth                 ), // Output buffer depth, can try to set it to 0 for -1 cycle latency
-        .RouteAlgo        (IdTable                                            ),
-        .id_t             (routing_table_pkg::routing_rule_addr_t             ),
-        .NumAddrRules     (NumGroups                                          ),
-        .addr_rule_t      (routing_table_pkg::routing_rule_t                  ),
-        .NoInputAssert    (NocRouterRemapping == 1 || NocRouterRemapping == 3 )
+        .NumRoutes        (mempool_pkg::NumDirections             ),
+        .NumVirtChannels  (1                                      ),
+        .flit_t           (floo_tcdm_rdwr_req_t                   ),
+        .InFifoDepth      (mempool_pkg::NumRouterInFifoDepth      ), // Input buffer depth
+        .OutFifoDepth     (mempool_pkg::NumRouterOutFifoDepth     ), // Output buffer depth, can try to set it to 0 for -1 cycle latency
+        .RouteAlgo        (IdTable                                ),
+        .id_t             (routing_table_pkg::routing_rule_addr_t ),
+        .NumAddrRules     (NumGroups                              ),
+        .addr_rule_t      (routing_table_pkg::routing_rule_t      )
       ) i_floo_tcdm_wide_req_router (
         .clk_i,
         .rst_ni,
@@ -884,16 +884,15 @@ for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_router_router_i
       localparam route_algo_e floo_route_algo = (NocRoutingAlgorithm == 1) ? OddEvenRouting :
                                                 (NocRoutingAlgorithm == 2) ? O1Routing : XYRouting;
       floo_router #(
-        .NumRoutes        (mempool_pkg::NumDirections                         ),
-        .NumVirtChannels  (1                                                  ),
-        .flit_t           (floo_tcdm_rdwr_req_t                               ),
-        .InFifoDepth      (mempool_pkg::NumRouterInFifoDepth                  ), // Input buffer depth
-        .OutFifoDepth     (mempool_pkg::NumRouterOutFifoDepth                 ), // Output buffer depth, can try to set it to 0 for -1 cycle latency
-        .RouteAlgo        (floo_route_algo                                    ),
-        .id_t             (group_xy_id_t                                      ),
-        .NumAddrRules     (1                                                  ),
-        .addr_rule_t      (logic                                              ),
-        .NoInputAssert    (NocRouterRemapping == 1 || NocRouterRemapping == 3 )
+        .NumRoutes        (mempool_pkg::NumDirections         ),
+        .NumVirtChannels  (1                                  ),
+        .flit_t           (floo_tcdm_rdwr_req_t               ),
+        .InFifoDepth      (mempool_pkg::NumRouterInFifoDepth  ), // Input buffer depth
+        .OutFifoDepth     (mempool_pkg::NumRouterOutFifoDepth ), // Output buffer depth, can try to set it to 0 for -1 cycle latency
+        .RouteAlgo        (floo_route_algo                    ),
+        .id_t             (group_xy_id_t                      ),
+        .NumAddrRules     (1                                  ),
+        .addr_rule_t      (logic                              )
       ) i_floo_tcdm_wide_req_router (
         .clk_i,
         .rst_ni,
@@ -916,16 +915,15 @@ for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_router_router_i
   for (genvar j = 1; j < NumRemoteRespPortsPerTile; j++) begin : gen_router_wide_resp_router_j
     if (NocTopology == 1) begin: gen_torus
       floo_router #(
-        .NumRoutes        (mempool_pkg::NumDirections                         ),
-        .NumVirtChannels  (1                                                  ),
-        .flit_t           (floo_tcdm_resp_t                                   ),
-        .InFifoDepth      (mempool_pkg::NumRouterInFifoDepth                  ), // Input buffer depth
-        .OutFifoDepth     (mempool_pkg::NumRouterOutFifoDepth                 ), // Output buffer depth, can try to set it to 0 for -1 cycle latency
-        .RouteAlgo        (IdTable                                            ),
-        .id_t             (routing_table_pkg::routing_rule_addr_t             ),
-        .NumAddrRules     (NumGroups                                          ),
-        .addr_rule_t      (routing_table_pkg::routing_rule_t                  ),
-        .NoInputAssert    (NocRouterRemapping == 2 || NocRouterRemapping == 3 )
+        .NumRoutes        (mempool_pkg::NumDirections             ),
+        .NumVirtChannels  (1                                      ),
+        .flit_t           (floo_tcdm_resp_t                       ),
+        .InFifoDepth      (mempool_pkg::NumRouterInFifoDepth      ), // Input buffer depth
+        .OutFifoDepth     (mempool_pkg::NumRouterOutFifoDepth     ), // Output buffer depth, can try to set it to 0 for -1 cycle latency
+        .RouteAlgo        (IdTable                                ),
+        .id_t             (routing_table_pkg::routing_rule_addr_t ),
+        .NumAddrRules     (NumGroups                              ),
+        .addr_rule_t      (routing_table_pkg::routing_rule_t      )
       ) i_floo_tcdm_wide_resp_router (
         .clk_i,
         .rst_ni,
@@ -943,16 +941,15 @@ for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_router_router_i
       localparam route_algo_e floo_route_algo = (NocRoutingAlgorithm == 1) ? OddEvenRouting :
                                                 (NocRoutingAlgorithm == 2) ? O1Routing : XYRouting;
       floo_router #(
-        .NumRoutes        (mempool_pkg::NumDirections                         ),
-        .NumVirtChannels  (1                                                  ),
-        .flit_t           (floo_tcdm_resp_t                                   ),
-        .InFifoDepth      (mempool_pkg::NumRouterInFifoDepth                  ), // Input buffer depth
-        .OutFifoDepth     (mempool_pkg::NumRouterOutFifoDepth                 ), // Output buffer depth, can try to set it to 0 for -1 cycle latency
-        .RouteAlgo        (floo_route_algo                                    ),
-        .id_t             (group_xy_id_t                                      ),
-        .NumAddrRules     (1                                                  ),
-        .addr_rule_t      (logic                                              ),
-        .NoInputAssert    (NocRouterRemapping == 2 || NocRouterRemapping == 3 )
+        .NumRoutes        (mempool_pkg::NumDirections         ),
+        .NumVirtChannels  (1                                  ),
+        .flit_t           (floo_tcdm_resp_t                   ),
+        .InFifoDepth      (mempool_pkg::NumRouterInFifoDepth  ), // Input buffer depth
+        .OutFifoDepth     (mempool_pkg::NumRouterOutFifoDepth ), // Output buffer depth, can try to set it to 0 for -1 cycle latency
+        .RouteAlgo        (floo_route_algo                    ),
+        .id_t             (group_xy_id_t                      ),
+        .NumAddrRules     (1                                  ),
+        .addr_rule_t      (logic                              )
       ) i_floo_tcdm_wide_resp_router (
         .clk_i,
         .rst_ni,
