@@ -16,6 +16,3 @@
 [submodule "hardware/deps/dram_rtl_sim"]
 	path = hardware/deps/dram_rtl_sim
 	url = https://github.com/pulp-platform/dram_rtl_sim.git
-[submodule "spatz"]
-	path = spatz
-	url = https://github.com/pulp-platform/spatz.git
