@@ -458,4 +458,9 @@ module mempool_tb;
  ****************/
 `include "tb_noc_profiling.svh"
 
+/*********************************
+ * NoC Visualization by vis4mesh *
+ *********************************/
+`include "tb_noc_visualization.svh"
+
 endmodule : mempool_tb
