@@ -4,6 +4,9 @@
 #
 # Author: Yichao Zhang, ETH Zurich
 
+config_build_path ?= minpool
+
+
 ###########################
 ## 1. Architecture Config
 ###########################
@@ -49,7 +52,7 @@ noc_virtual_channel_num ?= 1
 
 # Channel configuration mode (internal control only)
 # Options: baseline, narrow, enhanced
-channel_config_mode := narrow  # Current MinPool setting
+channel_config_mode := baseline  # Current MinPool setting
 
 # Channel configuration based on selected mode
 ifeq ($(strip $(channel_config_mode)), baseline)

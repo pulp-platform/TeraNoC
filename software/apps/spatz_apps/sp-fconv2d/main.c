@@ -131,7 +131,7 @@ int main() {
 
   // float *o = omtx + r * num_rows * cid;
   float *o = omtx + cid * num_rows * c; 
-  //ç®—å¥½æ¯ä¸ªcoreèµ·å§‹çš„addrï¼Œå†ä¸€èµ·å¼€å§‹
+
 
   // Wait for all cores to finish
   mempool_barrier(num_cores);
@@ -145,40 +145,60 @@ int main() {
 
 
   if (cid == 0) {
-  //   printf("\n=== STEP 1: Check DRAM source ===\n");
-  //   printf("fconv2d_F_dram address: %p\n", fconv2d_F_dram);
-  //   printf("First 5 values in fconv2d_F_dram:\n");
-  //   for (int i = 0; i < 5; i++) {
-  //       printf("  [%d] = 0x%08x\n", i, *((uint32_t*)&fconv2d_F_dram[i]));
-  //   }
+    // // 全局三个缓冲区的起止地址
+    // size_t fmtx_len = (size_t)f * (size_t)f * (size_t)ch;
+    // size_t imtx_len = (size_t)(r + f - 1) * (size_t)(c + f - 1);
+    // size_t omtx_len = (size_t)r * (size_t)c;
+
+    // uintptr_t fmtx0 = (uintptr_t)fmtx;
+    // uintptr_t fmtx1 = (uintptr_t)(fmtx + fmtx_len) - 1;
+    // uintptr_t imtx0 = (uintptr_t)imtx;
+    // uintptr_t imtx1 = (uintptr_t)(imtx + imtx_len) - 1;
+    // uintptr_t omtx0 = (uintptr_t)omtx;
+    // uintptr_t omtx1 = (uintptr_t)(omtx + omtx_len) - 1;
+
+    // printf("\n=== ADDRESS CHECK BEFORE DMA ===\n");
+    // printf("fmtx: [%p .. %p]  len=%zu floats, bytes=%zu\n", 
+    //        (void*)fmtx0, (void*)(fmtx1+1), fmtx_len, fmtx_len*sizeof(float));
+    // printf("imtx: [%p .. %p]  len=%zu floats, bytes=%zu\n", 
+    //        (void*)imtx0, (void*)(imtx1+1), imtx_len, imtx_len*sizeof(float));
+    // printf("omtx: [%p .. %p]  len=%zu floats, bytes=%zu\n", 
+    //        (void*)omtx0, (void*)(omtx1+1), omtx_len, omtx_len*sizeof(float));
+
+    // printf("\nOVERLAP CHECK:\n");
+    // printf("OVERLAP(fmtx, imtx) = %s\n", OVERLAP(fmtx0,fmtx1,imtx0,imtx1) ? "YES *** PROBLEM ***":"NO");
+    // printf("OVERLAP(fmtx, omtx) = %s\n", OVERLAP(fmtx0,fmtx1,omtx0,omtx1) ? "YES *** PROBLEM ***":"NO");
+    // printf("OVERLAP(imtx, omtx) = %s\n", OVERLAP(imtx0,imtx1,omtx0,omtx1) ? "YES *** PROBLEM ***":"NO");
     
-    // printf("\n=== STEP 2: Perform DMA (skipping pre-DMA read) ===\n");
-    // printf("fmtx address: %p\n", fmtx);
-    // printf("Copying %u bytes from %p to %p\n", 
-    //        f * f * ch * sizeof(float), fconv2d_F_dram, fmtx);
-    dma_memcpy_blocking(fmtx, fconv2d_F_dram, f * f * ch * sizeof(float));
-    
-    // printf("\n=== STEP 3: Check L1 destination AFTER DMA ===\n");
-    // printf("First 10 values in fmtx:\n");
-    // for (int i = 0; i < 10; i++) {
-    //     printf("  [%d] = 0x%08x\n", i, *((uint32_t*)&fmtx[i]));
+    // printf("\n=== Check DRAM data range ===\n");
+    // // 检查前20个元素
+    // for (int i = 0; i < 20; i++) {
+    //     printf("  DRAM[%d] = 0x%08x\n", i, *((uint32_t*)&fconv2d_F_dram[i]));
     // }
     
-    // printf("\n=== Compare with Python output ===\n");
-    // printf("Expected from Python:\n");
-    // printf("  [0] = 0xbf6a0a92 (matches DRAM? %s)\n", 
-    //        (*((uint32_t*)&fmtx[0]) == 0xbf6a0a92) ? "YES" : "NO");
+    // // 检查最后几个元素
+    // printf("\n=== Check DRAM end ===\n");
+    // int total = f * f * ch;
+    // for (int i = total-5; i < total; i++) {
+    //     printf("  DRAM[%d] = 0x%08x\n", i, *((uint32_t*)&fconv2d_F_dram[i]));
+    // }
+    
+    // printf("\n=== C reads fconv2d_F_dram (BEFORE DMA) ===\n");
+    // for (int i = 0; i < 12; i++) {
+    //     printf("  fconv2d_F_dram[%d] = 0x%08x\n", i, *((uint32_t*)&fconv2d_F_dram[i]));
+    // }
+
+    dma_memcpy_blocking(fmtx, fconv2d_F_dram, f * f * ch * sizeof(float));
+    
+    // printf("\n=== Check fmtx (AFTER DMA) ===\n");
+    // for (int i = 0; i < 12; i++) {
+    //     printf("  fmtx[%d] = 0x%08x\n", i, *((uint32_t*)&fmtx[i]));
+    // }
     
     dma_memcpy_blocking(imtx, fconv2d_I_dram, (r+f-1)*(c+f-1)*sizeof(float));
     dma_memcpy_blocking(omtx, fconv2d_R_dram, r*c*sizeof(float));
 
     printf("finish copy\n");
-
-//     // 立刻check fmtx 是否正确
-//     printf("\n=== Immediately after all DMAs ===\n");
-//     printf("  fmtx[0]=0x%08x \n", *((uint32_t*)&fmtx[0]));
-//     printf("  fmtx[1]=0x%08x \n", *((uint32_t*)&fmtx[1]));
-//     printf("  fmtx[2]=0x%08x \n", *((uint32_t*)&fmtx[2]));
    }
 
 
@@ -197,55 +217,6 @@ int main() {
   // if (cid == 0)
   //   start_kernel();
 
-  // if (cid == 0) {
-  //   printf("\n=== Filter check BEFORE conv ===\n");
-  //   printf("  fmtx[0]=0x%08x\n", *((uint32_t*)&fmtx[0]));
-  //   printf("  fmtx[7]=0x%08x\n", *((uint32_t*)&fmtx[7]));
-  //   printf("  fmtx[14]=0x%08x\n", *((uint32_t*)&fmtx[14]));
-  // }
-
-  // if (cid == 0) {
-  // // 全局三个缓冲区的起止地址（以 float 元素计）
-  // size_t fmtx_len = (size_t)f * (size_t)f * (size_t)ch;
-  // size_t imtx_len = (size_t)(r + f - 1) * (size_t)(c + f - 1);
-  // size_t omtx_len = (size_t)r * (size_t)c;
-
-  // uintptr_t fmtx0 = (uintptr_t)fmtx;
-  // uintptr_t fmtx1 = (uintptr_t)(fmtx + fmtx_len) - 1;
-  // uintptr_t imtx0 = (uintptr_t)imtx;
-  // uintptr_t imtx1 = (uintptr_t)(imtx + imtx_len) - 1;
-  // uintptr_t omtx0 = (uintptr_t)omtx;
-  // uintptr_t omtx1 = (uintptr_t)(omtx + omtx_len) - 1;
-
-  // printf("\n=== ADDRESS CHECK BEFORE KERNEL ===\n");
-  // printf("fmtx: [%p .. %p]  bytes=%zu\n", (void*)fmtx, (void*)(fmtx1+1),
-  //        fmtx_len*sizeof(float));
-  // printf("imtx: [%p .. %p]  bytes=%zu\n", (void*)imtx, (void*)(imtx1+1),
-  //        imtx_len*sizeof(float));
-  // printf("omtx: [%p .. %p]  bytes=%zu\n", (void*)omtx, (void*)(omtx1+1),
-  //        omtx_len*sizeof(float));
-
-  // printf("OVERLAP(fmtx, imtx) = %s\n", OVERLAP(fmtx0,fmtx1,imtx0,imtx1) ? "YES":"NO");
-  // printf("OVERLAP(fmtx, omtx) = %s\n", OVERLAP(fmtx0,fmtx1,omtx0,omtx1) ? "YES":"NO");
-  // printf("OVERLAP(imtx, omtx) = %s\n", OVERLAP(imtx0,imtx1,omtx0,omtx1) ? "YES":"NO");
-
-  // // 再把本核 slice 的 i/o 也检查一下（可直接看是否误指到 fmtx）
-  // size_t i_len = (size_t)num_rows * (size_t)(c + f - 1);
-  // size_t o_len = (size_t)num_rows * (size_t)c;
-  // uintptr_t i0 = (uintptr_t)i, i1 = (uintptr_t)(i + i_len) - 1;
-  // uintptr_t o0 = (uintptr_t)o, o1 = (uintptr_t)(o + o_len) - 1;
-
-  // printf("i(slice): [%p .. %p]  bytes=%zu\n", (void*)i, (void*)(i1+1),
-  //        i_len*sizeof(float));
-  // printf("o(slice): [%p .. %p]  bytes=%zu\n", (void*)o, (void*)(o1+1),
-  //        o_len*sizeof(float));
-
-  // printf("OVERLAP(i, fmtx) = %s\n", OVERLAP(i0,i1,fmtx0,fmtx1) ? "YES":"NO");
-  // printf("OVERLAP(o, fmtx) = %s\n", OVERLAP(o0,o1,fmtx0,fmtx1) ? "YES":"NO");
-  // printf("OVERLAP(i, imtx) = %s\n", OVERLAP(i0,i1,imtx0,imtx1) ? "YES":"NO");
-  // printf("OVERLAP(o, omtx) = %s\n", OVERLAP(o0,o1,omtx0,omtx1) ? "YES":"NO");
-  // }
-
   // mempool_barrier(num_cores);
 
   /////////////////// Calculate the result //////////////////////////
@@ -254,26 +225,6 @@ int main() {
 
   // Wait for all cores to finish
   mempool_barrier(num_cores);
-
-  // if (cid == 0) {
-  //   printf("\n=== Right after convolution ===\n");
-  //   printf("  fmtx[0]=0x%08x\n", *((uint32_t*)&fmtx[0]));
-  //   printf("  fmtx[7]=0x%08x\n", *((uint32_t*)&fmtx[7]));
-  //   printf("  fmtx[14]=0x%08x\n", *((uint32_t*)&fmtx[14]));
-
-  //   printf("\n=== Check which positions changed ===\n");
-  //   int changed = 0;
-  //   for (int i = 0; i < f * f * ch; i++) {
-  //       if (*((uint32_t*)&fmtx[i]) != *((uint32_t*)&fconv2d_F_dram[i])) {
-  //           printf("  Position %d changed: was 0x%08x, now 0x%08x\n",
-  //                  i,
-  //                  *((uint32_t*)&fconv2d_F_dram[i]),
-  //                  *((uint32_t*)&fmtx[i]));
-  //           changed++;
-  //           if (changed >= 10) break;  // 只打印前10个
-  //       }
-  //   }
-  // }
 
   // End timer
   if (cid == 0) {
@@ -296,21 +247,7 @@ int main() {
            performance, utilization);
   }
 
-// #ifdef CHECK
-//   if (cid == 0) {
-//     int error = verify_matrix(omtx, fconv2d_GR_dram, r * c );
-//     printf("Error count: %d\n", error);
-//   }
-  
-//     // for (unsigned int k = 0; k < r * c; ++k) {
-//     //   if (!fp_check(fconv2d_GR_dram[k], omtx[k], THRESHOLD)) {
-//     //     printf("Error index %d: result = %x (@ %x), golden = %x\n", k,
-//     //            *((unsigned int *)&omtx[k]), omtx + k,
-//     //            *((unsigned int *)&fconv2d_GR_dram[k]));
-//     //     // return -1;
-//     //   }
-//     // }
-// #endif
+
 
 #ifdef CHECK
   if (cid == 0) {
@@ -319,13 +256,6 @@ int main() {
   }
 #endif
 
-
-  // // Free the matrices
-  // if (cid == 0) {
-  //   domain_free(get_alloc_l1(), imtx);
-  //   domain_free(get_alloc_l1(), omtx);
-  //   domain_free(get_alloc_l1(), fmtx);
-  // }
 
   // Wait for core 0 to finish displaying results
   mempool_barrier(num_cores);

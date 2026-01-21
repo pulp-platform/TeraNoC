@@ -391,3 +391,497 @@ void matmul_8xVL(float *c, const float *a, const float *b,
     p += gvl;
   }
 }
+
+void matmul_8xVL_r2(float *c, const float *a, const float *b,
+                 const unsigned int m_start, const unsigned int m_end,
+                 const unsigned int N, const unsigned int P,
+                 const unsigned int p_start, const unsigned int p_end) {
+
+  unsigned int p = p_start;
+  while (p < p_end) {
+    // Calculate the vl
+    size_t gvl;
+    asm volatile("vsetvli %[gvl], %[vl], e32, m2, ta, ma"
+                 : [gvl] "=r"(gvl)
+                 : [vl] "r"(p_end - p));
+
+    const float *b_ = b + p;
+    float *c_ = c + p;
+
+    for (unsigned int m = m_start; m < m_end; m += 8) {
+      const float *a_ = a + m * N;
+      const float *a__ = a_;
+
+      asm volatile("vle32.v v18, (%0);" ::"r"(b_));
+      const float *b__ = b_ + P;
+      asm volatile("vle32.v v20, (%0);" ::"r"(b__));
+      b__ += P;
+      
+      float *c__ = c_ + m * P;
+
+      float t0, t1, t2, t3, t4, t5, t6, t7;
+
+      t0 = *a__;
+      a__ += N;
+      t1 = *a__;
+      a__ += N;
+      t2 = *a__;
+      a__ += N;
+      t3 = *a__;
+      a__ += N;
+      t4 = *a__;
+      a__ += N;
+      t5 = *a__;
+      a__ += N;
+      t6 = *a__;
+      a__ += N;
+      t7 = *a__;
+
+      unsigned int n = 0;
+
+      while (n < N) {
+        a__ = a_ + ++n;
+
+        asm volatile("vle32.v v22, (%0);" ::"r"(b__));
+        b__ += P;
+
+        if (n == 1) {
+          asm volatile("vfmul.vf v0, v18, %0" ::"f"(t0));
+          t0 = *a__;
+          a__ += N;
+          asm volatile("vfmul.vf v2, v18, %0" ::"f"(t1));
+          t1 = *a__;
+          a__ += N;
+          asm volatile("vfmul.vf v4, v18, %0" ::"f"(t2));
+          t2 = *a__;
+          a__ += N;
+          asm volatile("vfmul.vf v6, v18, %0" ::"f"(t3));
+          t3 = *a__;
+          a__ += N;
+          asm volatile("vfmul.vf v8, v18, %0" ::"f"(t4));
+          t4 = *a__;
+          a__ += N;
+          asm volatile("vfmul.vf v10, v18, %0" ::"f"(t5));
+          t5 = *a__;
+          a__ += N;
+          asm volatile("vfmul.vf v12, v18, %0" ::"f"(t6));
+          t6 = *a__;
+          a__ += N;
+          asm volatile("vfmul.vf v14, v18, %0" ::"f"(t7));
+          t7 = *a__;
+        } else {
+          asm volatile("vfmacc.vf v0, %0, v18" ::"f"(t0));
+          t0 = *a__;
+          a__ += N;
+          asm volatile("vfmacc.vf v2, %0, v18" ::"f"(t1));
+          t1 = *a__;
+          a__ += N;
+          asm volatile("vfmacc.vf v4, %0, v18" ::"f"(t2));
+          t2 = *a__;
+          a__ += N;
+          asm volatile("vfmacc.vf v6, %0, v18" ::"f"(t3));
+          t3 = *a__;
+          a__ += N;
+          asm volatile("vfmacc.vf v8, %0, v18" ::"f"(t4));
+          t4 = *a__;
+          a__ += N;
+          asm volatile("vfmacc.vf v10, %0, v18" ::"f"(t5));
+          t5 = *a__;
+          a__ += N;
+          asm volatile("vfmacc.vf v12, %0, v18" ::"f"(t6));
+          t6 = *a__;
+          a__ += N;
+          asm volatile("vfmacc.vf v14, %0, v18" ::"f"(t7));
+          t7 = *a__;
+        }
+
+        a__ = a_ + ++n;
+
+        asm volatile("vle32.v v24, (%0);" ::"r"(b__));
+        b__ += P;
+
+        asm volatile("vfmacc.vf v0, %0, v20" ::"f"(t0));
+        t0 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v2, %0, v20" ::"f"(t1));
+        t1 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v4, %0, v20" ::"f"(t2));
+        t2 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v6, %0, v20" ::"f"(t3));
+        t3 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v8, %0, v20" ::"f"(t4));
+        t4 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v10, %0, v20" ::"f"(t5));
+        t5 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v12, %0, v20" ::"f"(t6));
+        t6 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v14, %0, v20" ::"f"(t7));
+        t7 = *a__;
+
+        a__ = a_ + ++n;
+
+        if (n == N)
+          break;
+
+        asm volatile("vle32.v v18, (%0);" ::"r"(b__));
+        b__ += P;
+
+        asm volatile("vfmacc.vf v0, %0, v22" ::"f"(t0));
+        t0 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v2, %0, v22" ::"f"(t1));
+        t1 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v4, %0, v22" ::"f"(t2));
+        t2 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v6, %0, v22" ::"f"(t3));
+        t3 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v8, %0, v22" ::"f"(t4));
+        t4 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v10, %0, v22" ::"f"(t5));
+        t5 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v12, %0, v22" ::"f"(t6));
+        t6 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v14, %0, v22" ::"f"(t7));
+        t7 = *a__;
+
+        a__ = a_ + ++n;
+
+        asm volatile("vle32.v v20, (%0);" ::"r"(b__));
+        b__ += P;
+
+        asm volatile("vfmacc.vf v0, %0, v24" ::"f"(t0));
+        t0 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v2, %0, v24" ::"f"(t1));
+        t1 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v4, %0, v24" ::"f"(t2));
+        t2 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v6, %0, v24" ::"f"(t3));
+        t3 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v8, %0, v24" ::"f"(t4));
+        t4 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v10, %0, v24" ::"f"(t5));
+        t5 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v12, %0, v24" ::"f"(t6));
+        t6 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v14, %0, v24" ::"f"(t7));
+        t7 = *a__;
+      }
+
+      asm volatile("vfmacc.vf v0, %0, v22" ::"f"(t0));
+      t0 = *a__;
+      a__ += N;
+      asm volatile("vfmacc.vf v2, %0, v22" ::"f"(t1));
+      t1 = *a__;
+      a__ += N;
+      asm volatile("vfmacc.vf v4, %0, v22" ::"f"(t2));
+      t2 = *a__;
+      a__ += N;
+      asm volatile("vfmacc.vf v6, %0, v22" ::"f"(t3));
+      t3 = *a__;
+      a__ += N;
+      asm volatile("vfmacc.vf v8, %0, v22" ::"f"(t4));
+      t4 = *a__;
+      a__ += N;
+      asm volatile("vfmacc.vf v10, %0, v22" ::"f"(t5));
+      t5 = *a__;
+      a__ += N;
+      asm volatile("vfmacc.vf v12, %0, v22" ::"f"(t6));
+      t6 = *a__;
+      a__ += N;
+      asm volatile("vfmacc.vf v14, %0, v22" ::"f"(t7));
+      t7 = *a__;
+
+      asm volatile("vfmacc.vf v0, %0, v24" ::"f"(t0));
+      asm volatile("vse32.v v0, (%0);" ::"r"(c__));
+      c__ += P;
+      asm volatile("vfmacc.vf v2, %0, v24" ::"f"(t1));
+      asm volatile("vse32.v v2, (%0);" ::"r"(c__));
+      c__ += P;
+      asm volatile("vfmacc.vf v4, %0, v24" ::"f"(t2));
+      asm volatile("vse32.v v4, (%0);" ::"r"(c__));
+      c__ += P;
+      asm volatile("vfmacc.vf v6, %0, v24" ::"f"(t3));
+      asm volatile("vse32.v v6, (%0);" ::"r"(c__));
+      c__ += P;
+      asm volatile("vfmacc.vf v8, %0, v24" ::"f"(t4));
+      asm volatile("vse32.v v8, (%0);" ::"r"(c__));
+      c__ += P;
+      asm volatile("vfmacc.vf v10, %0, v24" ::"f"(t5));
+      asm volatile("vse32.v v10, (%0);" ::"r"(c__));
+      c__ += P;
+      asm volatile("vfmacc.vf v12, %0, v24" ::"f"(t6));
+      asm volatile("vse32.v v12, (%0);" ::"r"(c__));
+      c__ += P;
+      asm volatile("vfmacc.vf v14, %0, v24" ::"f"(t7));
+      asm volatile("vse32.v v14, (%0);" ::"r"(c__));
+    }
+
+    p += gvl;
+  }
+}
+
+void matmul_8xVL_mempool(float *c, const float *a, const float *b,
+                 const unsigned int m_start, const unsigned int m_end,
+                 const unsigned int N, const unsigned int P,
+                 const unsigned int p_start, const unsigned int p_end) {
+
+  unsigned int p = p_start;
+  while (p < p_end) {
+    // Calculate the vl
+    size_t gvl;
+    asm volatile("vsetvli %[gvl], %[vl], e32, m2, ta, ma"
+                 : [gvl] "=r"(gvl)
+                 : [vl] "r"(p_end - p));
+
+    const float *b_ = b + p;
+    float *c_ = c + p;
+
+    for (unsigned int m = m_start; m < m_end; m += 8) {
+      const float *a_ = a + m * N;
+      const float *a__ = a_;
+
+      asm volatile("vle32.v v18, (%0);" ::"r"(b_));
+      const float *b__ = b_ + P;
+      asm volatile("vle32.v v20, (%0);" ::"r"(b__));
+      b__ += P;
+      
+      float *c__ = c_ + m * P;
+
+      float t0, t1, t2, t3, t4, t5, t6, t7;
+
+      t0 = *a__;
+      a__ += N;
+      t1 = *a__;
+      a__ += N;
+      t2 = *a__;
+      a__ += N;
+      t3 = *a__;
+      a__ += N;
+      t4 = *a__;
+      a__ += N;
+      t5 = *a__;
+      a__ += N;
+      t6 = *a__;
+      a__ += N;
+      t7 = *a__;
+
+      unsigned int n = 0;
+
+      while (n < N) {
+        a__ = a_ + ++n;
+
+        asm volatile("vle32.v v22, (%0);" ::"r"(b__));
+        b__ += P;
+
+        if (n == 1) {
+          asm volatile("vfmul.vf v0, v18, %0" ::"f"(t0));
+          t0 = *a__;
+          a__ += N;
+          asm volatile("vfmul.vf v2, v18, %0" ::"f"(t1));
+          t1 = *a__;
+          a__ += N;
+          asm volatile("vfmul.vf v4, v18, %0" ::"f"(t2));
+          t2 = *a__;
+          a__ += N;
+          asm volatile("vfmul.vf v6, v18, %0" ::"f"(t3));
+          t3 = *a__;
+          a__ += N;
+          asm volatile("vfmul.vf v8, v18, %0" ::"f"(t4));
+          t4 = *a__;
+          a__ += N;
+          asm volatile("vfmul.vf v10, v18, %0" ::"f"(t5));
+          t5 = *a__;
+          a__ += N;
+          asm volatile("vfmul.vf v12, v18, %0" ::"f"(t6));
+          t6 = *a__;
+          a__ += N;
+          asm volatile("vfmul.vf v14, v18, %0" ::"f"(t7));
+          t7 = *a__;
+        } else {
+          asm volatile("vfmacc.vf v0, %0, v18" ::"f"(t0));
+          t0 = *a__;
+          a__ += N;
+          asm volatile("vfmacc.vf v2, %0, v18" ::"f"(t1));
+          t1 = *a__;
+          a__ += N;
+          asm volatile("vfmacc.vf v4, %0, v18" ::"f"(t2));
+          t2 = *a__;
+          a__ += N;
+          asm volatile("vfmacc.vf v6, %0, v18" ::"f"(t3));
+          t3 = *a__;
+          a__ += N;
+          asm volatile("vfmacc.vf v8, %0, v18" ::"f"(t4));
+          t4 = *a__;
+          a__ += N;
+          asm volatile("vfmacc.vf v10, %0, v18" ::"f"(t5));
+          t5 = *a__;
+          a__ += N;
+          asm volatile("vfmacc.vf v12, %0, v18" ::"f"(t6));
+          t6 = *a__;
+          a__ += N;
+          asm volatile("vfmacc.vf v14, %0, v18" ::"f"(t7));
+          t7 = *a__;
+        }
+
+        a__ = a_ + ++n;
+
+        asm volatile("vle32.v v24, (%0);" ::"r"(b__));
+        b__ += P;
+
+        asm volatile("vfmacc.vf v0, %0, v20" ::"f"(t0));
+        t0 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v2, %0, v20" ::"f"(t1));
+        t1 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v4, %0, v20" ::"f"(t2));
+        t2 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v6, %0, v20" ::"f"(t3));
+        t3 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v8, %0, v20" ::"f"(t4));
+        t4 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v10, %0, v20" ::"f"(t5));
+        t5 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v12, %0, v20" ::"f"(t6));
+        t6 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v14, %0, v20" ::"f"(t7));
+        t7 = *a__;
+
+        a__ = a_ + ++n;
+
+        if (n == N)
+          break;
+
+        asm volatile("vle32.v v18, (%0);" ::"r"(b__));
+        b__ += P;
+
+        asm volatile("vfmacc.vf v0, %0, v22" ::"f"(t0));
+        t0 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v2, %0, v22" ::"f"(t1));
+        t1 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v4, %0, v22" ::"f"(t2));
+        t2 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v6, %0, v22" ::"f"(t3));
+        t3 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v8, %0, v22" ::"f"(t4));
+        t4 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v10, %0, v22" ::"f"(t5));
+        t5 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v12, %0, v22" ::"f"(t6));
+        t6 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v14, %0, v22" ::"f"(t7));
+        t7 = *a__;
+
+        a__ = a_ + ++n;
+
+        asm volatile("vle32.v v20, (%0);" ::"r"(b__));
+        b__ += P;
+
+        asm volatile("vfmacc.vf v0, %0, v24" ::"f"(t0));
+        t0 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v2, %0, v24" ::"f"(t1));
+        t1 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v4, %0, v24" ::"f"(t2));
+        t2 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v6, %0, v24" ::"f"(t3));
+        t3 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v8, %0, v24" ::"f"(t4));
+        t4 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v10, %0, v24" ::"f"(t5));
+        t5 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v12, %0, v24" ::"f"(t6));
+        t6 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v14, %0, v24" ::"f"(t7));
+        t7 = *a__;
+      }
+
+      asm volatile("vfmacc.vf v0, %0, v22" ::"f"(t0));
+      t0 = *a__;
+      a__ += N;
+      asm volatile("vfmacc.vf v2, %0, v22" ::"f"(t1));
+      t1 = *a__;
+      a__ += N;
+      asm volatile("vfmacc.vf v4, %0, v22" ::"f"(t2));
+      t2 = *a__;
+      a__ += N;
+      asm volatile("vfmacc.vf v6, %0, v22" ::"f"(t3));
+      t3 = *a__;
+      a__ += N;
+      asm volatile("vfmacc.vf v8, %0, v22" ::"f"(t4));
+      t4 = *a__;
+      a__ += N;
+      asm volatile("vfmacc.vf v10, %0, v22" ::"f"(t5));
+      t5 = *a__;
+      a__ += N;
+      asm volatile("vfmacc.vf v12, %0, v22" ::"f"(t6));
+      t6 = *a__;
+      a__ += N;
+      asm volatile("vfmacc.vf v14, %0, v22" ::"f"(t7));
+      t7 = *a__;
+
+      asm volatile("vfmacc.vf v0, %0, v24" ::"f"(t0));
+      asm volatile("vse32.v v0, (%0);" ::"r"(c__));
+      c__ += P;
+      asm volatile("vfmacc.vf v2, %0, v24" ::"f"(t1));
+      asm volatile("vse32.v v2, (%0);" ::"r"(c__));
+      c__ += P;
+      asm volatile("vfmacc.vf v4, %0, v24" ::"f"(t2));
+      asm volatile("vse32.v v4, (%0);" ::"r"(c__));
+      c__ += P;
+      asm volatile("vfmacc.vf v6, %0, v24" ::"f"(t3));
+      asm volatile("vse32.v v6, (%0);" ::"r"(c__));
+      c__ += P;
+      asm volatile("vfmacc.vf v8, %0, v24" ::"f"(t4));
+      asm volatile("vse32.v v8, (%0);" ::"r"(c__));
+      c__ += P;
+      asm volatile("vfmacc.vf v10, %0, v24" ::"f"(t5));
+      asm volatile("vse32.v v10, (%0);" ::"r"(c__));
+      c__ += P;
+      asm volatile("vfmacc.vf v12, %0, v24" ::"f"(t6));
+      asm volatile("vse32.v v12, (%0);" ::"r"(c__));
+      c__ += P;
+      asm volatile("vfmacc.vf v14, %0, v24" ::"f"(t7));
+      asm volatile("vse32.v v14, (%0);" ::"r"(c__));
+    }
+
+    p += gvl;
+  }
+}

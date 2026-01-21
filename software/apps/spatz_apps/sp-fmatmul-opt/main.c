@@ -138,7 +138,7 @@ int main() {
   if (cid == 0) {
     dma_memcpy_blocking(a, gemm_A_dram, (gemm_l.M * gemm_l.N) * sizeof(float));
     dma_memcpy_blocking(b, gemm_B_dram, (gemm_l.N * gemm_l.P) * sizeof(float));
-    dma_memcpy_blocking(c, gemm_C_dram, (gemm_l.M * gemm_l.P) * sizeof(float));
+    // dma_memcpy_blocking(c, gemm_C_dram, (gemm_l.M * gemm_l.P) * sizeof(float));
     // dma_memcpy_blocking(r, gemm_checksum, gemm_l.M * sizeof(float));
 
     init_matrix(r, gemm_checksum, 0, 1, gemm_l.M);
@@ -149,16 +149,25 @@ int main() {
               (cid + 1) * (gemm_l.M / active_cores), gemm_l.N);
   init_matrix(b, gemm_B_dram, cid * (gemm_l.N / active_cores),
               (cid + 1) * (gemm_l.N / active_cores), gemm_l.P);
-  init_matrix(c, gemm_C_dram, cid * (gemm_l.M / active_cores),
-              (cid + 1) * (gemm_l.M / active_cores), gemm_l.P);
+  // init_matrix(c, gemm_C_dram, cid * (gemm_l.M / active_cores),
+  //             (cid + 1) * (gemm_l.M / active_cores), gemm_l.P);
   // Initialize the checksum
   if (cid == 0) {
     init_matrix(r, gemm_checksum, 0, 1, gemm_l.M);
   }
   #endif
 
-  if (cid == 0)
+  if (cid == 0) {
+    // for (int i=0; i<gemm_l.P; i++)
+    // {
+    //   printf("Reference row: A[%d][%d]=0x%08x\n", 0, i, *((uint32_t*)&a[i]));
+    // }
+    // for (int i=0; i<gemm_l.P; i++)
+    // {
+    //   printf("Reference row: A[%d][%d]=0x%08x\n", 40, i, *((uint32_t*)&a[40*((int)gemm_l.P)+i]));
+    // }
     printf("finish copy\n");
+  }
 
   // Wait for all cores to finish
   mempool_barrier(num_cores);
@@ -204,20 +213,20 @@ int main() {
     }
   }
 
-  if (cid == 0) {
-    int error = 1;
-    error = verify_matrix((float *)c, (const float *)r, gemm_l.M, gemm_l.P);
-    // int error =
-    //     verify_matrix((float *)c, (const float *)gemm_checksum, gemm_l.M, gemm_l.P);
+  // if (cid == 0) {
+  //   int error = 1;
+  //   error = verify_matrix((float *)c, (const float *)r, gemm_l.M, gemm_l.P);
+  //   // int error =
+  //   //     verify_matrix((float *)c, (const float *)gemm_checksum, gemm_l.M, gemm_l.P);
 
-    if (error != 0) {
-      printf("Error core %d: c[%d]=%x\n", cid, error, (int)c[error]);
-      return error;
-    }
-    else {
-      printf("fmatmul finishes successfully!");
-    }
-  }
+  //   if (error != 0) {
+  //     printf("Error core %d: c[%d]=%x\n", cid, error, (int)c[error]);
+  //     return error;
+  //   }
+  //   else {
+  //     printf("fmatmul finishes successfully!");
+  //   }
+  // }
 
   // Check and display results
   if (cid == 0) {
@@ -231,20 +240,36 @@ int main() {
            performance, utilization);
   }
 
-  // if (cid == 0) {
-  //   int error =
-  //       verify_matrix((float *)c, (const float *)r, gemm_l.M, gemm_l.P);
-  //   // int error =
-  //   //     verify_matrix((float *)c, (const float *)gemm_checksum, gemm_l.M, gemm_l.P);
+  if (cid == 0) {
+    int error =
+        verify_matrix((float *)c, (const float *)r, gemm_l.M, gemm_l.P);
+    // int error =
+    //     verify_matrix((float *)c, (const float *)gemm_checksum, gemm_l.M, gemm_l.P);
 
-  //   if (error != 0) {
-  //     printf("Error core %d: c[%d]=%x\n", cid, error, (int)c[error]);
-  //     return error;
-  //   }
-  //   else {
-  //     printf("fmatmul finishes successfully!");
-  //   }
-  // }
+    if (error != 0) {
+      printf("Error core %d: checksum[%d]=%u\n", cid, error, (uint32_t)r[error]);
+
+      // for (int i=0; i<gemm_l.P; i++)
+      // {
+      //   printf("Reference row: c[%d][%d]=0x%08x\n", 0, i, *((uint32_t*)&c[i]));
+      // }
+
+      for (int i=0; i<gemm_l.P; i++)
+      {
+        printf("Reference row: c[%d][%d]=0x%08x\n", 39, i, *((uint32_t*)&c[39*((int)gemm_l.P)+i]));
+      }
+
+      for (int i=0; i<gemm_l.P; i++)
+      {
+        printf("Error row: c[%d][%d]=0x%08x\n", error, i, *((uint32_t*)&c[error*((int)gemm_l.P)+i]));
+      }
+
+      return error;
+    }
+    else {
+      printf("success!");
+    }
+  }
 
   // Wait for core 0 to finish displaying results
   mempool_barrier(num_cores);

@@ -97,15 +97,25 @@ def emit_fconv2d_layer(name='fconv2d', **kwargs):
     dtype = ctypes[str(kwargs['prec'])]
 
     if dtype != 'char':
-        layer_str += f'const uint32_t active_cores = {cores};\n'
-        layer_str += f'{dtype} imtx[{ch}*{r+f-1}*{c+f-1}] __attribute__((section(".l1_prio")))' + ';\n'
-        layer_str += f'{dtype} omtx[{r}*{c}] __attribute__((section(".l1_prio")))' + ';\n'
-        layer_str += f'{dtype} fmtx[{ch}*{f}*{f}] __attribute__((section(".l1_prio")))' + ';\n'
+        # layer_str += f'const uint32_t active_cores = {cores};\n'
+        # layer_str += f'{dtype} imtx[{ch}*{r+f-1}*{c+f-1}] __attribute__((section(".l1_prio")))' + ';\n'
+        # layer_str += f'{dtype} omtx[{r}*{c}] __attribute__((section(".l1_prio")))' + ';\n'
+        # layer_str += f'{dtype} fmtx[{ch}*{f}*{f}] __attribute__((section(".l1_prio")))' + ';\n'
 
-        layer_str += f'static {dtype} {name}_I_dram [{ch}*{r+f-1}*{c+f-1}] __attribute__((section(".data"))) = ' + array_to_cstr(vec_I) + ';\n\n\n'
-        layer_str += f'static {dtype} {name}_F_dram [{ch}*{f}*{f}] __attribute__((section(".data"))) = ' + array_to_cstr(vec_F) + ';\n\n\n'
-        layer_str += f'static {dtype} {name}_R_dram [{r}*{c}] __attribute__((section(".data"))) = ' + array_to_cstr(vec_R) + ';\n\n\n'
-        layer_str += f'static {dtype} {name}_GR_dram [{r}*{c}] __attribute__((section(".data"))) = ' + array_to_cstr(vec_GR) + ';\n\n\n'
+        # layer_str += f'static {dtype} {name}_I_dram [{ch}*{r+f-1}*{c+f-1}] __attribute__((section(".data"))) = ' + array_to_cstr(vec_I) + ';\n\n\n'
+        # layer_str += f'static {dtype} {name}_F_dram [{ch}*{f}*{f}] __attribute__((section(".data"))) = ' + array_to_cstr(vec_F) + ';\n\n\n'
+        # layer_str += f'static {dtype} {name}_R_dram [{r}*{c}] __attribute__((section(".data"))) = ' + array_to_cstr(vec_R) + ';\n\n\n'
+        # layer_str += f'static {dtype} {name}_GR_dram [{r}*{c}] __attribute__((section(".data"))) = ' + array_to_cstr(vec_GR) + ';\n\n\n'
+
+        layer_str += f'const uint32_t active_cores = {cores};\n'
+        layer_str += f'{dtype} imtx[{ch}*{r+f-1}*{c+f-1}] __attribute__((section(".l1_prio"), aligned(16384)));\n'
+        layer_str += f'{dtype} omtx[{r}*{c}] __attribute__((section(".l1_prio"), aligned(16384)));\n'
+        layer_str += f'{dtype} fmtx[{ch}*{f}*{f}] __attribute__((section(".l1_prio"), aligned(16384)));\n\n'
+
+        layer_str += f'static {dtype} {name}_I_dram [{ch}*{r+f-1}*{c+f-1}] __attribute__((section(".data"), aligned(16384))) = ' + array_to_cstr(vec_I) + ';\n\n\n'
+        layer_str += f'static {dtype} {name}_F_dram [{ch}*{f}*{f}] __attribute__((section(".data"), aligned(16384))) = ' + array_to_cstr(vec_F) + ';\n\n\n'
+        layer_str += f'static {dtype} {name}_R_dram [{r}*{c}] __attribute__((section(".data"), aligned(16384))) = ' + array_to_cstr(vec_R) + ';\n\n\n'
+        layer_str += f'static {dtype} {name}_GR_dram [{r}*{c}] __attribute__((section(".data"), aligned(16384))) = ' + array_to_cstr(vec_GR) + ';\n\n\n'
     else:
         layer_str += f'static {dtype} {name}_I_dram [{ch}*{r+f-1}*{c+f-1}] = ' + \
             array_to_cstr(kwargs['bits_I'], fmt='char') + ';\n\n\n'
@@ -160,7 +170,7 @@ def fconv2d(i, f, r, CH, R, C, F, dtype):
     #   r += scipy.signal.convolve2d(np.flip(f.tolist()[ch]), i[ch], 'valid')
     #   r += scipy.signal.correlate2d(i[ch], f.tolist()[ch], 'valid')
       r += scipy.signal.correlate2d(i[ch], f.tolist()[ch], mode='valid')
-    #   r += scipy.signal.convolve2d(i[ch], f.tolist()[ch], mode='valid')    
+        # r += scipy.signal.convolve2d(i[ch], f.tolist()[ch], mode='valid')    
     return r;
 
 # def fconv2d(i, f, r, CH, R, C, F, dtype):
@@ -268,6 +278,8 @@ def main():
 
     
     vec_F_T = vec_F.transpose(1, 2)
+    #vec_F_T = vec_F.transpose(1, 2).contiguous()
+    # vec_F_T = vec_F.contiguous()
 
     # # 在 emit_header_file 之前添加调试
     # print("\n=== DEBUG: Data to be written to .h file ===")
@@ -330,13 +342,12 @@ def main():
     for i in range(min(5, len(flat_golden))):
         val = float(flat_golden[i])
         print(f"  fconv2d_GR_dram[{i}] = {float_to_hex(val)}")
-    
-    print("\n" + "="*60)
-    print("Compare with C output:")
-    print("  C read fconv2d_F_dram[0] = 0x3f2d5fbd")
-    print("  C read fconv2d_F_dram[1] = 0x3ef3fea5")
-    print("  C read fconv2d_F_dram[2] = 0xbf6a0a92")
-    print("="*60)
+
+    print(f"\nTotal filter elements: {len(flat_filter)} (should be {param['CH']*param['F']*param['F']})")
+    print(f"\nAll filter values (first 20):")
+    for i in range(min(20, len(flat_filter))):
+        val = float(flat_filter[i])
+        print(f"  [{i:2d}] = {float_to_hex(val)}")
     # ========================================
 
 if __name__ == '__main__':

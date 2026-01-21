@@ -19,16 +19,12 @@
 #ifndef _GEMV_H
 #define _GEMV_H
 
-inline void gemv_v32b_m4_unroll_M (float *a, float* b, float* c, 
-																	 uint32_t M, uint32_t M_core, uint32_t N)
+inline void gemv_v32b_opt_unroll8 (float *a, float* b, float* c, 
+																	 uint32_t M_core, uint32_t N, uint32_t offset)
 																	 __attribute__((always_inline));
 																	 
 inline void gemv_v32b_m4 					(float *a, float* b, float* c,
 		 															 uint32_t M, uint32_t M_core, uint32_t N)
-																	 __attribute__((always_inline));
-
-inline void gemv_v16b_m4 					(__fp16 *a, __fp16* b, __fp16* c,
-																	 uint32_t M, uint32_t M_core, uint32_t N)
 																	 __attribute__((always_inline));
 
 
@@ -36,10 +32,5 @@ inline void gemv_v32b_m4_unroll8			(float *a, float* b, float* c,
 		 															 uint32_t M, uint32_t M_core, uint32_t N)
 																	 __attribute__((always_inline));																	 
 
-
-
-inline void gemv_v32b_new 					(float *a, float* b, float* c,
-		 															 uint32_t M, uint32_t N)
-																	 __attribute__((always_inline));
 
 #endif

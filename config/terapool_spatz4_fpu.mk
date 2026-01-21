@@ -4,26 +4,35 @@
 
 # Author: Matheus Cavalcante, ETH Zurich
 
-config_build_path ?= mempool
+# Copyright 2021 ETH Zurich and University of Bologna.
+# Licensed under the Apache License, Version 2.0, see LICENSE for details.
+# SPDX-License-Identifier: Apache-2.0
 
-###############
-##  MemPool  ##
-###############
+# Author: Matheus Cavalcante, ETH Zurich
+
+config_build_path ?= terapool
+
+###########################
+## 1. Architecture Config
+###########################
+
+# Global Control
+terapool ?= 1
 
 # Number of cores
-num_cores ?= 64
+num_cores ?= 256
 
 # Number of groups
-num_groups ?= 4
+num_groups ?= 16
 
-# Number of cores per MemPool tile
+# Number of cores per Terapool tile
 num_cores_per_tile ?= 1
 
 # L1 scratchpad banking factor
 banking_factor ?= 4
 
 # Number of shared divsqrt units per MemPool tile
-# Defaults to 0 if xDivSqrt is not activated
+# Defaults to 1 if xDivSqrt is activated
 num_divsqrt_per_tile ?= 0
 
 #####################
@@ -32,7 +41,7 @@ num_divsqrt_per_tile ?= 0
 
 # FlooNoC configuration
 num_directions ?= 5
-num_x          ?= 2
+num_x          ?= 4
 
 # Topology
 # 0: 2D mesh, 1: torus
@@ -51,22 +60,25 @@ noc_virtual_channel_num ?= 1
 
 # Channel configuration mode (internal control only)
 # Options: baseline, narrow, enhanced
-channel_config_mode := baseline  # Current MemPool setting
+channel_config_mode := baseline  # Change this value to switch modes
 
 # Channel configuration based on selected mode
 ifeq ($(strip $(channel_config_mode)), baseline)
+# Baseline config, do NOT define USE_NARROW_REQ_CHANNEL
 noc_req_rd_channel_num   ?= 0
 noc_req_rdwr_channel_num ?= 2
 noc_req_wr_channel_num   ?= 0
 noc_resp_channel_num     ?= 2
 
 else ifeq ($(strip $(channel_config_mode)), narrow)
+# Reduced req link count, define USE_NARROW_REQ_CHANNEL
 noc_req_rd_channel_num   ?= 1
 noc_req_rdwr_channel_num ?= 1
 noc_req_wr_channel_num   ?= 0
 noc_resp_channel_num     ?= 2
 
 else ifeq ($(strip $(channel_config_mode)), enhanced)
+# Enhanced resp link, define USE_NARROW_REQ_CHANNEL
 noc_req_rd_channel_num   ?= 1
 noc_req_rdwr_channel_num ?= 1
 noc_req_wr_channel_num   ?= 0
@@ -86,8 +98,8 @@ $(info [DEBUG:][noc_resp_channel_num]------$(noc_resp_channel_num))
 noc_router_input_fifo_dep  ?= 2
 noc_router_output_fifo_dep ?= 2
 
-# Router remapping configuration
-noc_router_remap_group_size ?= 8
+# Router remapping xbar size configuration
+noc_router_remap_group_size ?= 4
 
 ###########################
 ## 3. AXI and DMA Config
@@ -100,13 +112,12 @@ axi_hier_radix ?= 17
 axi_masters_per_group ?= 1
 
 # Number of DMA backends in each group
-dmas_per_group ?= 1  # Burst Length = 16
+dmas_per_group ?= 1 # Burst Length = 16
 
 # L2 Banks/Channels
-l2_size               ?= 4194304   # 400000
-l2_banks              ?= 4
+l2_size               ?= 16777216  # 1000000
+l2_banks              ?= 16
 axi_width_interleaved ?= 16
-
 
 ###########################
 ## 4. Spatz Config
@@ -128,7 +139,7 @@ n_fpu ?= 4
 rvf ?= 1
 rvd ?= 0
 
-# Deactivate the XpulpIMG extension
+# Make sure XPULP is off for Spatz configuration
 xpulpimg ?= 0
 
 # Make sure zfinx is off for Spatz configuration
