@@ -20,6 +20,9 @@ global verbose
 
 def array_to_cstr(a, fmt=float):
     out = "{"
+
+    count = 0
+
     if fmt == float:
         if isinstance(a, np.ndarray):
             a = a.flat
@@ -27,6 +30,9 @@ def array_to_cstr(a, fmt=float):
             a = a.numpy().flat
         for el in a:
             out += "{}, ".format(el)
+            count += 1
+            if count % 8 == 0:
+                out += "\n"
     else:
         for sign, exp, mant in zip(
             a["sign"].numpy().flat,
@@ -35,7 +41,17 @@ def array_to_cstr(a, fmt=float):
         ):
             value = sign * 2**7 + exp * 2**2 + mant
             out += "0x{:02x}, ".format(value)
-    out = out[:-2] + "}"
+            count += 1
+            if count % 8 == 0:
+                out += "\n"
+
+    if out.endswith(", \n"):
+        out = out[:-3] + "}"
+    elif out.endswith(", "):
+        out = out[:-2] + "}"
+    else:
+        out += "}"
+        
     return out
 
 
@@ -148,27 +164,27 @@ def emit_GEMM_layer(name="gemm", **kwargs):
 
     dtype = ctypes[str(kwargs["prec"])]
     if dtype != "char":
-        layer_str += f'{dtype} a[{m}*{n}]  __attribute__((section(".l1")));\n'
-        layer_str += f'{dtype} b[{n}*{p}]  __attribute__((section(".l1")));\n'
-        layer_str += f'{dtype} c[{m}*{p}]  __attribute__((section(".l1")));\n'
-        layer_str += f'{dtype} r[{m}]  __attribute__((section(".l1")));\n'
+        layer_str += f'{dtype} a[{m}*{n}]  __attribute__((section(".l1_prio"), aligned(4096)));\n'
+        layer_str += f'{dtype} b[{n}*{p}]  __attribute__((section(".l1_prio"), aligned(4096)));\n'
+        layer_str += f'{dtype} c[{m}*{p}]  __attribute__((section(".l1_prio"), aligned(4096)));\n'
+        layer_str += f'{dtype} r[{m}]  __attribute__((section(".l1_prio"), aligned(4096)));\n'
         layer_str += (
-            f'static {dtype} {name}_A_dram [{m}*{n}] __attribute__((section(".data"))) = '
+            f'static {dtype} {name}_A_dram [{m}*{n}] __attribute__((section(".data"), aligned(4096))) = '
             + array_to_cstr(mat_A)
             + ";\n\n\n"
         )
         layer_str += (
-            f'static {dtype} {name}_B_dram [{n}*{p}] __attribute__((section(".data"))) = '
+            f'static {dtype} {name}_B_dram [{n}*{p}] __attribute__((section(".data"), aligned(4096))) = '
             + array_to_cstr(mat_B)
             + ";\n\n\n"
         )
         layer_str += (
-            f'static {dtype} {name}_C_dram [{m}*{p}] __attribute__((section(".data"))) = '
+            f'static {dtype} {name}_C_dram [{m}*{p}] __attribute__((section(".data"), aligned(4096))) = '
             + array_to_cstr(mat_C)
             + ";\n\n\n"
         )
         layer_str += (
-            f'static {dtype} {name}_checksum[{m}] __attribute__((section(".data"))) = '
+            f'static {dtype} {name}_checksum[{m}] __attribute__((section(".data"), aligned(4096))) = '
             + array_to_cstr(torch.sum(result, dim=-1))
             + ";\n\n\n"
         )

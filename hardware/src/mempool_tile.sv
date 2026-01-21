@@ -821,7 +821,7 @@ module mempool_tile
     .NumInp   (NumCoresPerTile*NumDataPortsPerCore  ),
     .NumOut   (NumRemoteReqPortsPerTile             ),
     .payload_t(tcdm_master_req_t                    ),
-    .ExtPrio  (1                                    ),
+    .ExtPrio  (0                                    ),
     // the sel_i can be changed before the hsk happen, as the priority of cores can be different
     .AxiVldRdy(0                                    ),
     .LockIn   (0                                    )

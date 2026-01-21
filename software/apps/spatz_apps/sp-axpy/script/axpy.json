@@ -6,7 +6,7 @@
 
 {
     kernel: "AXPY"
-    M: 16384,
+    M: 65536,
     prec: 32,
     cores: 64
 }

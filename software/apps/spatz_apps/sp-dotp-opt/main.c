@@ -56,7 +56,7 @@ void fdotp_v32b_opt_p1(const float *a, const float *b, uint32_t avl, const uint3
       asm volatile("vle32.v v8,  (%0)" ::"r"(a_in_loop));
       asm volatile("vle32.v v16, (%0)" ::"r"(b_in_loop));
       a_in_loop += vl;
-      a_in_loop += vl;
+      b_in_loop += vl;
       // Multiply and accumulate
       if (i == 0 & avl == orig_avl) {
         // first loop first calc, do mul
@@ -77,12 +77,53 @@ void fdotp_v32b_opt_p1(const float *a, const float *b, uint32_t avl, const uint3
   }
 }
 
+void fdotp_v32b_opt_p1_unroll2(const float *a, const float *b, uint32_t avl, const uint32_t loops, const uint32_t offset) {
+
+  uint32_t vl;
+  const float *a_in_loop = a;
+  const float *b_in_loop = b;
+  asm volatile("vsetvli %0, %1, e32, m1, ta, ma" : "=r"(vl) : "r"(avl));
+  asm volatile("vmv.v.i v24, 0");
+  asm volatile("vmv.v.i v25, 0");
+
+  for (uint32_t i = 0; i < loops; i ++) {
+    // Stripmine and accumulate a partial reduced vector
+    // Load chunk a and b
+    asm volatile("vle32.v v8,  (%0)" ::"r"(a_in_loop));
+    asm volatile("vle32.v v16, (%0)" ::"r"(b_in_loop));
+    a_in_loop += offset;
+    b_in_loop += offset;
+    // Multiply and accumulate
+    // asm volatile("vfmacc.vv v24, v8, v16");
+    asm volatile("vfmacc.vv v24, v8, v16");
+    
+    // Load chunk a and b
+    asm volatile("vle32.v v9,  (%0)" ::"r"(a_in_loop));
+    asm volatile("vle32.v v17, (%0)" ::"r"(b_in_loop));
+    a_in_loop += offset;
+    b_in_loop += offset;
+    // Multiply and accumulate
+    // asm volatile("vfmacc.vv v24, v9, v17");
+    asm volatile("vfmacc.vv v25, v9, v17");
+  }
+}
+
 float fdotp_v32b_opt_p2() {
   float red;
   // Reduce and return
   asm volatile("vfredusum.vs v0, v24, v0");
   asm volatile("vfmv.f.s %0, v0" : "=f"(red));
   return red;
+}
+
+float fdotp_v32b_opt_p2_unroll2() {
+  float red, blue;
+  asm volatile("vfredusum.vs v0, v24, v0");
+  asm volatile("vfredusum.vs v1, v25, v1");
+  asm volatile("vfmv.f.s %0, v0" : "=f"(red));
+  asm volatile("vfmv.f.s %0, v1" : "=f"(blue));
+  return (red+blue);
+  // return red;
 }
 
 static inline int fp_check(const float a, const float b) {
@@ -106,6 +147,7 @@ int main() {
 
   uint32_t linesize;
   uint32_t active_cores;
+  uint32_t unroll = 2;
 
   if (dim < AddrOffset) {
     // We cannot use all cores in this case
@@ -162,7 +204,10 @@ int main() {
     }
 
     // Calculate the result
-    fdotp_v32b_opt_p1(a_init, b_init, v_len, loops, linesize);
+    if (unroll == 1)
+      fdotp_v32b_opt_p1(a_init, b_init, v_len, loops, linesize);
+    else if (unroll == 2)
+      fdotp_v32b_opt_p1_unroll2(a_init, b_init, v_len, loops >> 1, linesize);
   }
 
   // Wait for all cores to finish
@@ -178,7 +223,10 @@ int main() {
   #endif
 
   if (is_core_active) {
-    acc = fdotp_v32b_opt_p2();
+    if (unroll == 1)
+      acc = fdotp_v32b_opt_p2();
+    else if (unroll == 2)
+      acc = fdotp_v32b_opt_p2_unroll2();
     result[cid] = acc;
   }
   // Wait for all cores to finish

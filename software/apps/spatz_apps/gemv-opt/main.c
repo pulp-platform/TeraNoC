@@ -75,10 +75,9 @@ int main() {
 
   const uint32_t is_core_active     = (cid < active_cores);
 
-  // algorithm switch
-  const uint32_t unroll_m           = 0;
-
   uint32_t timer_start, timer_end, timer;
+
+  uint32_t linesize = mempool_get_tile_count() * NUM_BANKS_PER_TILE;
 
   // Initialize multicore barrier
   mempool_barrier_init(cid);
@@ -144,21 +143,7 @@ int main() {
       if (cid == 0)
         mempool_start_benchmark();
 
-      // gemv_v32b_m4(a_core, b, result_core, gemv_l.M, m_core, gemv_l.N);
-
-      gemv_v32b_m4_unroll8(a_core, b, result_core, gemv_l.M, m_core, gemv_l.N);
-      // gemv_v32b_new(a_core, b, result_core, m_core, gemv_l.N);
-
-      // Calculate gemv
-      // if (sizeof(T) == 4)
-      //   if (unroll_m)
-      //     gemv_v32b_m4_unroll_M(a_core, b, result_core, gemv_l.M, m_core, gemv_l.N);
-      //   else
-      //     gemv_v32b_m4(a_core, b, result_core, gemv_l.M, m_core, gemv_l.N);
-      // else if (sizeof(T) == 2)
-      //   gemv_v16b_m4(a_core, b, result_core, gemv_l.M, m_core, gemv_l.N);
-      // else
-      //   return -2;
+      gemv_v32b_opt_unroll8(a_core, b, result_core, m_core, gemv_l.N >> 3, linesize);
     }
 
     // Wait for all cores to finish matmul

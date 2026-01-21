@@ -67,6 +67,66 @@ void gemv_v32b_m4_unroll_M(float *a, float* b, float* c, uint32_t M, uint32_t M_
   
 }
 
+void gemv_v32b_m4_unroll8(float *a, float* b, float* c, uint32_t M, uint32_t M_core, uint32_t N) {
+  unsigned int vl, avl = M_core;
+  float *a_ = a;
+  float *b_ = b;
+  float *c_ = c;
+  
+  asm volatile("vmv.s.x v28, zero");
+  do {
+    asm volatile("vsetvli %0, %1, e32, m4, ta, ma" : "=r"(vl) : "r"(avl));
+    for (uint32_t col = 0; col < N; col+=8) {
+      // Load chunk a
+      asm volatile("vle32.v v0, (%0)" ::"r"(a_));
+      a_ += M;
+      // Multiply and accumulate
+      asm volatile("vfmacc.vf v28, %0, v0" ::"f"(*b_));
+      b_++;
+
+      asm volatile("vle32.v v4, (%0)" ::"r"(a_));
+      a_ += M;
+      asm volatile("vfmacc.vf v28, %0, v4" ::"f"(*b_));
+      b_++;
+
+      asm volatile("vle32.v v8, (%0)" ::"r"(a_));
+      a_ += M;
+      asm volatile("vfmacc.vf v28, %0, v8" ::"f"(*b_));
+      b_++;
+
+      asm volatile("vle32.v v12, (%0)" ::"r"(a_));
+      a_ += M;
+      asm volatile("vfmacc.vf v28, %0, v12" ::"f"(*b_));
+      b_++;
+
+      asm volatile("vle32.v v16, (%0)" ::"r"(a_));
+      a_ += M;
+      asm volatile("vfmacc.vf v28, %0, v16" ::"f"(*b_));
+      b_++;
+
+      asm volatile("vle32.v v20, (%0)" ::"r"(a_));
+      a_ += M;
+      asm volatile("vfmacc.vf v28, %0, v20" ::"f"(*b_));
+      b_++;
+
+      asm volatile("vle32.v v24, (%0)" ::"r"(a_));
+      a_ += M;
+      asm volatile("vfmacc.vf v28, %0, v24" ::"f"(*b_));
+      b_++;
+
+      asm volatile("vle32.v v8, (%0)" ::"r"(a_));
+      a_ += M;
+      asm volatile("vfmacc.vf v28, %0, v8" ::"f"(*b_));
+      b_++;
+    }
+    asm volatile("vse32.v v28, (%0)" ::"r"(c_));
+    avl -= vl;
+    c_ += vl;
+    b_ = b;
+    a_ += vl;
+  } while (avl > 0);
+}
+
 void gemv_v32b_m4(float *a, float* b, float* c, uint32_t M, uint32_t M_core, uint32_t N) {
   unsigned int vl, avl = M_core;
   float *a_ = a;
@@ -159,66 +219,7 @@ void gemv_v16b_m4(__fp16 *a, __fp16* b, __fp16* c, uint32_t M, uint32_t M_core, 
   
 }
 
-void gemv_v32b_m4_unroll8(float *a, float* b, float* c, uint32_t M, uint32_t M_core, uint32_t N) {
-  unsigned int vl, avl = M_core;
-  float *a_ = a;
-  float *b_ = b;
-  float *c_ = c;
-  
-  asm volatile("vmv.s.x v28, zero");
-  do {
-    asm volatile("vsetvli %0, %1, e32, m4, ta, ma" : "=r"(vl) : "r"(avl));
-    for (uint32_t col = 0; col < N; col+=8) {
-      // Load chunk a
-      asm volatile("vle32.v v0, (%0)" ::"r"(a_));
-      a_ += M;
-      // Multiply and accumulate
-      asm volatile("vfmacc.vf v28, %0, v0" ::"f"(*b_));
-      b_++;
-
-      asm volatile("vle32.v v4, (%0)" ::"r"(a_));
-      a_ += M;
-      asm volatile("vfmacc.vf v28, %0, v4" ::"f"(*b_));
-      b_++;
-
-      asm volatile("vle32.v v8, (%0)" ::"r"(a_));
-      a_ += M;
-      asm volatile("vfmacc.vf v28, %0, v8" ::"f"(*b_));
-      b_++;
-
-      asm volatile("vle32.v v12, (%0)" ::"r"(a_));
-      a_ += M;
-      asm volatile("vfmacc.vf v28, %0, v12" ::"f"(*b_));
-      b_++;
-
-      asm volatile("vle32.v v16, (%0)" ::"r"(a_));
-      a_ += M;
-      asm volatile("vfmacc.vf v28, %0, v16" ::"f"(*b_));
-      b_++;
-
-      asm volatile("vle32.v v20, (%0)" ::"r"(a_));
-      a_ += M;
-      asm volatile("vfmacc.vf v28, %0, v20" ::"f"(*b_));
-      b_++;
-
-      asm volatile("vle32.v v24, (%0)" ::"r"(a_));
-      a_ += M;
-      asm volatile("vfmacc.vf v28, %0, v24" ::"f"(*b_));
-      b_++;
-
-      asm volatile("vle32.v v8, (%0)" ::"r"(a_));
-      a_ += M;
-      asm volatile("vfmacc.vf v28, %0, v8" ::"f"(*b_));
-      b_++;
-    }
-    asm volatile("vse32.v v28, (%0)" ::"r"(c_));
-    avl -= vl;
-    c_ += vl;
-    b_ = b;
-    a_ += vl;
-  } while (avl > 0);
-}
-
+// 44 % util
 void gemv_v32b_new(float *a, float* b, float* c, uint32_t M, uint32_t N) {
   unsigned int vl, avl = N;
   float *a_ = a + (M-2) * N;
@@ -287,9 +288,7 @@ void gemv_v32b_new(float *a, float* b, float* c, uint32_t M, uint32_t N) {
     asm volatile("vfredusum.vs v20, v24, v20");
     asm volatile("vfslide1up.vf v16, v20, %0" ::"f"((float)0.0));
     b_ = b;
-    a_ -= N;
-    a_ -= N;
-    a_ -= N;
+    a_ -= (3*N);
     avl = N;
   }
   

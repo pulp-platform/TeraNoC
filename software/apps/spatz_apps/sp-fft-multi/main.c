@@ -67,7 +67,7 @@ int main() {
   // distance in bits
   const uint32_t stride = stride_e * element_size;
 
-  const uint32_t CHECK = 0;
+  const uint32_t CHECK = 1;
 
 
   // Reset timer

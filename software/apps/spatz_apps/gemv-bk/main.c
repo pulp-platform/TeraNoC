@@ -112,7 +112,8 @@ int main() {
   unsigned int m_core = gemv_l.M / active_cores;
 
   // Calculate internal pointers
-  T *a_core      = a + m_core * cid;
+  //   T *a_core      = a + m_core * cid;
+  T *a_core      = a + gemv_l.N * m_core * cid;
   T *b_core      = b[cid * multiB / num_cores];
   T *result_core = result + m_core * cid;
 
@@ -145,9 +146,8 @@ int main() {
         mempool_start_benchmark();
 
       // gemv_v32b_m4(a_core, b, result_core, gemv_l.M, m_core, gemv_l.N);
-
-      gemv_v32b_m4_unroll8(a_core, b, result_core, gemv_l.M, m_core, gemv_l.N);
-      // gemv_v32b_new(a_core, b, result_core, m_core, gemv_l.N);
+      /gemv_v32b_new(a_core, b, result_core, m_core, gemv_l.N);
+      // gemv_v32b_m4_unroll8(a_core, b, result_core, gemv_l.M, m_core, gemv_l.N);
 
       // Calculate gemv
       // if (sizeof(T) == 4)
@@ -189,19 +189,28 @@ int main() {
     printf("The execution took %u cycles.\n", timer);
     printf("The performance is %u OP/1000cycle (%u%%o utilization).\n",
            performance, utilization);
-  }
+  
+
+    // for (uint32_t i = 0; i < gemv_l.M; i++) {
+    //   if (fp_check(&result[i], &gemv_result[i])) {
+    //     uint32_t *calc = (uint32_t *) &result[i];
+    //     uint32_t *gold = (uint32_t *) &gemv_result[i];
+    //     printf("Error: ID: %i Result = %f, Golden = %f\n", i, (uint32_t) *calc, (uint32_t) *gold);
+    //     return -1;
+    //   }
+    // }
+  
 
   if (is_core_active) {
-    uint32_t print_offset = m_core * cid;
     for (uint32_t i = 0; i < m_core; i++) {
-      uint32_t *gold = (uint32_t *) &gemv_result[i+print_offset];
-      uint32_t *calc = (uint32_t *) &result[i+print_offset];
-      if (fp_check(calc, gold)) {
-          printf("Error: ID: %u Result = %x, Golden = %x\n", i, (uint32_t) *calc, (uint32_t) *gold);
+      if (fp_check(&result[i+m_core*cid], &gemv_result[i+m_core*cid])) {
+        printf("Error: ID: %i Result = %f, Golden = %f\n", i+m_core*cid, result[i+m_core*cid], gemv_result[i+m_core*cid]);
         return -1;
       }
     }
+    printf("success!");
   }
+}
 
   // Wait for core 0 to finish displaying results
   mempool_barrier(num_cores);
