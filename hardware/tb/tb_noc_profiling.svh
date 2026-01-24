@@ -1,12 +1,15 @@
 // Copyright 2025 ETH Zurich and University of Bologna.
 // Solderpad Hardware License, Version 0.51, see LICENSE for details.
 // SPDX-License-Identifier: SHL-0.51
+//
+// Author: Zexin Fu <zexifu@iis.ee.ethz.ch>
 
 `ifndef TB_NOC_PROFILING_SVH_
 `define TB_NOC_PROFILING_SVH_
 
 `ifndef TARGET_SYNTHESIS
 `ifndef TARGET_VERILATOR
+`ifdef NOC_PROFILING
   logic [63:0] cycle_q;
   always_ff @(posedge clk or negedge rst_n) begin
     if(~rst_n) begin
@@ -16,7 +19,6 @@
     end
   end
 
-`ifdef NOC_PROFILING
   string  app, log_path, dump_time;
   integer retval;
   // File handles and filenames for various profiling logs

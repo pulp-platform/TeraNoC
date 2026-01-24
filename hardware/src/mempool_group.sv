@@ -15,7 +15,9 @@ module mempool_group
   // Boot address
   parameter logic [31:0] BootAddr     = 32'h0000_1000,
   // For post-synthesis
-  parameter int unsigned GroupId      = 32'd0
+  parameter int unsigned GroupId      = 32'd0,
+  // Enable the group-level MSHR in the remote request path.
+  parameter bit          EnableGroupMshr = 1'b0
 ) (
   // Clock and reset
   input  logic                                                                                   clk_i,
@@ -279,13 +281,30 @@ module mempool_group
    *  Remote Interconnects  *
    **************************/
 
+  // Group-level MSHR wiring (remote ports only).
+  tcdm_master_req_t  [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]  group_mshr_req;
+  logic              [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]  group_mshr_req_valid;
+  logic              [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]  group_mshr_req_ready;
+  tcdm_master_req_t  [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]  mshr_noc_req;
+  logic              [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]  mshr_noc_req_valid;
+  logic              [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]  mshr_noc_req_ready;
+  tcdm_master_resp_t [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1] mshr_noc_resp;
+  logic              [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1] mshr_noc_resp_valid;
+  logic              [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1] mshr_noc_resp_ready;
+  tcdm_master_resp_t [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1] group_mshr_resp;
+  logic              [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1] group_mshr_resp_valid;
+  logic              [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1] group_mshr_resp_ready;
+
   // Sort the remote ports by tile
   for (genvar r = 1; r < NumRemoteReqPortsPerTile; r++) begin: gen_remote_interface_connection_req
     for (genvar t = 0; t < NumTilesPerGroup; t++) begin: gen_remote_connections_req
       // master req
-      assign tcdm_master_req_valid_o[t][r]  = tcdm_master_req_valid[r][t];
-      assign tcdm_master_req_o[t][r]        = tcdm_master_req[r][t];
-      assign tcdm_master_req_ready[r][t]    = tcdm_master_req_ready_i[t][r];
+      assign group_mshr_req_valid[t][r]     = tcdm_master_req_valid[r][t];
+      assign group_mshr_req[t][r]           = tcdm_master_req[r][t];
+      assign tcdm_master_req_ready[r][t]    = group_mshr_req_ready[t][r];
+      assign tcdm_master_req_valid_o[t][r]  = mshr_noc_req_valid[t][r];
+      assign tcdm_master_req_o[t][r]        = mshr_noc_req[t][r];
+      assign mshr_noc_req_ready[t][r]       = tcdm_master_req_ready_i[t][r];
       // slave req
       assign tcdm_slave_req[r][t]           = tcdm_slave_req_i[t][r];
       assign tcdm_slave_req_valid[r][t]     = tcdm_slave_req_valid_i[t][r];
@@ -296,9 +315,12 @@ module mempool_group
   for (genvar r = 1; r < NumRemoteRespPortsPerTile; r++) begin: gen_remote_interface_connection_resp
     for (genvar t = 0; t < NumTilesPerGroup; t++) begin: gen_remote_connections_resp
       // master resp
-      assign tcdm_master_resp[r][t]         = tcdm_master_resp_i[t][r];
-      assign tcdm_master_resp_valid[r][t]   = tcdm_master_resp_valid_i[t][r];
-      assign tcdm_master_resp_ready_o[t][r] = tcdm_master_resp_ready[r][t];
+      assign mshr_noc_resp[t][r]            = tcdm_master_resp_i[t][r];
+      assign mshr_noc_resp_valid[t][r]      = tcdm_master_resp_valid_i[t][r];
+      assign tcdm_master_resp_ready_o[t][r] = mshr_noc_resp_ready[t][r];
+      assign tcdm_master_resp[r][t]         = group_mshr_resp[t][r];
+      assign tcdm_master_resp_valid[r][t]   = group_mshr_resp_valid[t][r];
+      assign group_mshr_resp_ready[t][r]    = tcdm_master_resp_ready[r][t];
       // slave resp
       assign tcdm_slave_resp_o[t][r]        = tcdm_slave_resp[r][t];
       assign tcdm_slave_resp_valid_o[t][r]  = tcdm_slave_resp_valid[r][t];
@@ -589,4 +611,46 @@ module mempool_group
       assign tcdm_dma_resp_ready[d*NumTilesPerDma+t] =dma_tile_req[t].p_ready;
     end
   end
+
+
+
+  /**********************
+   *  Group-level MSHR  *
+   *********************/
+  if (EnableGroupMshr) begin : gen_group_mshr
+    mempool_group_mshr #(
+      .NumGroups                (NumGroups                ),
+      .NumTilesPerGroup         (NumTilesPerGroup         ),
+      .NumRemoteReqPortsPerTile (NumRemoteReqPortsPerTile ),
+      .NumRemoteRespPortsPerTile(NumRemoteRespPortsPerTile)
+    ) i_group_mshr (
+      .clk_i                    (clk_i                   ),
+      .rst_ni                   (rst_ni                  ),
+      .testmode_i               (testmode_i              ),
+      .scan_enable_i            (scan_enable_i           ),
+      .scan_data_i              (scan_data_i             ),
+      .scan_data_o              (/* Unconnected */       ),
+      .group_id_i               (group_id_i              ),
+      .group_mshr_req_i         (group_mshr_req           ),
+      .group_mshr_req_valid_i   (group_mshr_req_valid     ),
+      .group_mshr_req_ready_o   (group_mshr_req_ready     ),
+      .mshr_noc_req_o           (mshr_noc_req             ),
+      .mshr_noc_req_valid_o     (mshr_noc_req_valid       ),
+      .mshr_noc_req_ready_i     (mshr_noc_req_ready       ),
+      .mshr_noc_resp_i          (mshr_noc_resp            ),
+      .mshr_noc_resp_valid_i    (mshr_noc_resp_valid      ),
+      .mshr_noc_resp_ready_o    (mshr_noc_resp_ready      ),
+      .group_mshr_resp_o        (group_mshr_resp          ),
+      .group_mshr_resp_valid_o  (group_mshr_resp_valid    ),
+      .group_mshr_resp_ready_i  (group_mshr_resp_ready    )
+    );
+  end else begin : gen_group_mshr_bypass
+    assign mshr_noc_req        = group_mshr_req;
+    assign mshr_noc_req_valid  = group_mshr_req_valid;
+    assign group_mshr_req_ready = mshr_noc_req_ready;
+    assign group_mshr_resp     = mshr_noc_resp;
+    assign group_mshr_resp_valid = mshr_noc_resp_valid;
+    assign mshr_noc_resp_ready = group_mshr_resp_ready;
+  end
+  
 endmodule: mempool_group
