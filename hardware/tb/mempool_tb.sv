@@ -458,4 +458,18 @@ module mempool_tb;
  ****************/
 `include "tb_noc_profiling.svh"
 
+
+/*******************
+ * Group Profiling *
+ *******************/
+`define GROUP_MERGE_PROFILING
+`define MERGE_BURST_WORDS 16
+`define MERGE_WINDOW_CYCLES 16
+`define MERGE_MSHR_NUM 16
+`define MERGE_RECORDS_PER_MSHR 16
+`define MERGE_REQS_PER_MSHR 16
+`define MERGE_ANALYZE_MODE 1
+
+`include "tb_group_merge.svh"
+
 endmodule : mempool_tb
