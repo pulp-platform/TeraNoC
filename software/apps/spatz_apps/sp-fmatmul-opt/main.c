@@ -90,7 +90,7 @@ int main() {
   const uint32_t core_gid = cid % cores_per_group;
   const uint32_t gid = cid / cores_per_group;
 
-  const uint32_t active_groups = 4;
+  const uint32_t active_groups = NUM_GROUPS;
   const uint32_t active_cores = cores_per_group * active_groups;
   const uint32_t is_core_active = cid < active_cores;
 
