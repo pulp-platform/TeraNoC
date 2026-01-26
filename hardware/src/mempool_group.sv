@@ -17,7 +17,7 @@ module mempool_group
   // For post-synthesis
   parameter int unsigned GroupId      = 32'd0,
   // Enable the group-level MSHR in the remote request path.
-  parameter bit          EnableGroupMshr = 1'b0
+  parameter bit          EnableGroupMshr = 1'b1
 ) (
   // Clock and reset
   input  logic                                                                                   clk_i,
