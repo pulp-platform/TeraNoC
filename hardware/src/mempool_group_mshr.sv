@@ -17,7 +17,7 @@ module mempool_group_mshr
   parameter int NumRemoteReqPortsPerTile  = 2,
   parameter int NumRemoteRespPortsPerTile = 2,
 
-  parameter int MshrNum        = 64,
+  parameter int MshrNum        = 16,
   parameter int MshrMergeWords = 1,
   parameter int MshrMergeReqs  = 16
 ) (
@@ -54,6 +54,7 @@ module mempool_group_mshr
 );
 
   localparam int unsigned RespPortIdW      = idx_width(NumRemoteRespPortsPerTile);
+  localparam int unsigned ReqPortIdW       = idx_width(NumRemoteReqPortsPerTile);
   localparam int unsigned SubReqCountW     = idx_width(MshrMergeReqs + 1);
   localparam int unsigned MergeWordOffset  = (MshrMergeWords <= 1) ? 0 : $clog2(MshrMergeWords);
   localparam int unsigned SpatzNumOutstandingLoads = snitch_pkg::NumIntOutstandingLoads;
@@ -94,33 +95,55 @@ module mempool_group_mshr
     logic [RespPortIdW-1:0] port_id;
   } req_id_t;
 
-  mempool_group_mshr_t [MshrNum-1:0] mshr_d, mshr_q;
-  logic                [MshrNum-1:0] mshr_d_valid, mshr_q_valid;
-  logic [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1] resp_is_mshr;
-  mshr_id_t [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1] resp_mshr_id;
-  // Debug: tag each output response as MSHR-drained or bypassed from NoC.
-  logic [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1] resp_from_mshr;
-  logic [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1] resp_from_bypass;
-  mshr_id_t [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1] resp_mshr_id_dbg;
-  logic [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1] port_taken;
-  logic [MshrNum-1:0] mshr_resp_inflight;
-  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] req_is_load;
-  tcdm_addr_t [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] req_addr_key;
-  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrNum-1:0] req_hit_mshr_map;
-  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] req_hit_mshr;
-  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] req_hit_mshr_sel_valid;
-  mshr_id_t [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] req_hit_mshr_sel_id;
-  logic [MshrNum-1:0][NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] mshr_hit_req_map;
-  logic [MshrNum-1:0] mshr_hit_req;
-  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] req_alloc_found;
-  mshr_id_t [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] req_alloc_found_mshr_id;
-  logic [MshrNum-1:0] mshr_alloc_found;
-  req_id_t [MshrNum-1:0] mshr_alloc_found_req_id;
-  logic [MshrNum-1:0] drain_subreq_found;
-  logic [idx_width(MshrMergeReqs)-1:0] drain_subreq_idx [MshrNum-1:0];
-  tile_group_id_t [MshrNum-1:0] drain_dst_tile;
-  logic [RespPortIdW-1:0] drain_dst_port [MshrNum-1:0];
-  logic [MshrNum-1:0] drain_last_subreq;
+  // MSHR state (registered and next-state).
+  mempool_group_mshr_t [MshrNum-1:0]                                           mshr_d;
+  mempool_group_mshr_t [MshrNum-1:0]                                           mshr_q;
+  logic                [MshrNum-1:0]                                           mshr_d_valid;
+  logic                [MshrNum-1:0]                                           mshr_q_valid;
+  logic                [MshrNum-1:0]                                           mshr_resp_inflight; // Block same-cycle merge.
+
+  // Response classification and debug (per response port).
+  logic    [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]               resp_is_mshr;
+  mshr_id_t[NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]               resp_mshr_id;
+  logic    [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]               resp_from_mshr;
+  logic    [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]               resp_from_bypass;
+  mshr_id_t[NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]               resp_mshr_id_dbg;
+  logic    [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]               port_taken;
+
+  // Request decode and merge lookup (per request port).
+  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_is_load;
+  tcdm_addr_t[NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_addr_key;
+  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrNum-1:0] req_hit_mshr_map;
+  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_hit_mshr;
+  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_hit_mshr_sel_valid;
+  mshr_id_t  [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_hit_mshr_sel_id;
+  logic      [MshrNum-1:0][NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] mshr_hit_req_map;
+  logic      [MshrNum-1:0]                                                     mshr_hit_req;
+
+  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][NumTilesPerGroup-1:0]
+             [NumRemoteReqPortsPerTile-1:1]                                                       req_hit_req_map; // only compare smaller idx
+  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                                 req_hit_req;
+  tile_group_id_t[NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                             req_leader_tile;
+  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][ReqPortIdW-1:0]                 req_leader_port;
+  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                                 req_leader_alloc_valid;
+  mshr_id_t  [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                                 req_leader_alloc_id;
+  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                                 req_leader_alloc_ready;
+  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                                 req_merge_valid;
+  mshr_id_t  [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                                 req_merge_mshr_id;
+  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                                 req_merge_ready;
+
+  // Request allocation (banked allocator bookkeeping).
+  logic    [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                req_alloc_found;
+  mshr_id_t[NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                req_alloc_found_mshr_id;
+  logic    [MshrNum-1:0]                                                       mshr_alloc_found;
+  req_id_t [MshrNum-1:0]                                                       mshr_alloc_found_req_id;
+
+  // Response drain scheduling (per MSHR entry).
+  logic         [MshrNum-1:0]                                                  drain_subreq_found;
+  logic         [idx_width(MshrMergeReqs)-1:0]                                 drain_subreq_idx [MshrNum-1:0];
+  tile_group_id_t[MshrNum-1:0]                                                 drain_dst_tile;
+  logic         [RespPortIdW-1:0]                                              drain_dst_port [MshrNum-1:0];
+  logic         [MshrNum-1:0]                                                  drain_last_subreq;
 
   function automatic tcdm_addr_t merge_addr_key(input tcdm_addr_t addr);
     if (MergeWordOffset == 0) begin
@@ -167,6 +190,53 @@ module mempool_group_mshr
   // endgenerate
   // `endif
   // // pragma translate_on
+
+  // Request-to-request hit lookup (parallel compare).
+  generate
+    for (genvar tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin : gen_req_hit_req_tile
+      for (genvar port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin : gen_req_hit_req_port
+        for (genvar oth_tile_i = 0; oth_tile_i < NumTilesPerGroup; oth_tile_i++) begin : gen_req_hit_req_oth_tile
+          for (genvar oth_port_i = 1; oth_port_i < NumRemoteReqPortsPerTile; oth_port_i++) begin : gen_req_hit_req_oth_port
+            // only compare the requests with smaller idx than itself
+            if (tile_i * (NumRemoteReqPortsPerTile - 1) + (port_i - 1) <=
+                oth_tile_i * (NumRemoteReqPortsPerTile - 1) + (oth_port_i - 1)) begin
+              assign req_hit_req_map[tile_i][port_i][oth_tile_i][oth_port_i] = 1'b0;
+            end else begin
+              assign req_hit_req_map[tile_i][port_i][oth_tile_i][oth_port_i] =
+                  req_is_load[tile_i][port_i] &&
+                  req_is_load[oth_tile_i][oth_port_i] &&
+                  (req_addr_key[tile_i][port_i] == req_addr_key[oth_tile_i][oth_port_i]) &&
+                  (group_mshr_req_i[tile_i][port_i].tgt_group_id ==
+                   group_mshr_req_i[oth_tile_i][oth_port_i].tgt_group_id);
+            end
+          end
+        end
+        assign req_hit_req[tile_i][port_i] = |req_hit_req_map[tile_i][port_i];
+      end
+    end
+  endgenerate
+
+  // Select the first matching request (smallest index) as leader.
+  generate
+    for (genvar tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin : gen_req_leader_tile
+      for (genvar port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin : gen_req_leader_port
+        always_comb begin
+          req_leader_tile[tile_i][port_i] = tile_group_id_t'(tile_i);
+          req_leader_port[tile_i][port_i] = port_i[ReqPortIdW-1:0];
+          for (int oth_tile_i = 0; oth_tile_i < NumTilesPerGroup; oth_tile_i++) begin
+            for (int oth_port_i = 1; oth_port_i < NumRemoteReqPortsPerTile; oth_port_i++) begin
+              if ((req_leader_tile[tile_i][port_i] == tile_group_id_t'(tile_i)) &&
+                  (req_leader_port[tile_i][port_i] == port_i[ReqPortIdW-1:0]) &&
+                  req_hit_req_map[tile_i][port_i][oth_tile_i][oth_port_i]) begin
+                req_leader_tile[tile_i][port_i] = tile_group_id_t'(oth_tile_i);
+                req_leader_port[tile_i][port_i] = oth_port_i[ReqPortIdW-1:0];
+              end
+            end
+          end
+        end
+      end
+    end
+  endgenerate
 
   // MSHR hit lookup (parallel compare).
   generate
@@ -244,6 +314,7 @@ module mempool_group_mshr
           if (!mshr_q_valid[mshr_i] &&
               !mshr_alloc_found[mshr_i] &&
               req_is_load[tile_i][port_i] &&
+              !req_hit_req[tile_i][port_i] &&
               !req_hit_mshr[tile_i][port_i] &&
               !req_alloc_found[tile_i][port_i]) begin
             req_alloc_found[tile_i][port_i] = 1'b1;
@@ -263,6 +334,7 @@ module mempool_group_mshr
             if (!mshr_q_valid[mshr_i] &&
                 !mshr_alloc_found[mshr_i] &&
                 req_is_load[tile_i][port_i] &&
+                !req_hit_req[tile_i][port_i] &&
                 !req_hit_mshr[tile_i][port_i] &&
                 !req_alloc_found[tile_i][port_i]) begin
               req_alloc_found[tile_i][port_i] = 1'b1;
@@ -273,6 +345,38 @@ module mempool_group_mshr
             end
           end
         end
+      end
+    end
+  end
+
+  // Track leader allocation status per request.
+  always_comb begin
+    for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
+      for (int port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin
+        req_leader_alloc_valid[tile_i][port_i] =
+            req_alloc_found[req_leader_tile[tile_i][port_i]][req_leader_port[tile_i][port_i]];
+        req_leader_alloc_id[tile_i][port_i] =
+            req_alloc_found_mshr_id[req_leader_tile[tile_i][port_i]][req_leader_port[tile_i][port_i]];
+        req_leader_alloc_ready[tile_i][port_i] =
+            mshr_noc_req_ready_i[req_leader_tile[tile_i][port_i]][req_leader_port[tile_i][port_i]];
+      end
+    end
+  end
+
+  // Select the merge target per request (existing MSHR or leader's new allocation).
+  always_comb begin
+    for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
+      for (int port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin
+        req_merge_valid[tile_i][port_i] =
+            req_is_load[tile_i][port_i] &&
+            (req_hit_mshr_sel_valid[tile_i][port_i] ||
+             (req_hit_req[tile_i][port_i] && req_leader_alloc_valid[tile_i][port_i]));
+        req_merge_mshr_id[tile_i][port_i] =
+            req_hit_mshr_sel_valid[tile_i][port_i]
+                ? req_hit_mshr_sel_id[tile_i][port_i]
+                : req_leader_alloc_id[tile_i][port_i];
+        req_merge_ready[tile_i][port_i] =
+            req_hit_mshr_sel_valid[tile_i][port_i] ? 1'b1 : req_leader_alloc_ready[tile_i][port_i];
       end
     end
   end
@@ -312,28 +416,28 @@ module mempool_group_mshr
     for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
       for (int port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin
         if (group_mshr_req_valid_i[tile_i][port_i]) begin
-          if (req_is_load[tile_i][port_i] && req_hit_mshr_sel_valid[tile_i][port_i]) begin
+          if (req_merge_valid[tile_i][port_i]) begin
             // Merge hit: accept without touching NoC.
-            group_mshr_req_ready_o[tile_i][port_i] = 1'b1;
+            group_mshr_req_ready_o[tile_i][port_i] = req_merge_ready[tile_i][port_i];
             if (group_mshr_req_ready_o[tile_i][port_i]) begin
-              if (mshr_d[req_hit_mshr_sel_id[tile_i][port_i]].sub_reqs_num < MshrMergeReqs) begin
-                mshr_d[req_hit_mshr_sel_id[tile_i][port_i]].sub_reqs[
-                    mshr_d[req_hit_mshr_sel_id[tile_i][port_i]].sub_reqs_num].valid = 1'b1;
-                mshr_d[req_hit_mshr_sel_id[tile_i][port_i]].sub_reqs[
-                    mshr_d[req_hit_mshr_sel_id[tile_i][port_i]].sub_reqs_num].tile_id = tile_i;
-                mshr_d[req_hit_mshr_sel_id[tile_i][port_i]].sub_reqs[
-                    mshr_d[req_hit_mshr_sel_id[tile_i][port_i]].sub_reqs_num].port_id = port_i;
-                mshr_d[req_hit_mshr_sel_id[tile_i][port_i]].sub_reqs[
-                    mshr_d[req_hit_mshr_sel_id[tile_i][port_i]].sub_reqs_num].core_id =
+              if (mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num < MshrMergeReqs) begin
+                mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[
+                    mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num].valid = 1'b1;
+                mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[
+                    mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num].tile_id = tile_i;
+                mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[
+                    mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num].port_id = port_i;
+                mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[
+                    mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num].core_id =
                     group_mshr_req_i[tile_i][port_i].wdata.core_id;
-                mshr_d[req_hit_mshr_sel_id[tile_i][port_i]].sub_reqs[
-                    mshr_d[req_hit_mshr_sel_id[tile_i][port_i]].sub_reqs_num].meta_id =
+                mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[
+                    mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num].meta_id =
                     group_mshr_req_i[tile_i][port_i].wdata.meta_id;
-                mshr_d[req_hit_mshr_sel_id[tile_i][port_i]].sub_reqs[
-                    mshr_d[req_hit_mshr_sel_id[tile_i][port_i]].sub_reqs_num].amo =
+                mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[
+                    mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num].amo =
                     group_mshr_req_i[tile_i][port_i].wdata.amo;
-                mshr_d[req_hit_mshr_sel_id[tile_i][port_i]].sub_reqs_num =
-                    mshr_d[req_hit_mshr_sel_id[tile_i][port_i]].sub_reqs_num + 1;
+                mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num =
+                    mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num + 1;
               end
             end
           end else begin
