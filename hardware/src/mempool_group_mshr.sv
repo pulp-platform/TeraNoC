@@ -17,9 +17,17 @@ module mempool_group_mshr
   parameter int NumRemoteReqPortsPerTile  = 2,
   parameter int NumRemoteRespPortsPerTile = 2,
 
-  parameter int MshrNum        = 16,
+  parameter int MshrNum        = NumTilesPerGroup * 4,
   parameter int MshrMergeWords = 1,
-  parameter int MshrMergeReqs  = 16
+  parameter int MshrMergeReqs  = 16,
+  // 0: drain one sub-request per MSHR per cycle (original behavior)
+  // 1: drain as many sub-requests as ports allow per cycle
+  parameter bit DrainMultiPort = 1'b1,
+  // Spill register enables (0 = pass-through).
+  parameter bit SpillReqIn     = 1'b0,
+  parameter bit SpillReqOut    = 1'b1,
+  parameter bit SpillRespIn    = 1'b0,
+  parameter bit SpillRespOut   = 1'b1
 ) (
   // Clock and reset
   input  logic                                                                                   clk_i,
@@ -95,6 +103,20 @@ module mempool_group_mshr
     logic [RespPortIdW-1:0] port_id;
   } req_id_t;
 
+  // Spill register plumbing (internal view of interfaces).
+  tcdm_master_req_t  [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]      req_in;
+  logic              [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]      req_in_valid;
+  logic              [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]      req_in_ready;
+  tcdm_master_req_t  [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]      req_out;
+  logic              [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]      req_out_valid;
+  logic              [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]      req_out_ready;
+  tcdm_master_resp_t [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]     resp_in;
+  logic              [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]     resp_in_valid;
+  logic              [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]     resp_in_ready;
+  tcdm_master_resp_t [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]     resp_out;
+  logic              [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]     resp_out_valid;
+  logic              [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]     resp_out_ready;
+
   // MSHR state (registered and next-state).
   mempool_group_mshr_t [MshrNum-1:0]                                           mshr_d;
   mempool_group_mshr_t [MshrNum-1:0]                                           mshr_q;
@@ -138,12 +160,20 @@ module mempool_group_mshr
   logic    [MshrNum-1:0]                                                       mshr_alloc_found;
   req_id_t [MshrNum-1:0]                                                       mshr_alloc_found_req_id;
 
-  // Response drain scheduling (per MSHR entry).
-  logic         [MshrNum-1:0]                                                  drain_subreq_found;
-  logic         [idx_width(MshrMergeReqs)-1:0]                                 drain_subreq_idx [MshrNum-1:0];
+  // Response drain scheduling (per response port).
+  logic      [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]             resp_sel_valid;
+  mshr_id_t  [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]             resp_sel_mshr_id;
+  logic      [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]
+             [idx_width(MshrMergeReqs)-1:0]                                    resp_sel_subreq_idx;
+  logic      [MshrNum-1:0][SubReqCountW-1:0]                                   drain_count;
+  // Response drain scheduling (single-response per MSHR).
+  logic      [MshrNum-1:0]                                                     drain_subreq_found;
+  logic      [idx_width(MshrMergeReqs)-1:0]                                    drain_subreq_idx [MshrNum-1:0];
   tile_group_id_t[MshrNum-1:0]                                                 drain_dst_tile;
-  logic         [RespPortIdW-1:0]                                              drain_dst_port [MshrNum-1:0];
-  logic         [MshrNum-1:0]                                                  drain_last_subreq;
+  logic      [RespPortIdW-1:0]                                                 drain_dst_port [MshrNum-1:0];
+  logic      [MshrNum-1:0]                                                     drain_last_subreq;
+  logic      [MshrNum-1:0]                                                     drain_port_found;
+  logic      [MshrNum-1:0][MshrMergeReqs-1:0]                                  subreq_claimed;
 
   function automatic tcdm_addr_t merge_addr_key(input tcdm_addr_t addr);
     if (MergeWordOffset == 0) begin
@@ -155,16 +185,81 @@ module mempool_group_mshr
 
   assign scan_data_o = scan_data_i;
 
+  // Spill registers on all interfaces (optional).
+  generate
+    for (genvar tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin : gen_spill_tile
+      for (genvar port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin : gen_spill_req
+        spill_register #(
+          .T(tcdm_master_req_t),
+          .Bypass(!SpillReqIn)
+        ) i_spill_req_in (
+          .clk_i   (clk_i                             ),
+          .rst_ni  (rst_ni                            ),
+          .valid_i (group_mshr_req_valid_i[tile_i][port_i]),
+          .ready_o (group_mshr_req_ready_o[tile_i][port_i]),
+          .data_i  (group_mshr_req_i[tile_i][port_i]  ),
+          .valid_o (req_in_valid[tile_i][port_i]      ),
+          .ready_i (req_in_ready[tile_i][port_i]      ),
+          .data_o  (req_in[tile_i][port_i]            )
+        );
+
+        spill_register #(
+          .T(tcdm_master_req_t),
+          .Bypass(!SpillReqOut)
+        ) i_spill_req_out (
+          .clk_i   (clk_i                             ),
+          .rst_ni  (rst_ni                            ),
+          .valid_i (req_out_valid[tile_i][port_i]     ),
+          .ready_o (req_out_ready[tile_i][port_i]     ),
+          .data_i  (req_out[tile_i][port_i]           ),
+          .valid_o (mshr_noc_req_valid_o[tile_i][port_i]),
+          .ready_i (mshr_noc_req_ready_i[tile_i][port_i]),
+          .data_o  (mshr_noc_req_o[tile_i][port_i]     )
+        );
+      end : gen_spill_req
+
+      for (genvar port_i = 1; port_i < NumRemoteRespPortsPerTile; port_i++) begin : gen_spill_resp
+        spill_register #(
+          .T(tcdm_master_resp_t),
+          .Bypass(!SpillRespIn)
+        ) i_spill_resp_in (
+          .clk_i   (clk_i                               ),
+          .rst_ni  (rst_ni                              ),
+          .valid_i (mshr_noc_resp_valid_i[tile_i][port_i]),
+          .ready_o (mshr_noc_resp_ready_o[tile_i][port_i]),
+          .data_i  (mshr_noc_resp_i[tile_i][port_i]     ),
+          .valid_o (resp_in_valid[tile_i][port_i]       ),
+          .ready_i (resp_in_ready[tile_i][port_i]       ),
+          .data_o  (resp_in[tile_i][port_i]             )
+        );
+
+        spill_register #(
+          .T(tcdm_master_resp_t),
+          .Bypass(!SpillRespOut)
+        ) i_spill_resp_out (
+          .clk_i   (clk_i                                ),
+          .rst_ni  (rst_ni                               ),
+          .valid_i (resp_out_valid[tile_i][port_i]       ),
+          .ready_o (resp_out_ready[tile_i][port_i]       ),
+          .data_i  (resp_out[tile_i][port_i]             ),
+          .valid_o (group_mshr_resp_valid_o[tile_i][port_i]),
+          .ready_i (group_mshr_resp_ready_i[tile_i][port_i]),
+          .data_o  (group_mshr_resp_o[tile_i][port_i]    )
+        );
+      end : gen_spill_resp
+    end : gen_spill_tile
+  endgenerate
+
   // Decode request type and address key for merge lookup.
   always_comb begin
     for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
       for (int port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin
-        req_is_load[tile_i][port_i] = group_mshr_req_valid_i[tile_i][port_i] &&
-                                      ~group_mshr_req_i[tile_i][port_i].wen &&
-                                      (group_mshr_req_i[tile_i][port_i].wdata.amo == '0);
-        if (group_mshr_req_valid_i[tile_i][port_i]) begin
+        req_is_load[tile_i][port_i] = req_in_valid[tile_i][port_i] &&
+                                      ~req_in[tile_i][port_i].wen &&
+                                      (req_in[tile_i][port_i].wdata.amo == '0);
+        if (req_in_valid[tile_i][port_i]) begin
           req_addr_key[tile_i][port_i] =
-              merge_addr_key(group_mshr_req_i[tile_i][port_i].tgt_addr);
+              merge_addr_key(req_in[tile_i][port_i].tgt_addr);
         end else begin
           req_addr_key[tile_i][port_i] = '0;
         end
@@ -206,8 +301,8 @@ module mempool_group_mshr
                   req_is_load[tile_i][port_i] &&
                   req_is_load[oth_tile_i][oth_port_i] &&
                   (req_addr_key[tile_i][port_i] == req_addr_key[oth_tile_i][oth_port_i]) &&
-                  (group_mshr_req_i[tile_i][port_i].tgt_group_id ==
-                   group_mshr_req_i[oth_tile_i][oth_port_i].tgt_group_id);
+                  (req_in[tile_i][port_i].tgt_group_id ==
+                   req_in[oth_tile_i][oth_port_i].tgt_group_id);
             end
           end
         end
@@ -249,7 +344,7 @@ module mempool_group_mshr
               (mshr_q[mshr_i].state == MSHR_WAIT_RESP) &&
               !mshr_resp_inflight[mshr_i] &&
               (mshr_q[mshr_i].base_addr == req_addr_key[tile_i][port_i]) &&
-              (mshr_q[mshr_i].tgt_group_id == group_mshr_req_i[tile_i][port_i].tgt_group_id) &&
+              (mshr_q[mshr_i].tgt_group_id == req_in[tile_i][port_i].tgt_group_id) &&
               (mshr_q[mshr_i].sub_reqs_num < MshrMergeReqs);
           assign mshr_hit_req_map[mshr_i][tile_i][port_i] = req_hit_mshr_map[tile_i][port_i][mshr_i];
         end
@@ -358,7 +453,7 @@ module mempool_group_mshr
         req_leader_alloc_id[tile_i][port_i] =
             req_alloc_found_mshr_id[req_leader_tile[tile_i][port_i]][req_leader_port[tile_i][port_i]];
         req_leader_alloc_ready[tile_i][port_i] =
-            mshr_noc_req_ready_i[req_leader_tile[tile_i][port_i]][req_leader_port[tile_i][port_i]];
+            req_out_ready[req_leader_tile[tile_i][port_i]][req_leader_port[tile_i][port_i]];
       end
     end
   end
@@ -382,15 +477,8 @@ module mempool_group_mshr
   end
 
   // Sequential state update
-  always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni) begin
-      mshr_q_valid <= '0;
-      mshr_q       <= '0;
-    end else begin
-      mshr_q_valid <= mshr_d_valid;
-      mshr_q       <= mshr_d;
-    end
-  end
+  `FF(mshr_q_valid, mshr_d_valid, '0)
+  `FF(mshr_q, mshr_d, '0)
 
   // Main combinational control: request merge/alloc, response capture, and drain
   always_comb begin
@@ -398,16 +486,16 @@ module mempool_group_mshr
     mshr_d = mshr_q;
     mshr_d_valid = mshr_q_valid;
 
-    mshr_noc_req_o = group_mshr_req_i;
-    mshr_noc_req_valid_o = '0;
-    group_mshr_req_ready_o = '1;
+    req_out = req_in;
+    req_out_valid = '0;
+    req_in_ready = '1;
 
-    group_mshr_resp_o = '0;
-    group_mshr_resp_valid_o = '0;
+    resp_out = '0;
+    resp_out_valid = '0;
     resp_from_mshr = '0;
     resp_from_bypass = '0;
     resp_mshr_id_dbg = '0;
-    mshr_noc_resp_ready_o = '1;
+    resp_in_ready = '1;
     mshr_resp_inflight = '0;
 
     // ------------------------------------------------------------
@@ -415,11 +503,11 @@ module mempool_group_mshr
     // ------------------------------------------------------------
     for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
       for (int port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin
-        if (group_mshr_req_valid_i[tile_i][port_i]) begin
+        if (req_in_valid[tile_i][port_i]) begin
           if (req_merge_valid[tile_i][port_i]) begin
             // Merge hit: accept without touching NoC.
-            group_mshr_req_ready_o[tile_i][port_i] = req_merge_ready[tile_i][port_i];
-            if (group_mshr_req_ready_o[tile_i][port_i]) begin
+            req_in_ready[tile_i][port_i] = req_merge_ready[tile_i][port_i];
+            if (req_in_ready[tile_i][port_i]) begin
               if (mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num < MshrMergeReqs) begin
                 mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[
                     mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num].valid = 1'b1;
@@ -429,54 +517,54 @@ module mempool_group_mshr
                     mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num].port_id = port_i;
                 mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[
                     mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num].core_id =
-                    group_mshr_req_i[tile_i][port_i].wdata.core_id;
+                    req_in[tile_i][port_i].wdata.core_id;
                 mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[
                     mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num].meta_id =
-                    group_mshr_req_i[tile_i][port_i].wdata.meta_id;
+                    req_in[tile_i][port_i].wdata.meta_id;
                 mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[
                     mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num].amo =
-                    group_mshr_req_i[tile_i][port_i].wdata.amo;
+                    req_in[tile_i][port_i].wdata.amo;
                 mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num =
                     mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num + 1;
               end
             end
           end else begin
             // Need to send to NoC (store, miss, or merge list full).
-            group_mshr_req_ready_o[tile_i][port_i] = mshr_noc_req_ready_i[tile_i][port_i];
+            req_in_ready[tile_i][port_i] = req_out_ready[tile_i][port_i];
             if (req_is_load[tile_i][port_i]) begin
               // Allocate a new MSHR entry for load miss if space exists.
-              if (req_alloc_found[tile_i][port_i] && group_mshr_req_ready_o[tile_i][port_i]) begin
+              if (req_alloc_found[tile_i][port_i] && req_in_ready[tile_i][port_i]) begin
                 mshr_d_valid[req_alloc_found_mshr_id[tile_i][port_i]] = 1'b1;
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]] = '0;
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].base_addr =
                     req_addr_key[tile_i][port_i];
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].tgt_group_id =
-                    group_mshr_req_i[tile_i][port_i].tgt_group_id;
+                    req_in[tile_i][port_i].tgt_group_id;
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].owner_tile = tile_i;
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].owner_port = port_i;
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].owner_core =
-                    group_mshr_req_i[tile_i][port_i].wdata.core_id;
+                    req_in[tile_i][port_i].wdata.core_id;
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].owner_meta =
-                    group_mshr_req_i[tile_i][port_i].wdata.meta_id;
+                    req_in[tile_i][port_i].wdata.meta_id;
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].state      = MSHR_WAIT_RESP;
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].resp_valid = 1'b0;
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].sub_reqs[0].valid   = 1'b1;
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].sub_reqs[0].tile_id = tile_i;
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].sub_reqs[0].port_id = port_i;
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].sub_reqs[0].core_id =
-                    group_mshr_req_i[tile_i][port_i].wdata.core_id;
+                    req_in[tile_i][port_i].wdata.core_id;
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].sub_reqs[0].meta_id =
-                    group_mshr_req_i[tile_i][port_i].wdata.meta_id;
+                    req_in[tile_i][port_i].wdata.meta_id;
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].sub_reqs[0].amo =
-                    group_mshr_req_i[tile_i][port_i].wdata.amo;
+                    req_in[tile_i][port_i].wdata.amo;
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].sub_reqs_num = 1;
               end
             end
             // Forward the request to NoC (alloc or bypass).
-            mshr_noc_req_valid_o[tile_i][port_i] = 1'b1;
+            req_out_valid[tile_i][port_i] = 1'b1;
           end
         end else begin
-          group_mshr_req_ready_o[tile_i][port_i] = 1'b1;
+          req_in_ready[tile_i][port_i] = 1'b1;
         end
       end
     end
@@ -488,15 +576,15 @@ module mempool_group_mshr
       for (int port_i = 1; port_i < NumRemoteRespPortsPerTile; port_i++) begin
         resp_is_mshr[tile_i][port_i] = 1'b0;
         resp_mshr_id[tile_i][port_i] = '0;
-        if (mshr_noc_resp_valid_i[tile_i][port_i] &&
-            (mshr_noc_resp_i[tile_i][port_i].wen == 1'b0) &&
-            (mshr_noc_resp_i[tile_i][port_i].rdata.amo == '0)) begin
+        if (resp_in_valid[tile_i][port_i] &&
+            (resp_in[tile_i][port_i].wen == 1'b0) &&
+            (resp_in[tile_i][port_i].rdata.amo == '0)) begin
           for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
             if (mshr_q_valid[mshr_i] &&
                 mshr_q[mshr_i].state == MSHR_WAIT_RESP &&
                 mshr_q[mshr_i].owner_tile == tile_i &&
-                mshr_q[mshr_i].owner_core == mshr_noc_resp_i[tile_i][port_i].rdata.core_id &&
-                mshr_q[mshr_i].owner_meta == mshr_noc_resp_i[tile_i][port_i].rdata.meta_id) begin
+                mshr_q[mshr_i].owner_core == resp_in[tile_i][port_i].rdata.core_id &&
+                mshr_q[mshr_i].owner_meta == resp_in[tile_i][port_i].rdata.meta_id) begin
               resp_is_mshr[tile_i][port_i] = 1'b1;
               resp_mshr_id[tile_i][port_i] = mshr_id_t'(mshr_i);
               break;
@@ -506,14 +594,14 @@ module mempool_group_mshr
 
         if (resp_is_mshr[tile_i][port_i]) begin
           mshr_resp_inflight[resp_mshr_id[tile_i][port_i]] = 1'b1;
-          mshr_noc_resp_ready_o[tile_i][port_i] = ~mshr_q[resp_mshr_id[tile_i][port_i]].resp_valid;
+          resp_in_ready[tile_i][port_i] = ~mshr_q[resp_mshr_id[tile_i][port_i]].resp_valid;
         end else begin
-          mshr_noc_resp_ready_o[tile_i][port_i] = group_mshr_resp_ready_i[tile_i][port_i];
+          resp_in_ready[tile_i][port_i] = resp_out_ready[tile_i][port_i];
         end
 
-        if (mshr_noc_resp_valid_i[tile_i][port_i] && !resp_is_mshr[tile_i][port_i]) begin
-          group_mshr_resp_valid_o[tile_i][port_i] = 1'b1;
-          group_mshr_resp_o[tile_i][port_i] = mshr_noc_resp_i[tile_i][port_i];
+        if (resp_in_valid[tile_i][port_i] && !resp_is_mshr[tile_i][port_i]) begin
+          resp_out_valid[tile_i][port_i] = 1'b1;
+          resp_out[tile_i][port_i] = resp_in[tile_i][port_i];
           resp_from_bypass[tile_i][port_i] = 1'b1;
         end
       end
@@ -522,10 +610,10 @@ module mempool_group_mshr
     // Capture MSHR responses
     for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
       for (int port_i = 1; port_i < NumRemoteRespPortsPerTile; port_i++) begin
-        if (mshr_noc_resp_valid_i[tile_i][port_i] &&
+        if (resp_in_valid[tile_i][port_i] &&
             resp_is_mshr[tile_i][port_i] &&
-            mshr_noc_resp_ready_o[tile_i][port_i]) begin
-          mshr_d[resp_mshr_id[tile_i][port_i]].resp_buf   = mshr_noc_resp_i[tile_i][port_i];
+            resp_in_ready[tile_i][port_i]) begin
+          mshr_d[resp_mshr_id[tile_i][port_i]].resp_buf   = resp_in[tile_i][port_i];
           mshr_d[resp_mshr_id[tile_i][port_i]].resp_valid = 1'b1;
           mshr_d[resp_mshr_id[tile_i][port_i]].state      = MSHR_DRAIN_RESP;
         end
@@ -535,60 +623,156 @@ module mempool_group_mshr
     // ------------------------------------------------------------
     // Drain captured responses to all recorded sub-requests
     // ------------------------------------------------------------
-    for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
-      for (int port_i = 1; port_i < NumRemoteRespPortsPerTile; port_i++) begin
-        port_taken[tile_i][port_i] = mshr_noc_resp_valid_i[tile_i][port_i];
-      end
-    end
-
-    for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
-      drain_subreq_found[mshr_i] = 1'b0;
-      drain_subreq_idx[mshr_i] = '0;
-      drain_dst_tile[mshr_i] = '0;
-      drain_dst_port[mshr_i] = '0;
-      drain_last_subreq[mshr_i] = 1'b0;
-      if (mshr_d_valid[mshr_i] && mshr_d[mshr_i].resp_valid && mshr_d[mshr_i].state == MSHR_DRAIN_RESP) begin
-        for (int s = 0; s < MshrMergeReqs; s++) begin
-          if (mshr_d[mshr_i].sub_reqs[s].valid) begin
-            drain_subreq_found[mshr_i] = 1'b1;
-            drain_subreq_idx[mshr_i] = s[idx_width(MshrMergeReqs)-1:0];
-            break;
-          end
+    if (DrainMultiPort) begin
+      // Use all available response ports per cycle.
+      for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
+        for (int port_i = 1; port_i < NumRemoteRespPortsPerTile; port_i++) begin
+          port_taken[tile_i][port_i] = resp_in_valid[tile_i][port_i];
+          resp_sel_valid[tile_i][port_i] = 1'b0;
+          resp_sel_mshr_id[tile_i][port_i] = '0;
+          resp_sel_subreq_idx[tile_i][port_i] = '0;
         end
+      end
+      for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
+        drain_count[mshr_i] = '0;
+        for (int s = 0; s < MshrMergeReqs; s++) begin
+          subreq_claimed[mshr_i][s] = 1'b0;
+        end
+      end
 
-        if (drain_subreq_found[mshr_i]) begin
-          drain_dst_tile[mshr_i] = mshr_d[mshr_i].sub_reqs[drain_subreq_idx[mshr_i]].tile_id;
-          drain_dst_port[mshr_i] = mshr_d[mshr_i].sub_reqs[drain_subreq_idx[mshr_i]].port_id;
-
-          if (!port_taken[drain_dst_tile[mshr_i]][drain_dst_port[mshr_i]]) begin
-            group_mshr_resp_valid_o[drain_dst_tile[mshr_i]][drain_dst_port[mshr_i]] = 1'b1;
-            group_mshr_resp_o[drain_dst_tile[mshr_i]][drain_dst_port[mshr_i]].wen =
-                mshr_d[mshr_i].resp_buf.wen;
-            group_mshr_resp_o[drain_dst_tile[mshr_i]][drain_dst_port[mshr_i]].rdata.data =
-                mshr_d[mshr_i].resp_buf.rdata.data;
-            group_mshr_resp_o[drain_dst_tile[mshr_i]][drain_dst_port[mshr_i]].rdata.core_id =
-                mshr_d[mshr_i].sub_reqs[drain_subreq_idx[mshr_i]].core_id;
-            group_mshr_resp_o[drain_dst_tile[mshr_i]][drain_dst_port[mshr_i]].rdata.meta_id =
-                mshr_d[mshr_i].sub_reqs[drain_subreq_idx[mshr_i]].meta_id;
-            group_mshr_resp_o[drain_dst_tile[mshr_i]][drain_dst_port[mshr_i]].rdata.amo =
-                mshr_d[mshr_i].sub_reqs[drain_subreq_idx[mshr_i]].amo;
-            resp_from_mshr[drain_dst_tile[mshr_i]][drain_dst_port[mshr_i]] = 1'b1;
-            resp_mshr_id_dbg[drain_dst_tile[mshr_i]][drain_dst_port[mshr_i]] = mshr_id_t'(mshr_i);
-
-            if (group_mshr_resp_ready_i[drain_dst_tile[mshr_i]][drain_dst_port[mshr_i]]) begin
-              drain_last_subreq[mshr_i] = (mshr_d[mshr_i].sub_reqs_num == 1);
-              mshr_d[mshr_i].sub_reqs[drain_subreq_idx[mshr_i]].valid = 1'b0;
-              if (mshr_d[mshr_i].sub_reqs_num != 0) begin
-                mshr_d[mshr_i].sub_reqs_num = mshr_d[mshr_i].sub_reqs_num - 1;
-              end
-
-              // If all sub-requests are drained, free the entry.
-              if (drain_last_subreq[mshr_i]) begin
-                mshr_d_valid[mshr_i] = 1'b0;
-                mshr_d[mshr_i] = '0;
+      // Select one sub-request per response port.
+      for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
+        for (int port_i = 1; port_i < NumRemoteRespPortsPerTile; port_i++) begin
+          if (!port_taken[tile_i][port_i]) begin
+            for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
+              if (mshr_d_valid[mshr_i] && mshr_d[mshr_i].resp_valid &&
+                  mshr_d[mshr_i].state == MSHR_DRAIN_RESP) begin
+                for (int s = 0; s < MshrMergeReqs; s++) begin
+                  if (!resp_sel_valid[tile_i][port_i] &&
+                      mshr_d[mshr_i].sub_reqs[s].valid &&
+                      !subreq_claimed[mshr_i][s] &&
+                      (mshr_d[mshr_i].sub_reqs[s].tile_id == tile_group_id_t'(tile_i))) begin
+                    resp_sel_valid[tile_i][port_i] = 1'b1;
+                    resp_sel_mshr_id[tile_i][port_i] = mshr_id_t'(mshr_i);
+                    resp_sel_subreq_idx[tile_i][port_i] = s[idx_width(MshrMergeReqs)-1:0];
+                    subreq_claimed[mshr_i][s] = 1'b1;
+                  end
+                end
               end
             end
-            port_taken[drain_dst_tile[mshr_i]][drain_dst_port[mshr_i]] = 1'b1;
+          end
+        end
+      end
+
+      // Drive responses and clear sub-requests on handshake.
+      for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
+        for (int port_i = 1; port_i < NumRemoteRespPortsPerTile; port_i++) begin
+          if (resp_sel_valid[tile_i][port_i]) begin
+            resp_out_valid[tile_i][port_i] = 1'b1;
+            resp_out[tile_i][port_i].wen =
+                mshr_d[resp_sel_mshr_id[tile_i][port_i]].resp_buf.wen;
+            resp_out[tile_i][port_i].rdata.data =
+                mshr_d[resp_sel_mshr_id[tile_i][port_i]].resp_buf.rdata.data;
+            resp_out[tile_i][port_i].rdata.core_id =
+                mshr_d[resp_sel_mshr_id[tile_i][port_i]].sub_reqs[
+                    resp_sel_subreq_idx[tile_i][port_i]].core_id;
+            resp_out[tile_i][port_i].rdata.meta_id =
+                mshr_d[resp_sel_mshr_id[tile_i][port_i]].sub_reqs[
+                    resp_sel_subreq_idx[tile_i][port_i]].meta_id;
+            resp_out[tile_i][port_i].rdata.amo =
+                mshr_d[resp_sel_mshr_id[tile_i][port_i]].sub_reqs[
+                    resp_sel_subreq_idx[tile_i][port_i]].amo;
+            resp_from_mshr[tile_i][port_i] = 1'b1;
+            resp_mshr_id_dbg[tile_i][port_i] = resp_sel_mshr_id[tile_i][port_i];
+
+            if (resp_out_ready[tile_i][port_i]) begin
+              mshr_d[resp_sel_mshr_id[tile_i][port_i]].sub_reqs[
+                  resp_sel_subreq_idx[tile_i][port_i]].valid = 1'b0;
+              drain_count[resp_sel_mshr_id[tile_i][port_i]] =
+                  drain_count[resp_sel_mshr_id[tile_i][port_i]] + 1'b1;
+            end
+          end
+        end
+      end
+
+      // Update per-entry counters and free when all drained.
+      for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
+        if (drain_count[mshr_i] != '0) begin
+          if (mshr_d[mshr_i].sub_reqs_num >= drain_count[mshr_i]) begin
+            mshr_d[mshr_i].sub_reqs_num = mshr_d[mshr_i].sub_reqs_num - drain_count[mshr_i];
+          end else begin
+            mshr_d[mshr_i].sub_reqs_num = '0;
+          end
+          if (mshr_d[mshr_i].sub_reqs_num == '0) begin
+            mshr_d_valid[mshr_i] = 1'b0;
+            mshr_d[mshr_i] = '0;
+          end
+        end
+      end
+    end else begin
+      // Original behavior: one sub-request per MSHR per cycle.
+      for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
+        for (int port_i = 1; port_i < NumRemoteRespPortsPerTile; port_i++) begin
+          port_taken[tile_i][port_i] = resp_in_valid[tile_i][port_i];
+        end
+      end
+
+      for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
+        drain_subreq_found[mshr_i] = 1'b0;
+        drain_subreq_idx[mshr_i] = '0;
+        drain_dst_tile[mshr_i] = '0;
+        drain_dst_port[mshr_i] = '0;
+        drain_last_subreq[mshr_i] = 1'b0;
+        drain_port_found[mshr_i] = 1'b0;
+        if (mshr_d_valid[mshr_i] && mshr_d[mshr_i].resp_valid &&
+            mshr_d[mshr_i].state == MSHR_DRAIN_RESP) begin
+          for (int s = 0; s < MshrMergeReqs; s++) begin
+            if (mshr_d[mshr_i].sub_reqs[s].valid) begin
+              drain_subreq_found[mshr_i] = 1'b1;
+              drain_subreq_idx[mshr_i] = s[idx_width(MshrMergeReqs)-1:0];
+              break;
+            end
+          end
+
+          if (drain_subreq_found[mshr_i]) begin
+            drain_dst_tile[mshr_i] = mshr_d[mshr_i].sub_reqs[drain_subreq_idx[mshr_i]].tile_id;
+            for (int rp = 1; rp < NumRemoteRespPortsPerTile; rp++) begin
+              if (!drain_port_found[mshr_i] &&
+                  !port_taken[drain_dst_tile[mshr_i]][rp]) begin
+                drain_dst_port[mshr_i] = rp[RespPortIdW-1:0];
+                drain_port_found[mshr_i] = 1'b1;
+              end
+            end
+
+            if (drain_port_found[mshr_i]) begin
+              resp_out_valid[drain_dst_tile[mshr_i]][drain_dst_port[mshr_i]] = 1'b1;
+              resp_out[drain_dst_tile[mshr_i]][drain_dst_port[mshr_i]].wen =
+                  mshr_d[mshr_i].resp_buf.wen;
+              resp_out[drain_dst_tile[mshr_i]][drain_dst_port[mshr_i]].rdata.data =
+                  mshr_d[mshr_i].resp_buf.rdata.data;
+              resp_out[drain_dst_tile[mshr_i]][drain_dst_port[mshr_i]].rdata.core_id =
+                  mshr_d[mshr_i].sub_reqs[drain_subreq_idx[mshr_i]].core_id;
+              resp_out[drain_dst_tile[mshr_i]][drain_dst_port[mshr_i]].rdata.meta_id =
+                  mshr_d[mshr_i].sub_reqs[drain_subreq_idx[mshr_i]].meta_id;
+              resp_out[drain_dst_tile[mshr_i]][drain_dst_port[mshr_i]].rdata.amo =
+                  mshr_d[mshr_i].sub_reqs[drain_subreq_idx[mshr_i]].amo;
+              resp_from_mshr[drain_dst_tile[mshr_i]][drain_dst_port[mshr_i]] = 1'b1;
+              resp_mshr_id_dbg[drain_dst_tile[mshr_i]][drain_dst_port[mshr_i]] = mshr_id_t'(mshr_i);
+
+              if (resp_out_ready[drain_dst_tile[mshr_i]][drain_dst_port[mshr_i]]) begin
+                drain_last_subreq[mshr_i] = (mshr_d[mshr_i].sub_reqs_num == 1);
+                mshr_d[mshr_i].sub_reqs[drain_subreq_idx[mshr_i]].valid = 1'b0;
+                if (mshr_d[mshr_i].sub_reqs_num != 0) begin
+                  mshr_d[mshr_i].sub_reqs_num = mshr_d[mshr_i].sub_reqs_num - 1;
+                end
+
+                if (drain_last_subreq[mshr_i]) begin
+                  mshr_d_valid[mshr_i] = 1'b0;
+                  mshr_d[mshr_i] = '0;
+                end
+              end
+              port_taken[drain_dst_tile[mshr_i]][drain_dst_port[mshr_i]] = 1'b1;
+            end
           end
         end
       end
