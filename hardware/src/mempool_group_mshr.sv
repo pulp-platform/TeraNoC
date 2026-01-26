@@ -23,6 +23,8 @@ module mempool_group_mshr
   // 0: drain one sub-request per MSHR per cycle (original behavior)
   // 1: drain as many sub-requests as ports allow per cycle
   parameter bit DrainMultiPort = 1'b1,
+  // Simulation-only statistics/prints (translate_off).
+  parameter bit EnableStats   = 1'b1,
   // Spill register enables (0 = pass-through).
   parameter bit SpillReqIn     = 1'b0,
   parameter bit SpillReqOut    = 1'b1,
@@ -506,7 +508,9 @@ module mempool_group_mshr
         if (req_in_valid[tile_i][port_i]) begin
           if (req_merge_valid[tile_i][port_i]) begin
             // Merge hit: accept without touching NoC.
-            req_in_ready[tile_i][port_i] = req_merge_ready[tile_i][port_i];
+            req_in_ready[tile_i][port_i] =
+                req_merge_ready[tile_i][port_i] &&
+                (mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num < MshrMergeReqs);
             if (req_in_ready[tile_i][port_i]) begin
               if (mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num < MshrMergeReqs) begin
                 mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[
@@ -778,6 +782,203 @@ module mempool_group_mshr
       end
     end
   end
+
+  // pragma translate_off
+  `ifndef VERILATOR
+  generate
+    if (EnableStats) begin : gen_stats
+      // Configuration summary at start of simulation.
+      initial begin
+        $display("[%0t] %m MSHR cfg: NumGroups=%0d NumTilesPerGroup=%0d NumRemoteReqPortsPerTile=%0d NumRemoteRespPortsPerTile=%0d",
+                 $time, NumGroups, NumTilesPerGroup, NumRemoteReqPortsPerTile, NumRemoteRespPortsPerTile);
+        $display("[%0t] %m MSHR cfg: MshrNum=%0d MshrMergeWords=%0d MshrMergeReqs=%0d DrainMultiPort=%0d EnableStats=%0d",
+                 $time, MshrNum, MshrMergeWords, MshrMergeReqs, DrainMultiPort, EnableStats);
+        $display("[%0t] %m MSHR cfg: SpillReqIn=%0d SpillReqOut=%0d SpillRespIn=%0d SpillRespOut=%0d",
+                 $time, SpillReqIn, SpillReqOut, SpillRespIn, SpillRespOut);
+      end
+
+      // Per-cycle stats (combinational).
+      longint unsigned stat_mshr_valid_cycle;
+      longint unsigned stat_subreq_valid_cycle;
+      longint unsigned stat_req_accept_cycle;
+      longint unsigned stat_req_merge_cycle;
+      longint unsigned stat_req_alloc_cycle;
+      longint unsigned stat_req_bypass_cycle;
+      longint unsigned stat_req_mshr_overflow_cycle;
+      longint unsigned stat_req_subreq_overflow_cycle;
+      longint unsigned stat_resp_mshr_cycle;
+      longint unsigned stat_resp_bypass_cycle;
+      logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] stat_req_subreq_full_match;
+
+      // Accumulated counters.
+      longint unsigned stat_cycle_count;
+      longint unsigned stat_mshr_valid_acc;
+      longint unsigned stat_subreq_valid_acc;
+      longint unsigned stat_mshr_max_valid;
+      longint unsigned stat_subreq_max_valid;
+      longint unsigned stat_req_accept;
+      longint unsigned stat_req_merge;
+      longint unsigned stat_req_alloc;
+      longint unsigned stat_req_bypass;
+      longint unsigned stat_req_mshr_overflow;
+      longint unsigned stat_req_subreq_overflow;
+      longint unsigned stat_resp_mshr;
+      longint unsigned stat_resp_bypass;
+
+      always_comb begin
+        stat_mshr_valid_cycle = 0;
+        stat_subreq_valid_cycle = 0;
+        for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
+          if (mshr_q_valid[mshr_i]) begin
+            stat_mshr_valid_cycle++;
+            stat_subreq_valid_cycle += mshr_q[mshr_i].sub_reqs_num;
+          end
+        end
+
+        stat_req_accept_cycle = 0;
+        stat_req_merge_cycle = 0;
+        stat_req_alloc_cycle = 0;
+        stat_req_bypass_cycle = 0;
+        stat_req_mshr_overflow_cycle = 0;
+        stat_req_subreq_overflow_cycle = 0;
+        for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
+          for (int port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin
+            stat_req_subreq_full_match[tile_i][port_i] = 1'b0;
+            if (req_in_valid[tile_i][port_i] && req_is_load[tile_i][port_i]) begin
+              for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
+                if (!stat_req_subreq_full_match[tile_i][port_i] &&
+                    mshr_q_valid[mshr_i] &&
+                    (mshr_q[mshr_i].state == MSHR_WAIT_RESP) &&
+                    !mshr_resp_inflight[mshr_i] &&
+                    (mshr_q[mshr_i].base_addr == req_addr_key[tile_i][port_i]) &&
+                    (mshr_q[mshr_i].tgt_group_id == req_in[tile_i][port_i].tgt_group_id) &&
+                    (mshr_q[mshr_i].sub_reqs_num >= MshrMergeReqs)) begin
+                  stat_req_subreq_full_match[tile_i][port_i] = 1'b1;
+                end
+              end
+            end
+
+            if (req_in_valid[tile_i][port_i] && req_in_ready[tile_i][port_i]) begin
+              stat_req_accept_cycle++;
+              if (req_merge_valid[tile_i][port_i]) begin
+                stat_req_merge_cycle++;
+              end else begin
+                stat_req_bypass_cycle++;
+                if (req_is_load[tile_i][port_i]) begin
+                  if (req_alloc_found[tile_i][port_i]) begin
+                    stat_req_alloc_cycle++;
+                  end else begin
+                    stat_req_mshr_overflow_cycle++;
+                  end
+                end
+              end
+              if (req_is_load[tile_i][port_i] &&
+                  stat_req_subreq_full_match[tile_i][port_i]) begin
+                stat_req_subreq_overflow_cycle++;
+              end
+            end
+          end
+        end
+
+        stat_resp_mshr_cycle = 0;
+        stat_resp_bypass_cycle = 0;
+        for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
+          for (int port_i = 1; port_i < NumRemoteRespPortsPerTile; port_i++) begin
+            if (resp_out_valid[tile_i][port_i] && resp_out_ready[tile_i][port_i]) begin
+              if (resp_from_mshr[tile_i][port_i]) begin
+                stat_resp_mshr_cycle++;
+              end
+              if (resp_from_bypass[tile_i][port_i]) begin
+                stat_resp_bypass_cycle++;
+              end
+            end
+          end
+        end
+      end
+
+      always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+          stat_cycle_count <= 0;
+          stat_mshr_valid_acc <= 0;
+          stat_subreq_valid_acc <= 0;
+          stat_mshr_max_valid <= 0;
+          stat_subreq_max_valid <= 0;
+          stat_req_accept <= 0;
+          stat_req_merge <= 0;
+          stat_req_alloc <= 0;
+          stat_req_bypass <= 0;
+          stat_req_mshr_overflow <= 0;
+          stat_req_subreq_overflow <= 0;
+          stat_resp_mshr <= 0;
+          stat_resp_bypass <= 0;
+        end else begin
+          stat_cycle_count <= stat_cycle_count + 1;
+          stat_mshr_valid_acc <= stat_mshr_valid_acc + stat_mshr_valid_cycle;
+          stat_subreq_valid_acc <= stat_subreq_valid_acc + stat_subreq_valid_cycle;
+          if (stat_mshr_valid_cycle > stat_mshr_max_valid) begin
+            stat_mshr_max_valid <= stat_mshr_valid_cycle;
+          end
+          if (stat_subreq_valid_cycle > stat_subreq_max_valid) begin
+            stat_subreq_max_valid <= stat_subreq_valid_cycle;
+          end
+          stat_req_accept <= stat_req_accept + stat_req_accept_cycle;
+          stat_req_merge <= stat_req_merge + stat_req_merge_cycle;
+          stat_req_alloc <= stat_req_alloc + stat_req_alloc_cycle;
+          stat_req_bypass <= stat_req_bypass + stat_req_bypass_cycle;
+          stat_req_mshr_overflow <= stat_req_mshr_overflow + stat_req_mshr_overflow_cycle;
+          stat_req_subreq_overflow <= stat_req_subreq_overflow + stat_req_subreq_overflow_cycle;
+          stat_resp_mshr <= stat_resp_mshr + stat_resp_mshr_cycle;
+          stat_resp_bypass <= stat_resp_bypass + stat_resp_bypass_cycle;
+        end
+      end
+
+      final begin
+        real avg_mshr_valid;
+        real avg_mshr_util;
+        real avg_subreq_valid;
+        real avg_subreq_util;
+        real avg_subreq_per_mshr;
+
+        if (stat_cycle_count != 0) begin
+          avg_mshr_valid = $itor(stat_mshr_valid_acc) / $itor(stat_cycle_count);
+          avg_mshr_util = $itor(stat_mshr_valid_acc) /
+                          ($itor(stat_cycle_count) * $itor(MshrNum));
+          avg_subreq_valid = $itor(stat_subreq_valid_acc) / $itor(stat_cycle_count);
+          if ((MshrNum * MshrMergeReqs) != 0) begin
+            avg_subreq_util = $itor(stat_subreq_valid_acc) /
+                              ($itor(stat_cycle_count) * $itor(MshrNum) * $itor(MshrMergeReqs));
+          end else begin
+            avg_subreq_util = 0.0;
+          end
+          if (stat_mshr_valid_acc != 0) begin
+            avg_subreq_per_mshr = $itor(stat_subreq_valid_acc) / $itor(stat_mshr_valid_acc);
+          end else begin
+            avg_subreq_per_mshr = 0.0;
+          end
+        end else begin
+          avg_mshr_valid = 0.0;
+          avg_mshr_util = 0.0;
+          avg_subreq_valid = 0.0;
+          avg_subreq_util = 0.0;
+          avg_subreq_per_mshr = 0.0;
+        end
+
+        $display("[%0t] %m MSHR stats:", $time);
+        $display("  cycles=%0d", stat_cycle_count);
+        $display("  mshr_valid_avg=%0f mshr_valid_max=%0d mshr_util_avg=%0f",
+                 avg_mshr_valid, stat_mshr_max_valid, avg_mshr_util);
+        $display("  subreq_valid_avg=%0f subreq_valid_max=%0d subreq_util_avg=%0f subreq_per_valid_mshr_avg=%0f",
+                 avg_subreq_valid, stat_subreq_max_valid, avg_subreq_util, avg_subreq_per_mshr);
+        $display("  reqs: accepted=%0d merged=%0d alloc=%0d bypass=%0d mshr_overflow=%0d subreq_overflow=%0d",
+                 stat_req_accept, stat_req_merge, stat_req_alloc, stat_req_bypass,
+                 stat_req_mshr_overflow, stat_req_subreq_overflow);
+        $display("  resps: from_mshr=%0d from_bypass=%0d",
+                 stat_resp_mshr, stat_resp_bypass);
+      end
+    end
+  endgenerate
+  `endif
+  // pragma translate_on
 
   // pragma translate_off
   `ifndef VERILATOR
