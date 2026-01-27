@@ -267,7 +267,7 @@ int main() {
       return error;
     }
     else {
-      printf("success!");
+      printf("success!\n");
     }
   }
 
