@@ -17,12 +17,14 @@ module mempool_group_mshr
   parameter int NumRemoteReqPortsPerTile  = 2,
   parameter int NumRemoteRespPortsPerTile = 2,
 
-  parameter int MshrNum        = NumTilesPerGroup * 4,
+  parameter int MshrNum        = NumTilesPerGroup * 32,
   parameter int MshrMergeWords = 1,
-  parameter int MshrMergeReqs  = 16,
+  parameter int MshrMergeReqs  = 8,
   // 0: drain one sub-request per MSHR per cycle (original behavior)
   // 1: drain as many sub-requests as ports allow per cycle
   parameter bit DrainMultiPort = 1'b1,
+  // Keep responded entries as a small read-response cache.
+  parameter bit EnableRespCache = 1'b1,
   // Simulation-only statistics/prints (translate_off).
   parameter bit EnableStats   = 1'b1,
   // Spill register enables (0 = pass-through).
@@ -73,7 +75,8 @@ module mempool_group_mshr
   typedef enum logic [1:0] {
     MSHR_IDLE       = 2'b00,
     MSHR_WAIT_RESP  = 2'b01,
-    MSHR_DRAIN_RESP = 2'b10
+    MSHR_DRAIN_RESP = 2'b10,
+    MSHR_CACHED     = 2'b11
   } mshr_state_t;
 
   typedef struct packed {
@@ -136,7 +139,9 @@ module mempool_group_mshr
 
   // Request decode and merge lookup (per request port).
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_is_load;
+  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_is_store;
   tcdm_addr_t[NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_addr_key;
+  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrNum-1:0] req_addr_hit_map;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrNum-1:0] req_hit_mshr_map;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_hit_mshr;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_hit_mshr_sel_valid;
@@ -155,6 +160,7 @@ module mempool_group_mshr
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                                 req_merge_valid;
   mshr_id_t  [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                                 req_merge_mshr_id;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                                 req_merge_ready;
+  logic                                                                                           amo_invalidate;
 
   // Request allocation (banked allocator bookkeeping).
   logic    [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                req_alloc_found;
@@ -254,11 +260,19 @@ module mempool_group_mshr
 
   // Decode request type and address key for merge lookup.
   always_comb begin
+    amo_invalidate = 1'b0;
     for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
       for (int port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin
         req_is_load[tile_i][port_i] = req_in_valid[tile_i][port_i] &&
                                       ~req_in[tile_i][port_i].wen &&
                                       (req_in[tile_i][port_i].wdata.amo == '0);
+        req_is_store[tile_i][port_i] = req_in_valid[tile_i][port_i] &&
+                                       req_in[tile_i][port_i].wen &&
+                                       (req_in[tile_i][port_i].wdata.amo == '0);
+        if (req_in_valid[tile_i][port_i] &&
+            (req_in[tile_i][port_i].wdata.amo != '0)) begin
+          amo_invalidate = 1'b1;
+        end
         if (req_in_valid[tile_i][port_i]) begin
           req_addr_key[tile_i][port_i] =
               merge_addr_key(req_in[tile_i][port_i].tgt_addr);
@@ -340,13 +354,19 @@ module mempool_group_mshr
     for (genvar tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin : gen_req_mshr_lookup_tile
       for (genvar port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin : gen_req_mshr_lookup_port
         for (genvar mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin : gen_req_mshr_lookup_entry
+          assign req_addr_hit_map[tile_i][port_i][mshr_i] =
+              req_in_valid[tile_i][port_i] &&
+              mshr_q_valid[mshr_i] &&
+              (mshr_q[mshr_i].base_addr == req_addr_key[tile_i][port_i]) &&
+              (mshr_q[mshr_i].tgt_group_id == req_in[tile_i][port_i].tgt_group_id);
           assign req_hit_mshr_map[tile_i][port_i][mshr_i] =
               req_is_load[tile_i][port_i] &&
-              mshr_q_valid[mshr_i] &&
-              (mshr_q[mshr_i].state == MSHR_WAIT_RESP) &&
+              req_addr_hit_map[tile_i][port_i][mshr_i] &&
+              ((mshr_q[mshr_i].state == MSHR_WAIT_RESP) ||
+               (EnableRespCache && !amo_invalidate &&
+                (mshr_q[mshr_i].state == MSHR_CACHED) &&
+                mshr_q[mshr_i].resp_valid)) &&
               !mshr_resp_inflight[mshr_i] &&
-              (mshr_q[mshr_i].base_addr == req_addr_key[tile_i][port_i]) &&
-              (mshr_q[mshr_i].tgt_group_id == req_in[tile_i][port_i].tgt_group_id) &&
               (mshr_q[mshr_i].sub_reqs_num < MshrMergeReqs);
           assign mshr_hit_req_map[mshr_i][tile_i][port_i] = req_hit_mshr_map[tile_i][port_i][mshr_i];
         end
@@ -408,7 +428,12 @@ module mempool_group_mshr
         for (req_i = 0; req_i < ReqsPerMshr; req_i++) begin
           tile_i = (mshr_i * ReqsPerMshr + req_i) / (NumRemoteReqPortsPerTile - 1);
           port_i = (mshr_i * ReqsPerMshr + req_i) % (NumRemoteReqPortsPerTile - 1) + 1;
-          if (!mshr_q_valid[mshr_i] &&
+          if ((!mshr_q_valid[mshr_i] ||
+               (EnableRespCache &&
+                mshr_q_valid[mshr_i] &&
+                (mshr_q[mshr_i].state == MSHR_CACHED) &&
+                (mshr_q[mshr_i].sub_reqs_num == '0) &&
+                !mshr_hit_req[mshr_i])) &&
               !mshr_alloc_found[mshr_i] &&
               req_is_load[tile_i][port_i] &&
               !req_hit_req[tile_i][port_i] &&
@@ -428,7 +453,12 @@ module mempool_group_mshr
           mshr_start = (tile_i * (NumRemoteReqPortsPerTile - 1) + (port_i - 1)) * MshrsPerReq;
           mshr_end = (tile_i * (NumRemoteReqPortsPerTile - 1) + (port_i - 1) + 1) * MshrsPerReq;
           for (mshr_i = mshr_start; mshr_i < mshr_end; mshr_i++) begin
-            if (!mshr_q_valid[mshr_i] &&
+            if ((!mshr_q_valid[mshr_i] ||
+                 (EnableRespCache &&
+                  mshr_q_valid[mshr_i] &&
+                  (mshr_q[mshr_i].state == MSHR_CACHED) &&
+                  (mshr_q[mshr_i].sub_reqs_num == '0) &&
+                  !mshr_hit_req[mshr_i])) &&
                 !mshr_alloc_found[mshr_i] &&
                 req_is_load[tile_i][port_i] &&
                 !req_hit_req[tile_i][port_i] &&
@@ -530,6 +560,10 @@ module mempool_group_mshr
                     req_in[tile_i][port_i].wdata.amo;
                 mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num =
                     mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num + 1;
+                if (EnableRespCache &&
+                    (mshr_d[req_merge_mshr_id[tile_i][port_i]].state == MSHR_CACHED)) begin
+                  mshr_d[req_merge_mshr_id[tile_i][port_i]].state = MSHR_DRAIN_RESP;
+                end
               end
             end
           end else begin
@@ -564,11 +598,33 @@ module mempool_group_mshr
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].sub_reqs_num = 1;
               end
             end
+            if (EnableRespCache && !amo_invalidate &&
+                req_is_store[tile_i][port_i] && req_in_ready[tile_i][port_i]) begin
+              for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
+                if (mshr_d_valid[mshr_i] &&
+                    (mshr_d[mshr_i].state == MSHR_CACHED) &&
+                    req_addr_hit_map[tile_i][port_i][mshr_i]) begin
+                  mshr_d[mshr_i].resp_buf.rdata.data = req_in[tile_i][port_i].wdata.data;
+                  mshr_d[mshr_i].resp_buf.wen = 1'b0;
+                  mshr_d[mshr_i].resp_valid = 1'b1;
+                end
+              end
+            end
             // Forward the request to NoC (alloc or bypass).
             req_out_valid[tile_i][port_i] = 1'b1;
           end
         end else begin
           req_in_ready[tile_i][port_i] = 1'b1;
+        end
+      end
+    end
+
+    // AMO invalidates all cached entries (cache is best-effort only).
+    if (EnableRespCache && amo_invalidate) begin
+      for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
+        if (mshr_d_valid[mshr_i] && (mshr_d[mshr_i].state == MSHR_CACHED)) begin
+          mshr_d_valid[mshr_i] = 1'b0;
+          mshr_d[mshr_i] = '0;
         end
       end
     end
@@ -708,8 +764,12 @@ module mempool_group_mshr
             mshr_d[mshr_i].sub_reqs_num = '0;
           end
           if (mshr_d[mshr_i].sub_reqs_num == '0) begin
-            mshr_d_valid[mshr_i] = 1'b0;
-            mshr_d[mshr_i] = '0;
+            if (EnableRespCache) begin
+              mshr_d[mshr_i].state = MSHR_CACHED;
+            end else begin
+              mshr_d_valid[mshr_i] = 1'b0;
+              mshr_d[mshr_i] = '0;
+            end
           end
         end
       end
@@ -771,8 +831,12 @@ module mempool_group_mshr
                 end
 
                 if (drain_last_subreq[mshr_i]) begin
-                  mshr_d_valid[mshr_i] = 1'b0;
-                  mshr_d[mshr_i] = '0;
+                  if (EnableRespCache) begin
+                    mshr_d[mshr_i].state = MSHR_CACHED;
+                  end else begin
+                    mshr_d_valid[mshr_i] = 1'b0;
+                    mshr_d[mshr_i] = '0;
+                  end
                 end
               end
               port_taken[drain_dst_tile[mshr_i]][drain_dst_port[mshr_i]] = 1'b1;
