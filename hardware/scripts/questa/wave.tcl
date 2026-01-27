@@ -14,6 +14,30 @@ add wave -noupdate -group Utilization -color {Cornflower Blue} -format Analog-St
 add wave -noupdate -group Utilization /mempool_tb/lsu_handshake
 add wave -noupdate -group Utilization -color {Cornflower Blue} -format Analog-Step -height 84 -max $num_cores -radix unsigned /mempool_tb/lsu_pressure
 add wave -noupdate -group Utilization /mempool_tb/lsu_request
+if {![catch {examine -radix dec /mempool_tb/spatz_issue_utilization}]} {
+  set spatz_lsu_channels [expr $num_cores * [examine -radix dec mempool_pkg::NumMemPortsPerSpatz]]
+  if {$spatz_lsu_channels < 1} { set spatz_lsu_channels 1 }
+  add wave -noupdate -group Utilization -color {Cornflower Blue} -format Analog-Step -height 84 -max $num_cores -radix unsigned /mempool_tb/spatz_issue_utilization
+  add wave -noupdate -group Utilization /mempool_tb/spatz_issue_handshake
+  add wave -noupdate -group Utilization -color {Cornflower Blue} -format Analog-Step -height 84 -max $num_cores -radix unsigned /mempool_tb/spatz_issue_pressure
+  add wave -noupdate -group Utilization /mempool_tb/spatz_issue_request
+  add wave -noupdate -group Utilization -color {Cornflower Blue} -format Analog-Step -height 84 -max $num_cores -radix unsigned /mempool_tb/spatz_rsp_utilization
+  add wave -noupdate -group Utilization /mempool_tb/spatz_rsp_handshake
+  add wave -noupdate -group Utilization -color {Cornflower Blue} -format Analog-Step -height 84 -max $num_cores -radix unsigned /mempool_tb/spatz_rsp_pressure
+  add wave -noupdate -group Utilization /mempool_tb/spatz_rsp_request
+  add wave -noupdate -group Utilization -color {Cornflower Blue} -format Analog-Step -height 84 -max $spatz_lsu_channels -radix unsigned /mempool_tb/spatz_lsu_utilization
+  add wave -noupdate -group Utilization /mempool_tb/spatz_lsu_handshake
+  add wave -noupdate -group Utilization -color {Cornflower Blue} -format Analog-Step -height 84 -max $spatz_lsu_channels -radix unsigned /mempool_tb/spatz_lsu_pressure
+  add wave -noupdate -group Utilization /mempool_tb/spatz_lsu_request
+  add wave -noupdate -group Utilization -color {Cornflower Blue} -format Analog-Step -height 84 -max $num_cores -radix unsigned /mempool_tb/spatz_fpu_lsu_utilization
+  add wave -noupdate -group Utilization /mempool_tb/spatz_fpu_lsu_handshake
+  add wave -noupdate -group Utilization -color {Cornflower Blue} -format Analog-Step -height 84 -max $num_cores -radix unsigned /mempool_tb/spatz_fpu_lsu_pressure
+  add wave -noupdate -group Utilization /mempool_tb/spatz_fpu_lsu_request
+  add wave -noupdate -group Utilization -color {Cornflower Blue} -format Analog-Step -height 84 -max $num_cores -radix unsigned /mempool_tb/spatz_fpu_utilization
+  add wave -noupdate -group Utilization /mempool_tb/spatz_fpu_handshake
+  add wave -noupdate -group Utilization -color {Cornflower Blue} -format Analog-Step -height 84 -max $num_cores -radix unsigned /mempool_tb/spatz_fpu_pressure
+  add wave -noupdate -group Utilization /mempool_tb/spatz_fpu_request
+}
 if {[examine -radix dec /snitch_pkg::XPULPIMG]} {
   add wave -noupdate -group Utilization -color {Cornflower Blue} -format Analog-Step -height 84 -max $num_cores -radix unsigned /mempool_tb/gen_utilization/dspu_utilization
   add wave -noupdate -group Utilization /mempool_tb/gen_utilization/dspu_handshake
@@ -23,14 +47,38 @@ if {[examine -radix dec /snitch_pkg::XPULPIMG]} {
 set axi_channels [expr [examine -radix dec mempool_pkg::NumGroups] * [examine -radix dec mempool_pkg::NumAXIMastersPerGroup]]
 add wave -noupdate -group Utilization -color {Cornflower Blue} -format Analog-Step -height 84 -max $axi_channels -radix unsigned /mempool_tb/axi_w_utilization
 add wave -noupdate -group Utilization -color {Cornflower Blue} -format Analog-Step -height 84 -max $axi_channels -radix unsigned /mempool_tb/axi_r_utilization
+if {![catch {examine -radix dec /mempool_tb/noc_req_utilization}]} {
+  set noc_req_channels [expr [examine -radix dec mempool_pkg::NumGroups] * [examine -radix dec mempool_pkg::NumTilesPerGroup] * ([examine -radix dec mempool_pkg::NumRemoteReqPortsPerTile] - 1)]
+  set noc_resp_channels [expr [examine -radix dec mempool_pkg::NumGroups] * [examine -radix dec mempool_pkg::NumTilesPerGroup] * ([examine -radix dec mempool_pkg::NumRemoteRespPortsPerTile] - 1)]
+  if {$noc_req_channels < 1} { set noc_req_channels 1 }
+  if {$noc_resp_channels < 1} { set noc_resp_channels 1 }
+  set noc_total_channels [expr $noc_req_channels + $noc_resp_channels]
+  add wave -noupdate -group NoC_Utilization -color {Cornflower Blue} -format Analog-Step -height 84 -max $noc_req_channels -radix unsigned /mempool_tb/noc_req_valid_total
+  add wave -noupdate -group NoC_Utilization -color {Cornflower Blue} -format Analog-Step -height 84 -max $noc_req_channels -radix unsigned /mempool_tb/noc_req_utilization
+  add wave -noupdate -group NoC_Utilization -color {Cornflower Blue} -format Analog-Step -height 84 -max $noc_req_channels -radix unsigned /mempool_tb/noc_req_pressure
+  add wave -noupdate -group NoC_Utilization -color {Cornflower Blue} -format Analog-Step -height 84 -max $noc_resp_channels -radix unsigned /mempool_tb/noc_resp_valid_total
+  add wave -noupdate -group NoC_Utilization -color {Cornflower Blue} -format Analog-Step -height 84 -max $noc_resp_channels -radix unsigned /mempool_tb/noc_resp_utilization
+  add wave -noupdate -group NoC_Utilization -color {Cornflower Blue} -format Analog-Step -height 84 -max $noc_resp_channels -radix unsigned /mempool_tb/noc_resp_pressure
+  add wave -noupdate -group NoC_Utilization -color {Cornflower Blue} -format Analog-Step -height 84 -max $noc_total_channels -radix unsigned /mempool_tb/noc_total_utilization
+}
 
 
 # Add a vector of the core's wfi signal to quickly see which cores are active
 add wave /mempool_tb/wfi
 
 # Add the spm bank util of one tile
-set NumX [examine -radix dec mempool_pkg::NumX]
-set NumY [examine -radix dec mempool_pkg::NumY]
+set NumX ""
+if {[catch {set NumX [examine -radix dec mempool_pkg::NumX]}]} {
+  catch {set NumX [examine -radix dec /mempool_pkg::NumX]}
+}
+set NumY ""
+if {[catch {set NumY [examine -radix dec mempool_pkg::NumY]}]} {
+  catch {set NumY [examine -radix dec /mempool_pkg::NumY]}
+}
+if {[catch {expr {$NumX + 0}}] || [catch {expr {$NumY + 0}}]} {
+  set NumX 1
+  set NumY 1
+}
 for {set group 0} {$group < [examine -radix dec /mempool_pkg::NumGroups]} {incr group} {
     for {set tile 0} {$tile < [examine -radix dec /mempool_pkg::NumTilesPerGroup]} {incr tile} {
         add wave -Group super_bank_req_valid -position insertpoint sim:/mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr ${group}/${NumX}]\]/gen_groups_y\[[expr ${group}%${NumY}]\]/gen_rtl_group/i_group/i_mempool_group/gen_tiles\[${tile}\]/i_tile/superbank_req_valid
@@ -39,13 +87,38 @@ for {set group 0} {$group < [examine -radix dec /mempool_pkg::NumGroups]} {incr 
 
 # Add all cores from group 0 tile 0
 for {set core 0}  {$core < [examine -radix dec mempool_pkg::NumCoresPerTile]} {incr core} {
-    do ../scripts/questa/wave_core.tcl 0 0 $core $NumY
+    if {![catch {examine -radix dec /mempool_tb/spatz_issue_utilization}]} {
+        do ../scripts/questa/wave_spatz_core.tcl 0 0 $core $NumY
+    } else {
+        do ../scripts/questa/wave_core.tcl 0 0 $core $NumY
+    }
 }
 
-# Add specific cores from different tiles
-do ../scripts/questa/wave_core.tcl 1 0 0 $NumY
-do ../scripts/questa/wave_core.tcl 1 1 1 $NumY
-do ../scripts/questa/wave_core.tcl [expr [examine -radix dec mempool_pkg::NumGroups]-1] [expr [examine -radix dec mempool_pkg::NumTilesPerGroup]-1] [expr [examine -radix dec mempool_pkg::NumCoresPerTile]-1] $NumY
+# Add specific cores from different tiles (guarded for small configs)
+set NumGroups [examine -radix dec mempool_pkg::NumGroups]
+set NumTilesPerGroup [examine -radix dec mempool_pkg::NumTilesPerGroup]
+set NumCoresPerTile [examine -radix dec mempool_pkg::NumCoresPerTile]
+if {$NumGroups > 1} {
+    if {![catch {examine -radix dec /mempool_tb/spatz_issue_utilization}]} {
+        do ../scripts/questa/wave_spatz_core.tcl 1 0 0 $NumY
+    } else {
+        do ../scripts/questa/wave_core.tcl 1 0 0 $NumY
+    }
+}
+if {$NumGroups > 1 && $NumTilesPerGroup > 1 && $NumCoresPerTile > 1} {
+    if {![catch {examine -radix dec /mempool_tb/spatz_issue_utilization}]} {
+        do ../scripts/questa/wave_spatz_core.tcl 1 1 1 $NumY
+    } else {
+        do ../scripts/questa/wave_core.tcl 1 1 1 $NumY
+    }
+}
+if {$NumGroups > 0 && $NumTilesPerGroup > 0 && $NumCoresPerTile > 0} {
+    if {![catch {examine -radix dec /mempool_tb/spatz_issue_utilization}]} {
+        do ../scripts/questa/wave_spatz_core.tcl [expr {$NumGroups-1}] [expr {$NumTilesPerGroup-1}] [expr {$NumCoresPerTile-1}] $NumY
+    } else {
+        do ../scripts/questa/wave_core.tcl [expr {$NumGroups-1}] [expr {$NumTilesPerGroup-1}] [expr {$NumCoresPerTile-1}] $NumY
+    }
+}
 
 # Add groups
 set DmaBurstLen [examine -radix dec mempool_pkg::DmaBurstLen]
@@ -101,8 +174,14 @@ do ../scripts/questa/wave_cluster.tcl
 # Add System
 add wave -group system -group soc_xbar /mempool_tb/dut/i_soc_xbar/*
 add wave -group system -group axi2mem_bootrom /mempool_tb/dut/i_axi2mem_bootrom/*
-if {[examine -radix dec mempool_pkg::NumDrams] ne ""} {
-  for {set dram 0} {$dram < [examine -radix dec mempool_pkg::NumDrams]} {incr dram} {
+set NumDrams ""
+if {![catch {examine -radix dec mempool_pkg::NumDrams} NumDrams]} {
+  # using mempool_pkg::NumDrams
+} elseif {![catch {examine -radix dec /mempool_pkg::NumDrams} NumDrams]} {
+  # using /mempool_pkg::NumDrams
+}
+if {$NumDrams ne ""} {
+  for {set dram 0} {$dram < $NumDrams} {incr dram} {
       add wave -group system -group dram_[$dram] /mempool_tb/dut/gen_drams[$dram]/i_axi_dram_sim/*
   }
 } else {
