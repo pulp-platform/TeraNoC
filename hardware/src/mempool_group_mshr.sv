@@ -93,10 +93,7 @@ module mempool_group_mshr
   typedef struct packed {
     tcdm_addr_t base_addr;
     group_id_t tgt_group_id;
-    tile_group_id_t owner_tile;
-    logic [RespPortIdW-1:0] owner_port;
-    tile_core_id_t owner_core;
-    meta_id_t owner_meta;
+    // sub_reqs[0] is always reserved for the owner request.
     mempool_group_mshr_sub_req_t [MshrMergeReqs-1:0] sub_reqs;
     logic [SubReqCountW-1:0] sub_reqs_num;
     tcdm_master_resp_t resp_buf;
@@ -627,14 +624,9 @@ module mempool_group_mshr
                     req_addr_key[tile_i][port_i];
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].tgt_group_id =
                     req_in[tile_i][port_i].tgt_group_id;
-                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].owner_tile = tile_i;
-                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].owner_port = port_i;
-                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].owner_core =
-                    req_in[tile_i][port_i].wdata.core_id;
-                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].owner_meta =
-                    req_in[tile_i][port_i].wdata.meta_id;
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].state      = MSHR_WAIT_RESP;
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].resp_valid = 1'b0;
+                // Owner request is always stored in sub_reqs[0].
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].sub_reqs[0].valid   = 1'b1;
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].sub_reqs[0].tile_id = tile_i;
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].sub_reqs[0].port_id = port_i;
@@ -691,9 +683,10 @@ module mempool_group_mshr
           for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
             if (mshr_q_valid[mshr_i] &&
                 mshr_q[mshr_i].state == MSHR_WAIT_RESP &&
-                mshr_q[mshr_i].owner_tile == tile_i &&
-                mshr_q[mshr_i].owner_core == resp_in[tile_i][port_i].rdata.core_id &&
-                mshr_q[mshr_i].owner_meta == resp_in[tile_i][port_i].rdata.meta_id) begin
+                mshr_q[mshr_i].sub_reqs[0].valid &&
+                (mshr_q[mshr_i].sub_reqs[0].tile_id == tile_group_id_t'(tile_i)) &&
+                (mshr_q[mshr_i].sub_reqs[0].core_id == resp_in[tile_i][port_i].rdata.core_id) &&
+                (mshr_q[mshr_i].sub_reqs[0].meta_id == resp_in[tile_i][port_i].rdata.meta_id)) begin
               resp_is_mshr[tile_i][port_i] = 1'b1;
               resp_mshr_id[tile_i][port_i] = mshr_id_t'(mshr_i);
               break;
@@ -939,6 +932,9 @@ module mempool_group_mshr
         real avg_subreq_per_mshr;
         real avg_cache_valid;
         real cache_hit_rate;
+        real avg_mshr_valid_uncached;
+        real avg_mshr_util_uncached;
+        real mshr_max_valid_uncached;
 
         if (cycles != 0) begin
           avg_mshr_valid = $itor(mshr_valid_acc) / $itor(cycles);
@@ -956,6 +952,17 @@ module mempool_group_mshr
             avg_subreq_per_mshr = 0.0;
           end
           avg_cache_valid = $itor(cache_valid_acc) / $itor(cycles);
+          avg_mshr_valid_uncached = avg_mshr_valid - avg_cache_valid;
+          if (MshrNum != 0) begin
+            avg_mshr_util_uncached = avg_mshr_valid_uncached / $itor(MshrNum);
+          end else begin
+            avg_mshr_util_uncached = 0.0;
+          end
+          if (mshr_max_valid >= cache_max_valid) begin
+            mshr_max_valid_uncached = $itor(mshr_max_valid - cache_max_valid);
+          end else begin
+            mshr_max_valid_uncached = 0.0;
+          end
           if ((cache_hit + cache_evict) != 0) begin
             cache_hit_rate = $itor(cache_hit) / $itor(cache_hit + cache_evict);
           end else begin
@@ -969,12 +976,19 @@ module mempool_group_mshr
           avg_subreq_per_mshr = 0.0;
           avg_cache_valid = 0.0;
           cache_hit_rate = 0.0;
+          avg_mshr_valid_uncached = 0.0;
+          avg_mshr_util_uncached = 0.0;
+          mshr_max_valid_uncached = 0.0;
         end
 
         $display("[%0t] %m MSHR stats (%s):", $time, tag);
         $display("  cycles=%0d", cycles);
         $display("  mshr_valid_avg=%0f mshr_valid_max=%0d mshr_util_avg=%0f",
                  avg_mshr_valid, mshr_max_valid, avg_mshr_util);
+        if (EnableRespCache) begin
+          $display("  mshr_valid_uncached_avg=%0f mshr_valid_uncached_max=%0f mshr_util_uncached_avg=%0f",
+                   avg_mshr_valid_uncached, mshr_max_valid_uncached, avg_mshr_util_uncached);
+        end
         $display("  subreq_valid_avg=%0f subreq_valid_max=%0d subreq_util_avg=%0f subreq_per_valid_mshr_avg=%0f",
                  avg_subreq_valid, subreq_max_valid, avg_subreq_util, avg_subreq_per_mshr);
         $display("  reqs: accepted=%0d merged=%0d alloc=%0d bypass=%0d mshr_overflow=%0d subreq_overflow=%0d",
