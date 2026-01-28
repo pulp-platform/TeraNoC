@@ -17,7 +17,8 @@ module mempool_group_mshr
   parameter int NumRemoteReqPortsPerTile  = 2,
   parameter int NumRemoteRespPortsPerTile = 2,
 
-  parameter int MshrNum        = NumTilesPerGroup * 32,
+  // parameter int MshrNum        = NumTilesPerGroup * 32,
+  parameter int MshrNum        = NumTilesPerGroup * 2,
   parameter int MshrMergeWords = 1,
   parameter int MshrMergeReqs  = 8,
   // 0: drain one sub-request per MSHR per cycle (original behavior)
@@ -192,6 +193,7 @@ module mempool_group_mshr
   `ifndef VERILATOR
   logic [63-1:0]                                                               stat_mshr_valid_cycle;
   logic [63-1:0]                                                               stat_cache_valid_cycle;
+  logic [63-1:0]                                                               stat_mshr_valid_uncached_cycle;
   logic [63-1:0]                                                               stat_subreq_valid_cycle;
   logic [63-1:0]                                                               stat_req_accept_cycle;
   logic [63-1:0]                                                               stat_req_merge_cycle;
@@ -210,10 +212,12 @@ module mempool_group_mshr
 
   logic [63-1:0]                                                               stat_cycle_count;
   logic [63-1:0]                                                               stat_mshr_valid_acc;
+  logic [63-1:0]                                                               stat_mshr_valid_uncached_acc;
   logic [63-1:0]                                                               stat_cache_valid_acc;
   logic [63-1:0]                                                               stat_subreq_valid_acc;
   logic [63-1:0]                                                               stat_mshr_max_valid;
   logic [63-1:0]                                                               stat_cache_max_valid;
+  logic [63-1:0]                                                               stat_mshr_max_valid_uncached;
   logic [63-1:0]                                                               stat_subreq_max_valid;
   logic [63-1:0]                                                               stat_req_accept;
   logic [63-1:0]                                                               stat_req_merge;
@@ -229,6 +233,29 @@ module mempool_group_mshr
   logic [63-1:0]                                                               stat_cache_store_update;
   logic [63-1:0]                                                               stat_cache_amo_inval;
   logic                                                                        stat_trace_q;
+  // Next-state debug signals for stats (for waveform visibility).
+  logic [63-1:0]                                                               stat_cycle_count_next;
+  logic [63-1:0]                                                               stat_mshr_valid_acc_next;
+  logic [63-1:0]                                                               stat_mshr_valid_uncached_acc_next;
+  logic [63-1:0]                                                               stat_cache_valid_acc_next;
+  logic [63-1:0]                                                               stat_subreq_valid_acc_next;
+  logic [63-1:0]                                                               stat_mshr_max_valid_next;
+  logic [63-1:0]                                                               stat_cache_max_valid_next;
+  logic [63-1:0]                                                               stat_mshr_max_valid_uncached_next;
+  logic [63-1:0]                                                               stat_subreq_max_valid_next;
+  logic [63-1:0]                                                               stat_req_accept_next;
+  logic [63-1:0]                                                               stat_req_merge_next;
+  logic [63-1:0]                                                               stat_req_alloc_next;
+  logic [63-1:0]                                                               stat_req_bypass_next;
+  logic [63-1:0]                                                               stat_req_mshr_overflow_next;
+  logic [63-1:0]                                                               stat_req_subreq_overflow_next;
+  logic [63-1:0]                                                               stat_resp_mshr_next;
+  logic [63-1:0]                                                               stat_resp_bypass_next;
+  logic [63-1:0]                                                               stat_cache_hit_next;
+  logic [63-1:0]                                                               stat_cache_fill_next;
+  logic [63-1:0]                                                               stat_cache_evict_next;
+  logic [63-1:0]                                                               stat_cache_store_update_next;
+  logic [63-1:0]                                                               stat_cache_amo_inval_next;
   `endif
   // pragma translate_on
 
@@ -943,6 +970,7 @@ module mempool_group_mshr
       task automatic print_stats(input string tag,
                                  input logic [63-1:0] cycles,
                                  input logic [63-1:0] mshr_valid_acc,
+                                 input logic [63-1:0] mshr_valid_uncached_acc,
                                  input logic [63-1:0] subreq_valid_acc,
                                  input logic [63-1:0] mshr_max_valid,
                                  input logic [63-1:0] subreq_max_valid,
@@ -956,6 +984,7 @@ module mempool_group_mshr
                                  input logic [63-1:0] resp_bypass,
                                  input logic [63-1:0] cache_valid_acc,
                                  input logic [63-1:0] cache_max_valid,
+                                 input logic [63-1:0] mshr_max_valid_uncached_in,
                                  input logic [63-1:0] cache_hit,
                                  input logic [63-1:0] cache_fill,
                                  input logic [63-1:0] cache_evict,
@@ -982,8 +1011,9 @@ module mempool_group_mshr
           end else begin
             avg_subreq_util = 0.0;
           end
-          if (mshr_valid_acc != 0) begin
-            avg_subreq_per_mshr = $itor(subreq_valid_acc) / $itor(mshr_valid_acc);
+          if ((EnableRespCache ? mshr_valid_uncached_acc : mshr_valid_acc) != 0) begin
+            avg_subreq_per_mshr = $itor(subreq_valid_acc) /
+                                  $itor(EnableRespCache ? mshr_valid_uncached_acc : mshr_valid_acc);
           end else begin
             avg_subreq_per_mshr = 0.0;
           end
@@ -994,11 +1024,7 @@ module mempool_group_mshr
           end else begin
             avg_mshr_util_uncached = 0.0;
           end
-          if (mshr_max_valid >= cache_max_valid) begin
-            mshr_max_valid_uncached = $itor(mshr_max_valid - cache_max_valid);
-          end else begin
-            mshr_max_valid_uncached = 0.0;
-          end
+          mshr_max_valid_uncached = $itor(mshr_max_valid_uncached_in);
           if ((cache_hit + cache_evict) != 0) begin
             cache_hit_rate = $itor(cache_hit) / $itor(cache_hit + cache_evict);
           end else begin
@@ -1043,16 +1069,24 @@ module mempool_group_mshr
       always_comb begin
         stat_mshr_valid_cycle = '0;
         stat_cache_valid_cycle = '0;
+        stat_mshr_valid_uncached_cycle = '0;
         stat_subreq_valid_cycle = '0;
         for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
           if (mshr_q_valid[mshr_i]) begin
             stat_mshr_valid_cycle = stat_mshr_valid_cycle + 1'b1;
-            stat_subreq_valid_cycle =
-                stat_subreq_valid_cycle + mshr_q[mshr_i].sub_reqs_num;
             if (mshr_q[mshr_i].state == MSHR_CACHED) begin
               stat_cache_valid_cycle = stat_cache_valid_cycle + 1'b1;
+            end else begin
+              stat_subreq_valid_cycle =
+                  stat_subreq_valid_cycle + mshr_q[mshr_i].sub_reqs_num;
             end
           end
+        end
+        if (stat_mshr_valid_cycle >= stat_cache_valid_cycle) begin
+          stat_mshr_valid_uncached_cycle =
+              stat_mshr_valid_cycle - stat_cache_valid_cycle;
+        end else begin
+          stat_mshr_valid_uncached_cycle = '0;
         end
 
         stat_req_accept_cycle = '0;
@@ -1125,8 +1159,8 @@ module mempool_group_mshr
             for (int port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin
               if (req_in_valid[tile_i][port_i] &&
                   req_in_ready[tile_i][port_i] &&
-                  req_merge_valid[tile_i][port_i] &&
-                  (mshr_q[req_merge_mshr_id[tile_i][port_i]].state == MSHR_CACHED)) begin
+                  req_hit_mshr_sel_valid[tile_i][port_i] &&
+                  (mshr_q[req_hit_mshr_sel_id[tile_i][port_i]].state == MSHR_CACHED)) begin
                 stat_cache_hit_cycle = stat_cache_hit_cycle + 1'b1;
               end
               if (req_in_valid[tile_i][port_i] &&
@@ -1169,35 +1203,17 @@ module mempool_group_mshr
       end
 
       always_ff @(posedge clk_i or negedge rst_ni) begin
-        logic [63-1:0] cycle_next;
-        logic [63-1:0] mshr_valid_acc_next;
-        logic [63-1:0] cache_valid_acc_next;
-        logic [63-1:0] subreq_valid_acc_next;
-        logic [63-1:0] mshr_max_valid_next;
-        logic [63-1:0] cache_max_valid_next;
-        logic [63-1:0] subreq_max_valid_next;
-        logic [63-1:0] req_accept_next;
-        logic [63-1:0] req_merge_next;
-        logic [63-1:0] req_alloc_next;
-        logic [63-1:0] req_bypass_next;
-        logic [63-1:0] req_mshr_overflow_next;
-        logic [63-1:0] req_subreq_overflow_next;
-        logic [63-1:0] resp_mshr_next;
-        logic [63-1:0] resp_bypass_next;
-        logic [63-1:0] cache_hit_next;
-        logic [63-1:0] cache_fill_next;
-        logic [63-1:0] cache_evict_next;
-        logic [63-1:0] cache_store_update_next;
-        logic [63-1:0] cache_amo_inval_next;
         logic            print_period;
         logic            print_fall;
         if (!rst_ni) begin
           stat_cycle_count <= 0;
           stat_mshr_valid_acc <= 0;
+          stat_mshr_valid_uncached_acc <= 0;
           stat_cache_valid_acc <= 0;
           stat_subreq_valid_acc <= 0;
           stat_mshr_max_valid <= 0;
           stat_cache_max_valid <= 0;
+          stat_mshr_max_valid_uncached <= 0;
           stat_subreq_max_valid <= 0;
           stat_req_accept <= 0;
           stat_req_merge <= 0;
@@ -1216,86 +1232,99 @@ module mempool_group_mshr
         end else begin
           stat_trace_q <= csr_trace_any_i;
 
-          cycle_next = stat_cycle_count;
-          mshr_valid_acc_next = stat_mshr_valid_acc;
-          cache_valid_acc_next = stat_cache_valid_acc;
-          subreq_valid_acc_next = stat_subreq_valid_acc;
-          mshr_max_valid_next = stat_mshr_max_valid;
-          cache_max_valid_next = stat_cache_max_valid;
-          subreq_max_valid_next = stat_subreq_max_valid;
-          req_accept_next = stat_req_accept;
-          req_merge_next = stat_req_merge;
-          req_alloc_next = stat_req_alloc;
-          req_bypass_next = stat_req_bypass;
-          req_mshr_overflow_next = stat_req_mshr_overflow;
-          req_subreq_overflow_next = stat_req_subreq_overflow;
-          resp_mshr_next = stat_resp_mshr;
-          resp_bypass_next = stat_resp_bypass;
-          cache_hit_next = stat_cache_hit;
-          cache_fill_next = stat_cache_fill;
-          cache_evict_next = stat_cache_evict;
-          cache_store_update_next = stat_cache_store_update;
-          cache_amo_inval_next = stat_cache_amo_inval;
+          stat_cycle_count_next = stat_cycle_count;
+          stat_mshr_valid_acc_next = stat_mshr_valid_acc;
+          stat_mshr_valid_uncached_acc_next = stat_mshr_valid_uncached_acc;
+          stat_cache_valid_acc_next = stat_cache_valid_acc;
+          stat_subreq_valid_acc_next = stat_subreq_valid_acc;
+          stat_mshr_max_valid_next = stat_mshr_max_valid;
+          stat_cache_max_valid_next = stat_cache_max_valid;
+          stat_mshr_max_valid_uncached_next = stat_mshr_max_valid_uncached;
+          stat_subreq_max_valid_next = stat_subreq_max_valid;
+          stat_req_accept_next = stat_req_accept;
+          stat_req_merge_next = stat_req_merge;
+          stat_req_alloc_next = stat_req_alloc;
+          stat_req_bypass_next = stat_req_bypass;
+          stat_req_mshr_overflow_next = stat_req_mshr_overflow;
+          stat_req_subreq_overflow_next = stat_req_subreq_overflow;
+          stat_resp_mshr_next = stat_resp_mshr;
+          stat_resp_bypass_next = stat_resp_bypass;
+          stat_cache_hit_next = stat_cache_hit;
+          stat_cache_fill_next = stat_cache_fill;
+          stat_cache_evict_next = stat_cache_evict;
+          stat_cache_store_update_next = stat_cache_store_update;
+          stat_cache_amo_inval_next = stat_cache_amo_inval;
 
           if (csr_trace_any_i) begin
-            cycle_next = stat_cycle_count + 1;
-            mshr_valid_acc_next = stat_mshr_valid_acc + stat_mshr_valid_cycle;
-            cache_valid_acc_next = stat_cache_valid_acc + stat_cache_valid_cycle;
-            subreq_valid_acc_next = stat_subreq_valid_acc + stat_subreq_valid_cycle;
-            if (stat_mshr_valid_cycle > mshr_max_valid_next) begin
-              mshr_max_valid_next = stat_mshr_valid_cycle;
+            stat_cycle_count_next = stat_cycle_count + 1;
+            stat_mshr_valid_acc_next = stat_mshr_valid_acc + stat_mshr_valid_cycle;
+            stat_mshr_valid_uncached_acc_next =
+                stat_mshr_valid_uncached_acc + stat_mshr_valid_uncached_cycle;
+            stat_cache_valid_acc_next = stat_cache_valid_acc + stat_cache_valid_cycle;
+            stat_subreq_valid_acc_next = stat_subreq_valid_acc + stat_subreq_valid_cycle;
+            if (stat_mshr_valid_cycle > stat_mshr_max_valid_next) begin
+              stat_mshr_max_valid_next = stat_mshr_valid_cycle;
             end
-            if (stat_cache_valid_cycle > cache_max_valid_next) begin
-              cache_max_valid_next = stat_cache_valid_cycle;
+            if (stat_cache_valid_cycle > stat_cache_max_valid_next) begin
+              stat_cache_max_valid_next = stat_cache_valid_cycle;
             end
-            if (stat_subreq_valid_cycle > subreq_max_valid_next) begin
-              subreq_max_valid_next = stat_subreq_valid_cycle;
+            if (stat_mshr_valid_uncached_cycle > stat_mshr_max_valid_uncached_next) begin
+              stat_mshr_max_valid_uncached_next = stat_mshr_valid_uncached_cycle;
             end
-            req_accept_next = stat_req_accept + stat_req_accept_cycle;
-            req_merge_next = stat_req_merge + stat_req_merge_cycle;
-            req_alloc_next = stat_req_alloc + stat_req_alloc_cycle;
-            req_bypass_next = stat_req_bypass + stat_req_bypass_cycle;
-            req_mshr_overflow_next = stat_req_mshr_overflow + stat_req_mshr_overflow_cycle;
-            req_subreq_overflow_next = stat_req_subreq_overflow + stat_req_subreq_overflow_cycle;
-            resp_mshr_next = stat_resp_mshr + stat_resp_mshr_cycle;
-            resp_bypass_next = stat_resp_bypass + stat_resp_bypass_cycle;
-            cache_hit_next = stat_cache_hit + stat_cache_hit_cycle;
-            cache_fill_next = stat_cache_fill + stat_cache_fill_cycle;
-            cache_evict_next = stat_cache_evict + stat_cache_evict_cycle;
-            cache_store_update_next = stat_cache_store_update + stat_cache_store_update_cycle;
-            cache_amo_inval_next = stat_cache_amo_inval + stat_cache_amo_inval_cycle;
+            if (stat_subreq_valid_cycle > stat_subreq_max_valid_next) begin
+              stat_subreq_max_valid_next = stat_subreq_valid_cycle;
+            end
+            stat_req_accept_next = stat_req_accept + stat_req_accept_cycle;
+            stat_req_merge_next = stat_req_merge + stat_req_merge_cycle;
+            stat_req_alloc_next = stat_req_alloc + stat_req_alloc_cycle;
+            stat_req_bypass_next = stat_req_bypass + stat_req_bypass_cycle;
+            stat_req_mshr_overflow_next = stat_req_mshr_overflow + stat_req_mshr_overflow_cycle;
+            stat_req_subreq_overflow_next = stat_req_subreq_overflow + stat_req_subreq_overflow_cycle;
+            stat_resp_mshr_next = stat_resp_mshr + stat_resp_mshr_cycle;
+            stat_resp_bypass_next = stat_resp_bypass + stat_resp_bypass_cycle;
+            stat_cache_hit_next = stat_cache_hit + stat_cache_hit_cycle;
+            stat_cache_fill_next = stat_cache_fill + stat_cache_fill_cycle;
+            stat_cache_evict_next = stat_cache_evict + stat_cache_evict_cycle;
+            stat_cache_store_update_next =
+                stat_cache_store_update + stat_cache_store_update_cycle;
+            stat_cache_amo_inval_next = stat_cache_amo_inval + stat_cache_amo_inval_cycle;
           end
 
-          print_period = (StatsPeriod != 0) && csr_trace_any_i && (cycle_next >= StatsPeriod);
+          print_period = (StatsPeriod != 0) && csr_trace_any_i &&
+                         (stat_cycle_count_next >= StatsPeriod);
           print_fall = stat_trace_q && !csr_trace_any_i;
-          if ((print_period || print_fall) && (cycle_next != 0)) begin
+          if ((print_period || print_fall) && (stat_cycle_count_next != 0)) begin
             print_stats(print_period ? "period" : "trace_off",
-                        cycle_next,
-                        mshr_valid_acc_next,
-                        subreq_valid_acc_next,
-                        mshr_max_valid_next,
-                        subreq_max_valid_next,
-                        req_accept_next,
-                        req_merge_next,
-                        req_alloc_next,
-                        req_bypass_next,
-                        req_mshr_overflow_next,
-                        req_subreq_overflow_next,
-                        resp_mshr_next,
-                        resp_bypass_next,
-                        cache_valid_acc_next,
-                        cache_max_valid_next,
-                        cache_hit_next,
-                        cache_fill_next,
-                        cache_evict_next,
-                        cache_store_update_next,
-                        cache_amo_inval_next);
+                        stat_cycle_count_next,
+                        stat_mshr_valid_acc_next,
+                        stat_mshr_valid_uncached_acc_next,
+                        stat_subreq_valid_acc_next,
+                        stat_mshr_max_valid_next,
+                        stat_subreq_max_valid_next,
+                        stat_req_accept_next,
+                        stat_req_merge_next,
+                        stat_req_alloc_next,
+                        stat_req_bypass_next,
+                        stat_req_mshr_overflow_next,
+                        stat_req_subreq_overflow_next,
+                        stat_resp_mshr_next,
+                        stat_resp_bypass_next,
+                        stat_cache_valid_acc_next,
+                        stat_cache_max_valid_next,
+                        stat_mshr_max_valid_uncached_next,
+                        stat_cache_hit_next,
+                        stat_cache_fill_next,
+                        stat_cache_evict_next,
+                        stat_cache_store_update_next,
+                        stat_cache_amo_inval_next);
             stat_cycle_count <= 0;
             stat_mshr_valid_acc <= 0;
+            stat_mshr_valid_uncached_acc <= 0;
             stat_cache_valid_acc <= 0;
             stat_subreq_valid_acc <= 0;
             stat_mshr_max_valid <= 0;
             stat_cache_max_valid <= 0;
+            stat_mshr_max_valid_uncached <= 0;
             stat_subreq_max_valid <= 0;
             stat_req_accept <= 0;
             stat_req_merge <= 0;
@@ -1311,26 +1340,28 @@ module mempool_group_mshr
             stat_cache_store_update <= 0;
             stat_cache_amo_inval <= 0;
           end else begin
-            stat_cycle_count <= cycle_next;
-            stat_mshr_valid_acc <= mshr_valid_acc_next;
-            stat_cache_valid_acc <= cache_valid_acc_next;
-            stat_subreq_valid_acc <= subreq_valid_acc_next;
-            stat_mshr_max_valid <= mshr_max_valid_next;
-            stat_cache_max_valid <= cache_max_valid_next;
-            stat_subreq_max_valid <= subreq_max_valid_next;
-            stat_req_accept <= req_accept_next;
-            stat_req_merge <= req_merge_next;
-            stat_req_alloc <= req_alloc_next;
-            stat_req_bypass <= req_bypass_next;
-            stat_req_mshr_overflow <= req_mshr_overflow_next;
-            stat_req_subreq_overflow <= req_subreq_overflow_next;
-            stat_resp_mshr <= resp_mshr_next;
-            stat_resp_bypass <= resp_bypass_next;
-            stat_cache_hit <= cache_hit_next;
-            stat_cache_fill <= cache_fill_next;
-            stat_cache_evict <= cache_evict_next;
-            stat_cache_store_update <= cache_store_update_next;
-            stat_cache_amo_inval <= cache_amo_inval_next;
+            stat_cycle_count <= stat_cycle_count_next;
+            stat_mshr_valid_acc <= stat_mshr_valid_acc_next;
+            stat_mshr_valid_uncached_acc <= stat_mshr_valid_uncached_acc_next;
+            stat_cache_valid_acc <= stat_cache_valid_acc_next;
+            stat_subreq_valid_acc <= stat_subreq_valid_acc_next;
+            stat_mshr_max_valid <= stat_mshr_max_valid_next;
+            stat_cache_max_valid <= stat_cache_max_valid_next;
+            stat_mshr_max_valid_uncached <= stat_mshr_max_valid_uncached_next;
+            stat_subreq_max_valid <= stat_subreq_max_valid_next;
+            stat_req_accept <= stat_req_accept_next;
+            stat_req_merge <= stat_req_merge_next;
+            stat_req_alloc <= stat_req_alloc_next;
+            stat_req_bypass <= stat_req_bypass_next;
+            stat_req_mshr_overflow <= stat_req_mshr_overflow_next;
+            stat_req_subreq_overflow <= stat_req_subreq_overflow_next;
+            stat_resp_mshr <= stat_resp_mshr_next;
+            stat_resp_bypass <= stat_resp_bypass_next;
+            stat_cache_hit <= stat_cache_hit_next;
+            stat_cache_fill <= stat_cache_fill_next;
+            stat_cache_evict <= stat_cache_evict_next;
+            stat_cache_store_update <= stat_cache_store_update_next;
+            stat_cache_amo_inval <= stat_cache_amo_inval_next;
           end
         end
       end
@@ -1340,6 +1371,7 @@ module mempool_group_mshr
           print_stats("final",
                       stat_cycle_count,
                       stat_mshr_valid_acc,
+                      stat_mshr_valid_uncached_acc,
                       stat_subreq_valid_acc,
                       stat_mshr_max_valid,
                       stat_subreq_max_valid,
@@ -1353,6 +1385,7 @@ module mempool_group_mshr
                       stat_resp_bypass,
                       stat_cache_valid_acc,
                       stat_cache_max_valid,
+                      stat_mshr_max_valid_uncached,
                       stat_cache_hit,
                       stat_cache_fill,
                       stat_cache_evict,
