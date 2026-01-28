@@ -204,6 +204,42 @@ module mempool_tb;
     end: gen_wfi_tiles
   end: gen_wfi_groups
 
+  // CSR trace OR across all groups (for MSHR stats gating).
+  logic [NumGroups-1:0][NumTilesPerGroup-1:0][NumCoresPerTile-1:0] csr_trace_q;
+  logic csr_trace_any_global;
+  for (genvar g = 0; g < NumGroups; g++) begin: gen_trace_groups
+    for (genvar t = 0; t < NumTilesPerGroup; t++) begin: gen_trace_tiles
+      for (genvar c = 0; c < NumCoresPerTile; c++) begin: gen_trace_cores
+        assign csr_trace_q[g][t][c] =
+            dut.i_mempool_cluster.gen_groups_x[g/NumY].gen_groups_y[g%NumY].gen_rtl_group
+                .i_group.i_mempool_group.gen_tiles[t].i_tile.gen_cores[c].gen_mempool_cc
+                .riscv_core.i_snitch.csr_trace_q;
+      end: gen_trace_cores
+    end: gen_trace_tiles
+  end: gen_trace_groups
+
+  always_comb begin
+    csr_trace_any_global = 1'b0;
+    for (int g = 0; g < NumGroups; g++) begin
+      for (int t = 0; t < NumTilesPerGroup; t++) begin
+        for (int c = 0; c < NumCoresPerTile; c++) begin
+          if (csr_trace_q[g][t][c]) begin
+            csr_trace_any_global = 1'b1;
+          end
+        end
+      end
+    end
+  end
+
+  for (genvar g = 0; g < NumGroups; g++) begin: gen_trace_force
+    localparam int gx = g / NumY;
+    localparam int gy = g % NumY;
+    initial begin
+      force dut.i_mempool_cluster.gen_groups_x[gx].gen_groups_y[gy].gen_rtl_group.i_group
+            .i_mempool_group.gen_group_mshr.i_group_mshr.csr_trace_any_i = csr_trace_any_global;
+    end
+  end: gen_trace_force
+
 `endif
 `endif
 `endif
@@ -393,13 +429,42 @@ module mempool_tb;
   // Cores
   logic [NumCores-1:0] instruction_handshake, lsu_request, lsu_handshake;
   int unsigned snitch_utilization, lsu_pressure, lsu_utilization;
+`ifdef TARGET_SPATZ
+  localparam int unsigned SpatzMemPortCount = NumCores * NumMemPortsPerSpatz;
+  logic [NumCores-1:0] spatz_issue_handshake, spatz_issue_request;
+  logic [NumCores-1:0] spatz_rsp_handshake, spatz_rsp_request;
+  logic [SpatzMemPortCount-1:0] spatz_lsu_handshake, spatz_lsu_request;
+  logic [NumCores-1:0] spatz_fpu_lsu_handshake, spatz_fpu_lsu_request;
+  logic [NumCores-1:0] spatz_fpu_handshake, spatz_fpu_request;
+  int unsigned spatz_issue_utilization, spatz_issue_pressure;
+  int unsigned spatz_rsp_utilization, spatz_rsp_pressure;
+  int unsigned spatz_lsu_utilization, spatz_lsu_pressure;
+  int unsigned spatz_fpu_lsu_utilization, spatz_fpu_lsu_pressure;
+  int unsigned spatz_fpu_utilization, spatz_fpu_pressure;
+`endif
   assign snitch_utilization = $countones(instruction_handshake);
   assign lsu_utilization = $countones(lsu_handshake);
   assign lsu_pressure = $countones(lsu_request);
+`ifdef TARGET_SPATZ
+  assign spatz_issue_utilization = $countones(spatz_issue_handshake);
+  assign spatz_issue_pressure = $countones(spatz_issue_request);
+  assign spatz_rsp_utilization = $countones(spatz_rsp_handshake);
+  assign spatz_rsp_pressure = $countones(spatz_rsp_request);
+  assign spatz_lsu_utilization = $countones(spatz_lsu_handshake);
+  assign spatz_lsu_pressure = $countones(spatz_lsu_request);
+  assign spatz_fpu_lsu_utilization = $countones(spatz_fpu_lsu_handshake);
+  assign spatz_fpu_lsu_pressure = $countones(spatz_fpu_lsu_request);
+  assign spatz_fpu_utilization = $countones(spatz_fpu_handshake);
+  assign spatz_fpu_pressure = $countones(spatz_fpu_request);
+`endif
 
   for (genvar g = 0; g < NumGroups; g++) begin
     for (genvar t = 0; t < NumTilesPerGroup; t++) begin
       for (genvar c = 0; c < NumCoresPerTile; c++) begin
+`ifdef TARGET_SPATZ
+        localparam int unsigned core_flat_idx = g*NumTilesPerGroup*NumCoresPerTile +
+          t*NumCoresPerTile + c;
+`endif
         logic valid_instr, stall;
         logic lsu_valid, lsu_ready;
         // Snitch
@@ -411,6 +476,44 @@ module mempool_tb;
         assign lsu_ready = dut.i_mempool_cluster.gen_groups_x[g/NumY].gen_groups_y[g%NumY].gen_rtl_group.i_group.i_mempool_group.gen_tiles[t].i_tile.gen_cores[c].gen_mempool_cc.riscv_core.i_snitch.data_qready_i;
         assign lsu_request[g*NumTilesPerGroup*NumCoresPerTile+t*NumCoresPerTile+c] = lsu_valid & !lsu_ready;
         assign lsu_handshake[g*NumTilesPerGroup*NumCoresPerTile+t*NumCoresPerTile+c] = lsu_valid & lsu_ready;
+`ifdef TARGET_SPATZ
+        // Spatz issue/response
+        assign spatz_issue_handshake[core_flat_idx] =
+          dut.i_mempool_cluster.gen_groups_x[g/NumY].gen_groups_y[g%NumY].gen_rtl_group.i_group.i_mempool_group.gen_tiles[t].i_tile.gen_cores[c].gen_mempool_cc.riscv_core.i_spatz.issue_valid_i &
+          dut.i_mempool_cluster.gen_groups_x[g/NumY].gen_groups_y[g%NumY].gen_rtl_group.i_group.i_mempool_group.gen_tiles[t].i_tile.gen_cores[c].gen_mempool_cc.riscv_core.i_spatz.issue_ready_o;
+        assign spatz_issue_request[core_flat_idx] =
+          dut.i_mempool_cluster.gen_groups_x[g/NumY].gen_groups_y[g%NumY].gen_rtl_group.i_group.i_mempool_group.gen_tiles[t].i_tile.gen_cores[c].gen_mempool_cc.riscv_core.i_spatz.issue_valid_i &
+          !dut.i_mempool_cluster.gen_groups_x[g/NumY].gen_groups_y[g%NumY].gen_rtl_group.i_group.i_mempool_group.gen_tiles[t].i_tile.gen_cores[c].gen_mempool_cc.riscv_core.i_spatz.issue_ready_o;
+        assign spatz_rsp_handshake[core_flat_idx] =
+          dut.i_mempool_cluster.gen_groups_x[g/NumY].gen_groups_y[g%NumY].gen_rtl_group.i_group.i_mempool_group.gen_tiles[t].i_tile.gen_cores[c].gen_mempool_cc.riscv_core.i_spatz.rsp_valid_o &
+          dut.i_mempool_cluster.gen_groups_x[g/NumY].gen_groups_y[g%NumY].gen_rtl_group.i_group.i_mempool_group.gen_tiles[t].i_tile.gen_cores[c].gen_mempool_cc.riscv_core.i_spatz.rsp_ready_i;
+        assign spatz_rsp_request[core_flat_idx] =
+          dut.i_mempool_cluster.gen_groups_x[g/NumY].gen_groups_y[g%NumY].gen_rtl_group.i_group.i_mempool_group.gen_tiles[t].i_tile.gen_cores[c].gen_mempool_cc.riscv_core.i_spatz.rsp_valid_o &
+          !dut.i_mempool_cluster.gen_groups_x[g/NumY].gen_groups_y[g%NumY].gen_rtl_group.i_group.i_mempool_group.gen_tiles[t].i_tile.gen_cores[c].gen_mempool_cc.riscv_core.i_spatz.rsp_ready_i;
+        // Spatz LSU
+        for (genvar p = 0; p < NumMemPortsPerSpatz; p++) begin : gen_spatz_lsu_util
+          assign spatz_lsu_handshake[core_flat_idx*NumMemPortsPerSpatz + p] =
+            dut.i_mempool_cluster.gen_groups_x[g/NumY].gen_groups_y[g%NumY].gen_rtl_group.i_group.i_mempool_group.gen_tiles[t].i_tile.gen_cores[c].gen_mempool_cc.riscv_core.spatz_mem_req_valid[p] &
+            dut.i_mempool_cluster.gen_groups_x[g/NumY].gen_groups_y[g%NumY].gen_rtl_group.i_group.i_mempool_group.gen_tiles[t].i_tile.gen_cores[c].gen_mempool_cc.riscv_core.spatz_mem_req_ready[p];
+          assign spatz_lsu_request[core_flat_idx*NumMemPortsPerSpatz + p] =
+            dut.i_mempool_cluster.gen_groups_x[g/NumY].gen_groups_y[g%NumY].gen_rtl_group.i_group.i_mempool_group.gen_tiles[t].i_tile.gen_cores[c].gen_mempool_cc.riscv_core.spatz_mem_req_valid[p] &
+            !dut.i_mempool_cluster.gen_groups_x[g/NumY].gen_groups_y[g%NumY].gen_rtl_group.i_group.i_mempool_group.gen_tiles[t].i_tile.gen_cores[c].gen_mempool_cc.riscv_core.spatz_mem_req_ready[p];
+        end
+        // Spatz FPU LSU
+        assign spatz_fpu_lsu_handshake[core_flat_idx] =
+          dut.i_mempool_cluster.gen_groups_x[g/NumY].gen_groups_y[g%NumY].gen_rtl_group.i_group.i_mempool_group.gen_tiles[t].i_tile.gen_cores[c].gen_mempool_cc.riscv_core.fp_lsu_mem_req_valid &
+          dut.i_mempool_cluster.gen_groups_x[g/NumY].gen_groups_y[g%NumY].gen_rtl_group.i_group.i_mempool_group.gen_tiles[t].i_tile.gen_cores[c].gen_mempool_cc.riscv_core.fp_lsu_mem_req_ready;
+        assign spatz_fpu_lsu_request[core_flat_idx] =
+          dut.i_mempool_cluster.gen_groups_x[g/NumY].gen_groups_y[g%NumY].gen_rtl_group.i_group.i_mempool_group.gen_tiles[t].i_tile.gen_cores[c].gen_mempool_cc.riscv_core.fp_lsu_mem_req_valid &
+          !dut.i_mempool_cluster.gen_groups_x[g/NumY].gen_groups_y[g%NumY].gen_rtl_group.i_group.i_mempool_group.gen_tiles[t].i_tile.gen_cores[c].gen_mempool_cc.riscv_core.fp_lsu_mem_req_ready;
+        // Spatz VFU (FPU) activity
+        assign spatz_fpu_handshake[core_flat_idx] =
+          dut.i_mempool_cluster.gen_groups_x[g/NumY].gen_groups_y[g%NumY].gen_rtl_group.i_group.i_mempool_group.gen_tiles[t].i_tile.gen_cores[c].gen_mempool_cc.riscv_core.i_spatz.i_vfu.spatz_req_valid_i &
+          dut.i_mempool_cluster.gen_groups_x[g/NumY].gen_groups_y[g%NumY].gen_rtl_group.i_group.i_mempool_group.gen_tiles[t].i_tile.gen_cores[c].gen_mempool_cc.riscv_core.i_spatz.i_vfu.spatz_req_ready_o;
+        assign spatz_fpu_request[core_flat_idx] =
+          dut.i_mempool_cluster.gen_groups_x[g/NumY].gen_groups_y[g%NumY].gen_rtl_group.i_group.i_mempool_group.gen_tiles[t].i_tile.gen_cores[c].gen_mempool_cc.riscv_core.i_spatz.i_vfu.spatz_req_valid_i &
+          !dut.i_mempool_cluster.gen_groups_x[g/NumY].gen_groups_y[g%NumY].gen_rtl_group.i_group.i_mempool_group.gen_tiles[t].i_tile.gen_cores[c].gen_mempool_cc.riscv_core.i_spatz.i_vfu.spatz_req_ready_o;
+`endif
       end
     end
   end
@@ -434,6 +537,74 @@ module mempool_tb;
   //     end
   //   end
   // end
+
+  // NoC (L1 routers)
+  localparam int unsigned NocReqPortsPerTile =
+    (NumRemoteReqPortsPerTile > 1) ? (NumRemoteReqPortsPerTile - 1) : 1;
+  localparam int unsigned NocRespPortsPerTile =
+    (NumRemoteRespPortsPerTile > 1) ? (NumRemoteRespPortsPerTile - 1) : 1;
+  localparam int unsigned NocReqPortCount = NumGroups * NumTilesPerGroup * NocReqPortsPerTile;
+  localparam int unsigned NocRespPortCount = NumGroups * NumTilesPerGroup * NocRespPortsPerTile;
+
+  logic [NocReqPortCount-1:0] noc_req_valid, noc_req_ready;
+  logic [NocRespPortCount-1:0] noc_resp_valid, noc_resp_ready;
+  logic [NocReqPortCount-1:0] noc_req_handshake, noc_req_pressure_vec;
+  logic [NocRespPortCount-1:0] noc_resp_handshake, noc_resp_pressure_vec;
+  int unsigned noc_req_valid_total, noc_req_utilization, noc_req_pressure;
+  int unsigned noc_resp_valid_total, noc_resp_utilization, noc_resp_pressure;
+  int unsigned noc_total_utilization;
+
+  assign noc_req_handshake = noc_req_valid & noc_req_ready;
+  assign noc_req_pressure_vec = noc_req_valid & ~noc_req_ready;
+  assign noc_req_valid_total = $countones(noc_req_valid);
+  assign noc_req_utilization = $countones(noc_req_handshake);
+  assign noc_req_pressure = $countones(noc_req_pressure_vec);
+  assign noc_resp_handshake = noc_resp_valid & noc_resp_ready;
+  assign noc_resp_pressure_vec = noc_resp_valid & ~noc_resp_ready;
+  assign noc_resp_valid_total = $countones(noc_resp_valid);
+  assign noc_resp_utilization = $countones(noc_resp_handshake);
+  assign noc_resp_pressure = $countones(noc_resp_pressure_vec);
+  assign noc_total_utilization = noc_req_utilization + noc_resp_utilization;
+
+  generate
+    if (NumRemoteReqPortsPerTile > 1) begin : gen_noc_req_util
+      for (genvar g = 0; g < NumGroups; g++) begin : gen_noc_req_group
+        for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_noc_req_tile
+          for (genvar p = 1; p < NumRemoteReqPortsPerTile; p++) begin : gen_noc_req_port
+            localparam int unsigned noc_req_idx =
+              (g * NumTilesPerGroup + t) * (NumRemoteReqPortsPerTile - 1) + (p - 1);
+            assign noc_req_valid[noc_req_idx] =
+              dut.i_mempool_cluster.gen_groups_x[g/NumY].gen_groups_y[g%NumY].gen_rtl_group.i_group.i_mempool_group.gen_tiles[t].i_tile.tcdm_master_req_valid_o[p];
+            assign noc_req_ready[noc_req_idx] =
+              dut.i_mempool_cluster.gen_groups_x[g/NumY].gen_groups_y[g%NumY].gen_rtl_group.i_group.i_mempool_group.gen_tiles[t].i_tile.tcdm_master_req_ready_i[p];
+          end
+        end
+      end
+    end else begin : gen_noc_req_util_none
+      assign noc_req_valid = '0;
+      assign noc_req_ready = '0;
+    end
+  endgenerate
+
+  generate
+    if (NumRemoteRespPortsPerTile > 1) begin : gen_noc_resp_util
+      for (genvar g = 0; g < NumGroups; g++) begin : gen_noc_resp_group
+        for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_noc_resp_tile
+          for (genvar p = 1; p < NumRemoteRespPortsPerTile; p++) begin : gen_noc_resp_port
+            localparam int unsigned noc_resp_idx =
+              (g * NumTilesPerGroup + t) * (NumRemoteRespPortsPerTile - 1) + (p - 1);
+            assign noc_resp_valid[noc_resp_idx] =
+              dut.i_mempool_cluster.gen_groups_x[g/NumY].gen_groups_y[g%NumY].gen_rtl_group.i_group.i_mempool_group.gen_tiles[t].i_tile.tcdm_master_resp_valid_i[p];
+            assign noc_resp_ready[noc_resp_idx] =
+              dut.i_mempool_cluster.gen_groups_x[g/NumY].gen_groups_y[g%NumY].gen_rtl_group.i_group.i_mempool_group.gen_tiles[t].i_tile.tcdm_master_resp_ready_o[p];
+          end
+        end
+      end
+    end else begin : gen_noc_resp_util_none
+      assign noc_resp_valid = '0;
+      assign noc_resp_ready = '0;
+    end
+  endgenerate
 
 `endif
 
