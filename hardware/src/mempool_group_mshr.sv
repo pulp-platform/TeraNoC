@@ -98,6 +98,10 @@ module mempool_group_mshr
     logic [SubReqCountW-1:0] sub_reqs_num;
     tcdm_master_resp_t resp_buf;
     logic resp_valid;
+`ifndef TARGET_SYNTHESIS
+    // Debug: number of cached hits before this entry is reallocated.
+    logic [31:0] cache_hit_cnt;
+`endif
     mshr_state_t state;
   } mempool_group_mshr_t;
 
@@ -202,7 +206,7 @@ module mempool_group_mshr
   logic [63-1:0]                                                               stat_cache_evict_cycle;
   logic [63-1:0]                                                               stat_cache_store_update_cycle;
   logic [63-1:0]                                                               stat_cache_amo_inval_cycle;
-  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              stat_req_subreq_full_match;
+  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                   stat_req_subreq_full_match;
 
   logic [63-1:0]                                                               stat_cycle_count;
   logic [63-1:0]                                                               stat_mshr_valid_acc;
@@ -558,6 +562,28 @@ module mempool_group_mshr
   `FF(mshr_q_valid, mshr_d_valid, '0)
   `FF(mshr_q, mshr_d, '0)
 
+  // Debug-only view of cached/uncached valid entries.
+  // pragma translate_off
+  `ifndef VERILATOR
+  logic [MshrNum-1:0] mshr_q_valid_cached;
+  logic [MshrNum-1:0] mshr_q_valid_uncached;
+  generate
+    for (genvar mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin : gen_mshr_valid_types
+      assign mshr_q_valid_cached[mshr_i] =
+          mshr_q_valid[mshr_i] &&
+          EnableRespCache &&
+          (mshr_q[mshr_i].state == MSHR_CACHED) &&
+          mshr_q[mshr_i].resp_valid;
+      assign mshr_q_valid_uncached[mshr_i] =
+          mshr_q_valid[mshr_i] &&
+          (!EnableRespCache ||
+           (mshr_q[mshr_i].state != MSHR_CACHED) ||
+           !mshr_q[mshr_i].resp_valid);
+    end
+  endgenerate
+  `endif
+  // pragma translate_on
+
   // Main combinational control: request merge/alloc, response capture, and drain
   always_comb begin
     // Defaults
@@ -589,6 +615,13 @@ module mempool_group_mshr
                 (mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num < MshrMergeReqs);
             if (req_in_ready[tile_i][port_i]) begin
               if (mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num < MshrMergeReqs) begin
+`ifndef TARGET_SYNTHESIS
+                if (EnableRespCache &&
+                    (mshr_d[req_merge_mshr_id[tile_i][port_i]].state == MSHR_CACHED)) begin
+                  mshr_d[req_merge_mshr_id[tile_i][port_i]].cache_hit_cnt =
+                      mshr_d[req_merge_mshr_id[tile_i][port_i]].cache_hit_cnt + 1'b1;
+                end
+`endif
                 mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[
                     mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num].valid = 1'b1;
                 mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[
@@ -636,6 +669,9 @@ module mempool_group_mshr
                     req_in[tile_i][port_i].wdata.meta_id;
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].sub_reqs[0].amo =
                     req_in[tile_i][port_i].wdata.amo;
+`ifndef TARGET_SYNTHESIS
+                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].cache_hit_cnt = '0;
+`endif
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].sub_reqs_num = 1;
               end
             end
