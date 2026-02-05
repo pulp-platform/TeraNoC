@@ -284,7 +284,8 @@ if (NocRouterRemapping == 1 || NocRouterRemapping == 3) begin: gen_req_remapping
             src_id: group_xy_id_t'({group_id_i, 1'b0}),                             // For NoC Router when response back
             dst_id: group_xy_id_t'({tcdm_master_req[i][j+(1)].tgt_group_id, 1'b0}), // For NoC Router when request send
             tgt_addr: tcdm_master_req[i][j+(1)].tgt_addr,                           // For Crossbar when request send (bank rows per Group)
-            last : 1'b1                                                             // Non Burst Request
+            last : 1'b1,                                                            // Non Burst Request
+            burst_len: tcdm_master_req[i][j+(1)].burst_len
           }
         };
         assign floo_tcdm_rd_req_to_remapper_valid[i][j] = tcdm_master_req_valid[i][j+(1)];
@@ -307,7 +308,8 @@ if (NocRouterRemapping == 1 || NocRouterRemapping == 3) begin: gen_req_remapping
           src_id: group_xy_id_t'({group_id_i, 1'b0}),                         // For NoC Router when response back
           dst_id: group_xy_id_t'({tcdm_master_req[i][j].tgt_group_id, 1'b0}), // For NoC Router when request send
           tgt_addr: tcdm_master_req[i][j].tgt_addr,                           // For Crossbar when request send (bank rows per Group)
-          last : 1'b1                                                         // Non Burst Request
+          last : 1'b1,                                                        // Non Burst Request
+          burst_len: tcdm_master_req[i][j].burst_len
         }
       };
       assign floo_tcdm_rdwr_req_to_remapper_valid[i][j-(1 + NumNarrowRemoteReqPortsPerTile)] = tcdm_master_req_valid[i][j];
@@ -363,7 +365,8 @@ end else begin: gen_req_remapping_bypass
             src_id: group_xy_id_t'({group_id_i, 1'b0}),                             // For NoC Router when response back
             dst_id: group_xy_id_t'({tcdm_master_req[i][j+(1)].tgt_group_id, 1'b0}), // For NoC Router when request send
             tgt_addr: tcdm_master_req[i][j+(1)].tgt_addr,                           // For Crossbar when request send (bank rows per Group)
-            last : 1'b1                                                             // Non Burst Request
+            last : 1'b1,                                                            // Non Burst Request
+            burst_len: tcdm_master_req[i][j+(1)].burst_len
           }
         };
         assign floo_tcdm_rd_req_to_router_valid[i][j] = tcdm_master_req_valid[i][j+(1)];
@@ -386,7 +389,8 @@ end else begin: gen_req_remapping_bypass
           src_id: group_xy_id_t'({group_id_i, 1'b0}),                         // For NoC Router when response back
           dst_id: group_xy_id_t'({tcdm_master_req[i][j].tgt_group_id, 1'b0}), // For NoC Router when request send
           tgt_addr: tcdm_master_req[i][j].tgt_addr,                           // For Crossbar when request send (bank rows per Group)
-          last : 1'b1                                                         // Non Burst Request
+          last : 1'b1,                                                        // Non Burst Request
+          burst_len: tcdm_master_req[i][j].burst_len
         }
       };
       assign floo_tcdm_rdwr_req_to_router_valid[i][j-(1 + NumNarrowRemoteReqPortsPerTile)] = tcdm_master_req_valid[i][j];
@@ -554,7 +558,8 @@ for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_router_req_to_slave_re
       src_group_id : group_id_t'({
                         floo_tcdm_req_from_router_after_xbar[i][j].hdr.src_id.x,
                         floo_tcdm_req_from_router_after_xbar[i][j].hdr.src_id.y
-                      }) // For NoC Router when response back
+                      }), // For NoC Router when response back
+      burst_len    : floo_tcdm_req_from_router_after_xbar[i][j].hdr.burst_len
     };
     assign tcdm_slave_req_valid[i][j]                    = floo_tcdm_req_from_router_after_xbar_valid[i][j];
     assign floo_tcdm_req_from_router_after_xbar_ready[i][j] = tcdm_slave_req_ready[i][j];
