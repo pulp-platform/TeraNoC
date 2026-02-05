@@ -38,6 +38,7 @@ module tcdm_shim
   output logic         [NrTCDM-1:0][3:0]                tcdm_req_amo_o,
   output logic         [NrTCDM-1:0][MetaIdWidth-1:0]    tcdm_req_id_o,
   output logic         [NrTCDM-1:0][StrbWidth-1:0]      tcdm_req_be_o,
+  output logic         [NrTCDM-1:0][snitch_pkg::BurstLenWidth-1:0] tcdm_req_burst_len_o,
   input  logic         [NrTCDM-1:0]                     tcdm_req_ready_i,
   input  logic         [NrTCDM-1:0]                     tcdm_resp_valid_i,
   output logic         [NrTCDM-1:0]                     tcdm_resp_ready_o,
@@ -64,6 +65,7 @@ module tcdm_shim
   input  logic         [DataWidth-1:0]                  data_qdata_i,
   input  logic         [StrbWidth-1:0]                  data_qstrb_i,
   input  logic         [MetaIdWidth-1:0]                data_qid_i,
+  input  logic         [snitch_pkg::BurstLenWidth-1:0]  data_qburst_len_i,
   input  logic                                          data_qvalid_i,
   output logic                                          data_qready_o,
   output logic         [DataWidth-1:0]                  data_pdata_o,
@@ -206,6 +208,7 @@ module tcdm_shim
     assign tcdm_req_id_o[i]       = tcdm_qpayload[i].id   ;
     assign tcdm_req_wen_o[i]      = tcdm_qpayload[i].write;
     assign tcdm_req_be_o[i]       = tcdm_qpayload[i].strb ;
+    assign tcdm_req_burst_len_o[i]= tcdm_qpayload[i].burst_len;
   end
 
   // Connect SOCs
@@ -228,6 +231,7 @@ module tcdm_shim
   assign data_qpayload.data  = data_qdata_i ;
   assign data_qpayload.id    = data_qid_i   ;
   assign data_qpayload.strb  = data_qstrb_i ;
+  assign data_qpayload.burst_len = data_qburst_len_i;
 
   // Response interface
   assign data_pdata_o  = data_ppayload.data ;

@@ -15,6 +15,8 @@ package snitch_pkg;
   localparam int NumIntOutstandingLoads = `ifdef TRAFFIC_GEN 2048 `else 8 `endif;
   localparam RobDepth                   = 32;
   localparam MetaIdWidth                = `ifdef TARGET_SPATZ idx_width(RobDepth) `else idx_width(NumIntOutstandingLoads) `endif;
+  localparam int unsigned MaxBurstWords = 16;
+  localparam int unsigned BurstLenWidth = $clog2(MaxBurstWords + 1);
   // Xpulpimg extension enabled?
 `ifdef XPULPIMG
   localparam bit XPULPIMG_EXTENSION = 1'b1;
@@ -45,6 +47,7 @@ package snitch_pkg;
     logic write;
     data_t data;
     strb_t strb;
+    logic [BurstLenWidth-1:0] burst_len;
   } dreq_t;
 
   typedef struct packed {

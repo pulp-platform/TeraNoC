@@ -278,6 +278,8 @@ package mempool_pkg;
   typedef logic [idx_width(NumTilesPerGroup)-1:0] tile_group_id_t;
   typedef logic [idx_width(NumGroups)-1:0] group_id_t;
   typedef logic [3:0] amo_t;
+  localparam int unsigned MaxBurstWords = 16;
+  localparam int unsigned BurstLenWidth = $clog2(MaxBurstWords + 1);
 
   typedef struct packed {
     meta_id_t meta_id;
@@ -292,6 +294,7 @@ package mempool_pkg;
     strb_t be;
     group_id_t tgt_group_id; // FlooNoC Added
     tcdm_addr_t tgt_addr;
+    logic [BurstLenWidth-1:0] burst_len;
   } tcdm_master_req_t;
 
   typedef struct packed {
@@ -306,6 +309,7 @@ package mempool_pkg;
     tile_addr_t tgt_addr;
     tile_group_id_t ini_addr;
     group_id_t src_group_id; // FlooNoC Added
+    logic [BurstLenWidth-1:0] burst_len;
   } tcdm_slave_req_t;
 
   typedef struct packed {
@@ -387,6 +391,7 @@ package mempool_pkg;
     group_xy_id_t       dst_id;
     tcdm_addr_t         tgt_addr;
     logic               last;
+    logic [BurstLenWidth-1:0] burst_len;
   } floo_tcdm_req_meta_t;
 
   typedef struct packed {

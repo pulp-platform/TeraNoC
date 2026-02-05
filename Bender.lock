@@ -123,10 +123,10 @@ packages:
     - common_cells
     - scm
   spatz:
-    revision: d02afac73f586780ae5669ec9c378ef3125a0d06
+    revision: 98897ed05dfe5d66289068c2b42788e6cfd41114
     version: null
     source:
-      Git: https://github.com/yzf0470/spatz.git
+      Git: https://github.com/pulp-platform/spatz.git
     dependencies:
     - axi
     - axi_riscv_atomics

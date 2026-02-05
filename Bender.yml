@@ -13,7 +13,7 @@ dependencies:
   register_interface:   { git: "https://github.com/pulp-platform/register_interface.git",   version: 0.4.3   }
   reqrsp_interface:     { path: "hardware/deps/reqrsp_interface"                                             }
   snitch:               { path: "hardware/deps/snitch"                                                       }
-  spatz:                { git: "https://github.com/yzf0470/spatz.git",                      rev:   d02afac   }
+  spatz:                { git: "https://github.com/pulp-platform/spatz.git",                rev:   98897ed   }
   # cluster_icache:       { git: "https://github.com/pulp-platform/cluster_icache.git",       version: 0.1.1   }
   tech_cells_generic:   { git: "https://github.com/pulp-platform/tech_cells_generic.git",   version: 0.2.13  }
   fpnew:                { git: "https://github.com/pulp-platform/cvfpu.git",                rev: pulp-v0.1.3 }
@@ -35,6 +35,7 @@ sources:
   - hardware/src/snitch_addr_demux.sv
   - hardware/src/tcdm_adapter.sv
   - hardware/src/tcdm_shim.sv
+  - hardware/src/tcdm_burst_expander.sv
   - hardware/src/tcdm_wide_narrow_mux.sv
   - hardware/src/address_scrambler.sv
   - hardware/src/axi_L2_interleaver.sv
