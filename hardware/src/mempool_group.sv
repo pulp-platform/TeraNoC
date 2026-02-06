@@ -192,6 +192,7 @@ module mempool_group
   logic           [NumTilesPerGroup-1:0] master_local_req_wen;
   tcdm_payload_t  [NumTilesPerGroup-1:0] master_local_req_wdata;
   strb_t          [NumTilesPerGroup-1:0] master_local_req_be;
+  logic [NumTilesPerGroup-1:0][BurstLenWidth-1:0] master_local_req_burst_len;
   logic           [NumTilesPerGroup-1:0] master_local_resp_valid;
   logic           [NumTilesPerGroup-1:0] master_local_resp_ready;
   tcdm_payload_t  [NumTilesPerGroup-1:0] master_local_resp_rdata;
@@ -215,6 +216,7 @@ module mempool_group
     assign master_local_req_wen[t]            = tcdm_master_req[0][t].wen;
     assign master_local_req_wdata[t]          = tcdm_master_req[0][t].wdata;
     assign master_local_req_be[t]             = tcdm_master_req[0][t].be;
+    assign master_local_req_burst_len[t]      = tcdm_master_req[0][t].burst_len;
     assign tcdm_master_req_ready[0][t]        = master_local_req_ready[t];
     assign slave_local_resp_valid[t]          = tcdm_slave_resp_valid[0][t];
     assign slave_local_resp_ini_addr[t]       = tcdm_slave_resp[0][t].ini_addr;
@@ -231,6 +233,11 @@ module mempool_group
     assign tcdm_slave_req[0][t].wen           = slave_local_req_wen[t];
     assign tcdm_slave_req[0][t].wdata         = slave_local_req_wdata[t];
     assign tcdm_slave_req[0][t].be            = slave_local_req_be[t];
+    // The local interconnect does not carry burst_len sideband. Rebuild it from
+    // the selected initiator index (req_ini_addr) to preserve local burst metadata.
+    assign tcdm_slave_req[0][t].burst_len     =
+      slave_local_req_valid[t] ? master_local_req_burst_len[slave_local_req_ini_addr[t]]
+                               : BurstLenWidth'(1);
     assign tcdm_slave_req[0][t].src_group_id  = group_id_i;
     assign slave_local_req_ready[t]           = tcdm_slave_req_ready[0][t];
   end
@@ -652,5 +659,5 @@ module mempool_group
     assign group_mshr_resp_valid = mshr_noc_resp_valid;
     assign mshr_noc_resp_ready = group_mshr_resp_ready;
   end
-  
+
 endmodule: mempool_group
