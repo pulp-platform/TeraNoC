@@ -19,7 +19,8 @@ module mempool_group_mshr
 
   // parameter int MshrNum        = NumTilesPerGroup * 32,
   // parameter int MshrNum        = NumTilesPerGroup * 2,
-  parameter int MshrNum        = 2,
+  // Can be overridden from build defines with GROUP_MSHR_NUM.
+  parameter int MshrNum        = `ifdef GROUP_MSHR_NUM `GROUP_MSHR_NUM `else 2 `endif,
   parameter int MshrMergeWords = 1,
   parameter int MshrMergeReqs  = MaxBurstWords,
   // Per-entry buffered response beats (for out-of-order/multi-channel returns).

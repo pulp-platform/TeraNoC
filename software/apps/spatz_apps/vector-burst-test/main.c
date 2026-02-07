@@ -12,10 +12,9 @@
 #include "synchronization.h"
 
 #ifndef ACTIVE_CORES
-#define ACTIVE_CORES 2 // 0 => use all cores
+#define ACTIVE_CORES 32 // 0 => use all cores
 #endif
 
-#define MAX_CORES 256
 #define BURST_WORDS 16
 #define BURST_BYTES (BURST_WORDS * 4)
 
@@ -40,8 +39,8 @@ static const burst_test_t tests[NUM_TESTS] = {
     {20, 3},  // unaligned, not full
 };
 
-static uint32_t __attribute__((aligned(BURST_BYTES))) src[MAX_CORES * PER_CORE_WORDS];
-static uint32_t __attribute__((aligned(BURST_BYTES))) dst[MAX_CORES * PER_CORE_WORDS];
+static uint32_t __attribute__((aligned(BURST_BYTES))) src[NUM_CORES * PER_CORE_WORDS];
+static uint32_t __attribute__((aligned(BURST_BYTES))) dst[NUM_CORES * PER_CORE_WORDS];
 
 static inline void vload_store(uint32_t *src_ptr, uint32_t *dst_ptr, uint32_t len) {
   size_t gvl;
@@ -71,16 +70,10 @@ int main() {
   if (active_cores == 0 || active_cores > num_cores) {
     active_cores = num_cores;
   }
-  if (active_cores > MAX_CORES) {
-    if (cid == 0) {
-      printf("vector-burst-test: active_cores=%u exceeds MAX_CORES=%u, truncating\n",
-             (unsigned)active_cores, (unsigned)MAX_CORES);
-    }
-    active_cores = MAX_CORES;
-  }
 
   for (uint32_t t = 0; t < NUM_TESTS; ++t) {
-    const uint32_t aligned = (cursor + (BURST_WORDS - 1)) & ~(BURST_WORDS - 1);
+    const uint32_t aligned = (cursor + (uint32_t)(BURST_WORDS - 1)) &
+                             ~((uint32_t)(BURST_WORDS - 1));
     test_base[t] = aligned + tests[t].offset;
     cursor = test_base[t] + tests[t].len + 1;
   }
