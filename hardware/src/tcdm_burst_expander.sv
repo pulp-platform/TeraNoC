@@ -45,7 +45,7 @@ module tcdm_burst_expander
   logic [BurstLenWidth-1:0] len_base;
   logic [BurstLenWidth-1:0] remaining;
   logic [BurstLenWidth-1:0] issue_cnt;
-  logic issue_ready;
+  logic [BurstLenWidth-1:0] issue_fire_cnt;
   logic have_req;
   req_t req_base;
 
@@ -79,13 +79,16 @@ module tcdm_burst_expander
       issue_cnt = remaining;
     end
 
-    issue_ready = 1'b1;
+    // Issue as many leading beats as can handshake this cycle.
+    // This avoids deadlock when only a subset of lanes is ready.
+    issue_fire_cnt = '0;
     for (int k = 0; k < IssueWidth; k++) begin
-      if (k < issue_cnt) begin
-        issue_ready &= ready_i[k];
+      if ((k < issue_cnt) &&
+          (issue_fire_cnt == BurstLenWidth'(k)) &&
+          ready_i[k]) begin
+        issue_fire_cnt = issue_fire_cnt + BurstLenWidth'(1);
       end
     end
-
     if (have_req) begin
       for (int k = 0; k < IssueWidth; k++) begin
         if (k < issue_cnt) begin
@@ -99,27 +102,25 @@ module tcdm_burst_expander
     end
 
     if (!active_q) begin
+      // One request can always be accepted when no burst is in flight.
+      ready_o = 1'b1;
       if (valid_i) begin
-        ready_o = issue_ready;
-        if (issue_ready) begin
-          if (remaining > issue_cnt) begin
-            req_d    = req_i;
-            active_d = 1'b1;
-            len_d    = len_i;
-            beat_d   = beat_base + issue_cnt;
-          end else begin
-            active_d = 1'b0;
-            beat_d   = '0;
-            len_d    = '0;
-          end
+        if (remaining > issue_fire_cnt) begin
+          req_d    = req_i;
+          active_d = 1'b1;
+          len_d    = len_i;
+          beat_d   = beat_base + issue_fire_cnt;
+        end else begin
+          active_d = 1'b0;
+          beat_d   = '0;
+          len_d    = '0;
         end
-      end else begin
-        ready_o = 1'b1;
       end
     end else begin
-      if (issue_ready) begin
-        if (remaining > issue_cnt) begin
-          beat_d = beat_base + issue_cnt;
+      ready_o = 1'b0;
+      if (issue_fire_cnt != '0) begin
+        if (remaining > issue_fire_cnt) begin
+          beat_d = beat_base + issue_fire_cnt;
         end else begin
           active_d = 1'b0;
           beat_d   = '0;

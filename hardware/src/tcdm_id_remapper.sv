@@ -58,10 +58,12 @@ module tcdm_id_remapper
     meta_id_t [RobDepth-1:0] remapped_id_q, remapped_id_d;
     logic [RobDepth-1:0] remapped_id_valid_q, remapped_id_valid_d;
     id_t [RobDepth-1:0] id_q, id_d;
+    logic [snitch_pkg::BurstLenWidth-1:0] burst_left_q, burst_left_d;
 
     `FF(remapped_id_q, remapped_id_d, '0)
     `FF(remapped_id_valid_q, remapped_id_valid_d, '0)
     `FF(id_q, id_d, '0)
+    `FF(burst_left_q, burst_left_d, '0)
     `FF(id_lock_q, id_lock_d, '0)
 
     lzc #(
@@ -73,11 +75,14 @@ module tcdm_id_remapper
     );
 
     always_comb begin
+      logic [snitch_pkg::BurstLenWidth-1:0] req_beats;
       // Maintain state
       remapped_id_d       = remapped_id_q;
       remapped_id_valid_d = remapped_id_valid_q;
       id_d                = id_q;
+      burst_left_d        = burst_left_q;
       id_lock_d           = id_lock_q;
+      req_beats           = (req.burst_len == '0) ? snitch_pkg::BurstLenWidth'(1) : req.burst_len;
 
       if (req_valid_o && !req_ready_i) begin
         // valid but not ready, we need to keep the id unchanged
@@ -91,17 +96,25 @@ module tcdm_id_remapper
           remapped_id_d[req.id]        = req.id;
           remapped_id_valid_d[req.id]  = 1'b1;
           id_d[req.id]                 = id;
+          burst_left_d[req.id]         = req_beats;
           id_lock_d                    = 1'b0;
         end else begin
           remapped_id_d[next_id]       = req.id;
           remapped_id_valid_d[next_id] = 1'b1;
           id_d[next_id]                = id;
+          burst_left_d[next_id]        = req_beats;
         end
       end
 
       // Did we sent a new response?
-      if (resp_valid_i && resp_ready_o)
-        remapped_id_valid_d[resp_i.id] = 1'b0;
+      if (resp_valid_i && resp_ready_o) begin
+        if (burst_left_q[resp_i.id] > snitch_pkg::BurstLenWidth'(1)) begin
+          burst_left_d[resp_i.id] = burst_left_q[resp_i.id] - snitch_pkg::BurstLenWidth'(1);
+        end else begin
+          burst_left_d[resp_i.id]       = '0;
+          remapped_id_valid_d[resp_i.id] = 1'b0;
+        end
+      end
     end
 
     ///////////////
