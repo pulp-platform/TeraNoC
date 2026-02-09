@@ -51,6 +51,7 @@ module tcdm_id_remapper
 
     // Lock the output id if the request has not been taken yet
     logic id_lock_d, id_lock_q;
+    meta_id_t locked_remap_id_d, locked_remap_id_q;
 
     typedef logic [cf_math_pkg::idx_width(NumIn)-1:0] id_t;
     id_t id;
@@ -65,6 +66,7 @@ module tcdm_id_remapper
     `FF(id_q, id_d, '0)
     `FF(burst_left_q, burst_left_d, '0)
     `FF(id_lock_q, id_lock_d, '0)
+    `FF(locked_remap_id_q, locked_remap_id_d, '0)
 
     lzc #(
       .WIDTH(RobDepth)
@@ -82,21 +84,25 @@ module tcdm_id_remapper
       id_d                = id_q;
       burst_left_d        = burst_left_q;
       id_lock_d           = id_lock_q;
+      locked_remap_id_d   = locked_remap_id_q;
       req_beats           = (req.burst_len == '0) ? snitch_pkg::BurstLenWidth'(1) : req.burst_len;
 
       if (req_valid_o && !req_ready_i) begin
         // valid but not ready, we need to keep the id unchanged
+        if (!id_lock_q) begin
+          locked_remap_id_d = next_id;
+        end
         id_lock_d         = 1'b1;
       end
 
       // Did we get a new request?
       if (req_valid_o && req_ready_i) begin
         if (id_lock_q) begin
-          // the outstanding ID is already stored in req
-          remapped_id_d[req.id]        = req.id;
-          remapped_id_valid_d[req.id]  = 1'b1;
-          id_d[req.id]                 = id;
-          burst_left_d[req.id]         = req_beats;
+          // Reuse the same remapped ID that was chosen before backpressure.
+          remapped_id_d[locked_remap_id_q]       = req.id;
+          remapped_id_valid_d[locked_remap_id_q] = 1'b1;
+          id_d[locked_remap_id_q]                = id;
+          burst_left_d[locked_remap_id_q]        = req_beats;
           id_lock_d                    = 1'b0;
         end else begin
           remapped_id_d[next_id]       = req.id;
@@ -147,8 +153,11 @@ module tcdm_id_remapper
 
       // Forward the request
       req_o    = req;
-      if (!id_lock_q)
+      if (id_lock_q) begin
+        req_o.id = locked_remap_id_q;
+      end else begin
         req_o.id = next_id;
+      end
     end
 
     ////////////////
