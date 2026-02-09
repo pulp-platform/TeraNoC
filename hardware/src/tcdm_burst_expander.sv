@@ -46,6 +46,7 @@ module tcdm_burst_expander
   logic [BurstLenWidth-1:0] remaining;
   logic [BurstLenWidth-1:0] issue_cnt;
   logic [BurstLenWidth-1:0] issue_fire_cnt;
+  logic issue_prefix_ready;
   logic have_req;
   req_t req_base;
 
@@ -79,24 +80,23 @@ module tcdm_burst_expander
       issue_cnt = remaining;
     end
 
-    // Issue as many leading beats as can handshake this cycle.
-    // This avoids deadlock when only a subset of lanes is ready.
-    issue_fire_cnt = '0;
-    for (int k = 0; k < IssueWidth; k++) begin
-      if ((k < issue_cnt) &&
-          (issue_fire_cnt == BurstLenWidth'(k)) &&
-          ready_i[k]) begin
-        issue_fire_cnt = issue_fire_cnt + BurstLenWidth'(1);
-      end
-    end
+    // Issue contiguous beats only: lane k is offered only if all lanes < k can
+    // fire in the same cycle. This keeps beat order deterministic.
+    issue_fire_cnt     = '0;
+    issue_prefix_ready = 1'b1;
     if (have_req) begin
       for (int k = 0; k < IssueWidth; k++) begin
-        if (k < issue_cnt) begin
+        if ((k < issue_cnt) && issue_prefix_ready) begin
           valid_o[k] = 1'b1;
           req_o[k]   = req_base;
           req_o[k].tgt_addr      = req_base.tgt_addr + (beat_base + k[BurstLenWidth-1:0]);
           req_o[k].wdata.meta_id = req_base.wdata.meta_id + (beat_base + k[BurstLenWidth-1:0]);
           req_o[k].burst_len     = BurstLenWidth'(1);
+          if (ready_i[k]) begin
+            issue_fire_cnt = issue_fire_cnt + BurstLenWidth'(1);
+          end else begin
+            issue_prefix_ready = 1'b0;
+          end
         end
       end
     end
