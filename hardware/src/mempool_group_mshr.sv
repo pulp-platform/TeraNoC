@@ -571,16 +571,16 @@ module mempool_group_mshr
       // Otherwise the beat gets popped without being delivered and data is lost.
       head_beat_must_match_subreq: assert property(
         @(posedge clk_i) disable iff (!rst_ni)
-          !mshr_q_valid[mshr_i] ||
-          (mshr_q[mshr_i].state != MSHR_DRAIN_RESP) ||
-          (mshr_q[mshr_i].resp_buf_cnt == '0) ||
-          (mshr_q[mshr_i].sub_reqs_num == '0) ||
+          !mshr_d_valid[mshr_i] ||
+          (mshr_d[mshr_i].state != MSHR_DRAIN_RESP) ||
+          (mshr_d[mshr_i].resp_buf_cnt == '0) ||
+          (mshr_d[mshr_i].sub_reqs_num == '0) ||
           resp_head_beat_pending[mshr_i])
         else $fatal(1, "MSHR unmatched head beat: mshr=%0d meta=%0d base_meta=%0d subreqs=%0d",
                     mshr_i,
-                    mshr_q[mshr_i].resp_buf[mshr_q[mshr_i].resp_buf_rd_ptr].rdata.meta_id,
-                    mshr_q[mshr_i].sub_reqs[0].meta_id,
-                    mshr_q[mshr_i].sub_reqs_num);
+                    mshr_d[mshr_i].resp_buf[mshr_d[mshr_i].resp_buf_rd_ptr].rdata.meta_id,
+                    mshr_d[mshr_i].sub_reqs[0].meta_id,
+                    mshr_d[mshr_i].sub_reqs_num);
 
       for (genvar s = 0; s < MshrMergeReqs; s++) begin : gen_subreq_offset_check
         subreq_offset_in_range: assert property(
