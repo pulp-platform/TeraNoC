@@ -123,7 +123,7 @@ packages:
     - common_cells
     - scm
   spatz:
-    revision: 9ffe73c7252f5681bb6e7b3164710db7b779b6ef
+    revision: 0e83f43792b8251140a0b4e12164d3e2480d350f
     version: null
     source:
       Git: https://github.com/pulp-platform/spatz.git
