@@ -20,9 +20,18 @@ module mempool_group_mshr
   // parameter int MshrNum        = NumTilesPerGroup * 32,
   // parameter int MshrNum        = NumTilesPerGroup * 2,
   // Can be overridden from build defines with GROUP_MSHR_NUM.
-  parameter int MshrNum        = `ifdef GROUP_MSHR_NUM `GROUP_MSHR_NUM `else 2 `endif,
+  parameter int MshrNum        = `ifdef GROUP_MSHR_NUM `GROUP_MSHR_NUM `else NumTilesPerGroup `endif,
   parameter int MshrMergeWords = 1,
   parameter int MshrMergeReqs  = 8,
+  // MSHR admission policy by effective load length:
+  // - single      : req_len == 1
+  // - non-full    : 1 < req_len < MshrFullBurstWords
+  // - full-burst  : req_len == MshrFullBurstWords
+  // req_len is after alignment handling (unaligned bursts are clamped to single).
+  parameter int unsigned MshrFullBurstWords = MaxBurstWords,
+  parameter bit EnableMshrSingleReq         = 1'b0,
+  parameter bit EnableMshrNonFullBurstReq   = 1'b1,
+  parameter bit EnableMshrFullBurstReq      = 1'b1,
   // Per-entry buffered response beats (for out-of-order/multi-channel returns).
   // Default tracks remote response bandwidth per tile.
   parameter int RespBufWords   = ((NumRemoteRespPortsPerTile > 1) ?
@@ -191,6 +200,9 @@ module mempool_group_mshr
   // Request decode and merge lookup (per request port).
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_is_load;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_is_store;
+  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_is_single;
+  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_is_non_full_burst;
+  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_is_full_burst;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_can_merge;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]
              [BurstLenWidth-1:0]                                              req_len;
@@ -263,6 +275,8 @@ module mempool_group_mshr
   logic [63-1:0]                                                               stat_mshr_valid_uncached_cycle;
   logic [63-1:0]                                                               stat_subreq_valid_cycle;
   logic [63-1:0]                                                               stat_req_accept_cycle;
+  logic [63-1:0]                                                               stat_req_accept_single_cycle;
+  logic [63-1:0]                                                               stat_req_accept_burst_cycle;
   logic [63-1:0]                                                               stat_req_merge_cycle;
   logic [63-1:0]                                                               stat_req_alloc_cycle;
   logic [63-1:0]                                                               stat_req_bypass_cycle;
@@ -287,6 +301,8 @@ module mempool_group_mshr
   logic [63-1:0]                                                               stat_mshr_max_valid_uncached;
   logic [63-1:0]                                                               stat_subreq_max_valid;
   logic [63-1:0]                                                               stat_req_accept;
+  logic [63-1:0]                                                               stat_req_accept_single;
+  logic [63-1:0]                                                               stat_req_accept_burst;
   logic [63-1:0]                                                               stat_req_merge;
   logic [63-1:0]                                                               stat_req_alloc;
   logic [63-1:0]                                                               stat_req_bypass;
@@ -311,6 +327,8 @@ module mempool_group_mshr
   logic [63-1:0]                                                               stat_mshr_max_valid_uncached_next;
   logic [63-1:0]                                                               stat_subreq_max_valid_next;
   logic [63-1:0]                                                               stat_req_accept_next;
+  logic [63-1:0]                                                               stat_req_accept_single_next;
+  logic [63-1:0]                                                               stat_req_accept_burst_next;
   logic [63-1:0]                                                               stat_req_merge_next;
   logic [63-1:0]                                                               stat_req_alloc_next;
   logic [63-1:0]                                                               stat_req_bypass_next;
@@ -449,6 +467,9 @@ module mempool_group_mshr
         req_is_store[tile_i][port_i] = req_in_valid[tile_i][port_i] &&
                                        req_in[tile_i][port_i].wen &&
                                        (req_in[tile_i][port_i].wdata.amo == '0);
+        req_is_single[tile_i][port_i] = 1'b0;
+        req_is_non_full_burst[tile_i][port_i] = 1'b0;
+        req_is_full_burst[tile_i][port_i] = 1'b0;
         req_can_merge[tile_i][port_i] = 1'b0;
         if (req_in_valid[tile_i][port_i] &&
             (req_in[tile_i][port_i].wdata.amo != '0)) begin
@@ -480,8 +501,16 @@ module mempool_group_mshr
             req_addr_key[tile_i][port_i] =
                 merge_addr_key(req_in[tile_i][port_i].tgt_addr);
           end
+          req_is_single[tile_i][port_i] = (req_len[tile_i][port_i] == BurstLenWidth'(1));
+          req_is_full_burst[tile_i][port_i] =
+              (req_len[tile_i][port_i] == BurstLenWidth'(MshrFullBurstWords));
+          req_is_non_full_burst[tile_i][port_i] =
+              !req_is_single[tile_i][port_i] && !req_is_full_burst[tile_i][port_i];
           req_can_merge[tile_i][port_i] =
-              req_is_load[tile_i][port_i];
+              req_is_load[tile_i][port_i] &&
+              ((EnableMshrSingleReq       && req_is_single[tile_i][port_i]) ||
+               (EnableMshrNonFullBurstReq && req_is_non_full_burst[tile_i][port_i]) ||
+               (EnableMshrFullBurstReq    && req_is_full_burst[tile_i][port_i]));
         end else begin
           req_addr_key[tile_i][port_i] = '0;
         end
@@ -528,6 +557,12 @@ module mempool_group_mshr
             ((req_len_raw[tile_i][port_i] >= 1) && (req_len_raw[tile_i][port_i] <= MaxBurstWords)))
           else $fatal(1, "MSHR req burst_len out of range: tile=%0d port=%0d len=%0d",
                       tile_i, port_i, req_len_raw[tile_i][port_i]);
+
+        full_burst_words_in_range: assert property(
+          @(posedge clk_i) disable iff (!rst_ni)
+            (MshrFullBurstWords >= 1) && (MshrFullBurstWords <= MaxBurstWords))
+          else $fatal(1, "MSHR MshrFullBurstWords out of range: cfg=%0d valid=[1..%0d]",
+                      MshrFullBurstWords, MaxBurstWords);
 
         burst_aligned: assert property(
           @(posedge clk_i) disable iff (!rst_ni)
@@ -1398,6 +1433,9 @@ module mempool_group_mshr
         $display("[%0t] %m MSHR cfg: MshrNum=%0d MshrMergeWords=%0d MshrMergeReqs=%0d RespBufWords=%0d DrainMultiPort=%0d EnableRespCache=%0d EnableStats=%0d StatsPeriod=%0d",
                  $time, MshrNum, MshrMergeWords, MshrMergeReqs, RespBufWords, DrainMultiPort, EnableRespCache,
                  EnableStats, StatsPeriod);
+        $display("[%0t] %m MSHR cfg: MshrFullBurstWords=%0d EnableSingle=%0d EnableNonFullBurst=%0d EnableFullBurst=%0d",
+                 $time, MshrFullBurstWords, EnableMshrSingleReq, EnableMshrNonFullBurstReq,
+                 EnableMshrFullBurstReq);
         $display("[%0t] %m MSHR cfg: SpillReqIn=%0d SpillReqOut=%0d SpillRespIn=%0d SpillRespOut=%0d",
                  $time, SpillReqIn, SpillReqOut, SpillRespIn, SpillRespOut);
       end
@@ -1410,6 +1448,8 @@ module mempool_group_mshr
                                  input logic [63-1:0] mshr_max_valid,
                                  input logic [63-1:0] subreq_max_valid,
                                  input logic [63-1:0] req_accept,
+                                 input logic [63-1:0] req_accept_single,
+                                 input logic [63-1:0] req_accept_burst,
                                  input logic [63-1:0] req_merge,
                                  input logic [63-1:0] req_alloc,
                                  input logic [63-1:0] req_bypass,
@@ -1488,8 +1528,8 @@ module mempool_group_mshr
         end
         $display("  subreq_valid_avg=%0f subreq_valid_max=%0d subreq_util_avg=%0f subreq_per_valid_mshr_avg=%0f",
                  avg_subreq_valid, subreq_max_valid, avg_subreq_util, avg_subreq_per_mshr);
-        $display("  reqs: accepted=%0d merged=%0d alloc=%0d bypass=%0d mshr_overflow=%0d subreq_overflow=%0d",
-                 req_accept, req_merge, req_alloc, req_bypass,
+        $display("  reqs: accepted=%0d (single=%0d burst=%0d) merged=%0d alloc=%0d bypass=%0d mshr_overflow=%0d subreq_overflow=%0d",
+                 req_accept, req_accept_single, req_accept_burst, req_merge, req_alloc, req_bypass,
                  req_mshr_overflow, req_subreq_overflow);
         $display("  resps: from_mshr=%0d from_bypass=%0d",
                  resp_mshr, resp_bypass);
@@ -1525,6 +1565,8 @@ module mempool_group_mshr
         end
 
         stat_req_accept_cycle = '0;
+        stat_req_accept_single_cycle = '0;
+        stat_req_accept_burst_cycle = '0;
         stat_req_merge_cycle = '0;
         stat_req_alloc_cycle = '0;
         stat_req_bypass_cycle = '0;
@@ -1551,6 +1593,11 @@ module mempool_group_mshr
 
             if (req_in_valid[tile_i][port_i] && req_in_ready[tile_i][port_i]) begin
               stat_req_accept_cycle = stat_req_accept_cycle + 1'b1;
+              if (req_len[tile_i][port_i] == BurstLenWidth'(1)) begin
+                stat_req_accept_single_cycle = stat_req_accept_single_cycle + 1'b1;
+              end else begin
+                stat_req_accept_burst_cycle = stat_req_accept_burst_cycle + 1'b1;
+              end
               if (req_merge_valid[tile_i][port_i]) begin
                 stat_req_merge_cycle = stat_req_merge_cycle + 1'b1;
               end else begin
@@ -1654,6 +1701,8 @@ module mempool_group_mshr
           stat_mshr_max_valid_uncached <= 0;
           stat_subreq_max_valid <= 0;
           stat_req_accept <= 0;
+          stat_req_accept_single <= 0;
+          stat_req_accept_burst <= 0;
           stat_req_merge <= 0;
           stat_req_alloc <= 0;
           stat_req_bypass <= 0;
@@ -1680,6 +1729,8 @@ module mempool_group_mshr
           stat_mshr_max_valid_uncached_next = stat_mshr_max_valid_uncached;
           stat_subreq_max_valid_next = stat_subreq_max_valid;
           stat_req_accept_next = stat_req_accept;
+          stat_req_accept_single_next = stat_req_accept_single;
+          stat_req_accept_burst_next = stat_req_accept_burst;
           stat_req_merge_next = stat_req_merge;
           stat_req_alloc_next = stat_req_alloc;
           stat_req_bypass_next = stat_req_bypass;
@@ -1713,6 +1764,8 @@ module mempool_group_mshr
               stat_subreq_max_valid_next = stat_subreq_valid_cycle;
             end
             stat_req_accept_next = stat_req_accept + stat_req_accept_cycle;
+            stat_req_accept_single_next = stat_req_accept_single + stat_req_accept_single_cycle;
+            stat_req_accept_burst_next = stat_req_accept_burst + stat_req_accept_burst_cycle;
             stat_req_merge_next = stat_req_merge + stat_req_merge_cycle;
             stat_req_alloc_next = stat_req_alloc + stat_req_alloc_cycle;
             stat_req_bypass_next = stat_req_bypass + stat_req_bypass_cycle;
@@ -1740,6 +1793,8 @@ module mempool_group_mshr
                         stat_mshr_max_valid_next,
                         stat_subreq_max_valid_next,
                         stat_req_accept_next,
+                        stat_req_accept_single_next,
+                        stat_req_accept_burst_next,
                         stat_req_merge_next,
                         stat_req_alloc_next,
                         stat_req_bypass_next,
@@ -1765,6 +1820,8 @@ module mempool_group_mshr
             stat_mshr_max_valid_uncached <= 0;
             stat_subreq_max_valid <= 0;
             stat_req_accept <= 0;
+            stat_req_accept_single <= 0;
+            stat_req_accept_burst <= 0;
             stat_req_merge <= 0;
             stat_req_alloc <= 0;
             stat_req_bypass <= 0;
@@ -1788,6 +1845,8 @@ module mempool_group_mshr
             stat_mshr_max_valid_uncached <= stat_mshr_max_valid_uncached_next;
             stat_subreq_max_valid <= stat_subreq_max_valid_next;
             stat_req_accept <= stat_req_accept_next;
+            stat_req_accept_single <= stat_req_accept_single_next;
+            stat_req_accept_burst <= stat_req_accept_burst_next;
             stat_req_merge <= stat_req_merge_next;
             stat_req_alloc <= stat_req_alloc_next;
             stat_req_bypass <= stat_req_bypass_next;
@@ -1814,6 +1873,8 @@ module mempool_group_mshr
                       stat_mshr_max_valid,
                       stat_subreq_max_valid,
                       stat_req_accept,
+                      stat_req_accept_single,
+                      stat_req_accept_burst,
                       stat_req_merge,
                       stat_req_alloc,
                       stat_req_bypass,
