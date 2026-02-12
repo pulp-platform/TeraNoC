@@ -22,7 +22,7 @@ module mempool_group_mshr
   // Can be overridden from build defines with GROUP_MSHR_NUM.
   parameter int MshrNum        = `ifdef GROUP_MSHR_NUM `GROUP_MSHR_NUM `else 2 `endif,
   parameter int MshrMergeWords = 1,
-  parameter int MshrMergeReqs  = MaxBurstWords,
+  parameter int MshrMergeReqs  = 8,
   // Per-entry buffered response beats (for out-of-order/multi-channel returns).
   // Default tracks remote response bandwidth per tile.
   parameter int RespBufWords   = ((NumRemoteRespPortsPerTile > 1) ?
@@ -104,37 +104,59 @@ module mempool_group_mshr
     tile_group_id_t tile_id;
     logic [RespPortIdW-1:0] port_id;
     tile_core_id_t  core_id;
-    meta_id_t       meta_id;
-    logic [BurstLenWidth-1:0] beat_offset;
+    // Base meta_id of this requester; per-beat meta_id is computed as
+    // (meta_id_base + beat_offset) when draining a returned beat.
+    meta_id_t       meta_id_base;
     amo_t           amo;
   } mempool_group_mshr_sub_req_t;
 
   typedef struct packed {
+    // Canonical merged address key (tile bits included) used for hit lookup.
     tcdm_addr_t base_addr;
+    // Target group used to route requests in NoC and to disambiguate same address
+    // targeting different groups.
     group_id_t tgt_group_id;
+    // Burst length for this merged entry (1..MaxBurstWords). All merged requesters
+    // in this entry share the same burst_len.
     logic [BurstLenWidth-1:0] burst_len;
-    // sub_reqs[0] is always reserved for the owner request.
+    // Requester records merged in this entry (one record per requester, not per beat).
+    // sub_reqs[0] is reserved for the owner request used as match anchor.
     mempool_group_mshr_sub_req_t [MshrMergeReqs-1:0] sub_reqs;
+    // Number of valid requester records currently stored in sub_reqs.
     logic [SubReqCountW-1:0] sub_reqs_num;
+    // Per-head-beat pending mask: bit s=1 means requester s still needs the current
+    // buffered response beat; cleared as each requester is serviced.
+    logic [MshrMergeReqs-1:0] beat_pending;
+    // Number of response beats still required to complete the whole entry.
+    // Decremented once per fully drained beat.
+    logic [BurstLenWidth-1:0] beats_left;
+    // Per-beat bookkeeping (no per-beat payload stored here):
+    // - beat_seen[b]   : beat b has been captured from NoC (possibly out-of-order)
+    // - beat_done[b]   : beat b has been fully drained to all merged requesters
+    logic [MaxBurstWords-1:0] beat_seen;
+    logic [MaxBurstWords-1:0] beat_done;
+    // Small per-entry response FIFO to absorb returning beats while outputs are
+    // temporarily blocked or responses arrive from multiple channels.
     tcdm_master_resp_t [RespBufWords-1:0] resp_buf;
+    // Valid bit per response-buffer slot.
     logic [RespBufWords-1:0] resp_buf_valid;
+    // Number of valid beats currently stored in resp_buf.
     logic [RespBufCountW-1:0] resp_buf_cnt;
+    // Read pointer of resp_buf head beat to be drained next.
     logic [RespBufPtrW-1:0] resp_buf_rd_ptr;
+    // Write pointer where the next captured response beat is stored.
     logic [RespBufPtrW-1:0] resp_buf_wr_ptr;
+    // Convenience mirror of (resp_buf_cnt != 0), used by scheduling logic.
     logic resp_valid;
 `ifndef TARGET_SYNTHESIS
     // Debug: number of cached hits before this entry is reallocated.
     logic [31:0] cache_hit_cnt;
 `endif
+    // Entry lifecycle state (IDLE/WAIT_RESP/DRAIN_RESP/CACHED).
     mshr_state_t state;
   } mempool_group_mshr_t;
 
   typedef logic [idx_width(MshrNum)-1:0] mshr_id_t;
-  typedef struct packed {
-    tile_group_id_t tile_id;
-    logic [RespPortIdW-1:0] port_id;
-  } req_id_t;
-
   // Spill register plumbing (internal view of interfaces).
   tcdm_master_req_t  [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]      req_in;
   logic              [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]      req_in_valid;
@@ -155,6 +177,7 @@ module mempool_group_mshr
   logic                [MshrNum-1:0]                                           mshr_d_valid;
   logic                [MshrNum-1:0]                                           mshr_q_valid;
   logic                [MshrNum-1:0]                                           mshr_resp_inflight; // Block same-cycle merge.
+  logic                [MshrNum-1:0]                                           mshr_resp_seen_now; // Any in-flight input beat matching this MSHR.
   logic                                                                        csr_trace_any_i;
 
   // Response classification and debug (per response port).
@@ -173,8 +196,6 @@ module mempool_group_mshr
              [BurstLenWidth-1:0]                                              req_len;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]
              [BurstLenWidth-1:0]                                              req_len_raw;
-  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]
-             [BurstLenWidth-1:0]                                              req_offset;
   tcdm_addr_t[NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_addr_key;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]
              [TileIdBits-1:0]                                                 req_tile_id;
@@ -211,7 +232,6 @@ module mempool_group_mshr
   logic    [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                req_alloc_found;
   mshr_id_t[NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                req_alloc_found_mshr_id;
   logic    [MshrNum-1:0]                                                       mshr_alloc_found;
-  req_id_t [MshrNum-1:0]                                                       mshr_alloc_found_req_id;
 
   // Response drain scheduling (per response port).
   logic      [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]             resp_sel_valid;
@@ -223,6 +243,8 @@ module mempool_group_mshr
   logic      [MshrNum-1:0][RespBufCountW-1:0]                                  mshr_resp_slots;
   logic      [MshrNum-1:0][RespBufPtrW-1:0]                                    resp_push_ptr;
   logic      [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]             resp_capture_fire;
+  logic      [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]
+             [BurstLenWidth-1:0]                                               resp_capture_beat_offset;
   logic      [MshrNum-1:0]                                                     resp_head_beat_pending;
   logic      [MshrNum-1:0][RespBufCountW-1:0]                                  resp_cnt_after_pop;
   // Response drain scheduling (single-response per MSHR).
@@ -230,7 +252,6 @@ module mempool_group_mshr
   logic      [idx_width(MshrMergeReqs)-1:0]                                    drain_subreq_idx [MshrNum-1:0];
   tile_group_id_t[MshrNum-1:0]                                                 drain_dst_tile;
   logic      [RespPortIdW-1:0]                                                 drain_dst_port [MshrNum-1:0];
-  logic      [MshrNum-1:0]                                                     drain_last_subreq;
   logic      [MshrNum-1:0]                                                     drain_port_found;
   logic      [MshrNum-1:0][MshrMergeReqs-1:0]                                  subreq_claimed;
 
@@ -419,7 +440,6 @@ module mempool_group_mshr
       for (int port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin
         req_len[tile_i][port_i] = BurstLenWidth'(1);
         req_len_raw[tile_i][port_i] = BurstLenWidth'(1);
-        req_offset[tile_i][port_i] = '0;
         req_tile_id[tile_i][port_i] = '0;
         req_tile_addr[tile_i][port_i] = '0;
         req_tile_addr_key[tile_i][port_i] = '0;
@@ -460,16 +480,8 @@ module mempool_group_mshr
             req_addr_key[tile_i][port_i] =
                 merge_addr_key(req_in[tile_i][port_i].tgt_addr);
           end
-          if (req_len[tile_i][port_i] > 1) begin
-            req_offset[tile_i][port_i] =
-                BurstLenWidth'(req_tile_addr[tile_i][port_i] -
-                               req_tile_addr_key[tile_i][port_i]);
-          end else begin
-            req_offset[tile_i][port_i] = '0;
-          end
           req_can_merge[tile_i][port_i] =
-              req_is_load[tile_i][port_i] &&
-              (req_len[tile_i][port_i] <= MshrMergeReqs);
+              req_is_load[tile_i][port_i];
         end else begin
           req_addr_key[tile_i][port_i] = '0;
         end
@@ -517,14 +529,6 @@ module mempool_group_mshr
           else $fatal(1, "MSHR req burst_len out of range: tile=%0d port=%0d len=%0d",
                       tile_i, port_i, req_len_raw[tile_i][port_i]);
 
-        burst_len_fit_mshr: assert property(
-          @(posedge clk_i) disable iff (!rst_ni)
-            (!req_in_valid[tile_i][port_i]) ||
-            !req_is_load[tile_i][port_i] ||
-            (req_len_raw[tile_i][port_i] <= MshrMergeReqs))
-          else $warning("MSHR burst_len exceeds MshrMergeReqs; bypassing merge: tile=%0d port=%0d len=%0d max=%0d",
-                        tile_i, port_i, req_len_raw[tile_i][port_i], MshrMergeReqs);
-
         burst_aligned: assert property(
           @(posedge clk_i) disable iff (!rst_ni)
             (!req_in_valid[tile_i][port_i] ||
@@ -548,6 +552,7 @@ module mempool_group_mshr
       resp_offset_in_range: assert property(
         @(posedge clk_i) disable iff (!rst_ni)
           !mshr_q_valid[mshr_i] ||
+          (mshr_q[mshr_i].state == MSHR_CACHED) ||
           (mshr_q[mshr_i].resp_buf_cnt == '0) ||
           (resp_beat_offset[mshr_i] < mshr_q[mshr_i].burst_len))
         else $fatal(1, "MSHR resp beat_offset out of range: mshr=%0d off=%0d len=%0d",
@@ -567,6 +572,13 @@ module mempool_group_mshr
         else $fatal(1, "MSHR resp_valid mismatch with resp_buf_cnt: mshr=%0d valid=%0d cnt=%0d",
                     mshr_i, mshr_q[mshr_i].resp_valid, mshr_q[mshr_i].resp_buf_cnt);
 
+      beat_done_subset_seen: assert property(
+        @(posedge clk_i) disable iff (!rst_ni)
+          !mshr_q_valid[mshr_i] ||
+          ((mshr_q[mshr_i].beat_done & ~mshr_q[mshr_i].beat_seen) == '0))
+        else $fatal(1, "MSHR beat_done not subset of beat_seen: mshr=%0d seen=0x%0x done=0x%0x",
+                    mshr_i, mshr_q[mshr_i].beat_seen, mshr_q[mshr_i].beat_done);
+
       // A buffered head beat must match at least one pending sub-request.
       // Otherwise the beat gets popped without being delivered and data is lost.
       head_beat_must_match_subreq: assert property(
@@ -579,22 +591,61 @@ module mempool_group_mshr
         else $fatal(1, "MSHR unmatched head beat: mshr=%0d meta=%0d base_meta=%0d subreqs=%0d",
                     mshr_i,
                     mshr_d[mshr_i].resp_buf[mshr_d[mshr_i].resp_buf_rd_ptr].rdata.meta_id,
-                    mshr_d[mshr_i].sub_reqs[0].meta_id,
+                    mshr_d[mshr_i].sub_reqs[0].meta_id_base,
                     mshr_d[mshr_i].sub_reqs_num);
+    end
 
-      for (genvar s = 0; s < MshrMergeReqs; s++) begin : gen_subreq_offset_check
-        subreq_offset_in_range: assert property(
+    // If a request merges into an existing burst MSHR entry, the entry must still
+    // be in its pre-response phase (no beat has been drained yet).
+    for (genvar tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin : gen_late_join_guard_tile
+      for (genvar port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin : gen_late_join_guard_port
+        no_late_join_burst: assert property(
           @(posedge clk_i) disable iff (!rst_ni)
-            !mshr_q_valid[mshr_i] ||
-            !mshr_q[mshr_i].sub_reqs[s].valid ||
-            (mshr_q[mshr_i].sub_reqs[s].beat_offset < mshr_q[mshr_i].burst_len))
-          else $fatal(1, "MSHR subreq beat_offset out of range: mshr=%0d sub=%0d off=%0d len=%0d",
-                      mshr_i, s, mshr_q[mshr_i].sub_reqs[s].beat_offset, mshr_q[mshr_i].burst_len);
+            !(req_in_valid[tile_i][port_i] &&
+              req_in_ready[tile_i][port_i] &&
+              req_merge_valid[tile_i][port_i] &&
+              req_hit_mshr_sel_valid[tile_i][port_i] &&
+              (req_len[tile_i][port_i] > BurstLenWidth'(1))) ||
+            ((mshr_q[req_hit_mshr_sel_id[tile_i][port_i]].state == MSHR_WAIT_RESP) &&
+             (mshr_q[req_hit_mshr_sel_id[tile_i][port_i]].beats_left ==
+              mshr_q[req_hit_mshr_sel_id[tile_i][port_i]].burst_len)))
+          else $fatal(1,
+                      "MSHR late join burst: tile=%0d port=%0d mshr=%0d len=%0d left=%0d state=%0d",
+                      tile_i, port_i, req_hit_mshr_sel_id[tile_i][port_i],
+                      req_len[tile_i][port_i],
+                      mshr_q[req_hit_mshr_sel_id[tile_i][port_i]].beats_left,
+                      mshr_q[req_hit_mshr_sel_id[tile_i][port_i]].state);
       end
     end
   endgenerate
   `endif
   // pragma translate_on
+
+  // Detect whether any response beat on input already targets each MSHR entry.
+  // This blocks late-join on burst entries as soon as first beat appears,
+  // even when that beat is not accepted in the same cycle.
+  always_comb begin
+    mshr_resp_seen_now = '0;
+    for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
+      for (int port_i = 1; port_i < NumRemoteRespPortsPerTile; port_i++) begin
+        if (resp_in_valid[tile_i][port_i] &&
+            (resp_in[tile_i][port_i].wen == 1'b0) &&
+            (resp_in[tile_i][port_i].rdata.amo == '0)) begin
+          for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
+            if (mshr_q_valid[mshr_i] &&
+                ((mshr_q[mshr_i].state == MSHR_WAIT_RESP) ||
+                 (mshr_q[mshr_i].state == MSHR_DRAIN_RESP)) &&
+                (mshr_q[mshr_i].sub_reqs[0].tile_id == tile_group_id_t'(tile_i)) &&
+                (mshr_q[mshr_i].sub_reqs[0].core_id == resp_in[tile_i][port_i].rdata.core_id) &&
+                ((resp_in[tile_i][port_i].rdata.meta_id -
+                  mshr_q[mshr_i].sub_reqs[0].meta_id_base) < mshr_q[mshr_i].burst_len)) begin
+              mshr_resp_seen_now[mshr_i] = 1'b1;
+            end
+          end
+        end
+      end
+    end
+  end
 
   // Request-to-request hit lookup (parallel compare).
   generate
@@ -665,7 +716,7 @@ module mempool_group_mshr
               !req_addr_hit_map[tile_i][port_i][mshr_i] &&
               meta_range_overlap(req_in[tile_i][port_i].wdata.meta_id,
                                  req_len[tile_i][port_i],
-                                 mshr_q[mshr_i].sub_reqs[0].meta_id,
+                                 mshr_q[mshr_i].sub_reqs[0].meta_id_base,
                                  mshr_q[mshr_i].burst_len);
           assign req_addr_hit_drain_map[tile_i][port_i][mshr_i] =
               req_addr_hit_map[tile_i][port_i][mshr_i] &&
@@ -675,13 +726,15 @@ module mempool_group_mshr
               req_can_merge[tile_i][port_i] &&
               req_addr_hit_map[tile_i][port_i][mshr_i] &&
               (mshr_q[mshr_i].burst_len == req_len[tile_i][port_i]) &&
-              ((mshr_q[mshr_i].state == MSHR_WAIT_RESP) ||
+              (((mshr_q[mshr_i].state == MSHR_WAIT_RESP) &&
+                (mshr_q[mshr_i].beats_left == mshr_q[mshr_i].burst_len)) ||
                (EnableRespCache && !amo_invalidate &&
                 (mshr_q[mshr_i].state == MSHR_CACHED) &&
                 mshr_q[mshr_i].resp_valid &&
                 (req_len[tile_i][port_i] == BurstLenWidth'(1)))) &&
+              !mshr_resp_seen_now[mshr_i] &&
               !mshr_resp_inflight[mshr_i] &&
-              ((mshr_q[mshr_i].sub_reqs_num + req_len[tile_i][port_i]) <= MshrMergeReqs);
+              ((mshr_q[mshr_i].sub_reqs_num + SubReqCountW'(1)) <= MshrMergeReqs);
           assign mshr_hit_req_map[mshr_i][tile_i][port_i] = req_hit_mshr_map[tile_i][port_i][mshr_i];
         end
         assign req_hit_mshr[tile_i][port_i] = |req_hit_mshr_map[tile_i][port_i];
@@ -736,7 +789,6 @@ module mempool_group_mshr
     end
     for (mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
       mshr_alloc_found[mshr_i] = 1'b0;
-      mshr_alloc_found_req_id[mshr_i] = '0;
     end
 
     if (MshrNum < ReqPortsTotal) begin
@@ -759,8 +811,6 @@ module mempool_group_mshr
             req_alloc_found[tile_i][port_i] = 1'b1;
             req_alloc_found_mshr_id[tile_i][port_i] = mshr_id_t'(mshr_i);
             mshr_alloc_found[mshr_i] = 1'b1;
-            mshr_alloc_found_req_id[mshr_i].tile_id = tile_group_id_t'(tile_i);
-            mshr_alloc_found_req_id[mshr_i].port_id = port_i[RespPortIdW-1:0];
           end
         end
       end
@@ -785,8 +835,6 @@ module mempool_group_mshr
               req_alloc_found[tile_i][port_i] = 1'b1;
               req_alloc_found_mshr_id[tile_i][port_i] = mshr_id_t'(mshr_i);
               mshr_alloc_found[mshr_i] = 1'b1;
-              mshr_alloc_found_req_id[mshr_i].tile_id = tile_group_id_t'(tile_i);
-              mshr_alloc_found_req_id[mshr_i].port_id = port_i[RespPortIdW-1:0];
             end
           end
         end
@@ -854,7 +902,6 @@ module mempool_group_mshr
 
   // Main combinational control: request merge/alloc, response capture, and drain
   always_comb begin
-    int unsigned merge_base_idx;
     int unsigned merge_new_idx;
     // Defaults
     mshr_d = mshr_q;
@@ -886,10 +933,10 @@ module mempool_group_mshr
             req_in_ready[tile_i][port_i] =
                 req_merge_ready[tile_i][port_i] &&
                 ((mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num +
-                  req_len[tile_i][port_i]) <= MshrMergeReqs);
+                  SubReqCountW'(1)) <= MshrMergeReqs);
             if (req_in_ready[tile_i][port_i]) begin
               if ((mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num +
-                   req_len[tile_i][port_i]) <= MshrMergeReqs) begin
+                   SubReqCountW'(1)) <= MshrMergeReqs) begin
 `ifndef TARGET_SYNTHESIS
                 if (EnableRespCache &&
                     (mshr_d[req_merge_mshr_id[tile_i][port_i]].state == MSHR_CACHED)) begin
@@ -897,29 +944,26 @@ module mempool_group_mshr
                       mshr_d[req_merge_mshr_id[tile_i][port_i]].cache_hit_cnt + 1'b1;
                 end
 `endif
-                merge_base_idx = mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num;
-                for (int k = 0; k < MshrMergeReqs; k++) begin
-                  merge_new_idx = merge_base_idx + k;
-                  if ((k < req_len[tile_i][port_i]) && (merge_new_idx < MshrMergeReqs)) begin
-                    mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[merge_new_idx].valid = 1'b1;
-                    mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[merge_new_idx].tile_id = tile_i;
-                    mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[merge_new_idx].port_id = port_i;
-                    mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[merge_new_idx].core_id =
-                        req_in[tile_i][port_i].wdata.core_id;
-                    mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[merge_new_idx].meta_id =
-                        req_in[tile_i][port_i].wdata.meta_id + meta_id_t'(k);
-                    mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[merge_new_idx].beat_offset =
-                        req_offset[tile_i][port_i] + BurstLenWidth'(k);
-                    mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[merge_new_idx].amo =
-                        req_in[tile_i][port_i].wdata.amo;
-                  end
-                end
+                merge_new_idx = mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num;
+                mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[merge_new_idx].valid = 1'b1;
+                mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[merge_new_idx].tile_id = tile_i;
+                mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[merge_new_idx].port_id = port_i;
+                mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[merge_new_idx].core_id =
+                    req_in[tile_i][port_i].wdata.core_id;
+                mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[merge_new_idx].meta_id_base =
+                    req_in[tile_i][port_i].wdata.meta_id;
+                mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[merge_new_idx].amo =
+                    req_in[tile_i][port_i].wdata.amo;
                 mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num =
-                    mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num +
-                    req_len[tile_i][port_i];
+                    mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num + SubReqCountW'(1);
                 if (EnableRespCache &&
                     (mshr_d[req_merge_mshr_id[tile_i][port_i]].state == MSHR_CACHED)) begin
                   mshr_d[req_merge_mshr_id[tile_i][port_i]].state = MSHR_DRAIN_RESP;
+                  mshr_d[req_merge_mshr_id[tile_i][port_i]].beats_left = BurstLenWidth'(1);
+                  mshr_d[req_merge_mshr_id[tile_i][port_i]].beat_pending = '0;
+                  mshr_d[req_merge_mshr_id[tile_i][port_i]].beat_seen = '0;
+                  mshr_d[req_merge_mshr_id[tile_i][port_i]].beat_seen[0] = 1'b1;
+                  mshr_d[req_merge_mshr_id[tile_i][port_i]].beat_done = '0;
                 end
               end
             end
@@ -953,27 +997,26 @@ module mempool_group_mshr
                     req_len[tile_i][port_i];
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].state      = MSHR_WAIT_RESP;
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].resp_valid = 1'b0;
+                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].beats_left =
+                    req_len[tile_i][port_i];
+                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].beat_pending = '0;
+                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].beat_seen = '0;
+                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].beat_done = '0;
                 // Owner request is always stored in sub_reqs[0].
-                for (int k = 0; k < MshrMergeReqs; k++) begin
-                  if (k < req_len[tile_i][port_i]) begin
-                    mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].sub_reqs[k].valid = 1'b1;
-                    mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].sub_reqs[k].tile_id = tile_i;
-                    mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].sub_reqs[k].port_id = port_i;
-                    mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].sub_reqs[k].core_id =
-                        req_in[tile_i][port_i].wdata.core_id;
-                    mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].sub_reqs[k].meta_id =
-                        req_in[tile_i][port_i].wdata.meta_id + meta_id_t'(k);
-                    mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].sub_reqs[k].beat_offset =
-                        req_offset[tile_i][port_i] + BurstLenWidth'(k);
-                    mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].sub_reqs[k].amo =
-                        req_in[tile_i][port_i].wdata.amo;
-                  end
-                end
+                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].sub_reqs[0].valid = 1'b1;
+                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].sub_reqs[0].tile_id = tile_i;
+                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].sub_reqs[0].port_id = port_i;
+                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].sub_reqs[0].core_id =
+                    req_in[tile_i][port_i].wdata.core_id;
+                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].sub_reqs[0].meta_id_base =
+                    req_in[tile_i][port_i].wdata.meta_id;
+                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].sub_reqs[0].amo =
+                    req_in[tile_i][port_i].wdata.amo;
 `ifndef TARGET_SYNTHESIS
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].cache_hit_cnt = '0;
 `endif
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].sub_reqs_num =
-                    req_len[tile_i][port_i];
+                    SubReqCountW'(1);
               end
             end
             if (EnableRespCache && !amo_invalidate &&
@@ -1027,6 +1070,7 @@ module mempool_group_mshr
     for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
       for (int port_i = 1; port_i < NumRemoteRespPortsPerTile; port_i++) begin
         resp_capture_fire[tile_i][port_i] = 1'b0;
+        resp_capture_beat_offset[tile_i][port_i] = '0;
         resp_is_mshr[tile_i][port_i] = 1'b0;
         resp_mshr_id[tile_i][port_i] = '0;
         if (resp_in_valid[tile_i][port_i] &&
@@ -1042,7 +1086,7 @@ module mempool_group_mshr
                 // A response beat belongs to this entry iff its distance from the owner
                 // base meta_id is smaller than burst_len (modulo meta_id width).
                 ((resp_in[tile_i][port_i].rdata.meta_id -
-                  mshr_q[mshr_i].sub_reqs[0].meta_id) < mshr_q[mshr_i].burst_len)) begin
+                  mshr_q[mshr_i].sub_reqs[0].meta_id_base) < mshr_q[mshr_i].burst_len)) begin
               resp_is_mshr[tile_i][port_i] = 1'b1;
               resp_mshr_id[tile_i][port_i] = mshr_id_t'(mshr_i);
               break;
@@ -1051,6 +1095,9 @@ module mempool_group_mshr
         end
 
         if (resp_is_mshr[tile_i][port_i]) begin
+          resp_capture_beat_offset[tile_i][port_i] =
+              resp_in[tile_i][port_i].rdata.meta_id -
+              mshr_q[resp_mshr_id[tile_i][port_i]].sub_reqs[0].meta_id_base;
           mshr_resp_inflight[resp_mshr_id[tile_i][port_i]] = 1'b1;
           resp_in_ready[tile_i][port_i] = (mshr_resp_slots[resp_mshr_id[tile_i][port_i]] != '0);
           if (resp_in_valid[tile_i][port_i] && resp_in_ready[tile_i][port_i]) begin
@@ -1074,6 +1121,12 @@ module mempool_group_mshr
     for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
       for (int port_i = 1; port_i < NumRemoteRespPortsPerTile; port_i++) begin
         if (resp_capture_fire[tile_i][port_i]) begin
+          if (mshr_d[resp_mshr_id[tile_i][port_i]].beat_seen[resp_capture_beat_offset[tile_i][port_i]]) begin
+            $fatal(1, "MSHR duplicate response beat: mshr=%0d beat=%0d meta=%0d",
+                   resp_mshr_id[tile_i][port_i],
+                   resp_capture_beat_offset[tile_i][port_i],
+                   resp_in[tile_i][port_i].rdata.meta_id);
+          end
           mshr_d[resp_mshr_id[tile_i][port_i]].resp_buf[resp_push_ptr[resp_mshr_id[tile_i][port_i]]] =
               resp_in[tile_i][port_i];
           mshr_d[resp_mshr_id[tile_i][port_i]].resp_buf_valid[resp_push_ptr[resp_mshr_id[tile_i][port_i]]] =
@@ -1093,6 +1146,7 @@ module mempool_group_mshr
           mshr_d[resp_mshr_id[tile_i][port_i]].resp_buf_wr_ptr = resp_push_ptr[resp_mshr_id[tile_i][port_i]];
           mshr_d[resp_mshr_id[tile_i][port_i]].resp_valid = 1'b1;
           mshr_d[resp_mshr_id[tile_i][port_i]].state      = MSHR_DRAIN_RESP;
+          mshr_d[resp_mshr_id[tile_i][port_i]].beat_seen[resp_capture_beat_offset[tile_i][port_i]] = 1'b1;
         end
       end
     end
@@ -1100,11 +1154,31 @@ module mempool_group_mshr
     // Precompute beat offset for the currently buffered head response (per MSHR).
     for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
       if (mshr_d_valid[mshr_i] && (mshr_d[mshr_i].resp_buf_cnt != '0)) begin
-        resp_beat_offset[mshr_i] =
-            mshr_d[mshr_i].resp_buf[mshr_d[mshr_i].resp_buf_rd_ptr].rdata.meta_id -
-            mshr_d[mshr_i].sub_reqs[0].meta_id;
+        // For single-word entries (including cached replay), the only legal beat
+        // index is 0. Use 0 directly so replayed cached data does not depend on
+        // stale meta_id inside resp_buf.
+        if (mshr_d[mshr_i].burst_len == BurstLenWidth'(1)) begin
+          resp_beat_offset[mshr_i] = '0;
+        end else begin
+          resp_beat_offset[mshr_i] =
+              mshr_d[mshr_i].resp_buf[mshr_d[mshr_i].resp_buf_rd_ptr].rdata.meta_id -
+              mshr_d[mshr_i].sub_reqs[0].meta_id_base;
+        end
       end else begin
         resp_beat_offset[mshr_i] = '0;
+      end
+    end
+
+    // Initialize pending-requester bitmap for a new head beat.
+    for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
+      if (mshr_d_valid[mshr_i] &&
+          (mshr_d[mshr_i].state == MSHR_DRAIN_RESP) &&
+          (mshr_d[mshr_i].resp_buf_cnt != '0) &&
+          (mshr_d[mshr_i].beat_pending == '0) &&
+          (mshr_d[mshr_i].sub_reqs_num != '0)) begin
+        for (int s = 0; s < MshrMergeReqs; s++) begin
+          mshr_d[mshr_i].beat_pending[s] = mshr_d[mshr_i].sub_reqs[s].valid;
+        end
       end
     end
 
@@ -1141,11 +1215,11 @@ module mempool_group_mshr
                 for (int s = 0; s < MshrMergeReqs; s++) begin
                   if (!resp_sel_valid[tile_i][port_i] &&
                       mshr_d[mshr_i].sub_reqs[s].valid &&
+                      mshr_d[mshr_i].beat_pending[s] &&
                       !subreq_claimed[mshr_i][s] &&
                       (mshr_d[mshr_i].sub_reqs[s].tile_id == tile_group_id_t'(tile_i)) &&
                       (map_resp_port_id(mshr_d[mshr_i].sub_reqs[s].port_id) ==
-                       port_i[RespPortIdW-1:0]) &&
-                      (mshr_d[mshr_i].sub_reqs[s].beat_offset == resp_beat_offset[mshr_i])) begin
+                       port_i[RespPortIdW-1:0])) begin
                     resp_sel_valid[tile_i][port_i] = 1'b1;
                     resp_sel_mshr_id[tile_i][port_i] = mshr_id_t'(mshr_i);
                     resp_sel_subreq_idx[tile_i][port_i] = s[idx_width(MshrMergeReqs)-1:0];
@@ -1174,7 +1248,8 @@ module mempool_group_mshr
                     resp_sel_subreq_idx[tile_i][port_i]].core_id;
             resp_out[tile_i][port_i].rdata.meta_id =
                 mshr_d[resp_sel_mshr_id[tile_i][port_i]].sub_reqs[
-                    resp_sel_subreq_idx[tile_i][port_i]].meta_id;
+                    resp_sel_subreq_idx[tile_i][port_i]].meta_id_base +
+                meta_id_t'(resp_beat_offset[resp_sel_mshr_id[tile_i][port_i]]);
             resp_out[tile_i][port_i].rdata.amo =
                 mshr_d[resp_sel_mshr_id[tile_i][port_i]].sub_reqs[
                     resp_sel_subreq_idx[tile_i][port_i]].amo;
@@ -1182,8 +1257,8 @@ module mempool_group_mshr
             resp_mshr_id_dbg[tile_i][port_i] = resp_sel_mshr_id[tile_i][port_i];
 
             if (resp_out_ready[tile_i][port_i]) begin
-              mshr_d[resp_sel_mshr_id[tile_i][port_i]].sub_reqs[
-                  resp_sel_subreq_idx[tile_i][port_i]].valid = 1'b0;
+              mshr_d[resp_sel_mshr_id[tile_i][port_i]].beat_pending[
+                  resp_sel_subreq_idx[tile_i][port_i]] = 1'b0;
               drain_count[resp_sel_mshr_id[tile_i][port_i]] =
                   drain_count[resp_sel_mshr_id[tile_i][port_i]] + 1'b1;
             end
@@ -1191,16 +1266,6 @@ module mempool_group_mshr
         end
       end
 
-      // Update per-entry counters and free when all drained.
-      for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
-        if (drain_count[mshr_i] != '0) begin
-          if (mshr_d[mshr_i].sub_reqs_num >= drain_count[mshr_i]) begin
-            mshr_d[mshr_i].sub_reqs_num = mshr_d[mshr_i].sub_reqs_num - drain_count[mshr_i];
-          end else begin
-            mshr_d[mshr_i].sub_reqs_num = '0;
-          end
-        end
-      end
     end else begin
       // Original behavior: one sub-request per MSHR per cycle.
       for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
@@ -1217,13 +1282,12 @@ module mempool_group_mshr
         drain_subreq_idx[mshr_i] = '0;
         drain_dst_tile[mshr_i] = '0;
         drain_dst_port[mshr_i] = '0;
-        drain_last_subreq[mshr_i] = 1'b0;
         drain_port_found[mshr_i] = 1'b0;
         if (mshr_d_valid[mshr_i] && mshr_d[mshr_i].resp_valid &&
             mshr_d[mshr_i].state == MSHR_DRAIN_RESP) begin
           for (int s = 0; s < MshrMergeReqs; s++) begin
             if (mshr_d[mshr_i].sub_reqs[s].valid &&
-                (mshr_d[mshr_i].sub_reqs[s].beat_offset == resp_beat_offset[mshr_i])) begin
+                mshr_d[mshr_i].beat_pending[s]) begin
               drain_subreq_found[mshr_i] = 1'b1;
               drain_subreq_idx[mshr_i] = s[idx_width(MshrMergeReqs)-1:0];
               break;
@@ -1247,18 +1311,15 @@ module mempool_group_mshr
               resp_out[drain_dst_tile[mshr_i]][drain_dst_port[mshr_i]].rdata.core_id =
                   mshr_d[mshr_i].sub_reqs[drain_subreq_idx[mshr_i]].core_id;
               resp_out[drain_dst_tile[mshr_i]][drain_dst_port[mshr_i]].rdata.meta_id =
-                  mshr_d[mshr_i].sub_reqs[drain_subreq_idx[mshr_i]].meta_id;
+                  mshr_d[mshr_i].sub_reqs[drain_subreq_idx[mshr_i]].meta_id_base +
+                  meta_id_t'(resp_beat_offset[mshr_i]);
               resp_out[drain_dst_tile[mshr_i]][drain_dst_port[mshr_i]].rdata.amo =
                   mshr_d[mshr_i].sub_reqs[drain_subreq_idx[mshr_i]].amo;
               resp_from_mshr[drain_dst_tile[mshr_i]][drain_dst_port[mshr_i]] = 1'b1;
               resp_mshr_id_dbg[drain_dst_tile[mshr_i]][drain_dst_port[mshr_i]] = mshr_id_t'(mshr_i);
 
               if (resp_out_ready[drain_dst_tile[mshr_i]][drain_dst_port[mshr_i]]) begin
-                drain_last_subreq[mshr_i] = (mshr_d[mshr_i].sub_reqs_num == 1);
-                mshr_d[mshr_i].sub_reqs[drain_subreq_idx[mshr_i]].valid = 1'b0;
-                if (mshr_d[mshr_i].sub_reqs_num != 0) begin
-                  mshr_d[mshr_i].sub_reqs_num = mshr_d[mshr_i].sub_reqs_num - 1;
-                end
+                mshr_d[mshr_i].beat_pending[drain_subreq_idx[mshr_i]] = 1'b0;
               end
               port_taken[drain_dst_tile[mshr_i]][drain_dst_port[mshr_i]] = 1'b1;
             end
@@ -1273,17 +1334,19 @@ module mempool_group_mshr
       resp_cnt_after_pop[mshr_i] = mshr_d[mshr_i].resp_buf_cnt;
       if (mshr_d_valid[mshr_i] && (mshr_d[mshr_i].resp_buf_cnt != '0) &&
           (mshr_d[mshr_i].state == MSHR_DRAIN_RESP)) begin
-        for (int s = 0; s < MshrMergeReqs; s++) begin
-          if (mshr_d[mshr_i].sub_reqs[s].valid &&
-              (mshr_d[mshr_i].sub_reqs[s].beat_offset == resp_beat_offset[mshr_i])) begin
-            resp_head_beat_pending[mshr_i] = 1'b1;
-          end
-        end
+        resp_head_beat_pending[mshr_i] = |mshr_d[mshr_i].beat_pending;
         if (!resp_head_beat_pending[mshr_i]) begin
-          if ((mshr_d[mshr_i].sub_reqs_num == '0) &&
+          if ((mshr_d[mshr_i].beats_left == BurstLenWidth'(1)) &&
               EnableRespCache &&
               (mshr_d[mshr_i].burst_len == BurstLenWidth'(1))) begin
-            // Keep head response as cache data (do not pop).
+            // Keep final drained head response as cache data (do not pop).
+            for (int s = 0; s < MshrMergeReqs; s++) begin
+              mshr_d[mshr_i].sub_reqs[s].valid = 1'b0;
+            end
+            mshr_d[mshr_i].sub_reqs_num = '0;
+            mshr_d[mshr_i].beat_pending = '0;
+            mshr_d[mshr_i].beat_done[resp_beat_offset[mshr_i]] = 1'b1;
+            mshr_d[mshr_i].beats_left = '0;
             mshr_d[mshr_i].state = MSHR_CACHED;
             mshr_d[mshr_i].resp_valid = (mshr_d[mshr_i].resp_buf_cnt != '0);
           end else begin
@@ -1301,15 +1364,22 @@ module mempool_group_mshr
               mshr_d[mshr_i].resp_buf_cnt = resp_cnt_after_pop[mshr_i];
             end
 
-            if (mshr_d[mshr_i].sub_reqs_num == '0) begin
+            mshr_d[mshr_i].beat_pending = '0;
+            mshr_d[mshr_i].beat_done[resp_beat_offset[mshr_i]] = 1'b1;
+            if (mshr_d[mshr_i].beats_left == BurstLenWidth'(1)) begin
               mshr_d_valid[mshr_i] = 1'b0;
               mshr_d[mshr_i] = '0;
-            end else if (resp_cnt_after_pop[mshr_i] != '0) begin
-              mshr_d[mshr_i].state = MSHR_DRAIN_RESP;
-              mshr_d[mshr_i].resp_valid = 1'b1;
             end else begin
-              mshr_d[mshr_i].state = MSHR_WAIT_RESP;
-              mshr_d[mshr_i].resp_valid = 1'b0;
+              if (mshr_d[mshr_i].beats_left != '0) begin
+                mshr_d[mshr_i].beats_left = mshr_d[mshr_i].beats_left - BurstLenWidth'(1);
+              end
+              if (resp_cnt_after_pop[mshr_i] != '0) begin
+                mshr_d[mshr_i].state = MSHR_DRAIN_RESP;
+                mshr_d[mshr_i].resp_valid = 1'b1;
+              end else begin
+                mshr_d[mshr_i].state = MSHR_WAIT_RESP;
+                mshr_d[mshr_i].resp_valid = 1'b0;
+              end
             end
           end
         end
@@ -1468,11 +1538,12 @@ module mempool_group_mshr
                 if (!stat_req_subreq_full_match[tile_i][port_i] &&
                     mshr_q_valid[mshr_i] &&
                     (mshr_q[mshr_i].state == MSHR_WAIT_RESP) &&
+                    !mshr_resp_seen_now[mshr_i] &&
                     !mshr_resp_inflight[mshr_i] &&
                     (mshr_q[mshr_i].base_addr == req_addr_key[tile_i][port_i]) &&
                     (mshr_q[mshr_i].tgt_group_id == req_in[tile_i][port_i].tgt_group_id) &&
                     (mshr_q[mshr_i].burst_len == req_len[tile_i][port_i]) &&
-                    ((mshr_q[mshr_i].sub_reqs_num + req_len[tile_i][port_i]) > MshrMergeReqs)) begin
+                    ((mshr_q[mshr_i].sub_reqs_num + SubReqCountW'(1)) > MshrMergeReqs)) begin
                   stat_req_subreq_full_match[tile_i][port_i] = 1'b1;
                 end
               end
