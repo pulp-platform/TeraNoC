@@ -6,10 +6,10 @@
 
 {
     kernel: "GEMV"
-    M: 1024,
+    M: 4096,
     N: 128,
-    CORES: 64,
-    multiB: 1
+    CORES: 256,
+    multiB: 256
     transpose_A: false,
     transpose_B: false,
     prec: 32,

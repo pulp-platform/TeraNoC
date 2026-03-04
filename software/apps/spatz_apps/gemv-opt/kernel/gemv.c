@@ -182,3 +182,133 @@ void gemv_v32b_opt_unroll8(float *a, float* b, float* c, uint32_t M_core, uint32
   }
   asm volatile("vse32.v v24, (%0)" ::"r"(c_));
 }
+
+// M_core should not be less than 16
+void gemv_v32b_opt_unroll8_scalar2(float *a, float* b, float* c, uint32_t M_core, uint32_t N, uint32_t offset) {
+  
+  unsigned int vl, avl = M_core;
+  float *a_ = a;
+  float *b1_ = b;
+  float *b2_ = b+1;
+  float *b3_ = b+2;
+  float *b4_ = b+3;
+  float *c_ = c;
+
+  asm volatile("vsetvli %0, %1, e32, m1, ta, ma" : "=r"(vl) : "r"(avl));
+  asm volatile("vmv.v.i v24, 0");
+
+  for (uint32_t i = 0; i < N; i++) {
+
+    asm volatile("vle32.v v0, (%0)" ::"r"(a_));
+    a_ += offset;
+    asm volatile("vfmacc.vf v24, ft1, v0" ::"f"(*b1_): "ft1");
+    b1_+=4;
+
+    asm volatile("vle32.v v1, (%0)" ::"r"(a_));
+    a_ += offset;
+    asm volatile("vfmacc.vf v24, ft2, v1" ::"f"(*b2_): "ft2");
+    b2_+=4;
+
+    asm volatile("vle32.v v2, (%0)" ::"r"(a_));
+    a_ += offset;
+    asm volatile("vfmacc.vf v24, ft3, v2" ::"f"(*b3_): "ft3");
+    b3_+=4;
+
+    asm volatile("vle32.v v3, (%0)" ::"r"(a_));
+    a_ += offset;
+    asm volatile("vfmacc.vf v24, ft4, v3" ::"f"(*b4_): "ft4");
+    b4_+=4;
+
+    asm volatile("vle32.v v4, (%0)" ::"r"(a_));
+    a_ += offset;
+    asm volatile("vfmacc.vf v24, ft5, v4" ::"f"(*b1_): "ft5");
+    b1_+=4;
+
+    asm volatile("vle32.v v5, (%0)" ::"r"(a_));
+    a_ += offset;
+    asm volatile("vfmacc.vf v24, ft6, v5" ::"f"(*b2_): "ft6");
+    b2_+=4;
+
+    asm volatile("vle32.v v6, (%0)" ::"r"(a_));
+    a_ += offset;
+    asm volatile("vfmacc.vf v24, ft7, v6" ::"f"(*b3_): "ft7");
+    b3_+=4;
+
+    asm volatile("vle32.v v7, (%0)" ::"r"(a_));
+    a_ += offset;
+    asm volatile("vfmacc.vf v24, ft8, v7" ::"f"(*b4_): "ft8");
+    b4_+=4;
+
+  }
+  asm volatile("vse32.v v24, (%0)" ::"r"(c_));
+}
+
+void gemv_v32b_opt_unroll8_scalar8(float *a, float* b, float* c, uint32_t M_core, uint32_t N, uint32_t offset) {
+  
+  unsigned int vl, avl = M_core;
+  float *a_ = a;
+  float *s1_ = b;
+  float *s2_ = b+1;
+  float *s3_ = b+2;
+  float *s4_ = b+3;
+  register float b1 __asm__("ft1") = *s1_;
+  register float b2 __asm__("ft2") = *s2_;
+  register float b3 __asm__("ft3") = *s3_;
+  register float b4 __asm__("ft4") = *s4_;
+  float *c_ = c;
+
+  asm volatile("vsetvli %0, %1, e32, m1, ta, ma" : "=r"(vl) : "r"(avl));
+  asm volatile("vmv.v.i v24, 0");
+
+  for (uint32_t i = 0; i < N; i++) {
+
+    asm volatile("vle32.v v0, (%0)" ::"r"(a_));
+    a_ += offset;
+    asm volatile("vfmacc.vf v24, ft1, v0" ::"f"(b1));
+    s1_+=4;
+    b1 = *s1_;
+
+    asm volatile("vle32.v v1, (%0)" ::"r"(a_));
+    a_ += offset;
+    asm volatile("vfmacc.vf v24, ft2, v1" ::"f"(b2));
+    s2_+=4;
+    b2 = *s2_;
+
+    asm volatile("vle32.v v2, (%0)" ::"r"(a_));
+    a_ += offset;
+    asm volatile("vfmacc.vf v24, ft3, v2" ::"f"(b3));
+    s3_+=4;
+    b3 = *s3_;
+
+    asm volatile("vle32.v v3, (%0)" ::"r"(a_));
+    a_ += offset;
+    asm volatile("vfmacc.vf v24, ft4, v3" ::"f"(b4));
+    s4_+=4;
+    b4 = *s4_;
+
+    asm volatile("vle32.v v4, (%0)" ::"r"(a_));
+    a_ += offset;
+    asm volatile("vfmacc.vf v24, ft1, v4" ::"f"(b1));
+    s1_+=4;
+    b1 = *s1_;
+
+    asm volatile("vle32.v v5, (%0)" ::"r"(a_));
+    a_ += offset;
+    asm volatile("vfmacc.vf v24, ft2, v5" ::"f"(b2));
+    s2_+=4;
+    b2 = *s2_;
+
+    asm volatile("vle32.v v6, (%0)" ::"r"(a_));
+    a_ += offset;
+    asm volatile("vfmacc.vf v24, ft3, v6" ::"f"(b3));
+    s3_+=4;    
+    b3 = *s3_;
+
+    asm volatile("vle32.v v7, (%0)" ::"r"(a_));
+    a_ += offset;
+    asm volatile("vfmacc.vf v24, ft4, v7" ::"f"(b4));
+    s4_+=4;
+    b4 = *s4_;
+  }
+  asm volatile("vse32.v v24, (%0)" ::"r"(c_));
+}

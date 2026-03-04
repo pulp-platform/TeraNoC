@@ -143,7 +143,8 @@ int main() {
       if (cid == 0)
         mempool_start_benchmark();
 
-      gemv_v32b_opt_unroll8(a_core, b, result_core, m_core, gemv_l.N >> 3, linesize);
+      // gemv_v32b_opt_unroll8(a_core, b_core, result_core, m_core, gemv_l.N >> 3, linesize);
+      gemv_v32b_opt_unroll8_scalar8(a_core, b_core, result_core, m_core, gemv_l.N >> 3, linesize);
     }
 
     // Wait for all cores to finish matmul
