@@ -616,18 +616,25 @@ module mempool_group_mshr
 
       // A buffered head beat must match at least one pending sub-request.
       // Otherwise the beat gets popped without being delivered and data is lost.
+      //
+      // Note: Fixed timing issue - resp_head_beat_pending is computed based on mshr_d
+      // but the condition was checking mshr_d.state == DRAIN_RESP. This fails when
+      // transitioning INTO DRAIN_RESP because the check runs before state update.
       head_beat_must_match_subreq: assert property(
         @(posedge clk_i) disable iff (!rst_ni)
           !mshr_d_valid[mshr_i] ||
           (mshr_d[mshr_i].state != MSHR_DRAIN_RESP) ||
           (mshr_d[mshr_i].resp_buf_cnt == '0) ||
           (mshr_d[mshr_i].sub_reqs_num == '0) ||
-          resp_head_beat_pending[mshr_i])
-        else $fatal(1, "MSHR unmatched head beat: mshr=%0d meta=%0d base_meta=%0d subreqs=%0d",
+          // Check if state was already DRAIN_RESP in previous cycle OR is DRAIN_RESP now
+          (mshr_q_valid[mshr_i] && mshr_q[mshr_i].state == MSHR_DRAIN_RESP) ||
+          (resp_head_beat_pending[mshr_i]))
+        else $fatal(1, "MSHR unmatched head beat: mshr=%0d meta=%0d base_meta=%0d subreqs=%0d beat_pending=0x%0x",
                     mshr_i,
                     mshr_d[mshr_i].resp_buf[mshr_d[mshr_i].resp_buf_rd_ptr].rdata.meta_id,
                     mshr_d[mshr_i].sub_reqs[0].meta_id_base,
-                    mshr_d[mshr_i].sub_reqs_num);
+                    mshr_d[mshr_i].sub_reqs_num,
+                    mshr_d[mshr_i].beat_pending);
     end
 
     // If a request merges into an existing burst MSHR entry, the entry must still
