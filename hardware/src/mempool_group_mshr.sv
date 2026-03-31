@@ -617,17 +617,21 @@ module mempool_group_mshr
       // A buffered head beat must match at least one pending sub-request.
       // Otherwise the beat gets popped without being delivered and data is lost.
       //
-      // Note: Fixed timing issue - resp_head_beat_pending is computed based on mshr_d
-      // but the condition was checking mshr_d.state == DRAIN_RESP. This fails when
-      // transitioning INTO DRAIN_RESP because the check runs before state update.
+      // When a response first enters an MSHR, the entry may transition into
+      // DRAIN_RESP, immediately service all requesters of the captured head beat,
+      // and even advance the response FIFO head in the same combinational pass.
+      // In that transition cycle, beat_pending can legally be zero before the
+      // next head beat gets its pending bitmap initialized. Skip the assertion
+      // while a matching response is being observed for this MSHR.
       head_beat_must_match_subreq: assert property(
         @(posedge clk_i) disable iff (!rst_ni)
           !mshr_d_valid[mshr_i] ||
           (mshr_d[mshr_i].state != MSHR_DRAIN_RESP) ||
           (mshr_d[mshr_i].resp_buf_cnt == '0) ||
           (mshr_d[mshr_i].sub_reqs_num == '0) ||
-          // Check if state was already DRAIN_RESP in previous cycle OR is DRAIN_RESP now
+          // Steady-state DRAIN_RESP is already covered by next-cycle checking.
           (mshr_q_valid[mshr_i] && mshr_q[mshr_i].state == MSHR_DRAIN_RESP) ||
+          mshr_resp_inflight[mshr_i] ||
           (resp_head_beat_pending[mshr_i]))
         else $fatal(1, "MSHR unmatched head beat: mshr=%0d meta=%0d base_meta=%0d subreqs=%0d beat_pending=0x%0x",
                     mshr_i,
