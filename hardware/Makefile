@@ -31,6 +31,8 @@ questa_version   ?= 2023.4-zr
 questa_cmd       ?= questa-$(questa_version)
 questa_args      ?=
 questa_config    ?=
+questa_voptargs ?= +acc
+questa_wlf      ?= vsim.wlf
 # VCS Configuration
 vcs_version      ?= 2024.09-zr
 vcs_cmd          ?= vcs-$(vcs_version)
@@ -50,7 +52,7 @@ python           ?= python3
 snitch_trace     ?= 1
 
 # Enable spatz (automatically set when using spatz configuration)
-spatz            ?= 0
+spatz            ?= 1
 
 # DRAMSys Integration
 dramsys_resouces_path ?= $(MEMPOOL_DIR)/hardware/deps/dram_rtl_sim/dramsys_lib/DRAMSys/configs
@@ -224,6 +226,9 @@ vlog_defs += -DNOC_RESP_CHANNEL_NUM=$(noc_resp_channel_num)
 vlog_defs += -DNOC_ROUTER_INPUT_FIFO_DEP=$(noc_router_input_fifo_dep)
 vlog_defs += -DNOC_ROUTER_OUTPUT_FIFO_DEP=$(noc_router_output_fifo_dep)
 vlog_defs += -DNOC_ROUTER_REMAP_GROUP_SIZE=$(noc_router_remap_group_size)
+# Extra defines injected from command line (e.g. sweep scripts) without clobbering base config.
+extra_vlog_defs ?=
+vlog_defs += $(extra_vlog_defs)
 
 # ============================================================================
 # Verilator: C++ Preprocessor Defines ##
@@ -348,13 +353,13 @@ $(buildpath)/compile.tcl: $(bender) $(config_mk) Makefile $(MEMPOOL_DIR)/Bender.
 .PHONY: sim
 sim: clean-dasm compile
 	cd $(buildpath) && \
-	$(questa_cmd) vsim -voptargs=+acc $(questa_args) $(library).$(top_level) -do "set config ${config}" -do ../scripts/questa/run.tcl
+	$(questa_cmd) vsim -voptargs=$(questa_voptargs) -wlf $(questa_wlf) $(questa_args) $(library).$(top_level) -do "set config ${config}" -do ../scripts/questa/run.tcl
 	./scripts/return_status.sh $(buildpath)/transcript
 
 .PHONY: simc
 simc: clean-dasm compile
 	cd $(buildpath) && \
-	$(questa_cmd) vsim -c $(questa_args) $(library).$(top_level) -do "run -a"
+	$(questa_cmd) vsim -c -voptargs=$(questa_voptargs) -wlf $(questa_wlf) $(questa_args) $(library).$(top_level) -do "log -r *" -do "run -a"
 	./scripts/return_status.sh $(buildpath)/transcript
 
 # DPIs
@@ -539,6 +544,18 @@ $(buildpath)/%.trace: $(buildpath)/%.dasm
 
 tracevis:
 	$(MEMPOOL_DIR)/scripts/tracevis.py $(preload) $(buildpath)/*.trace -o $(buildpath)/tracevis.json
+
+############################
+# NoC traffic visualization #
+############################
+noc_vis_W ?= $(num_x)
+noc_vis_H ?= $(shell echo $$(( $(num_groups) / $(num_x) )))
+
+noc-vis: $(buildpath)/v4m_out/trace_events.csv
+	$(python) scripts/noc_visualization/gen_v4m_from_csv.py \
+		$< $(buildpath)/vis4mesh_out \
+		--W $(noc_vis_W) --H $(noc_vis_H) \
+		--cycles-per-slice 10 --debug
 
 ############################
 # Unit tests simulation    #
