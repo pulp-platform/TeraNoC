@@ -12,7 +12,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define NUM_BANKS_PER_TILE NUM_CORES_PER_TILE *BANKING_FACTOR
+#define NUM_BANKS_PER_TILE NUM_CORES_PER_TILE * BANKING_FACTOR * N_FU
 
 extern char l1_alloc_base;
 static uint32_t volatile *wake_up_reg =
@@ -98,10 +98,12 @@ static inline uint32_t mempool_get_core_count_per_group() {
 /// Initialization
 static inline void mempool_init(const uint32_t core_id) {
   if (core_id == 0) {
+    if (SEQ_MEM_SIZE != L1_BANK_SIZE * BANKING_FACTOR * N_FU) {
     // Initialize L1 Interleaved Heap Allocator
     extern uint32_t __heap_start, __heap_end;
     uint32_t heap_size = (uint32_t)&__heap_end - (uint32_t)&__heap_start;
     alloc_init(get_alloc_l1(), &__heap_start, heap_size);
+    }
 
     // Initialize L1 Sequential Heap Allocator per Tile
     extern uint32_t __seq_start;

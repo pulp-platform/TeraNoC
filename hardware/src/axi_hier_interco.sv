@@ -99,7 +99,7 @@ module axi_hier_interco
   // Recursive module to implement multiple hierarchy levels at once
 
   if (NumMstPorts >  NumSlvPorts) begin : gen_error
-    $error("[axi_hier_interco] `NumMstPorts` must be bigger than `NumSlvPorts`.");
+    $error("[axi_hier_interco] `NumMstPorts` must not be bigger than `NumSlvPorts`.");
   end else if (NumMstPorts == NumSlvPorts) begin : gen_top_level
     // Top-level, connect the ports to the master ports
     for (genvar i = 0; i < NumMstPorts; i++) begin : gen_bypasses
@@ -234,7 +234,7 @@ module axi_hier_interco
         .AxiUserWidth (UserWidth     ),
         .MaxTrans     (32'd16        ),
         .NrAddrRules  (NrAddrRules   ),
-        .SerialLookup (1             ),
+        // .SerialLookup (1             ),
         .slv_req_t    (int_req_t     ),
         .slv_rsp_t    (int_resp_t    ),
         .mst_req_t    (cache_req_t   ),
@@ -250,9 +250,7 @@ module axi_hier_interco
         .axi_slv_req_i (int_req                    ),
         .axi_slv_rsp_o (int_resp                   ),
         .axi_mst_req_o (cache_req                  ),
-        .axi_mst_rsp_i (cache_resp                 ),
-        .sram_cfg_data_i('0                        ),
-        .sram_cfg_tag_i ('0                        )
+        .axi_mst_rsp_i (cache_resp                 )
       );
     end else begin: gen_no_ro_cache
       assign cache_req = int_req;

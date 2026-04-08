@@ -56,6 +56,14 @@ else
   CLANG_LDFLAGS  := ""
 endif
 
+ifeq ($(spatz), 1)
+# RV32XPULPIMG := opcodes-xpulpabs_CUSTOM opcodes-xpulpbr_CUSTOM opcodes-xpulpclip_CUSTOM opcodes-xpulpmacsi_CUSTOM opcodes-xpulpminmax_CUSTOM opcodes-xpulpslet_CUSTOM
+# RV32XPULPIMG += opcodes-xpulpbitop_CUSTOM
+	MEMPOOL_ISA := opcodes-frep_CUSTOM 
+# $(RV32XPULPIMG) opcodes-xpulppostmod_CUSTOM
+	OPCODES := "$(MEMPOOL_ISA) opcodes-rvv opcodes-smallfloat"
+endif
+
 ################
 # Dependencies #
 ################
@@ -84,7 +92,6 @@ clean-deps:
 		cluster_interconnect \
 		common_cells \
 		common_verification \
-		dram_rtl_sim \
 		floo_noc \
 		fpnew \
 		fpu_div_sqrt_mvp \
@@ -113,7 +120,10 @@ halide:
 	make install
 
 # Toolchain
-toolchain: tc-riscv-gcc tc-llvm
+toolchain: toolchain-submodules tc-riscv-gcc tc-llvm riscv-isa-sim
+
+toolchain-submodules: 
+	git submodule update --init --recursive
 
 tc-riscv-gcc:
 	mkdir -p $(GCC_INSTALL_DIR)
@@ -265,13 +275,22 @@ apps:
 update_opcodes: software/runtime/encoding.h hardware/deps/snitch/src/riscv_instr.sv
 
 software/runtime/encoding.h: toolchain/riscv-opcodes/*
+ifeq ($(spatz), 1)
+	MY_OPCODES=$(OPCODES) make -C toolchain/riscv-opcodes encoding_out.h
+else
 	make -C toolchain/riscv-opcodes encoding_out.h
+endif
 	mv toolchain/riscv-opcodes/encoding_out.h $@
 	ln -fsr $@ toolchain/riscv-isa-sim/riscv/encoding.h
 	ln -fsr $@ software/riscv-tests/env/encoding.h #this will change when riscv-tests is a submodule
 
 hardware/deps/snitch/src/riscv_instr.sv: toolchain/riscv-opcodes/*
+ifeq ($(spatz), 1)
+	MY_OPCODES=$(OPCODES) make -C toolchain/riscv-opcodes inst.sverilog
+# 		make -C toolchain/riscv-opcodes inst.sverilog
+else
 	make -C toolchain/riscv-opcodes inst.sverilog
+endif
 	mv toolchain/riscv-opcodes/inst.sverilog $@
 
 toolchain/riscv-opcodes/*:

@@ -15,16 +15,33 @@
 
 module snitch
   import snitch_pkg::meta_id_t;
-  import snitch_pkg::acc_addr_e;
 #(
   parameter logic [31:0] BootAddr  = 32'h0000_1000,
   parameter logic [31:0] MTVEC     = BootAddr, // Exception Base Address (see privileged spec 3.1.7)
   parameter bit          RVE       = 0,   // Reduced-register Extension
   parameter bit          RVM       = 1,   // Enable IntegerMmultiplication & Division Extension
-  parameter int    RegNrWritePorts = 2    // Implement one or two write ports into the register file
+
+  parameter bit          RVV       = 0,   // Enable Vector Extension
+  parameter bit          XFVEC     = 0,
+  parameter bit          XFDOTP    = 0,
+  parameter bit          XFAUX     = 0,
+  /// Enable F Extension.
+  parameter bit          RVF       = 0,
+  /// Enable D Extension.
+  parameter bit          RVD       = 0,
+  parameter bit          XF16      = 0,
+  parameter bit          XF16ALT   = 0,
+  parameter bit          XF8       = 0,
+  parameter bit          XF8ALT    = 0,
+  /// Enable div/sqrt unit (buggy - use with caution)
+  parameter bit          XDivSqrt  = 0,
+  parameter int    RegNrWritePorts = 2,   // Implement one or two write ports into the register file
+  parameter type         acc_issue_rsp_t = logic,
+  // Dependant parameters.
+  localparam bit FP_EN             = RVF || RVD  // Enable FP in general,
 ) (
   input  logic          clk_i,
-  input  logic          rst_ni,
+  input  logic          rst_i,
   input  logic [31:0]   hart_id_i,
   // Instruction Refill Port
   output logic [31:0]   inst_addr_o,
@@ -57,8 +74,14 @@ module snitch
   /// Independent channels for transaction request and read completion.
   /// AXI-like handshaking.
   /// Same IDs need to be handled in-order.
-  output acc_addr_e     acc_qaddr_o,
+  output logic [31:0]   acc_qaddr_o,
+`ifdef TARGET_SPATZ
+  output logic [5:0]    acc_qid_o,
+  input  logic [5:0]    acc_pid_i,
+`else
   output logic [4:0]    acc_qid_o,
+  input  logic [4:0]    acc_pid_i,
+`endif
   output logic [31:0]   acc_qdata_op_o,
   output logic [31:0]   acc_qdata_arga_o,
   output logic [31:0]   acc_qdata_argb_o,
@@ -66,10 +89,13 @@ module snitch
   output logic          acc_qvalid_o,
   input  logic          acc_qready_i,
   input  logic [31:0]   acc_pdata_i,
-  input  logic [4:0]    acc_pid_i,
+  input  logic          acc_pwrite_i,
   input  logic          acc_perror_i,
   input  logic          acc_pvalid_i,
   output logic          acc_pready_o,
+  input  acc_issue_rsp_t      acc_qdata_rsp_i,
+  input  logic [1:0]    acc_mem_finished_i,
+  input  logic [1:0]    acc_mem_str_finished_i,
   /// TCDM Data Interface
   /// Write transactions do not return data on the `P Channel`
   /// Transactions need to be handled strictly in-order.
@@ -87,14 +113,16 @@ module snitch
   input  logic          data_pvalid_i,
   output logic          data_pready_o,
   input  logic          wake_up_sync_i, // synchronous wake-up interrupt
+  // FPU **un-timed** Side-channel
   output fpnew_pkg::roundmode_e    fpu_rnd_mode_o,
+  output fpnew_pkg::fmt_mode_t     fpu_fmt_mode_o,
   input  fpnew_pkg::status_t       fpu_status_i,
   // Core event strobes
   output snitch_pkg::core_events_t core_events_o
 );
 
   localparam int RegWidth = RVE ? 4 : 5;
-  localparam int RegNrReadPorts = ((snitch_pkg::XPULPIMG) || (snitch_pkg::ZFINX)) ? 3 : 2;
+  localparam int RegNrReadPorts = snitch_pkg::XPULPIMG ? 3 : 2;
   localparam logic [RegWidth-1:0] SP = 2;
   localparam int OutstandingWfi = 8;
 
@@ -124,8 +152,6 @@ module snitch
   logic [31:0] alu_result;
 
   logic [RegWidth-1:0] rd, rs1, rs2;
-  logic [RegWidth-1:0] rs3;
-
   logic stall, lsu_stall, fence_stall;
   // Register connections
   logic [RegNrReadPorts-1:0][RegWidth-1:0]  gpr_raddr;
@@ -138,6 +164,7 @@ module snitch
   // Load/Store Defines
   logic is_load, is_store, is_signed, is_postincr;
   logic is_fp_load, is_fp_store;
+  logic is_acc_mem, is_acc;
   logic ls_misaligned;
   logic ld_addr_misaligned;
   logic st_addr_misaligned;
@@ -171,6 +198,7 @@ module snitch
   logic [RegWidth-1:0] lsu_rd;
   logic [31:0] lsu_qaddr;
 
+
   logic retire_load; // retire a load instruction
   logic retire_p; // retire from post-increment instructions
   logic retire_i; // retire the rest of the base instruction set
@@ -199,9 +227,10 @@ module snitch
     None, Reg, IImmediate, UImmediate, JImmediate, SImmediate, SFImmediate, PC, CSR, CSRImmediate, PBImmediate, RegRd, RegRs2
   } opa_select, opb_select, opc_select;
 
-  logic write_rd; // write rd desitnation this cycle
+  logic write_rd; // write rd destination this cycle
   logic uses_rd;
   logic write_rs1; // write rs1 destination this cycle
+  logic uses_rs1;
   enum logic [1:0] {Consec, Alu, Exception} next_pc;
 
   enum logic [1:0] {RdAlu, RdConsecPC, RdBypass} rd_select;
@@ -213,20 +242,23 @@ module snitch
   logic csr_en;
 
   typedef struct packed {
+    fpnew_pkg::fmt_mode_t  fmode;
     fpnew_pkg::roundmode_e frm;
     fpnew_pkg::status_t    fflags;
   } fcsr_t;
   fcsr_t fcsr_d, fcsr_q;
+  // Current instruction needs fcsr
+  logic read_fcsr;
+
+  assign fpu_rnd_mode_o = fcsr_q.frm;
+  assign fpu_fmt_mode_o = fcsr_q.fmode;
 
   // Registers
-  `FF(pc_q, pc_d, BootAddr, clk_i, rst_ni)
-  `FF(wfi_q, wfi_d, '0, clk_i, rst_ni)
-  `FF(wake_up_q, wake_up_d, '0, clk_i, rst_ni)
-  `FF(sb_q, sb_d, '0, clk_i, rst_ni)
-  if (snitch_pkg::ZFINX) begin
-    `FF(fcsr_q, fcsr_d, '0, clk_i, rst_ni)
-    assign fpu_rnd_mode_o = fcsr_q.frm;
-  end
+  `FFAR(pc_q, pc_d, BootAddr, clk_i, rst_i)
+  `FFAR(wfi_q, wfi_d, '0, clk_i, rst_i)
+  `FFAR(wake_up_q, wake_up_d, '0, clk_i, rst_i)
+  `FFAR(sb_q, sb_d, '0, clk_i, rst_i)
+  `FFAR(fcsr_q, fcsr_d, '0, clk_i, rst_i)
 
   always_comb begin
     core_events_o = '0;
@@ -236,12 +268,24 @@ module snitch
   // accelerator offloading interface
   // register int destination in scoreboard
   logic  acc_register_rd;
+  // LSU stalling due to accelerator memory requests
+  logic acc_mem_stall;
+  // Offloaded mem operation is a store operation
+  logic acc_mem_store;
 
+  assign acc_qaddr_o = hart_id_i;
   assign acc_qid_o = rd;
   assign acc_qdata_op_o = inst_data_i;
   assign acc_qdata_arga_o = {{32{gpr_rdata[0][31]}}, gpr_rdata[0]};
-  assign acc_qdata_argb_o = {{32{gpr_rdata[1][31]}}, gpr_rdata[1]};
-  assign acc_qdata_argc_o = {{32{gpr_rdata[2][31]}}, gpr_rdata[2]};
+  assign acc_qdata_argb_o = opb_select inside {IImmediate, SImmediate, SFImmediate} ?
+    {{32{alu_result[31]}}, alu_result} : {{32{gpr_rdata[1][31]}}, gpr_rdata[1]};
+
+`ifdef XPULPIMG_EXTENSION
+  assign acc_qdata_argc_o = gpr_rdata[2]};
+`else
+  assign acc_qdata_argc_o = '0;
+`endif
+
 
   // instruction fetch interface
   assign inst_addr_o = pc_q;
@@ -254,7 +298,7 @@ module snitch
   logic operands_ready;
   logic dst_ready;
   logic opa_ready, opb_ready, opc_ready;
-  logic dstrd_ready;
+  logic dstrd_ready, dstrs1_ready;
 
   always_comb begin
     sb_d = sb_q;
@@ -267,25 +311,38 @@ module snitch
   // TODO(zarubaf): This can probably be described a bit more efficient
   assign opa_ready = (opa_select != Reg) | ~sb_q[rs1];
   assign opb_ready = ((opb_select != Reg & opb_select != SImmediate) | ~sb_q[rs2]) & ((opb_select != RegRd) | ~sb_q[rd]);
-  if (snitch_pkg::ZFINX) begin
-    assign opc_ready = ((opc_select != Reg & opc_select != SImmediate) | ~sb_q[rs3]) & ((opc_select != RegRs2) | ~sb_q[rs2]);
-  end else begin
-    assign opc_ready = ((opc_select != Reg) | ~sb_q[rd]) & ((opc_select != RegRs2) | ~sb_q[rs2]);
-  end
+  assign opc_ready = ((opc_select != Reg) | ~sb_q[rd]) & ((opc_select != RegRs2) | ~sb_q[rs2]);
   assign operands_ready = opa_ready & opb_ready & opc_ready;
-
   // either we are not using the destination register or we need to make
   // sure that its destination operand is not marked busy in the scoreboard.
   assign dstrd_ready = ~uses_rd | (uses_rd & ~sb_q[rd]);
-  assign dst_ready = dstrd_ready;
+  assign dstrs1_ready = ~uses_rs1 | (uses_rs1 & ~sb_q[rs1]);
+  assign dst_ready = dstrd_ready & dstrs1_ready;
 
   assign valid_instr = (inst_ready_i & inst_valid_o) & operands_ready & dst_ready;
+
+`ifdef TARGET_SPATZ
   // the accelerator interface stalled us
-  assign acc_stall = (acc_qvalid_o & ~acc_qready_i);
+  assign acc_stall = (acc_qvalid_o & ~acc_qready_i) || (read_fcsr && acc_qdata_rsp_i.isfloat);
   // the LSU Interface didn't accept our request yet
-  assign lsu_stall = (lsu_qvalid & ~lsu_qready);
+`else
+  assign acc_stall = (acc_qvalid_o & ~acc_qready_i);
+`endif
+
   // Stall the stage if we either didn't get a valid instruction or the LSU/Accelerator is not ready
-  assign stall = ~valid_instr | lsu_stall | acc_stall | fence_stall;
+  always_comb begin
+    lsu_stall = (lsu_qvalid & ~lsu_qready);
+    stall = ~valid_instr | lsu_stall | acc_stall | fence_stall;
+    if (acc_mem_stall) begin
+      // If acc memory is stalling, it is not necessary to stall the snich
+      // only memory instructions cannot be forward to avoid data hazards
+      if (is_acc_mem | is_store | is_load) begin
+        // If is a acc insn or snitch mem insn, we stall
+        lsu_stall = 1'b1;
+        stall     = 1'b1;
+      end
+    end
+  end
 
   // --------------------
   // Instruction Frontend
@@ -311,14 +368,17 @@ module snitch
   `ifdef SNITCH_ENABLE_PERF
   logic [63:0] cycle_q;
   logic [63:0] instret_q;
+  `FFAR(cycle_q, cycle_q + 1, '0, clk_i, rst_i);
+  `FFLAR(instret_q, instret_q + 1, !stall, '0, clk_i, rst_i);
+  `endif
+
+  `ifdef SNITCH_ENABLE_STALL_COUNTER
   logic [31:0] stall_ins_q;
   logic [31:0] stall_raw_q;
   logic [31:0] stall_lsu_q;
-  `FF(cycle_q, cycle_q + 1, '0, clk_i, rst_ni);
-  `FFL(instret_q, instret_q + 1, !stall, '0, clk_i, rst_ni);
-  `FFL(stall_ins_q, stall_ins_q + 1, stall && (!inst_ready_i) && inst_valid_o, '0, clk_i, rst_ni)
-  `FFL(stall_raw_q, stall_raw_q + 1, (!operands_ready) || (!dst_ready), '0, clk_i, rst_ni)
-  `FFL(stall_lsu_q, stall_lsu_q + 1, lsu_stall, '0, clk_i, rst_ni)
+  `FFLAR(stall_ins_q, stall_ins_q + 1, stall && (!inst_ready_i) && inst_valid_o, '0, clk_i, rst_i)
+  `FFLAR(stall_raw_q, stall_raw_q + 1, (!operands_ready) || (!dst_ready), '0, clk_i, rst_i)
+  `FFLAR(stall_lsu_q, stall_lsu_q + 1, lsu_stall, '0, clk_i, rst_i)
   `endif
 
 
@@ -328,10 +388,6 @@ module snitch
   assign rd = inst_data_i[7 + RegWidth - 1:7];
   assign rs1 = inst_data_i[15 + RegWidth - 1:15];
   assign rs2 = inst_data_i[20 + RegWidth - 1:20];
-  if (snitch_pkg::ZFINX) begin
-    assign rs3 = (((acc_qaddr_o == snitch_pkg::FP_SS) || (acc_qaddr_o == snitch_pkg::FP_DIVSQRT)) & (snitch_pkg::ZFINX)) ? inst_data_i[27 + RegWidth - 1:27] :
-                 ((acc_qaddr_o == snitch_pkg::XPULP_IPU) & (snitch_pkg::XPULPIMG)) ? inst_data_i[7 + RegWidth - 1:7] : '0;
-  end
 
   always_comb begin
     illegal_inst = 1'b0;
@@ -342,14 +398,14 @@ module snitch
 
     next_pc = Consec;
 
-    // Set up rd destination
+    // set up rd destination
     rd_select = RdAlu;
-    // instruction writes rd in the decoding cycle
     write_rd = 1'b1;
-    // instruction writes rd
-    uses_rd = 1'b1;
-    // instruction writes rs1 in the decoding cycle
+    // if we are writing the field this cycle we need an int destination register
+    uses_rd = write_rd;
+    // set up rs1 destination
     write_rs1 = 1'b0;
+    uses_rs1 = write_rs1;
 
     rd_bypass = '0;
     zero_lsb = 1'b0;
@@ -364,14 +420,17 @@ module snitch
     ls_size = Byte;
     ls_amo = AMONone;
 
+    is_acc_mem = 1'b0;
+    is_acc     = 1'b0;
+
     acc_qvalid_o = 1'b0;
-    acc_qaddr_o = snitch_pkg::XPULP_IPU;
     acc_register_rd = 1'b0;
+    acc_mem_store = 1'b0;
 
     csr_en = 1'b0;
     fence_stall = 1'b0;
     // Wake up if a wake-up is incoming or pending
-    wfi_d = ((wake_up_q > 0) || wake_up_sync_i) ? 1'b0 : wfi_q;
+    wfi_d = ((|wake_up_q) | wake_up_sync_i) ? 1'b0 : wfi_q;
     // Only store a pending wake-up if we are not asleep
     wake_up_d = (wake_up_sync_i && !wfi_q) ? wake_up_q + 1 : wake_up_q;
 
@@ -496,7 +555,6 @@ module snitch
       riscv_instr::BEQ: begin
         is_branch = 1'b1;
         write_rd = 1'b0;
-        uses_rd = 1'b0;
         alu_op = Eq;
         opa_select = Reg;
         opb_select = Reg;
@@ -504,7 +562,6 @@ module snitch
       riscv_instr::BNE: begin
         is_branch = 1'b1;
         write_rd = 1'b0;
-        uses_rd = 1'b0;
         alu_op = Neq;
         opa_select = Reg;
         opb_select = Reg;
@@ -512,7 +569,6 @@ module snitch
       riscv_instr::BLT: begin
         is_branch = 1'b1;
         write_rd = 1'b0;
-        uses_rd = 1'b0;
         alu_op = Slt;
         opa_select = Reg;
         opb_select = Reg;
@@ -520,7 +576,6 @@ module snitch
       riscv_instr::BLTU: begin
         is_branch = 1'b1;
         write_rd = 1'b0;
-        uses_rd = 1'b0;
         alu_op = Sltu;
         opa_select = Reg;
         opb_select = Reg;
@@ -528,7 +583,6 @@ module snitch
       riscv_instr::BGE: begin
         is_branch = 1'b1;
         write_rd = 1'b0;
-        uses_rd = 1'b0;
         alu_op = Ge;
         opa_select = Reg;
         opb_select = Reg;
@@ -536,7 +590,6 @@ module snitch
       riscv_instr::BGEU: begin
         is_branch = 1'b1;
         write_rd = 1'b0;
-        uses_rd = 1'b0;
         alu_op = Geu;
         opa_select = Reg;
         opb_select = Reg;
@@ -544,14 +597,12 @@ module snitch
       // Load/Stores
       riscv_instr::SB: begin
         write_rd = 1'b0;
-        uses_rd = 1'b0;
         is_store = 1'b1;
         opa_select = Reg;
         opb_select = SImmediate;
       end
       riscv_instr::SH: begin
         write_rd = 1'b0;
-        uses_rd = 1'b0;
         is_store = 1'b1;
         ls_size = HalfWord;
         opa_select = Reg;
@@ -559,7 +610,6 @@ module snitch
       end
       riscv_instr::SW: begin
         write_rd = 1'b0;
-        uses_rd = 1'b0;
         is_store = 1'b1;
         ls_size = Word;
         opa_select = Reg;
@@ -567,6 +617,7 @@ module snitch
       end
       riscv_instr::LB: begin
         write_rd = 1'b0;
+        uses_rd = 1'b1;
         is_load = 1'b1;
         is_signed = 1'b1;
         opa_select = Reg;
@@ -574,6 +625,7 @@ module snitch
       end
       riscv_instr::LH: begin
         write_rd = 1'b0;
+        uses_rd = 1'b1;
         is_load = 1'b1;
         is_signed = 1'b1;
         ls_size = HalfWord;
@@ -582,6 +634,7 @@ module snitch
       end
       riscv_instr::LW: begin
         write_rd = 1'b0;
+        uses_rd = 1'b1;
         is_load = 1'b1;
         is_signed = 1'b1;
         ls_size = Word;
@@ -590,12 +643,14 @@ module snitch
       end
       riscv_instr::LBU: begin
         write_rd = 1'b0;
+        uses_rd = 1'b1;
         is_load = 1'b1;
         opa_select = Reg;
         opb_select = IImmediate;
       end
       riscv_instr::LHU: begin
         write_rd = 1'b0;
+        uses_rd = 1'b1;
         is_load = 1'b1;
         ls_size = HalfWord;
         opa_select = Reg;
@@ -603,67 +658,204 @@ module snitch
       end
       // CSR Instructions
       riscv_instr::CSRRW: begin // Atomic Read/Write CSR
-        opa_select = Reg;
-        opb_select = None;
-        rd_select = RdBypass;
-        rd_bypass = csr_rvalue;
-        csr_en = 1'b1;
+        unique case (inst_data_i[31:20])
+`ifdef TARGET_SPATZ
+          riscv_instr::CSR_VSTART,
+          riscv_instr::CSR_VL,
+          riscv_instr::CSR_VTYPE,
+          riscv_instr::CSR_VLENB,
+          riscv_instr::CSR_VXSAT,
+          riscv_instr::CSR_VXRM,
+          riscv_instr::CSR_VCSR: begin
+            if (RVV) begin
+              write_rd = 1'b0;
+              uses_rd = rd != 0;
+              is_acc = 1'b1;
+              acc_qvalid_o = valid_instr;
+              opa_select = Reg;
+              acc_register_rd = rd != 0;
+            end else begin
+              illegal_inst = 1'b1;
+            end
+          end
+`endif
+          default: begin
+            opa_select = Reg;
+            opb_select = None;
+            rd_select = RdBypass;
+            rd_bypass = csr_rvalue;
+            csr_en = 1'b1;
+          end
+        endcase
       end
       riscv_instr::CSRRWI: begin
-        opa_select = CSRImmediate;
-        opb_select = None;
-        rd_select = RdBypass;
-        rd_bypass = csr_rvalue;
-        csr_en = 1'b1;
+        unique case (inst_data_i[31:20])
+`ifdef TARGET_SPATZ
+          riscv_instr::CSR_VSTART,
+          riscv_instr::CSR_VL,
+          riscv_instr::CSR_VTYPE,
+          riscv_instr::CSR_VLENB,
+          riscv_instr::CSR_VXSAT,
+          riscv_instr::CSR_VXRM,
+          riscv_instr::CSR_VCSR: begin
+            if (RVV) begin
+              write_rd = 1'b0;
+              uses_rd = rd != 0;
+              is_acc = 1'b1;
+              acc_qvalid_o = valid_instr;
+              acc_register_rd = rd != 0;
+            end else begin
+              illegal_inst = 1'b1;
+            end
+          end
+`endif
+          default: begin
+            opa_select = CSRImmediate;
+            opb_select = None;
+            rd_select = RdBypass;
+            rd_bypass = csr_rvalue;
+            csr_en = 1'b1;
+          end
+        endcase
       end
       riscv_instr::CSRRS: begin  // Atomic Read and Set Bits in CSR
-          alu_op = LOr;
-          opa_select = Reg;
-          opb_select = CSR;
-          rd_select = RdBypass;
-          rd_bypass = csr_rvalue;
-          csr_en = 1'b1;
+        unique case (inst_data_i[31:20])
+`ifdef TARGET_SPATZ
+          riscv_instr::CSR_VSTART,
+          riscv_instr::CSR_VL,
+          riscv_instr::CSR_VTYPE,
+          riscv_instr::CSR_VLENB,
+          riscv_instr::CSR_VXSAT,
+          riscv_instr::CSR_VXRM,
+          riscv_instr::CSR_VCSR: begin
+            if (RVV) begin
+              write_rd = 1'b0;
+              uses_rd = 1'b1;
+              is_acc = 1'b1;
+              acc_qvalid_o = valid_instr;
+              opa_select = Reg;
+              acc_register_rd = 1'b1;
+            end else begin
+              illegal_inst = 1'b1;
+            end
+          end
+`endif
+          default: begin
+            alu_op = LOr;
+            opa_select = Reg;
+            opb_select = CSR;
+            rd_select = RdBypass;
+            rd_bypass = csr_rvalue;
+            csr_en = 1'b1;
+          end
+        endcase
       end
       riscv_instr::CSRRSI: begin
-        // offload CSR enable to FP SS
-        if (inst_data_i[31:20] != snitch_pkg::CSR_SSR) begin
-          alu_op = LOr;
-          opa_select = CSRImmediate;
-          opb_select = CSR;
-          rd_select = RdBypass;
-          rd_bypass = csr_rvalue;
-          csr_en = 1'b1;
-        end else begin
-          write_rd = 1'b0;
-          acc_qvalid_o = valid_instr;
-        end
+        unique case (inst_data_i[31:20])
+`ifdef TARGET_SPATZ
+          riscv_instr::CSR_VSTART,
+          riscv_instr::CSR_VL,
+          riscv_instr::CSR_VTYPE,
+          riscv_instr::CSR_VLENB,
+          riscv_instr::CSR_VXSAT,
+          riscv_instr::CSR_VXRM,
+          riscv_instr::CSR_VCSR: begin
+            if (RVV) begin
+              write_rd = 1'b0;
+              uses_rd = 1'b1;
+              is_acc = 1'b1;
+              acc_qvalid_o = valid_instr;
+              acc_register_rd = 1'b1;
+            end else begin
+              illegal_inst = 1'b1;
+            end
+          end
+`endif
+          snitch_pkg::CSR_SSR: begin
+            write_rd = 1'b0;
+            acc_qvalid_o = valid_instr;
+          end
+          default: begin
+            alu_op = LOr;
+            opa_select = CSRImmediate;
+            opb_select = CSR;
+            rd_select = RdBypass;
+            rd_bypass = csr_rvalue;
+            csr_en = 1'b1;
+          end
+        endcase
       end
       riscv_instr::CSRRC: begin // Atomic Read and Clear Bits in CSR
-        alu_op = LNAnd;
-        opa_select = Reg;
-        opb_select = CSR;
-        rd_select = RdBypass;
-        rd_bypass = csr_rvalue;
-        csr_en = 1'b1;
+        unique case (inst_data_i[31:20])
+`ifdef TARGET_SPATZ
+          riscv_instr::CSR_VSTART,
+          riscv_instr::CSR_VL,
+          riscv_instr::CSR_VTYPE,
+          riscv_instr::CSR_VLENB,
+          riscv_instr::CSR_VXSAT,
+          riscv_instr::CSR_VXRM,
+          riscv_instr::CSR_VCSR: begin
+            if (RVV) begin
+              write_rd = 1'b0;
+              uses_rd = 1'b1;
+              is_acc = 1'b1;
+              acc_qvalid_o = valid_instr;
+              opa_select = Reg;
+              acc_register_rd = 1'b1;
+            end else begin
+              illegal_inst = 1'b1;
+            end
+          end
+`endif
+          default: begin
+            alu_op = LNAnd;
+            opa_select = Reg;
+            opb_select = CSR;
+            rd_select = RdBypass;
+            rd_bypass = csr_rvalue;
+            csr_en = 1'b1;
+          end
+        endcase
       end
       riscv_instr::CSRRCI: begin
-        if (inst_data_i[31:20] != snitch_pkg::CSR_SSR) begin
-          alu_op = LNAnd;
-          opa_select = CSRImmediate;
-          opb_select = CSR;
-          rd_select = RdBypass;
-          rd_bypass = csr_rvalue;
-          csr_en = 1'b1;
-        end else begin
-          write_rd = 1'b0;
-          acc_qvalid_o = valid_instr;
-        end
+        unique case (inst_data_i[31:20])
+`ifdef TARGET_SPATZ
+          riscv_instr::CSR_VSTART,
+          riscv_instr::CSR_VL,
+          riscv_instr::CSR_VTYPE,
+          riscv_instr::CSR_VLENB,
+          riscv_instr::CSR_VXSAT,
+          riscv_instr::CSR_VXRM,
+          riscv_instr::CSR_VCSR: begin
+            if (RVV) begin
+              write_rd = 1'b0;
+              uses_rd = 1'b1;
+              is_acc = 1'b1;
+              acc_qvalid_o = valid_instr;
+              acc_register_rd = 1'b1;
+            end else begin
+              illegal_inst = 1'b1;
+            end
+          end
+`endif
+          snitch_pkg::CSR_SSR: begin
+            write_rd = 1'b0;
+            acc_qvalid_o = valid_instr;
+          end
+          default: begin
+            alu_op = LNAnd;
+            opa_select = CSRImmediate;
+            opb_select = CSR;
+            rd_select = RdBypass;
+            rd_bypass = csr_rvalue;
+            csr_en = 1'b1;
+          end
+        endcase
       end
       riscv_instr::ECALL,
       riscv_instr::EBREAK: begin
         // TODO(zarubaf): Trap to precise address
         write_rd = 1'b0;
-        uses_rd = 1'b0;
       end
       // NOP Instructions
       riscv_instr::FENCE: begin
@@ -674,10 +866,10 @@ module snitch
       riscv_instr::WFI: begin
         if (valid_instr) begin
           wfi_d = 1'b1;
-          if ((wake_up_q > 0) || wake_up_sync_i) begin
+          if ((|wake_up_q)| wake_up_sync_i) begin
             // Do not sleep if a wake-up is pending
             wfi_d = 1'b0;
-            if (wake_up_q > 0) begin
+            if (|wake_up_q) begin
               // Decrement outstanding wake_up pulses
               wake_up_d = wake_up_q - 1;
             end
@@ -692,6 +884,7 @@ module snitch
       riscv_instr::AMOADD_W: begin
         alu_op = BypassA;
         write_rd = 1'b0;
+        uses_rd = 1'b1;
         is_load = 1'b1;
         is_signed = 1'b1;
         ls_size = Word;
@@ -702,6 +895,7 @@ module snitch
       riscv_instr::AMOXOR_W: begin
         alu_op = BypassA;
         write_rd = 1'b0;
+        uses_rd = 1'b1;
         is_load = 1'b1;
         is_signed = 1'b1;
         ls_size = Word;
@@ -712,6 +906,7 @@ module snitch
       riscv_instr::AMOOR_W: begin
         alu_op = BypassA;
         write_rd = 1'b0;
+        uses_rd = 1'b1;
         is_load = 1'b1;
         is_signed = 1'b1;
         ls_size = Word;
@@ -722,6 +917,7 @@ module snitch
       riscv_instr::AMOAND_W: begin
         alu_op = BypassA;
         write_rd = 1'b0;
+        uses_rd = 1'b1;
         is_load = 1'b1;
         is_signed = 1'b1;
         ls_size = Word;
@@ -732,6 +928,7 @@ module snitch
       riscv_instr::AMOMIN_W: begin
         alu_op = BypassA;
         write_rd = 1'b0;
+        uses_rd = 1'b1;
         is_load = 1'b1;
         is_signed = 1'b1;
         ls_size = Word;
@@ -742,6 +939,7 @@ module snitch
       riscv_instr::AMOMAX_W: begin
         alu_op = BypassA;
         write_rd = 1'b0;
+        uses_rd = 1'b1;
         is_load = 1'b1;
         is_signed = 1'b1;
         ls_size = Word;
@@ -752,6 +950,7 @@ module snitch
       riscv_instr::AMOMINU_W: begin
         alu_op = BypassA;
         write_rd = 1'b0;
+        uses_rd = 1'b1;
         is_load = 1'b1;
         is_signed = 1'b1;
         ls_size = Word;
@@ -762,6 +961,7 @@ module snitch
       riscv_instr::AMOMAXU_W: begin
         alu_op = BypassA;
         write_rd = 1'b0;
+        uses_rd = 1'b1;
         is_load = 1'b1;
         is_signed = 1'b1;
         ls_size = Word;
@@ -772,6 +972,7 @@ module snitch
       riscv_instr::AMOSWAP_W: begin
         alu_op = BypassA;
         write_rd = 1'b0;
+        uses_rd = 1'b1;
         is_load = 1'b1;
         is_signed = 1'b1;
         ls_size = Word;
@@ -782,6 +983,7 @@ module snitch
       riscv_instr::LR_W: begin
         alu_op = BypassA;
         write_rd = 1'b0;
+        uses_rd = 1'b1;
         is_load = 1'b1;
         is_signed = 1'b1;
         ls_size = Word;
@@ -792,6 +994,7 @@ module snitch
       riscv_instr::SC_W: begin
         alu_op = BypassA;
         write_rd = 1'b0;
+        uses_rd = 1'b1;
         is_load = 1'b1;
         is_signed = 1'b1;
         ls_size = Word;
@@ -814,536 +1017,411 @@ module snitch
       riscv_instr::REMW,
       riscv_instr::REMUW: begin
         write_rd = 1'b0;
+        uses_rd = 1'b1;
         acc_qvalid_o = valid_instr;
         opa_select = Reg;
         opb_select = Reg;
         acc_register_rd = 1'b1;
-        acc_qaddr_o = snitch_pkg::XPULP_IPU;
       end
 
-      /////////////////////////
-      /* ZFINX extensions */
-      /////////////////////////
+/* RVV extension */
+`ifdef TARGET_SPATZ
+      // Off-load to RVV coprocessor
+      // 1 destination register (rd)
+      riscv_instr::VSETIVLI: begin
+        if (RVV) begin
+          write_rd        = 1'b0;
+          uses_rd         = 1'b1;
+          is_acc          = 1'b1;
+          acc_qvalid_o = valid_instr;
+          acc_register_rd = 1'b1;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+      // 1 source register (rs1) and 1 destination register (rd)
+      riscv_instr::VSETVLI: begin
+        if (RVV) begin
+          write_rd        = 1'b0;
+          uses_rd         = 1'b1;
+          is_acc          = 1'b1;
+          acc_qvalid_o = valid_instr;
+          opa_select      = Reg;
+          acc_register_rd = 1'b1;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+      // 2 source registers (rs1, rs2) and one destination register (rd)
+      riscv_instr::VSETVL: begin
+        if (RVV) begin
+          write_rd        = 1'b0;
+          uses_rd         = 1'b1;
+          is_acc          = 1'b1;
+          acc_qvalid_o = valid_instr;
+          opa_select      = Reg;
+          opb_select      = Reg;
+          acc_register_rd = 1'b1;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+      // 0 source register and 1 destination register
+      riscv_instr::VMV_X_S: begin
+        if (RVV) begin
+          write_rd        = 1'b0;
+          uses_rd         = 1'b1;
+          is_acc          = 1'b1;
+          acc_qvalid_o = valid_instr;
+          acc_register_rd = 1'b1;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+      // 0 source register and 0 destination register
+      riscv_instr::VADD_VV,
+      riscv_instr::VADD_VI,
+      riscv_instr::VSUB_VV,
+      riscv_instr::VRSUB_VI,
+      riscv_instr::VAND_VV,
+      riscv_instr::VAND_VI,
+      riscv_instr::VOR_VV,
+      riscv_instr::VOR_VI,
+      riscv_instr::VXOR_VV,
+      riscv_instr::VXOR_VI,
+      riscv_instr::VADC_VVM,
+      riscv_instr::VADC_VIM,
+      riscv_instr::VMADC_VV,
+      riscv_instr::VMADC_VI,
+      riscv_instr::VMADC_VVM,
+      riscv_instr::VMADC_VIM,
+      riscv_instr::VSBC_VVM,
+      riscv_instr::VMSBC_VV,
+      riscv_instr::VMSBC_VVM,
+      riscv_instr::VSLL_VV,
+      riscv_instr::VSLL_VI,
+      riscv_instr::VSRL_VV,
+      riscv_instr::VSRL_VI,
+      riscv_instr::VSRA_VV,
+      riscv_instr::VSRA_VI,
+      riscv_instr::VREDSUM_VS,
+      riscv_instr::VREDAND_VS,
+      riscv_instr::VREDOR_VS,
+      riscv_instr::VREDXOR_VS,
+      riscv_instr::VREDMIN_VS,
+      riscv_instr::VREDMINU_VS,
+      riscv_instr::VREDMAX_VS,
+      riscv_instr::VREDMAXU_VS,
+      riscv_instr::VMSEQ_VV,
+      riscv_instr::VMSEQ_VI,
+      riscv_instr::VMSNE_VV,
+      riscv_instr::VMSNE_VI,
+      riscv_instr::VMSLTU_VV,
+      riscv_instr::VMSLT_VV,
+      riscv_instr::VMSLEU_VV,
+      riscv_instr::VMSLEU_VI,
+      riscv_instr::VMSLE_VV,
+      riscv_instr::VMSLE_VI,
+      riscv_instr::VMSGTU_VI,
+      riscv_instr::VMSGT_VI,
+      riscv_instr::VMIN_VV,
+      riscv_instr::VMINU_VV,
+      riscv_instr::VMAX_VV,
+      riscv_instr::VMAXU_VV,
+      riscv_instr::VMUL_VV,
+      riscv_instr::VMULH_VV,
+      riscv_instr::VMULHU_VV,
+      riscv_instr::VMULHSU_VV,
+      riscv_instr::VMACC_VV,
+      riscv_instr::VNMSAC_VV,
+      riscv_instr::VMADD_VV,
+      riscv_instr::VNMSUB_VV,
+      riscv_instr::VDIV_VV,
+      riscv_instr::VDIVU_VV,
+      riscv_instr::VREM_VV,
+      riscv_instr::VREMU_VV,
+      riscv_instr::VWMUL_VV,
+      riscv_instr::VWMULU_VV,
+      riscv_instr::VWMULSU_VV,
+      riscv_instr::VWMACC_VV,
+      riscv_instr::VWMACCU_VV,
+      riscv_instr::VWMACCSU_VV,
+      riscv_instr::VMV_V_V,
+      riscv_instr::VMV_V_I,
+      riscv_instr::VFMV_F_S,
+      riscv_instr::VSLIDEUP_VI,
+      riscv_instr::VSLIDEDOWN_VI: begin
+        if (RVV) begin
+          write_rd        = 1'b0;
+          uses_rd         = 1'b0;
+          is_acc          = 1'b1;
+          acc_qvalid_o = valid_instr;
+          acc_register_rd = 1'b0;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+      riscv_instr::VFADD_VV,
+      riscv_instr::VFSUB_VV,
+      riscv_instr::VFMIN_VV,
+      riscv_instr::VFMAX_VV,
+      riscv_instr::VFSGNJ_VV,
+      riscv_instr::VFSGNJN_VV,
+      riscv_instr::VFSGNJX_VV,
+      riscv_instr::VFMUL_VV,
+      riscv_instr::VFMADD_VV,
+      riscv_instr::VFNMADD_VV,
+      riscv_instr::VFMSUB_VV,
+      riscv_instr::VFNMSUB_VV,
+      riscv_instr::VFMACC_VV,
+      riscv_instr::VFNMACC_VV,
+      riscv_instr::VFMSAC_VV,
+      riscv_instr::VFNMSAC_VV,
+      riscv_instr::VFCVT_F_X_V,
+      riscv_instr::VFCVT_F_XU_V,
+      riscv_instr::VFCVT_X_F_V,
+      riscv_instr::VFCVT_XU_F_V,
+      riscv_instr::VFCVT_RTZ_X_F_V,
+      riscv_instr::VFCVT_RTZ_XU_F_V,
+      riscv_instr::VFNCVT_XU_F_W,
+      riscv_instr::VFNCVT_X_F_W,
+      riscv_instr::VFNCVT_RTZ_XU_F_W,
+      riscv_instr::VFNCVT_RTZ_X_F_W,
+      riscv_instr::VFNCVT_F_XU_W,
+      riscv_instr::VFNCVT_F_X_W,
+      riscv_instr::VFNCVT_F_F_W,
+      riscv_instr::VFREDOSUM_VS,
+      riscv_instr::VFREDUSUM_VS,
+      riscv_instr::VFREDMAX_VS,
+      riscv_instr::VFREDMIN_VS,
+      riscv_instr::VFWADD_VV,
+      riscv_instr::VFWADD_WV,
+      riscv_instr::VFWSUB_VV,
+      riscv_instr::VFWSUB_WV,
+      riscv_instr::VFWMUL_VV,
+      riscv_instr::VFWDOTP_VV,
+      riscv_instr::VFWMACC_VV,
+      riscv_instr::VFWNMACC_VV,
+      riscv_instr::VFWMSAC_VV,
+      riscv_instr::VFWNMSAC_VV: begin
+        if (RVV && RVF) begin
+          write_rd        = 1'b0;
+          uses_rd         = 1'b0;
+          is_acc          = 1'b1;
+          acc_qvalid_o = valid_instr;
+          acc_register_rd = 1'b0;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+      // 1 source register (rs1)
+      riscv_instr::VADD_VX,
+      riscv_instr::VSUB_VX,
+      riscv_instr::VRSUB_VX,
+      riscv_instr::VAND_VX,
+      riscv_instr::VOR_VX,
+      riscv_instr::VXOR_VX,
+      riscv_instr::VADC_VXM,
+      riscv_instr::VMADC_VX,
+      riscv_instr::VMADC_VXM,
+      riscv_instr::VSBC_VXM,
+      riscv_instr::VMSBC_VX,
+      riscv_instr::VMSBC_VXM,
+      riscv_instr::VSLL_VX,
+      riscv_instr::VSRL_VX,
+      riscv_instr::VSRA_VX,
+      riscv_instr::VMSEQ_VX,
+      riscv_instr::VMSNE_VX,
+      riscv_instr::VMSLTU_VX,
+      riscv_instr::VMSLT_VX,
+      riscv_instr::VMSLEU_VX,
+      riscv_instr::VMSLE_VX,
+      riscv_instr::VMSGTU_VX,
+      riscv_instr::VMSGT_VX,
+      riscv_instr::VMIN_VX,
+      riscv_instr::VMINU_VX,
+      riscv_instr::VMAX_VX,
+      riscv_instr::VMAXU_VX,
+      riscv_instr::VMUL_VX,
+      riscv_instr::VMULH_VX,
+      riscv_instr::VMULHU_VX,
+      riscv_instr::VMULHSU_VX,
+      riscv_instr::VMACC_VX,
+      riscv_instr::VNMSAC_VX,
+      riscv_instr::VMADD_VX,
+      riscv_instr::VNMSUB_VX,
+      riscv_instr::VDIV_VX,
+      riscv_instr::VDIVU_VX,
+      riscv_instr::VREM_VX,
+      riscv_instr::VREMU_VX,
+      riscv_instr::VWMUL_VX,
+      riscv_instr::VWMULU_VX,
+      riscv_instr::VWMULSU_VX,
+      riscv_instr::VWMACC_VX,
+      riscv_instr::VWMACCU_VX,
+      riscv_instr::VWMACCSU_VX,
+      riscv_instr::VWMACCUS_VX,
+      riscv_instr::VMV_V_X,
+      riscv_instr::VMV_S_X,
+      riscv_instr::VSLIDEUP_VX,
+      riscv_instr::VSLIDEDOWN_VX,
+      riscv_instr::VSLIDE1UP_VX,
+      riscv_instr::VSLIDE1DOWN_VX: begin
+        if (RVV) begin
+          write_rd        = 1'b0;
+          uses_rd         = 1'b0;
+          is_acc          = 1'b1;
+          acc_qvalid_o = valid_instr;
+          opa_select      = Reg;
+          acc_register_rd = 1'b0;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+      riscv_instr::VFADD_VF,
+      riscv_instr::VFSUB_VF,
+      riscv_instr::VFMIN_VF,
+      riscv_instr::VFMAX_VF,
+      riscv_instr::VFSGNJ_VF,
+      riscv_instr::VFSGNJN_VF,
+      riscv_instr::VFSGNJX_VF,
+      riscv_instr::VFSLIDE1UP_VF,
+      riscv_instr::VFSLIDE1DOWN_VF,
+      riscv_instr::VFMV_V_F,
+      riscv_instr::VFMV_S_F,
+      riscv_instr::VFMUL_VF,
+      riscv_instr::VFRSUB_VF,
+      riscv_instr::VFMADD_VF,
+      riscv_instr::VFNMADD_VF,
+      riscv_instr::VFMSUB_VF,
+      riscv_instr::VFNMSUB_VF,
+      riscv_instr::VFMACC_VF,
+      riscv_instr::VFNMACC_VF,
+      riscv_instr::VFMSAC_VF,
+      riscv_instr::VFNMSAC_VF,
+      riscv_instr::VFWADD_VF,
+      riscv_instr::VFWADD_WF,
+      riscv_instr::VFWSUB_VF,
+      riscv_instr::VFWSUB_WF,
+      riscv_instr::VFWMUL_VF,
+      riscv_instr::VFWDOTP_VF,
+      riscv_instr::VFWMACC_VF,
+      riscv_instr::VFWNMACC_VF,
+      riscv_instr::VFWMSAC_VF,
+      riscv_instr::VFWNMSAC_VF: begin
+        if (RVV && RVF) begin
+          write_rd        = 1'b0;
+          uses_rd         = 1'b0;
+          is_acc          = 1'b1;
+          acc_qvalid_o = valid_instr;
+          acc_register_rd = 1'b0;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+      riscv_instr::VLE8_V,
+      riscv_instr::VLE16_V,
+      riscv_instr::VLE32_V,
+      riscv_instr::VLE64_V,
+      riscv_instr::VLOXEI8_V,
+      riscv_instr::VLOXEI16_V,
+      riscv_instr::VLOXEI32_V,
+      riscv_instr::VLOXEI64_V,
+      riscv_instr::VLUXEI8_V,
+      riscv_instr::VLUXEI16_V,
+      riscv_instr::VLUXEI32_V,
+      riscv_instr::VLUXEI64_V: begin
+        if (RVV) begin
+          write_rd        = 1'b0;
+          uses_rd         = 1'b0;
+          is_acc          = 1'b1;
+          is_acc_mem      = 1'b1;
+          acc_qvalid_o    = valid_instr && !acc_mem_stall;
+          opa_select      = Reg;
+          acc_register_rd = 1'b0;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+      // 1 source register (rs1) and memory store operation
+      riscv_instr::VSE8_V,
+      riscv_instr::VSE16_V,
+      riscv_instr::VSE32_V,
+      riscv_instr::VSE64_V,
+      riscv_instr::VSOXEI8_V,
+      riscv_instr::VSOXEI16_V,
+      riscv_instr::VSOXEI32_V,
+      riscv_instr::VSOXEI64_V,
+      riscv_instr::VSUXEI8_V,
+      riscv_instr::VSUXEI16_V,
+      riscv_instr::VSUXEI32_V,
+      riscv_instr::VSUXEI64_V: begin
+        if (RVV) begin
+          write_rd        = 1'b0;
+          uses_rd         = 1'b0;
+          is_acc          = 1'b1;
+          is_acc_mem      = 1'b1;
+          acc_qvalid_o = valid_instr && !acc_mem_stall;
+          opa_select      = Reg;
+          acc_register_rd = 1'b0;
+          acc_mem_store   = 1'b1;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+      // 2 source registers (rs1, rs2)
+      riscv_instr::VLSE8_V,
+      riscv_instr::VLSE16_V,
+      riscv_instr::VLSE32_V,
+      riscv_instr::VLSE64_V: begin
+        if (RVV) begin
+          write_rd        = 1'b0;
+          uses_rd         = 1'b0;
+          is_acc          = 1'b1;
+          is_acc_mem      = 1'b1;
+          acc_qvalid_o = valid_instr && !acc_mem_stall;
+          opa_select      = Reg;
+          opb_select      = Reg;
+          acc_register_rd = 1'b0;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+      // 2 source registers (rs1, rs2) and memory store opeeration
+      riscv_instr::VSSE8_V,
+      riscv_instr::VSSE16_V,
+      riscv_instr::VSSE32_V,
+      riscv_instr::VSSE64_V: begin
+        if (RVV) begin
+          write_rd        = 1'b0;
+          uses_rd         = 1'b0;
+          is_acc          = 1'b1;
+          is_acc_mem      = 1'b1;
+          acc_qvalid_o = valid_instr && !acc_mem_stall;
+          opa_select      = Reg;
+          opb_select      = Reg;
+          acc_register_rd = 1'b0;
+          acc_mem_store   = 1'b1;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+`endif
+/* end of RVV extension */
 
-      /////////////////////////////////////
-      /* Single precision Floating-Point */
-      riscv_instr::FADD_S,
-      riscv_instr::FSUB_S,
-      riscv_instr::FMUL_S,
-      riscv_instr::FSGNJ_S,
-      riscv_instr::FSGNJN_S,
-      riscv_instr::FSGNJX_S,
-      riscv_instr::FMIN_S,
-      riscv_instr::FMAX_S: begin
-        if (snitch_pkg::ZFINX) begin
-          write_rd = 1'b0;
-          acc_qvalid_o = valid_instr;
-          opa_select = Reg;
-          opb_select = Reg;
-          acc_register_rd = 1'b1;
-          acc_qaddr_o = snitch_pkg::FP_SS;
-        end else begin
-          illegal_inst = 1'b1;
-        end
-      end
-      riscv_instr::FDIV_S,
-      riscv_instr::FSQRT_S: begin
-        if (snitch_pkg::ZFINX && snitch_pkg::XDIVSQRT) begin
-          write_rd = 1'b0;
-          acc_qvalid_o = valid_instr;
-          opa_select = Reg;
-          opb_select = Reg;
-          acc_register_rd = 1'b1;
-          acc_qaddr_o = snitch_pkg::FP_DIVSQRT;
-        end else begin
-          illegal_inst = 1'b1;
-        end
-      end
-      riscv_instr::FLE_S,
-      riscv_instr::FLT_S,
-      riscv_instr::FEQ_S,
-      riscv_instr::FCVT_W_S,
-      riscv_instr::FCVT_WU_S,
-      riscv_instr::FMV_X_W,
-      riscv_instr::FCLASS_S,
-      riscv_instr::FCVT_S_W,
-      riscv_instr::FCVT_S_WU,
-      riscv_instr::FMV_W_X: begin
-        if (snitch_pkg::ZFINX) begin
-          write_rd = 1'b0;
-          acc_qvalid_o = valid_instr;
-          opa_select = Reg;
-          opb_select = Reg;
-          acc_register_rd = 1'b1;
-          acc_qaddr_o = snitch_pkg::FP_SS;
-        end else begin
-          illegal_inst = 1'b1;
-        end
-      end
-      riscv_instr::FMADD_S,
-      riscv_instr::FMSUB_S,
-      riscv_instr::FNMSUB_S,
-      riscv_instr::FNMADD_S: begin
-        if (snitch_pkg::ZFINX) begin
-          write_rd = 1'b0;
-          acc_qvalid_o = valid_instr;
-          opa_select = Reg;
-          opb_select = Reg;
-          opc_select = Reg;
-          acc_register_rd = 1'b1;
-          acc_qaddr_o = snitch_pkg::FP_SS;
-        end else begin
-          illegal_inst = 1'b1;
-        end
-      end
-      ///////////////////////////////////
-      /* Half Precision Floating-Point */
-      riscv_instr::FADD_H,
-      riscv_instr::FSUB_H,
-      riscv_instr::FMUL_H,
-      riscv_instr::FSGNJ_H,
-      riscv_instr::FSGNJN_H,
-      riscv_instr::FSGNJX_H,
-      riscv_instr::FMIN_H,
-      riscv_instr::FMAX_H: begin
-        if (snitch_pkg::ZFINX && snitch_pkg::XF16) begin
-          write_rd = 1'b0;
-          acc_qvalid_o = valid_instr;
-          opa_select = Reg;
-          opb_select = Reg;
-          acc_register_rd = 1'b1;
-          acc_qaddr_o = snitch_pkg::FP_SS;
-        end else begin
-          illegal_inst = 1'b1;
-        end
-      end
-      riscv_instr::FDIV_H,
-      riscv_instr::FSQRT_H: begin
-        if (snitch_pkg::ZFINX && snitch_pkg::XDIVSQRT && snitch_pkg::XF16) begin
-          write_rd = 1'b0;
-          acc_qvalid_o = valid_instr;
-          opa_select = Reg;
-          opb_select = Reg;
-          acc_register_rd = 1'b1;
-          acc_qaddr_o = snitch_pkg::FP_DIVSQRT;
-        end else begin
-          illegal_inst = 1'b1;
-        end
-      end
-      riscv_instr::FCVT_S_H,
-      riscv_instr::FCVT_H_S,
-      riscv_instr::FLE_H,
-      riscv_instr::FLT_H,
-      riscv_instr::FEQ_H,
-      riscv_instr::FCVT_W_H,
-      riscv_instr::FCVT_WU_H,
-      riscv_instr::FMV_X_H,
-      riscv_instr::FCLASS_H,
-      riscv_instr::FCVT_H_W,
-      riscv_instr::FCVT_H_WU,
-      riscv_instr::FMV_H_X: begin
-        if (snitch_pkg::ZFINX && snitch_pkg::XF16) begin
-          write_rd = 1'b0;
-          acc_qvalid_o = valid_instr;
-          opa_select = Reg;
-          opb_select = Reg;
-          acc_register_rd = 1'b1;
-          acc_qaddr_o = snitch_pkg::FP_SS;
-        end else begin
-          illegal_inst = 1'b1;
-        end
-      end
-      riscv_instr::FMADD_H,
-      riscv_instr::FMSUB_H,
-      riscv_instr::FNMSUB_H,
-      riscv_instr::FNMADD_H: begin
-        if (snitch_pkg::ZFINX && snitch_pkg::XF16) begin
-          write_rd = 1'b0;
-          acc_qvalid_o = valid_instr;
-          opa_select = Reg;
-          opb_select = Reg;
-          opc_select = Reg;
-          acc_register_rd = 1'b1;
-          acc_qaddr_o = snitch_pkg::FP_SS;
-        end else begin
-          illegal_inst = 1'b1;
-        end
-      end
-      ////////////////////////////////////////
-      /* SIMD Half Precision Floating-Point */
-      riscv_instr::VFADD_H,
-      riscv_instr::VFADD_R_H,
-      riscv_instr::VFSUB_H,
-      riscv_instr::VFSUB_R_H,
-      riscv_instr::VFMUL_H,
-      riscv_instr::VFMUL_R_H,
-      riscv_instr::VFMIN_H,
-      riscv_instr::VFMIN_R_H,
-      riscv_instr::VFMAX_H,
-      riscv_instr::VFMAX_R_H,
-      riscv_instr::VFCLASS_H,
-      riscv_instr::VFSGNJ_H,
-      riscv_instr::VFSGNJ_R_H,
-      riscv_instr::VFSGNJN_H,
-      riscv_instr::VFSGNJN_R_H,
-      riscv_instr::VFSGNJX_H,
-      riscv_instr::VFSGNJX_R_H: begin
-        if (snitch_pkg::ZFINX && snitch_pkg::XFVEC && snitch_pkg::XF16) begin
-          write_rd = 1'b0;
-          acc_qvalid_o = valid_instr;
-          opa_select = Reg;
-          opb_select = Reg;
-          acc_register_rd = 1'b1;
-          acc_qaddr_o = snitch_pkg::FP_SS;
-        end else begin
-          illegal_inst = 1'b1;
-        end
-      end
-      riscv_instr::VFDIV_H,
-      riscv_instr::VFDIV_R_H,
-      riscv_instr::VFSQRT_H: begin
-        if (snitch_pkg::ZFINX && snitch_pkg::XDIVSQRT && snitch_pkg::XFVEC && snitch_pkg::XF16) begin
-          write_rd = 1'b0;
-          acc_qvalid_o = valid_instr;
-          opa_select = Reg;
-          opb_select = Reg;
-          acc_register_rd = 1'b1;
-          acc_qaddr_o = snitch_pkg::FP_DIVSQRT;
-        end else begin
-          illegal_inst = 1'b1;
-        end
-      end
-      riscv_instr::VFCVT_H_S,
-      riscv_instr::VFCVTU_H_S,
-      riscv_instr::VFCVT_S_H,
-      riscv_instr::VFCVTU_S_H,
-      riscv_instr::VFEQ_H,
-      riscv_instr::VFEQ_R_H,
-      riscv_instr::VFNE_H,
-      riscv_instr::VFNE_R_H,
-      riscv_instr::VFLT_H,
-      riscv_instr::VFLT_R_H,
-      riscv_instr::VFGE_H,
-      riscv_instr::VFGE_R_H,
-      riscv_instr::VFLE_H,
-      riscv_instr::VFLE_R_H,
-      riscv_instr::VFGT_H,
-      riscv_instr::VFGT_R_H,
-      riscv_instr::VFMV_X_H,
-      riscv_instr::VFMV_H_X,
-      riscv_instr::VFCVT_X_H,
-      riscv_instr::VFCVT_XU_H,
-      riscv_instr::VFCVT_H_X,
-      riscv_instr::VFCVT_H_XU: begin
-        if (snitch_pkg::ZFINX && snitch_pkg::XFVEC && snitch_pkg::XF16) begin
-          write_rd = 1'b0;
-          acc_qvalid_o = valid_instr;
-          opa_select = Reg;
-          opb_select = Reg;
-          acc_register_rd = 1'b1;
-          acc_qaddr_o = snitch_pkg::FP_SS;
-        end else begin
-          illegal_inst = 1'b1;
-        end
-      end
-      riscv_instr::VFMAC_H,
-      riscv_instr::VFMAC_R_H,
-      riscv_instr::VFMRE_H,
-      riscv_instr::VFMRE_R_H: begin
-        if (snitch_pkg::ZFINX && snitch_pkg::XFVEC && snitch_pkg::XF16) begin
-          write_rd = 1'b0;
-          acc_qvalid_o = valid_instr;
-          opa_select = Reg;
-          opb_select = Reg;
-          opc_select = RegRd;
-          acc_register_rd = 1'b1;
-          acc_qaddr_o = snitch_pkg::FP_SS;
-        end else begin
-          illegal_inst = 1'b1;
-        end
-      end
-      riscv_instr::VFCPKA_H_S: begin
-        if (snitch_pkg::ZFINX && snitch_pkg::XFVEC && snitch_pkg::XF16) begin
-          write_rd = 1'b0;
-          acc_qvalid_o = valid_instr;
-          opa_select = Reg;
-          opb_select = Reg;
-          acc_register_rd = 1'b1;
-          acc_qaddr_o = snitch_pkg::FP_SS;
-        end else begin
-          illegal_inst = 1'b1;
-        end
-      end
-      // Extended dotp
-      riscv_instr::VFDOTPEX_S_H,
-      riscv_instr::VFDOTPEX_S_R_H,
-      riscv_instr::VFNDOTPEX_S_H,
-      riscv_instr::VFNDOTPEX_S_R_H,
-      riscv_instr::VFSUMEX_S_H,
-      riscv_instr::VFNSUMEX_S_H: begin
-        if (snitch_pkg::ZFINX && snitch_pkg::XFVEC && snitch_pkg::XF16) begin
-          write_rd = 1'b0;
-          acc_qvalid_o = valid_instr;
-          opa_select = Reg;
-          opb_select = Reg;
-          opc_select = RegRd;
-          acc_register_rd = 1'b1;
-          acc_qaddr_o = snitch_pkg::FP_SS;
-        end else begin
-          illegal_inst = 1'b1;
-        end
-      end
-      // Half precision complex
-      riscv_instr::FCDOTPEX_S_H,
-      riscv_instr::FCNDOTPEX_S_H,
-      riscv_instr::FCCDOTPEX_S_H,
-      riscv_instr::FCCNDOTPEX_S_H: begin
-        if (snitch_pkg::ZFINX && snitch_pkg::XFVEC && snitch_pkg::XF16) begin
-          write_rd = 1'b0;
-          acc_qvalid_o = valid_instr;
-          opa_select = Reg;
-          opb_select = Reg;
-          opc_select = RegRd;
-          acc_register_rd = 1'b1;
-          acc_qaddr_o = snitch_pkg::FP_SS;
-        end else begin
-          illegal_inst = 1'b1;
-        end
-      end
-
-      //////////////////////////////////////
-      /* Quarter Precision Floating-Point */
-      riscv_instr::FADD_B,
-      riscv_instr::FSUB_B,
-      riscv_instr::FMUL_B,
-      riscv_instr::FSGNJ_B,
-      riscv_instr::FSGNJN_B,
-      riscv_instr::FSGNJX_B,
-      riscv_instr::FMIN_B,
-      riscv_instr::FMAX_B: begin
-        if (snitch_pkg::ZFINX && snitch_pkg::XF8) begin
-          write_rd = 1'b0;
-          acc_qvalid_o = valid_instr;
-          opa_select = Reg;
-          opb_select = Reg;
-          acc_register_rd = 1'b1;
-          acc_qaddr_o = snitch_pkg::FP_SS;
-        end else begin
-          illegal_inst = 1'b1;
-        end
-      end
-      riscv_instr::FDIV_B,
-      riscv_instr::FSQRT_B: begin
-        if (snitch_pkg::ZFINX && snitch_pkg::XDIVSQRT && snitch_pkg::XF8) begin
-          write_rd = 1'b0;
-          acc_qvalid_o = valid_instr;
-          opa_select = Reg;
-          opb_select = Reg;
-          acc_register_rd = 1'b1;
-          acc_qaddr_o = snitch_pkg::FP_DIVSQRT;
-        end else begin
-          illegal_inst = 1'b1;
-        end
-      end
-      riscv_instr::FCVT_S_B,
-      riscv_instr::FCVT_B_S,
-      riscv_instr::FCVT_H_B,
-      riscv_instr::FCVT_B_H,
-      riscv_instr::FLE_B,
-      riscv_instr::FLT_B,
-      riscv_instr::FEQ_B,
-      riscv_instr::FCVT_W_B,
-      riscv_instr::FCVT_WU_B,
-      riscv_instr::FMV_X_B,
-      riscv_instr::FCLASS_B,
-      riscv_instr::FCVT_B_W,
-      riscv_instr::FCVT_B_WU: begin
-        if (snitch_pkg::ZFINX && snitch_pkg::XF8) begin
-          write_rd = 1'b0;
-          acc_qvalid_o = valid_instr;
-          opa_select = Reg;
-          opb_select = Reg;
-          acc_register_rd = 1'b1;
-          acc_qaddr_o = snitch_pkg::FP_SS;
-        end else begin
-          illegal_inst = 1'b1;
-        end
-      end
-      riscv_instr::FMADD_B,
-      riscv_instr::FMSUB_B,
-      riscv_instr::FNMSUB_B,
-      riscv_instr::FNMADD_B: begin
-        if (snitch_pkg::ZFINX && snitch_pkg::XF8) begin
-          write_rd = 1'b0;
-          acc_qvalid_o = valid_instr;
-          opa_select = Reg;
-          opb_select = Reg;
-          opc_select = Reg;
-          acc_register_rd = 1'b1;
-          acc_qaddr_o = snitch_pkg::FP_SS;
-        end else begin
-          illegal_inst = 1'b1;
-        end
-      end
-      ///////////////////////////////////////////
-      /* SIMD Quarter Precision Floating-Point */
-      riscv_instr::VFADD_B,
-      riscv_instr::VFADD_R_B,
-      riscv_instr::VFSUB_B,
-      riscv_instr::VFSUB_R_B,
-      riscv_instr::VFMUL_B,
-      riscv_instr::VFMUL_R_B,
-      riscv_instr::VFMIN_B,
-      riscv_instr::VFMIN_R_B,
-      riscv_instr::VFMAX_B,
-      riscv_instr::VFMAX_R_B,
-      riscv_instr::VFCLASS_B,
-      riscv_instr::VFSGNJ_B,
-      riscv_instr::VFSGNJ_R_B,
-      riscv_instr::VFSGNJN_B,
-      riscv_instr::VFSGNJN_R_B,
-      riscv_instr::VFSGNJX_B,
-      riscv_instr::VFSGNJX_R_B: begin
-        if (snitch_pkg::ZFINX && snitch_pkg::XFVEC && snitch_pkg::XF8) begin
-          write_rd = 1'b0;
-          acc_qvalid_o = valid_instr;
-          opa_select = Reg;
-          opb_select = Reg;
-          acc_register_rd = 1'b1;
-          acc_qaddr_o = snitch_pkg::FP_SS;
-        end else begin
-          illegal_inst = 1'b1;
-        end
-      end
-      riscv_instr::VFDIV_B,
-      riscv_instr::VFDIV_R_B,
-      riscv_instr::VFSQRT_B: begin
-        if (snitch_pkg::ZFINX && snitch_pkg::XDIVSQRT && snitch_pkg::XFVEC && snitch_pkg::XF8) begin
-          write_rd = 1'b0;
-          acc_qvalid_o = valid_instr;
-          opa_select = Reg;
-          opb_select = Reg;
-          acc_register_rd = 1'b1;
-          acc_qaddr_o = snitch_pkg::FP_DIVSQRT;
-        end else begin
-          illegal_inst = 1'b1;
-        end
-      end
-      riscv_instr::VFCVT_B_S,
-      riscv_instr::VFCVTU_B_S,
-      riscv_instr::VFCVT_H_B,
-      riscv_instr::VFCVTU_H_B,
-      riscv_instr::VFCVT_B_H,
-      riscv_instr::VFCVTU_B_H,
-      riscv_instr::VFEQ_B,
-      riscv_instr::VFEQ_R_B,
-      riscv_instr::VFNE_B,
-      riscv_instr::VFNE_R_B,
-      riscv_instr::VFLT_B,
-      riscv_instr::VFLT_R_B,
-      riscv_instr::VFGE_B,
-      riscv_instr::VFGE_R_B,
-      riscv_instr::VFLE_B,
-      riscv_instr::VFLE_R_B,
-      riscv_instr::VFGT_B,
-      riscv_instr::VFGT_R_B,
-      riscv_instr::VFMV_X_B,
-      riscv_instr::VFMV_B_X,
-      riscv_instr::VFCVT_X_B,
-      riscv_instr::VFCVT_XU_B,
-      riscv_instr::VFCVT_B_X,
-      riscv_instr::VFCVT_B_XU: begin
-        if (snitch_pkg::ZFINX && snitch_pkg::XFVEC && snitch_pkg::XF8) begin
-          write_rd = 1'b0;
-          acc_qvalid_o = valid_instr;
-          opa_select = Reg;
-          opb_select = Reg;
-          acc_register_rd = 1'b1;
-          acc_qaddr_o = snitch_pkg::FP_SS;
-        end else begin
-          illegal_inst = 1'b1;
-        end
-      end
-      riscv_instr::VFMAC_B,
-      riscv_instr::VFMAC_R_B,
-      riscv_instr::VFMRE_B,
-      riscv_instr::VFMRE_R_B: begin
-        if (snitch_pkg::ZFINX && snitch_pkg::XFVEC && snitch_pkg::XF8) begin
-          write_rd = 1'b0;
-          acc_qvalid_o = valid_instr;
-          opa_select = Reg;
-          opb_select = Reg;
-          opc_select = RegRd;
-          acc_register_rd = 1'b1;
-          acc_qaddr_o = snitch_pkg::FP_SS;
-        end else begin
-          illegal_inst = 1'b1;
-        end
-      end
-      riscv_instr::VFCPKA_B_S,
-      riscv_instr::VFCPKB_B_S: begin
-        if (snitch_pkg::ZFINX && snitch_pkg::XFVEC && snitch_pkg::XF8) begin
-          write_rd = 1'b0;
-          acc_qvalid_o = valid_instr;
-          opa_select = Reg;
-          opb_select = Reg;
-          acc_register_rd = 1'b1;
-          acc_qaddr_o = snitch_pkg::FP_SS;
-        end else begin
-          illegal_inst = 1'b1;
-        end
-      end
-      // Extended dotp
-      riscv_instr::VFDOTPEX_H_B,
-      riscv_instr::VFDOTPEX_H_R_B,
-      riscv_instr::VFNDOTPEX_H_B,
-      riscv_instr::VFNDOTPEX_H_R_B,
-      riscv_instr::VFSUMEX_H_B,
-      riscv_instr::VFNSUMEX_H_B: begin
-        if (snitch_pkg::ZFINX && snitch_pkg::XFVEC && snitch_pkg::XF8) begin
-          write_rd = 1'b0;
-          acc_qvalid_o = valid_instr;
-          opa_select = Reg;
-          opb_select = Reg;
-          opc_select = RegRd;
-          acc_register_rd = 1'b1;
-          acc_qaddr_o = snitch_pkg::FP_SS;
-        end else begin
-          illegal_inst = 1'b1;
-        end
-      end
-      riscv_instr::VFDOTPEXA_S_B,
-      riscv_instr::VFDOTPEXB_S_B,
-      riscv_instr::VFDOTPEXA_S_R_B,
-      riscv_instr::VFDOTPEXB_S_R_B: begin
-        if (snitch_pkg::ZFINX && snitch_pkg::XFVEC && snitch_pkg::XF8) begin
-          write_rd = 1'b0;
-          acc_qvalid_o = valid_instr;
-          opa_select = Reg;
-          opb_select = Reg;
-          opc_select = RegRd;
-          acc_register_rd = 1'b1;
-          acc_qaddr_o = snitch_pkg::FP_SS;
-        end else begin
-          illegal_inst = 1'b1;
-        end
-      end
-
-      ////////////////////////
-      /* Xpulpimg extension */
-      ////////////////////////
-
+/* Xpulpimg extension */
+`ifdef XPULPIMG_EXTENSION
       // Post-increment loads/stores
       riscv_instr::P_LB_IRPOST: begin // Xpulpimg: p.lb rd,iimm(rs1!)
         if (snitch_pkg::XPULPIMG) begin
           write_rd = 1'b0;
+          uses_rd = 1'b1;
           write_rs1 = 1'b1;
           is_load = 1'b1;
           is_postincr = 1'b1;
           is_signed = 1'b1;
           opa_select = Reg;
           opb_select = IImmediate;
-          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1351,12 +1429,12 @@ module snitch
       riscv_instr::P_LBU_IRPOST: begin // Xpulpimg: p.lbu
         if (snitch_pkg::XPULPIMG) begin
           write_rd = 1'b0;
+          uses_rd = 1'b1;
           write_rs1 = 1'b1;
           is_load = 1'b1;
           is_postincr = 1'b1;
           opa_select = Reg;
           opb_select = IImmediate;
-          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1364,6 +1442,7 @@ module snitch
       riscv_instr::P_LH_IRPOST: begin  // Xpulpimg: p.lh
         if (snitch_pkg::XPULPIMG) begin
           write_rd = 1'b0;
+          uses_rd = 1'b1;
           write_rs1 = 1'b1;
           is_load = 1'b1;
           is_postincr = 1'b1;
@@ -1371,7 +1450,6 @@ module snitch
           ls_size = HalfWord;
           opa_select = Reg;
           opb_select = IImmediate;
-          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1379,13 +1457,13 @@ module snitch
       riscv_instr::P_LHU_IRPOST: begin // Xpulpimg: p.lhu
         if (snitch_pkg::XPULPIMG) begin
           write_rd = 1'b0;
+          uses_rd = 1'b1;
           write_rs1 = 1'b1;
           is_load = 1'b1;
           is_postincr = 1'b1;
           ls_size = HalfWord;
           opa_select = Reg;
           opb_select = IImmediate;
-          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1393,6 +1471,7 @@ module snitch
       riscv_instr::P_LW_IRPOST: begin  // Xpulpimg: p.lw
         if (snitch_pkg::XPULPIMG) begin
           write_rd = 1'b0;
+          uses_rd = 1'b1;
           write_rs1 = 1'b1;
           is_load = 1'b1;
           is_postincr = 1'b1;
@@ -1400,7 +1479,6 @@ module snitch
           ls_size = Word;
           opa_select = Reg;
           opb_select = IImmediate;
-          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1408,13 +1486,13 @@ module snitch
       riscv_instr::P_LB_RRPOST: begin  // Xpulpimg: p.lb rd,rs2(rs1!)
         if (snitch_pkg::XPULPIMG) begin
           write_rd = 1'b0;
+          uses_rd = 1'b1;
           write_rs1 = 1'b1;
           is_load = 1'b1;
           is_postincr = 1'b1;
           is_signed = 1'b1;
           opa_select = Reg;
           opb_select = Reg;
-          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1422,12 +1500,12 @@ module snitch
       riscv_instr::P_LBU_RRPOST: begin // Xpulpimg: p.lbu
         if (snitch_pkg::XPULPIMG) begin
           write_rd = 1'b0;
+          uses_rd = 1'b1;
           write_rs1 = 1'b1;
           is_load = 1'b1;
           is_postincr = 1'b1;
           opa_select = Reg;
           opb_select = Reg;
-          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1435,6 +1513,7 @@ module snitch
       riscv_instr::P_LH_RRPOST: begin  // Xpulpimg: p.lh
         if (snitch_pkg::XPULPIMG) begin
           write_rd = 1'b0;
+          uses_rd = 1'b1;
           write_rs1 = 1'b1;
           is_load = 1'b1;
           is_postincr = 1'b1;
@@ -1442,7 +1521,6 @@ module snitch
           ls_size = HalfWord;
           opa_select = Reg;
           opb_select = Reg;
-          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1450,13 +1528,13 @@ module snitch
       riscv_instr::P_LHU_RRPOST: begin // Xpulpimg: p.lhu
         if (snitch_pkg::XPULPIMG) begin
           write_rd = 1'b0;
+          uses_rd = 1'b1;
           write_rs1 = 1'b1;
           is_load = 1'b1;
           is_postincr = 1'b1;
           ls_size = HalfWord;
           opa_select = Reg;
           opb_select = Reg;
-          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1464,6 +1542,7 @@ module snitch
       riscv_instr::P_LW_RRPOST: begin  // Xpulpimg: p.lw
         if (snitch_pkg::XPULPIMG) begin
           write_rd = 1'b0;
+          uses_rd = 1'b1;
           write_rs1 = 1'b1;
           is_load = 1'b1;
           is_postincr = 1'b1;
@@ -1471,7 +1550,6 @@ module snitch
           ls_size = Word;
           opa_select = Reg;
           opb_select = Reg;
-          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1479,11 +1557,11 @@ module snitch
       riscv_instr::P_LB_RR: begin      // Xpulpimg: p.lb rd,rs2(rs1)
         if (snitch_pkg::XPULPIMG) begin
           write_rd = 1'b0;
+          uses_rd = 1'b1;
           is_load = 1'b1;
           is_signed = 1'b1;
           opa_select = Reg;
           opb_select = Reg;
-          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1491,10 +1569,10 @@ module snitch
       riscv_instr::P_LBU_RR: begin     // Xpulpimg: p.lbu
         if (snitch_pkg::XPULPIMG) begin
           write_rd = 1'b0;
+          uses_rd = 1'b1;
           is_load = 1'b1;
           opa_select = Reg;
           opb_select = Reg;
-          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1502,12 +1580,12 @@ module snitch
       riscv_instr::P_LH_RR: begin      // Xpulpimg: p.lh
         if (snitch_pkg::XPULPIMG) begin
           write_rd = 1'b0;
+          uses_rd = 1'b1;
           is_load = 1'b1;
           is_signed = 1'b1;
           ls_size = HalfWord;
           opa_select = Reg;
           opb_select = Reg;
-          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1515,11 +1593,11 @@ module snitch
       riscv_instr::P_LHU_RR: begin     // Xpulpimg: p.lhu
         if (snitch_pkg::XPULPIMG) begin
           write_rd = 1'b0;
+          uses_rd = 1'b1;
           is_load = 1'b1;
           ls_size = HalfWord;
           opa_select = Reg;
           opb_select = Reg;
-          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1527,12 +1605,12 @@ module snitch
       riscv_instr::P_LW_RR: begin      // Xpulpimg: p.lw
         if (snitch_pkg::XPULPIMG) begin
           write_rd = 1'b0;
+          uses_rd = 1'b1;
           is_load = 1'b1;
           is_signed = 1'b1;
           ls_size = Word;
           opa_select = Reg;
           opb_select = Reg;
-          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1540,13 +1618,11 @@ module snitch
       riscv_instr::P_SB_IRPOST: begin  // Xpulpimg: p.sb rs2,simm(rs1!)
         if (snitch_pkg::XPULPIMG) begin
           write_rd = 1'b0;
-          uses_rd = 1'b0;
           write_rs1 = 1'b1;
           is_store = 1'b1;
           is_postincr = 1'b1;
           opa_select = Reg;
           opb_select = SImmediate;
-          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1554,14 +1630,12 @@ module snitch
       riscv_instr::P_SH_IRPOST: begin  // Xpulpimg: p.sh
         if (snitch_pkg::XPULPIMG) begin
           write_rd = 1'b0;
-          uses_rd = 1'b0;
           write_rs1 = 1'b1;
           is_store = 1'b1;
           is_postincr = 1'b1;
           ls_size = HalfWord;
           opa_select = Reg;
           opb_select = SImmediate;
-          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1569,14 +1643,12 @@ module snitch
       riscv_instr::P_SW_IRPOST: begin  // Xpulpimg: p.sw
         if (snitch_pkg::XPULPIMG) begin
           write_rd = 1'b0;
-          uses_rd = 1'b0;
           write_rs1 = 1'b1;
           is_store = 1'b1;
           is_postincr = 1'b1;
           ls_size = Word;
           opa_select = Reg;
           opb_select = SImmediate;
-          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1594,7 +1666,6 @@ module snitch
           opa_select = Reg; // rs1 base address
           opb_select = RegRd; // rs3 (i.e. rd) offset
           opc_select = RegRs2; // rs2 source data
-          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1609,7 +1680,6 @@ module snitch
           opa_select = Reg;
           opb_select = RegRd;
           opc_select = RegRs2;
-          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1624,7 +1694,6 @@ module snitch
           opa_select = Reg;
           opb_select = RegRd;
           opc_select = RegRs2;
-          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1636,7 +1705,6 @@ module snitch
           opa_select = Reg;
           opb_select = RegRd;
           opc_select = RegRs2;
-          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1649,7 +1717,6 @@ module snitch
           opa_select = Reg;
           opb_select = RegRd;
           opc_select = RegRs2;
-          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1662,7 +1729,6 @@ module snitch
           opa_select = Reg;
           opb_select = RegRd;
           opc_select = RegRs2;
-          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1672,11 +1738,9 @@ module snitch
         if (snitch_pkg::XPULPIMG) begin
           is_branch = 1'b1;
           write_rd = 1'b0;
-          uses_rd = 1'b0;
           alu_op = Eq;
           opa_select = Reg;
           opb_select = PBImmediate;
-          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1685,11 +1749,9 @@ module snitch
         if (snitch_pkg::XPULPIMG) begin
           is_branch = 1'b1;
           write_rd = 1'b0;
-          uses_rd = 1'b0;
           alu_op = Neq;
           opa_select = Reg;
           opb_select = PBImmediate;
-          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1745,10 +1807,10 @@ module snitch
       riscv_instr::PV_DOTSP_SCI_B: begin // Xpulpimg: pv.dotsp.sci.b
         if (snitch_pkg::XPULPIMG) begin
           write_rd = 1'b0;
+          uses_rd = 1'b1;
           acc_qvalid_o = valid_instr;
           opa_select = Reg;
           acc_register_rd = 1'b1;
-          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1832,11 +1894,11 @@ module snitch
       riscv_instr::PV_DOTSP_SC_B: begin // Xpulpimg: pv.dotsp.sc.b
         if (snitch_pkg::XPULPIMG) begin
           write_rd = 1'b0;
+          uses_rd = 1'b1;
           acc_qvalid_o = valid_instr;
           opa_select = Reg;
           opb_select = Reg;
           acc_register_rd = 1'b1;
-          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1852,11 +1914,11 @@ module snitch
       riscv_instr::PV_SDOTSP_SCI_B: begin // Xpulpimg: pv.sdotsp.sci.b
         if (snitch_pkg::XPULPIMG) begin
           write_rd = 1'b0;
+          uses_rd = 1'b1;
           acc_qvalid_o = valid_instr;
           opa_select = Reg;
           opc_select = Reg;
           acc_register_rd = 1'b1;
-          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1882,16 +1944,501 @@ module snitch
       riscv_instr::PV_PACK_H: begin      // Xpulpimg: pv.pack.h
         if (snitch_pkg::XPULPIMG) begin
           write_rd = 1'b0;
+          uses_rd = 1'b1;
           acc_qvalid_o = valid_instr;
           opa_select = Reg;
           opb_select = Reg;
           opc_select = Reg;
           acc_register_rd = 1'b1;
-          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
       end
+`endif
+/* end of Xpulpimg extension */
+
+/* Floating point instructions */
+
+      // Offload FP-FP Instructions - fire and forget
+      // TODO (smach): Check legal rounding modes and issue illegal isn if needed
+      // Single Precision Floating-Point
+      riscv_instr::FADD_S,
+      riscv_instr::FSUB_S,
+      riscv_instr::FMUL_S,
+      riscv_instr::FDIV_S,
+      riscv_instr::FSQRT_S,
+      riscv_instr::FSGNJ_S,
+      riscv_instr::FSGNJN_S,
+      riscv_instr::FSGNJX_S,
+      riscv_instr::FMIN_S,
+      riscv_instr::FMAX_S,
+      riscv_instr::FMADD_S,
+      riscv_instr::FMSUB_S,
+      riscv_instr::FNMSUB_S,
+      riscv_instr::FNMADD_S: begin
+        if (FP_EN && RVF && (!(inst_data_i inside {riscv_instr::FDIV_S, riscv_instr::FSQRT_S}) || XDivSqrt)) begin
+          write_rd        = 1'b0;
+          is_acc          = 1'b1;
+          acc_qvalid_o = valid_instr;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+
+       // Double Precision Floating-Point
+      riscv_instr::FADD_D,
+      riscv_instr::FSUB_D,
+      riscv_instr::FMUL_D,
+      riscv_instr::FDIV_D,
+      riscv_instr::FSQRT_D,
+      riscv_instr::FSGNJ_D,
+      riscv_instr::FSGNJN_D,
+      riscv_instr::FSGNJX_D,
+      riscv_instr::FMIN_D,
+      riscv_instr::FMAX_D,
+      riscv_instr::FMADD_D,
+      riscv_instr::FMSUB_D,
+      riscv_instr::FNMSUB_D,
+      riscv_instr::FNMADD_D: begin
+        if (FP_EN && RVD && (!(inst_data_i inside {riscv_instr::FDIV_D, riscv_instr::FSQRT_D}) || XDivSqrt)) begin
+          write_rd        = 1'b0;
+          is_acc          = 1'b1;
+          acc_qvalid_o = valid_instr;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+      riscv_instr::FCVT_S_D,
+      riscv_instr::FCVT_D_S: begin
+        if (FP_EN && RVF && (!(inst_data_i inside {riscv_instr::FDIV_S, riscv_instr::FSQRT_S}) || XDivSqrt)) begin
+          write_rd        = 1'b0;
+          is_acc          = 1'b1;
+          acc_qvalid_o = valid_instr;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+
+      // Half Precision Floating-Point
+      riscv_instr::FADD_H,
+      riscv_instr::FSUB_H,
+      riscv_instr::FMUL_H,
+      riscv_instr::FDIV_H,
+      riscv_instr::FSQRT_H,
+      riscv_instr::FMADD_H,
+      riscv_instr::FMSUB_H,
+      riscv_instr::FNMSUB_H,
+      riscv_instr::FNMADD_H,
+      riscv_instr::FSGNJ_H,
+      riscv_instr::FSGNJN_H,
+      riscv_instr::FSGNJX_H,
+      riscv_instr::FMIN_H,
+      riscv_instr::FMAX_H: begin
+        if (FP_EN && XF16 && fcsr_q.fmode.dst == 1'b0 &&
+            (!(inst_data_i inside {riscv_instr::FDIV_H, riscv_instr::FSQRT_H}) || XDivSqrt)) begin
+          write_rd = 1'b0;
+          is_acc   = 1'b1;
+          acc_qvalid_o = valid_instr;
+        end else if (FP_EN && XF16ALT && fcsr_q.fmode.dst == 1'b1 &&
+            (!(inst_data_i inside {riscv_instr::FDIV_H, riscv_instr::FSQRT_H}) || XDivSqrt)) begin
+          write_rd = 1'b0;
+          is_acc   = 1'b1;
+          acc_qvalid_o = valid_instr;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+      riscv_instr::FCVT_S_H: begin
+        if (FP_EN && RVF && XF16 && fcsr_q.fmode.src == 1'b0) begin
+          write_rd = 1'b0;
+          is_acc   = 1'b1;
+          acc_qvalid_o = valid_instr;
+        end else if (FP_EN && RVF && XF16ALT && fcsr_q.fmode.src == 1'b1) begin
+          write_rd = 1'b0;
+          is_acc   = 1'b1;
+          acc_qvalid_o = valid_instr;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+      riscv_instr::FCVT_H_S: begin
+        if (FP_EN && RVF && XF16 && fcsr_q.fmode.dst == 1'b0) begin
+          write_rd = 1'b0;
+          is_acc   = 1'b1;
+          acc_qvalid_o = valid_instr;
+        end else if (FP_EN && RVF && XF16ALT && fcsr_q.fmode.dst == 1'b1) begin
+          write_rd = 1'b0;
+          is_acc   = 1'b1;
+          acc_qvalid_o = valid_instr;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+      riscv_instr::FCVT_D_H: begin
+        if (FP_EN && RVD && XF16 && fcsr_q.fmode.src == 1'b0) begin
+          write_rd = 1'b0;
+          is_acc   = 1'b1;
+          acc_qvalid_o = valid_instr;
+        end else if (FP_EN && RVD && XF16ALT && fcsr_q.fmode.src == 1'b1) begin
+          write_rd = 1'b0;
+          is_acc   = 1'b1;
+          acc_qvalid_o = valid_instr;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+      riscv_instr::FCVT_H_D: begin
+        if (FP_EN && RVD && XF16 && fcsr_q.fmode.dst == 1'b0) begin
+          write_rd = 1'b0;
+          is_acc   = 1'b1;
+          acc_qvalid_o = valid_instr;
+        end else if (FP_EN && RVD && XF16ALT && fcsr_q.fmode.dst == 1'b1) begin
+          write_rd = 1'b0;
+          is_acc   = 1'b1;
+          acc_qvalid_o = valid_instr;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+
+      // Byte Precision Floating-Point
+      riscv_instr::FADD_B,
+      riscv_instr::FSUB_B,
+      riscv_instr::FMUL_B,
+      riscv_instr::FDIV_B,
+      riscv_instr::FSQRT_B,
+      riscv_instr::FSGNJ_B,
+      riscv_instr::FSGNJN_B,
+      riscv_instr::FSGNJX_B,
+      riscv_instr::FMIN_B,
+      riscv_instr::FMAX_B,
+      riscv_instr::FMADD_B,
+      riscv_instr::FMSUB_B,
+      riscv_instr::FNMSUB_B,
+      riscv_instr::FNMADD_B: begin
+        if (FP_EN && XF8 && fcsr_q.fmode.dst == 1'b0 && (!(inst_data_i inside {riscv_instr::FDIV_B, riscv_instr::FSQRT_B}) || XDivSqrt)) begin
+          write_rd        = 1'b0;
+          is_acc          = 1'b1;
+          acc_qvalid_o = valid_instr;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+
+      riscv_instr::FCVT_B_H: begin
+        if (FP_EN) begin
+          if ((XF16 && fcsr_q.fmode.src == 1'b0) ||
+             (XF16ALT && fcsr_q.fmode.src == 1'b1)) begin
+            if ((XF8 && fcsr_q.fmode.dst == 1'b0) ||
+               (XF8ALT && fcsr_q.fmode.dst == 1'b1)) begin
+              write_rd = 1'b0;
+              is_acc       = 1'b1;
+              acc_qvalid_o = valid_instr;
+            end else begin
+              illegal_inst = 1'b1;
+            end
+          end else begin
+            illegal_inst = 1'b1;
+          end
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+      riscv_instr::FCVT_H_B: begin
+        if (FP_EN) begin
+          if ((XF8 && fcsr_q.fmode.src == 1'b0) ||
+             (XF8ALT && fcsr_q.fmode.src == 1'b1)) begin
+            if ((XF16 && fcsr_q.fmode.dst == 1'b0) ||
+               (XF16ALT && fcsr_q.fmode.dst == 1'b1)) begin
+              write_rd = 1'b0;
+              is_acc   = 1'b1;
+              acc_qvalid_o = valid_instr;
+            end else begin
+              illegal_inst = 1'b1;
+            end
+          end else begin
+            illegal_inst = 1'b1;
+          end
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+
+      // double precision floating-point
+      riscv_instr::FCLASS_D,
+      riscv_instr::FLE_D,
+      riscv_instr::FLT_D,
+      riscv_instr::FEQ_D,
+      riscv_instr::FCVT_W_D,
+      riscv_instr::FCVT_WU_D: begin
+        if (FP_EN && RVD) begin
+          write_rd = 1'b0;
+          uses_rd = 1'b1;
+          acc_register_rd = 1'b1;
+          is_acc          = 1'b1;
+          acc_qvalid_o = valid_instr;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+
+      // single precision floating-point
+      riscv_instr::FCLASS_S,
+      riscv_instr::FLE_S,
+      riscv_instr::FLT_S,
+      riscv_instr::FEQ_S,
+      riscv_instr::FMV_X_S,
+      riscv_instr::FCVT_W_S,
+      riscv_instr::FCVT_WU_S,
+      riscv_instr::FMV_X_W: begin
+        if (FP_EN && RVF) begin
+          acc_register_rd = 1'b1;
+          is_acc          = 1'b1;
+          acc_qvalid_o = valid_instr;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+
+      // half precision floating-point
+      riscv_instr::FCLASS_H,
+      riscv_instr::FLE_H,
+      riscv_instr::FLT_H,
+      riscv_instr::FEQ_H,
+      riscv_instr::FMV_X_H,
+      riscv_instr::FCVT_W_H,
+      riscv_instr::FCVT_WU_H: begin
+        if (FP_EN && XF16 && fcsr_q.fmode.src == 1'b0) begin
+          write_rd = 1'b0;
+          uses_rd = 1'b1;
+          acc_register_rd = 1'b1;
+          is_acc          = 1'b1;
+          acc_qvalid_o = valid_instr;
+        end else if (FP_EN && XF16ALT && fcsr_q.fmode.src == 1'b1) begin
+          write_rd = 1'b0;
+          uses_rd = 1'b1;
+          is_acc          = 1'b1;
+          acc_qvalid_o = valid_instr;
+          acc_register_rd = 1'b1; // No RS in GPR but RD in GPR, register in int scoreboard
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+
+      // Byte Precision Floating-Point
+      riscv_instr::FCLASS_B,
+      riscv_instr::FLE_B,
+      riscv_instr::FLT_B,
+      riscv_instr::FEQ_B,
+      riscv_instr::FMV_X_B,
+      riscv_instr::FCVT_W_B,
+      riscv_instr::FCVT_WU_B: begin
+        if (FP_EN && XF8 && fcsr_q.fmode.src == 1'b0) begin
+          write_rd = 1'b0;
+          uses_rd = 1'b1;
+          is_acc          = 1'b1;
+          acc_qvalid_o = valid_instr;
+          acc_register_rd = 1'b1; // No RS in GPR but RD in GPR, register in int scoreboard
+        end else if (FP_EN && XF8ALT && fcsr_q.fmode.src == 1'b1) begin
+          write_rd = 1'b0;
+          uses_rd = 1'b1;
+          is_acc          = 1'b1;
+          acc_qvalid_o = valid_instr;
+          acc_register_rd = 1'b1; // No RS in GPR but RD in GPR, register in int scoreboard
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+
+      // Double Precision Floating-Point
+      riscv_instr::FMV_D_X,
+      riscv_instr::FCVT_D_W,
+      riscv_instr::FCVT_D_WU: begin
+        if (FP_EN && RVD) begin
+          opa_select      = Reg;
+          is_acc          = 1'b1;
+          acc_qvalid_o = valid_instr;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+
+      // Single Precision Floating-Point
+      // riscv_instr::FMV_S_X,
+      riscv_instr::FMV_W_X,
+      riscv_instr::FCVT_S_W,
+      riscv_instr::FCVT_S_WU: begin
+        if (FP_EN && RVF) begin
+          opa_select      = Reg;
+          is_acc          = 1'b1;
+          acc_qvalid_o = valid_instr;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+
+      // Half Precision Floating-Point
+      riscv_instr::FMV_H_X,
+      riscv_instr::FCVT_H_W,
+      riscv_instr::FCVT_H_WU: begin
+        if (FP_EN && XF16 && (fcsr_q.fmode.dst == 1'b0)) begin
+          opa_select = Reg;
+          write_rd = 1'b0;
+          is_acc   = 1'b1;
+          acc_qvalid_o = valid_instr;
+        end else if (FP_EN && XF16ALT && (fcsr_q.fmode.dst == 1'b1)) begin
+          opa_select = Reg;
+          write_rd = 1'b0;
+          is_acc   = 1'b1;
+          acc_qvalid_o = valid_instr;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+
+      // Byte Precision Floating-Point
+      riscv_instr::FMV_B_X,
+      riscv_instr::FCVT_B_W,
+      riscv_instr::FCVT_B_WU: begin
+        if (FP_EN && XF8 && fcsr_q.fmode.dst == 1'b0) begin
+          opa_select = Reg;
+          write_rd = 1'b0;
+          is_acc   = 1'b1;
+          acc_qvalid_o = valid_instr;
+        end else if (FP_EN && XF8ALT && fcsr_q.fmode.dst == 1'b1) begin
+          opa_select = Reg;
+          write_rd = 1'b0;
+          is_acc   = 1'b1;
+          acc_qvalid_o = valid_instr;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+
+      // Floating-Point Load/Store
+      // Single Precision Floating-Point
+      riscv_instr::FLW: begin
+        if (FP_EN && RVF) begin
+          opa_select = Reg;
+          opb_select = IImmediate;
+          write_rd = 1'b0;
+          is_acc     = 1'b1;
+          is_acc_mem = 1'b1;
+          acc_qvalid_o = valid_instr && !acc_mem_stall;
+          ls_size = Word;
+          is_fp_load = 1'b1;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+      riscv_instr::FSW: begin
+        if (FP_EN && RVF) begin
+          opa_select = Reg;
+          opb_select = SFImmediate;
+          write_rd = 1'b0;
+          is_acc     = 1'b1;
+          is_acc_mem = 1'b1;
+          acc_qvalid_o = valid_instr && !acc_mem_stall;
+          ls_size = Word;
+          is_fp_store = 1'b1;
+          acc_mem_store   = 1'b1;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+      // Double Precision Floating-Point
+      riscv_instr::FLD: begin
+        if (FP_EN && (RVD || XFVEC)) begin
+          opa_select = Reg;
+          opb_select = IImmediate;
+          write_rd = 1'b0;
+          is_acc     = 1'b1;
+          is_acc_mem = 1'b1;
+          acc_qvalid_o = valid_instr && !acc_mem_stall;
+          ls_size = Double;
+          is_fp_load = 1'b1;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+      riscv_instr::FSD: begin
+        if (FP_EN && (RVD || XFVEC)) begin
+          opa_select = Reg;
+          opb_select = SFImmediate;
+          write_rd = 1'b0;
+          is_acc     = 1'b1;
+          is_acc_mem = 1'b1;
+          acc_qvalid_o = valid_instr && !acc_mem_stall;
+          ls_size = Double;
+          is_fp_store = 1'b1;
+          acc_mem_store   = 1'b1;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+      // Half Precision Floating-Point
+      riscv_instr::FLH: begin
+        if (FP_EN && (XF16 || XF16ALT)) begin
+          opa_select = Reg;
+          opb_select = IImmediate;
+          write_rd = 1'b0;
+          is_acc     = 1'b1;
+          is_acc_mem = 1'b1;
+          acc_qvalid_o = valid_instr && !acc_mem_stall;
+          ls_size = HalfWord;
+          is_fp_load = 1'b1;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+      riscv_instr::FSH: begin
+        if (FP_EN && (XF16 || XF16ALT)) begin
+          opa_select = Reg;
+          opb_select = SFImmediate;
+          write_rd = 1'b0;
+          is_acc     = 1'b1;
+          is_acc_mem = 1'b1;
+          acc_qvalid_o = valid_instr && !acc_mem_stall;
+          ls_size = HalfWord;
+          is_fp_store = 1'b1;
+          acc_mem_store   = 1'b1;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+      // Quarter Precision Floating-Point
+      riscv_instr::FLB: begin
+        if (FP_EN && (XF8 || XF8ALT)) begin
+          opa_select = Reg;
+          opb_select = IImmediate;
+          write_rd = 1'b0;
+          is_acc     = 1'b1;
+          is_acc_mem = 1'b1;
+          acc_qvalid_o = valid_instr && !acc_mem_stall;
+          ls_size = Byte;
+          is_fp_load = 1'b1;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+      riscv_instr::FSB: begin
+        if (FP_EN && (XF8 || XF8ALT)) begin
+          opa_select = Reg;
+          opb_select = SFImmediate;
+          write_rd = 1'b0;
+          is_acc     = 1'b1;
+          is_acc_mem = 1'b1;
+          acc_qvalid_o = valid_instr && !acc_mem_stall;
+          ls_size = Byte;
+          is_fp_store = 1'b1;
+          acc_mem_store   = 1'b1;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+
+/* end of floating point instructions */
+
 
       // TODO(zarubaf): Illegal Instructions
       default: begin
@@ -1904,6 +2451,7 @@ module snitch
      write_rd = 1'b0;
      uses_rd = 1'b0;
      write_rs1 = 1'b0;
+     uses_rs1 = 1'b0;
      acc_qvalid_o = 1'b0;
      next_pc = Exception;
     end
@@ -1912,16 +2460,14 @@ module snitch
   assign exception = illegal_inst | ld_addr_misaligned | st_addr_misaligned;
 
   // pragma translate_off
-  /* verilator lint_off SYNCASYNCNET */
-  always_ff @(posedge clk_i) begin
-    if (rst_ni && illegal_inst && inst_valid_o && inst_ready_i) begin
+  always_ff @(posedge clk_i or posedge rst_i) begin
+    if (!rst_i && illegal_inst && inst_valid_o && inst_ready_i) begin
       $display("[Illegal Instruction Core %0d] PC: %h Data: %h", hart_id_i, inst_addr_o, inst_data_i);
     end
-    if (rst_ni && wake_up_sync_i && &wake_up_q) begin
+    if (!rst_i && wake_up_sync_i && &wake_up_q) begin
       $display("[Missed wake-up Core %0d] Cycle: %d, Time: %t", hart_id_i, cycle_q, $time);
     end
   end
-  /* verilator lint_on SYNCASYNCNET */
   // pragma translate_on
 
   // CSR logic
@@ -1937,9 +2483,12 @@ module snitch
     csr_dump = 1'b0;
     csr_trace_en = 1'b0;
     csr_stack_limit_en = 1'b0;
+    read_fcsr = 1'b0;
 
     fcsr_d = fcsr_q;
-    fcsr_d.fflags = fcsr_q.fflags | fpu_status_i;
+    if (FP_EN) begin
+      fcsr_d.fflags = fcsr_q.fflags | fpu_status_i;
+    end
 
     // TODO(zarubaf): Needs some more input handling, like illegal instruction exceptions.
     // Right now we skip this due to simplicity.
@@ -1981,25 +2530,37 @@ module snitch
           csr_rvalue = stall_raw_q[31:0];
         end
         `endif
+        `ifdef TARGET_SPATZ
         // F/D Extension
         riscv_instr::CSR_FFLAGS: begin
-          if (snitch_pkg::ZFINX) begin
-            csr_rvalue = {27'b0, fcsr_q.fflags};
-            fcsr_d.fflags = fpnew_pkg::status_t'(alu_result[4:0]);
+          if (FP_EN) begin
+            csr_rvalue = {27'b0, fcsr_d.fflags};
+            read_fcsr  = 1'b1;
+            if (!exception && !acc_stall) fcsr_d.fflags = fpnew_pkg::status_t'(alu_result[4:0]);
           end
         end
         riscv_instr::CSR_FRM: begin
-          if (snitch_pkg::ZFINX) begin
-            csr_rvalue = {29'b0, fcsr_q.frm};
-            fcsr_d.frm = fpnew_pkg::roundmode_e'(alu_result[2:0]);
+          if (FP_EN) begin
+            csr_rvalue = {29'b0, fcsr_d.frm};
+            read_fcsr  = 1'b1;
+            if (!exception && !acc_stall) fcsr_d.frm = fpnew_pkg::roundmode_e'(alu_result[2:0]);
+          end
+        end
+        riscv_instr::CSR_FMODE: begin
+          if (FP_EN) begin
+            csr_rvalue = {30'b0, fcsr_q.fmode};
+            read_fcsr  = 1'b1;
+            if (!exception && !acc_stall) fcsr_d.fmode = fpnew_pkg::fmt_mode_t'(alu_result[1:0]);
           end
         end
         riscv_instr::CSR_FCSR: begin
-          if (snitch_pkg::ZFINX) begin
-            csr_rvalue = {24'b0, fcsr_q};
-            fcsr_d = fcsr_t'(alu_result[7:0]);
+          if (FP_EN) begin
+            csr_rvalue = {22'b0, fcsr_d};
+            read_fcsr  = 1'b1;
+            if (!exception && !acc_stall) fcsr_d = fcsr_t'(alu_result[9:0]);
           end
         end
+        `endif
         default: begin
           csr_rvalue = '0;
           csr_dump = 1'b1;
@@ -2009,19 +2570,22 @@ module snitch
   end
 
   // CSR registers
-  `FFL(csr_trace_q, alu_result, csr_trace_en, '0, clk_i, rst_ni);
-  `FFL(csr_stack_limit_q, alu_result, csr_stack_limit_en, 32'hFFFF_FFFF, clk_i, rst_ni);
+  `ifdef TARGET_ASIC
+    assign csr_trace_q = '0;
+    assign csr_stack_limit_q = '0;
+  `else
+    `FFLAR(csr_trace_q, alu_result, csr_trace_en, '0, clk_i, rst_i);
+    `FFLAR(csr_stack_limit_q, alu_result, csr_stack_limit_en, 32'hFFFF_FFFF, clk_i, rst_i);
+  `endif
 
   // pragma translate_off
-  /* verilator lint_off SYNCASYNCNET */
-  always_ff @(posedge clk_i) begin
+  always_ff @(posedge clk_i or posedge rst_i) begin
     // Display CSR write if the CSR does not exist
-    if (rst_ni && csr_dump && inst_valid_o && inst_ready_i && !stall) begin
+    if (!rst_i && csr_dump && inst_valid_o && inst_ready_i && !stall) begin
       $timeformat(-9, 0, " ns", 0);
       $display("[DUMP] %t Core %3d: 0x%3h = 0x%08h, %d", $time, hart_id_i, inst_data_i[31:20], alu_result, alu_result);
     end
   end
-  /* verilator lint_off SYNCASYNCNET */
   // pragma translate_on
 
   snitch_regfile #(
@@ -2032,7 +2596,6 @@ module snitch
     .ADDR_WIDTH     ( RegWidth        )
   ) i_snitch_regfile (
     .clk_i,
-    .rst_ni,
     .raddr_i   ( gpr_raddr ),
     .rdata_o   ( gpr_rdata ),
     .waddr_i   ( gpr_waddr ),
@@ -2063,7 +2626,9 @@ module snitch
       PC: opb = pc_q;
       CSR: opb = csr_rvalue;
       PBImmediate: opb = pbimm;
+`ifdef XPULPIMG_EXTENSION
       RegRd: opb = gpr_rdata[2];
+`endif
       default: opb = '0;
     endcase
   end
@@ -2072,12 +2637,7 @@ module snitch
   assign gpr_raddr[1] = rs2;
   // connect third read port only if present
   if (RegNrReadPorts >= 3) begin : gpr_raddr_2
-    if (snitch_pkg::ZFINX) begin
-      assign gpr_raddr[2] = ((snitch_pkg::ZFINX) || (snitch_pkg::XPULPIMG) && (opc_select == RegRd)) ? rd  :
-                            ((snitch_pkg::ZFINX) || (snitch_pkg::XPULPIMG) && (opc_select == Reg))   ? rs3 : '0;
-    end else begin
-      assign gpr_raddr[2] = rd;
-    end
+    assign gpr_raddr[2] = rd;
   end
 
   // --------------------
@@ -2176,16 +2736,17 @@ module snitch
   assign lsu_qtag = (lsu_qvalid && (!is_store || ls_amo != AMONone)) ? rd : '0;
   // Send the data if it is a write or an AMO
   assign lsu_qdata = (lsu_qvalid && (is_store || ls_amo != AMONone)) ? gpr_rdata[1] : '0;
+  localparam int unsigned NumIOLoadBit = $clog2(snitch_pkg::NumIntOutstandingLoads);
 
   snitch_lsu #(
     .tag_t               ( logic[RegWidth-1:0]                ),
     .NumOutstandingLoads ( snitch_pkg::NumIntOutstandingLoads )
   ) i_snitch_lsu (
     .clk_i                                ,
-    .rst_ni                               ,
-    .lsu_qtag_i   ( lsu_qtag              ),
-    .lsu_qwrite   ( is_store              ),
-    .lsu_qsigned  ( is_signed             ),
+    .rst_i                                ,
+    .lsu_qtag_i   ( rd                    ),
+    .lsu_qwrite_i ( is_store              ),
+    .lsu_qsigned_i( is_signed             ),
     .lsu_qaddr_i  ( lsu_qaddr             ),
     .lsu_qdata_i  ( lsu_qdata             ),
     .lsu_qsize_i  ( ls_size               ),
@@ -2203,20 +2764,64 @@ module snitch
     .data_qdata_o                          ,
     .data_qamo_o                           ,
     .data_qstrb_o                          ,
-    .data_qid_o                            ,
+    .data_qid_o   ( data_qid_o[NumIOLoadBit-1:0])                         ,
     .data_qvalid_o                         ,
     .data_qready_i                         ,
     .data_pdata_i                          ,
     .data_perror_i                         ,
-    .data_pid_i                            ,
+    // We may have more ID fields due to enlarged Spatz ROB
+    .data_pid_i   ( data_pid_i[NumIOLoadBit-1:0]),
     .data_pvalid_i                         ,
     .data_pready_o
   );
+  if (snitch_pkg::NumIntOutstandingLoads < snitch_pkg::RobDepth) begin
+    assign data_qid_o[$clog2(snitch_pkg::RobDepth)-1:NumIOLoadBit] = '0;
+  end
+
+`ifdef TARGET_SPATZ
+  // Number of memory operations in the accelerator
+  logic [2:0] acc_mem_cnt_q, acc_mem_cnt_d;
+  `FFAR(acc_mem_cnt_q, acc_mem_cnt_d, '0, clk_i, rst_i)
+
+  // Number of store operations in the accelerator
+  logic [2:0] acc_mem_str_cnt_q, acc_mem_str_cnt_d;
+  `FFAR(acc_mem_str_cnt_q, acc_mem_str_cnt_d, '0, clk_i, rst_i)
+
+  assign acc_mem_stall = (is_store && acc_mem_cnt_q != '0) || (is_load && acc_mem_str_cnt_q != 0) || acc_mem_cnt_q == '1;
+
+  always_comb begin
+    acc_mem_cnt_d = acc_mem_cnt_q;
+    acc_mem_str_cnt_d = acc_mem_str_cnt_q;
+
+    if (acc_qdata_rsp_i.loadstore && acc_qready_i && acc_qvalid_o)
+      acc_mem_cnt_d += 1;
+    if (acc_mem_finished_i[0])
+      acc_mem_cnt_d -= 1;
+    if (acc_mem_finished_i[1])
+      acc_mem_cnt_d -= 1;
+
+    if (acc_qdata_rsp_i.loadstore && acc_qready_i && acc_qvalid_o && acc_mem_store)
+      acc_mem_str_cnt_d += 1;
+    if (acc_mem_finished_i[0] && acc_mem_str_finished_i[0])
+      acc_mem_str_cnt_d -= 1;
+    if (acc_mem_finished_i[1] && acc_mem_str_finished_i[1])
+      acc_mem_str_cnt_d -= 1;
+  end
+
+  `ASSERT(MemoryOperationCounterRollover,
+      acc_mem_cnt_q == '0 |=> acc_mem_cnt_q != '1, clk_i, rst_i)
+
+  `ASSERT(MemoryStoreOperationCounterRollover,
+      acc_mem_str_cnt_q == '0 |=> acc_mem_str_cnt_q != '1, clk_i, rst_i)
 
   // address can be alu_result (i.e. rs1 + iimm/simm) or rs1 (for post-increment load/stores)
+  assign lsu_qaddr = is_postincr ? gpr_rdata[0] : alu_result;
+  assign lsu_qvalid = valid_instr & (is_load | is_store) & ~(ld_addr_misaligned | st_addr_misaligned) & ~acc_mem_stall;
+`else
+  // address can be alu_result (i.e. rs1 + iimm/simm) or rs1 (for post-increment load/stores)
   assign lsu_qaddr = lsu_qvalid ? (is_postincr ? gpr_rdata[0] : alu_result) : '0;
-
   assign lsu_qvalid = valid_instr & (is_load | is_store) & ~(ld_addr_misaligned | st_addr_misaligned);
+`endif
 
   // NOTE(smazzola): write-backs "on rd from non-load or non-acc instructions" and "on rs1 from
   // post-increment instructions" in the same cycle should be mutually exclusive (currently valid
@@ -2245,8 +2850,8 @@ module snitch
   assign ld_addr_misaligned = ls_misaligned & (is_load | is_fp_load);
 
   // pragma translate_off
-  always_ff @(posedge clk_i) begin
-    if (rst_ni && (ld_addr_misaligned || st_addr_misaligned) && valid_instr && inst_ready_i) begin
+  always_ff @(posedge clk_i or posedge rst_i) begin
+    if (!rst_i && (ld_addr_misaligned || st_addr_misaligned) && valid_instr && inst_ready_i) begin
       $display("%t: [Misaligned Load/Store Core %0d] PC: %h Address: %h Data: %h", $time, hart_id_i, inst_addr_o, alu_result, inst_data_i);
     end
   end
@@ -2292,7 +2897,7 @@ module snitch
           gpr_we[0] = 1'b1;
           gpr_waddr[0] = lsu_rd;
           gpr_wdata[0] = ld_result[31:0];
-        end else if (acc_pvalid_i) begin
+        end else if (acc_pvalid_i & acc_pwrite_i) begin
           // if we are not retiring another instruction retire the accelerated one now
           retire_acc = 1'b1;
           gpr_we[0] = 1'b1;
@@ -2313,8 +2918,12 @@ module snitch
       gpr_waddr[1] = lsu_rd;
       gpr_wdata[1] = ld_result[31:0];
       // external interfaces
-      // Snitch and LSU have priority
+      // Snitch and LSU have priority if Spatz is not used
+    `ifdef TARGET_SPATZ
+      lsu_pready = 1'b0;
+    `else
       lsu_pready = 1'b1;
+    `endif
       acc_pready_o = 1'b0;
       retire_acc = 1'b0;
       retire_load = 1'b0;
@@ -2324,7 +2933,8 @@ module snitch
         if (lsu_pvalid) begin
           retire_load = 1'b1;
           gpr_we[1] = 1'b1;
-        end else if (acc_pvalid_i) begin
+          lsu_pready = 1'b1;
+        end else if (acc_pvalid_i & acc_pwrite_i) begin
           retire_acc = 1'b1;
           gpr_we[1] = 1'b1;
           gpr_waddr[1] = acc_pid_i;
@@ -2333,7 +2943,7 @@ module snitch
         end
       // if we are not retiring another instruction retire the load now
       end else begin
-        if (acc_pvalid_i) begin
+        if (acc_pvalid_i & acc_pwrite_i) begin
           retire_acc = 1'b1;
           gpr_we[0] = 1'b1;
           gpr_waddr[0] = acc_pid_i;
@@ -2343,6 +2953,7 @@ module snitch
         if (lsu_pvalid) begin
           retire_load = 1'b1;
           gpr_we[1] = 1'b1;
+          lsu_pready = 1'b1;
         end
       end
     end
@@ -2358,8 +2969,8 @@ module snitch
   for (genvar i = 0; i < RegNrWritePorts; i++) begin : gen_stack_overflow_check
     logic [31:0] sp_new_value;
     assign sp_new_value = gpr_wdata[i];
-    always_ff @(posedge clk_i) begin
-      if (rst_ni && gpr_we[i] && gpr_waddr[i] == SP && csr_stack_limit_q != 32'hFFFF_FFFF && ($signed(sp_new_value) < $signed(csr_stack_limit_q))) begin
+    always_ff @(posedge clk_i or posedge rst_i) begin
+      if (!rst_i && gpr_we[i] && gpr_waddr[i] == SP && csr_stack_limit_q != 32'hFFFF_FFFF && ($signed(sp_new_value) < $signed(csr_stack_limit_q))) begin
         $warning("[Stackoverflow: Core %0d] Set SP to 0x%08h, limit is 0x%08h", hart_id_i, sp_new_value, csr_stack_limit_q);
       end
     end
@@ -2386,7 +2997,7 @@ module snitch
 
 
     // retire an instruction and increase ordering bit
-    `FFL(rvfi_order[0], rvfi_order[0] + 1, rvfi_valid[0], '0, clk_i, rst_ni)
+    `FFLAR(rvfi_order[0], rvfi_order[0] + 1, rvfi_valid[0], '0, clk_i, rst_i)
 
     logic [31:0] ld_instr_q;
     logic [31:0] ld_addr_q;
@@ -2394,12 +3005,12 @@ module snitch
     logic [31:0] rs1_data_q;
     logic [31:0] pc_qq;
     // we need to latch the load
-    `FFL(ld_instr_q, inst_data_i, latch_load, '0, clk_i, rst_ni)
-    `FFL(ld_addr_q, data_qaddr_o, latch_load, '0, clk_i, rst_ni)
-    `FFL(rs1_q, rs1, latch_load, '0, clk_i, rst_ni)
-    `FFL(rs1_data_q, gpr_rdata[0], latch_load, '0, clk_i, rst_ni)
-    `FFL(pc_qq, pc_d, latch_load, '0, clk_i, rst_ni)
-    `FFL(ld_addr_misaligned_q, ld_addr_misaligned, latch_load, '0, clk_i, rst_ni)
+    `FFLAR(ld_instr_q, inst_data_i, latch_load, '0, clk_i, rst_i)
+    `FFLAR(ld_addr_q, data_qaddr_o, latch_load, '0, clk_i, rst_i)
+    `FFLAR(rs1_q, rs1, latch_load, '0, clk_i, rst_i)
+    `FFLAR(rs1_data_q, gpr_rdata[0], latch_load, '0, clk_i, rst_i)
+    `FFLAR(pc_qq, pc_d, latch_load, '0, clk_i, rst_i)
+    `FFLAR(ld_addr_misaligned_q, ld_addr_misaligned, latch_load, '0, clk_i, rst_i)
 
     // in case we don't retire another instruction on port 1 we can use it for loads
     logic retire_load_port1;
@@ -2436,6 +3047,6 @@ module snitch
   // the LSU or accelerator interface by withdrawing the valid signal.
   `ASSERT(InstructionInterfaceStable,
       (inst_valid_o && inst_ready_i) ##1 (inst_valid_o && $stable(inst_addr_o))
-      |-> inst_ready_i && $stable(inst_data_i), clk_i, rst_ni)
+      |-> inst_ready_i && $stable(inst_data_i), clk_i, rst_i)
 
 endmodule

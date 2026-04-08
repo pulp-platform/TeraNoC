@@ -415,25 +415,25 @@ module mempool_tb;
     end
   end
 
-  // DSPU
-  if (snitch_pkg::XPULPIMG) begin: gen_utilization
-    logic [NumCores-1:0] dspu_handshake, dspu_mac;
-    int unsigned dspu_utilization, mac_utilization;
-    assign dspu_utilization = $countones(dspu_handshake);
-    assign mac_utilization = $countones(dspu_mac);
-    for (genvar g = 0; g < NumGroups; g++) begin
-      for (genvar t = 0; t < NumTilesPerGroup; t++) begin
-        for (genvar c = 0; c < NumCoresPerTile; c++) begin
-          logic dsp_valid, dsp_ready, mac;
-          assign dsp_valid = dut.i_mempool_cluster.gen_groups_x[g/NumY].gen_groups_y[g%NumY].gen_rtl_group.i_group.i_mempool_group.gen_tiles[t].i_tile.gen_cores[c].gen_mempool_cc.riscv_core.i_snitch_ipu.gen_xpulpimg.i_dspu.in_valid_i;
-          assign dsp_ready = dut.i_mempool_cluster.gen_groups_x[g/NumY].gen_groups_y[g%NumY].gen_rtl_group.i_group.i_mempool_group.gen_tiles[t].i_tile.gen_cores[c].gen_mempool_cc.riscv_core.i_snitch_ipu.gen_xpulpimg.i_dspu.in_ready_o;
-          assign mac = dut.i_mempool_cluster.gen_groups_x[g/NumY].gen_groups_y[g%NumY].gen_rtl_group.i_group.i_mempool_group.gen_tiles[t].i_tile.gen_cores[c].gen_mempool_cc.riscv_core.i_snitch_ipu.gen_xpulpimg.i_dspu.operator_i ==? riscv_instr::P_MAC;
-          assign dspu_handshake[g*NumTilesPerGroup*NumCoresPerTile+t*NumCoresPerTile+c] = dsp_valid & dsp_ready;
-          assign dspu_mac[g*NumTilesPerGroup*NumCoresPerTile+t*NumCoresPerTile+c] = dsp_valid & dsp_ready & mac;
-        end
-      end
-    end
-  end
+  // // DSPU
+  // if (snitch_pkg::XPULPIMG) begin: gen_utilization
+  //   logic [NumCores-1:0] dspu_handshake, dspu_mac;
+  //   int unsigned dspu_utilization, mac_utilization;
+  //   assign dspu_utilization = $countones(dspu_handshake);
+  //   assign mac_utilization = $countones(dspu_mac);
+  //   for (genvar g = 0; g < NumGroups; g++) begin
+  //     for (genvar t = 0; t < NumTilesPerGroup; t++) begin
+  //       for (genvar c = 0; c < NumCoresPerTile; c++) begin
+  //         logic dsp_valid, dsp_ready, mac;
+  //         assign dsp_valid = dut.i_mempool_cluster.gen_groups_x[g/NumY].gen_groups_y[g%NumY].gen_rtl_group.i_group.i_mempool_group.gen_tiles[t].i_tile.gen_cores[c].gen_mempool_cc.riscv_core.i_snitch_ipu.gen_xpulpimg.i_dspu.in_valid_i;
+  //         assign dsp_ready = dut.i_mempool_cluster.gen_groups_x[g/NumY].gen_groups_y[g%NumY].gen_rtl_group.i_group.i_mempool_group.gen_tiles[t].i_tile.gen_cores[c].gen_mempool_cc.riscv_core.i_snitch_ipu.gen_xpulpimg.i_dspu.in_ready_o;
+  //         assign mac = dut.i_mempool_cluster.gen_groups_x[g/NumY].gen_groups_y[g%NumY].gen_rtl_group.i_group.i_mempool_group.gen_tiles[t].i_tile.gen_cores[c].gen_mempool_cc.riscv_core.i_snitch_ipu.gen_xpulpimg.i_dspu.operator_i ==? riscv_instr::P_MAC;
+  //         assign dspu_handshake[g*NumTilesPerGroup*NumCoresPerTile+t*NumCoresPerTile+c] = dsp_valid & dsp_ready;
+  //         assign dspu_mac[g*NumTilesPerGroup*NumCoresPerTile+t*NumCoresPerTile+c] = dsp_valid & dsp_ready & mac;
+  //       end
+  //     end
+  //   end
+  // end
 
 `endif
 
