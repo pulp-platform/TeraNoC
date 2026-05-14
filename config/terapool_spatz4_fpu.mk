@@ -53,7 +53,16 @@ noc_routing_algorithm ?= 0
 
 # NoC remapping configuration
 # 0: no remapping, 1: req remapping, 2: resp remapping 3: req+resp remapping
-noc_router_remapping ?= 3
+noc_router_remapping ?= 1
+
+# Hash-based port spreading at tile level (bitmask)
+#   bit0 (1): req port hash     — spread req across remote req ports
+#   bit1 (2): resp temporal RR  — rotate resp port across cycles (resp_rr_q)
+#   bit2 (4): resp spatial RR   — offset resp port by bank id within a cycle,
+#                                 so multiple remote-destined bank responses
+#                                 in the same cycle spread across resp ports
+# Common values: 0 none, 3 req+temporal, 6 temporal+spatial, 7 all
+noc_port_hash ?= 7
 
 # Virtual channel number
 noc_virtual_channel_num ?= 1
@@ -100,6 +109,35 @@ noc_router_output_fifo_dep ?= 2
 
 # Router remapping xbar size configuration
 noc_router_remap_group_size ?= 4
+
+# Tile ID remapping (0=disabled).
+tile_id_remap ?= 0
+
+#####################
+## 2b. Group MSHR  ##
+#####################
+# Number of MSHR entries per group (peak outstanding remote bursts).
+# For terapool: 16 tiles/group * 2 remote req ports = 32 concurrent slots,
+# 64+ is recommended to absorb overlapping outstanding bursts without overflow.
+group_mshr_num           ?= 64
+# Max sub-requests coalesced into one MSHR entry.
+group_mshr_merge_reqs    ?= 8
+# Admit single-word reqs into MSHR merge pool (1) or let them bypass (0).
+# NOTE: currently set to 0 as a workaround. With =1, a residual orphan race
+# in the single-word admission path (likely duplicate-entry allocation when
+# a CACHED entry exists for the same address) causes sporadic deadlocks on
+# sp-fmatmul-opt-burst-merge. Tested fixes (beat_pending init for mid-drain
+# merges; removing CACHED-merge) were each insufficient. Until the root
+# cause is fully characterized, keep this at 0 — single-word loads bypass
+# the MSHR. See bottleneck_analysis/ for details.
+group_mshr_enable_single ?= 0
+# Emit MSHR internal [MSHR stats] via $display (sim-only).
+group_mshr_enable_stats  ?= 1
+# Stats print period (cycles) while csr_trace is active (0 = final dump only).
+group_mshr_stats_period  ?= 1000
+# Enable tb_group_merge.svh (TB-side merge-opportunity analysis).
+# Produces [GroupMerge] lines and `group_merge_profiling/*.log` per 10k cycles.
+group_merge_profiling    ?= 1
 
 ###########################
 ## 3. AXI and DMA Config

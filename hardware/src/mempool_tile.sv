@@ -496,6 +496,23 @@ module mempool_tile
   end
 
   assign bank_req_ini_addr = superbank_req_ini_addr;
+
+  // Free-running round-robin counter for response port spreading.
+  // Increments every cycle, independent of valid/ready.
+  // Note: this may cause stream_xbar sel_i instability assertions to fire
+  // (since sel changes while valid is high), but the xbar is configured with
+  // AxiVldRdy=0 and LockIn=0, so sel changes are functionally safe.
+  localparam int unsigned RespRRWidth = (NumRemoteRespPortsPerTile > 2) ? $clog2(NumRemoteRespPortsPerTile - 1) : 1;
+  logic [RespRRWidth-1:0] resp_rr_q, resp_rr_d;
+  `FF(resp_rr_q, resp_rr_d, '0)
+
+  always_comb begin
+    if (resp_rr_q == RespRRWidth'(NumRemoteRespPortsPerTile - 2))
+      resp_rr_d = '0;
+    else
+      resp_rr_d = resp_rr_q + RespRRWidth'(1);
+  end
+
   for (genvar b = 0; unsigned'(b) < NumBanksPerTile; b++) begin: gen_superbank_resp_ini_addr
     if(NumRemoteReqPortsPerTile > NumRemoteRespPortsPerTile ) begin: gen_superbank_resp_ini_addr_req_gt_resp
       always_comb begin
@@ -507,9 +524,39 @@ module mempool_tile
       end
 
     end else if (NumRemoteReqPortsPerTile == NumRemoteRespPortsPerTile) begin: gen_superbank_resp_ini_addr_req_eq_resp
-      always_comb begin
-        superbank_resp_ini_addr[b] = '0;
-        superbank_resp_ini_addr[b] = bank_resp_ini_addr_norm[b];
+      // Resp-port selection for remote-destined responses.
+      // Two orthogonal behaviors controlled by NocPortHash bits:
+      //   NocPortHash[1] (temporal RR): rotate across cycles via resp_rr_q.
+      //                 All banks pick the same port in a given cycle.
+      //   NocPortHash[2] (spatial RR): each bank offsets by its bank-id, so
+      //                 multiple banks with remote responses in the same
+      //                 cycle are spread across different resp ports instead
+      //                 of piling up on one output.
+      // They can be combined: port = base + (resp_rr_q + b) mod N_remote.
+      if (NocPortHash[1] || NocPortHash[2]) begin: gen_resp_port_rr
+        localparam int unsigned NumRemoteResp = NumRemoteRespPortsPerTile - 1;
+        always_comb begin
+          // Compile-time-select of the offset source
+          automatic int unsigned port_offset;
+          port_offset = 0;
+          if (NocPortHash[1]) port_offset = port_offset + resp_rr_q;
+          if (NocPortHash[2]) port_offset = port_offset + b;
+          // Modulo over the remote-port count (power-of-two for typical configs)
+          port_offset = port_offset % NumRemoteResp;
+
+          superbank_resp_ini_addr[b] = '0;
+          superbank_resp_ini_addr[b] = bank_resp_ini_addr_norm[b];
+          if (bank_resp_ini_addr_norm[b] > NumCoresPerTile*NumDataPortsPerCore) begin
+            superbank_resp_ini_addr[b] =
+              NumCoresPerTile*NumDataPortsPerCore + 1 + port_offset;
+          end
+        end
+      end else begin: gen_resp_port_passthrough
+        // Direct passthrough: response exits through the same port as the request.
+        always_comb begin
+          superbank_resp_ini_addr[b] = '0;
+          superbank_resp_ini_addr[b] = bank_resp_ini_addr_norm[b];
+        end
       end
     end
     else begin: gen_superbank_resp_ini_addr_req_lt_resp
@@ -520,16 +567,17 @@ module mempool_tile
       logic [hash_width-1:0] hash_src0, hash_src1, hash;
       assign bank_resp_payload_raw = bank_resp_payload[b];
       if(hash_width == 4) begin: gen_customed_hash_4
-        assign hash_src0 = {bank_resp_payload[b].rdata.core_id[0],
-                            bank_resp_payload[b].rdata.core_id[1],
-                            bank_resp_payload[b].src_group_id[0],
-                            bank_resp_payload[b].src_group_id[2]
-                            };
-        assign hash_src1 = {
+        // meta_id at MSB — varies per beat within a burst, giving per-response
+        // port alternation. ini_addr[1:0] avoided (constant due to interleaving).
+        assign hash_src0 = {bank_resp_payload[b].rdata.meta_id[0],
+                            bank_resp_payload[b].ini_addr[3],
                             bank_resp_payload[b].ini_addr[2],
-                            bank_resp_payload[b].src_group_id[3],
-                            bank_resp_payload[b].ini_addr[0],
-                            bank_resp_payload[b].ini_addr[1]
+                            bank_resp_payload[b].src_group_id[0]
+                            };
+        assign hash_src1 = {bank_resp_payload[b].rdata.meta_id[1],
+                            bank_resp_payload[b].src_group_id[1],
+                            bank_resp_payload[b].rdata.core_id[0],
+                            bank_resp_payload[b].rdata.core_id[1]
                             };
       end else begin: gen_general_hash
         $warning("Customed hashing is not implemented for hash_width = %0d, ",
@@ -952,7 +1000,11 @@ module mempool_tile
   stream_xbar #(
     .NumInp   (NumBanksPerTile                                                ),
     .NumOut   (NumCoresPerTile*NumDataPortsPerCore + NumRemoteRespPortsPerTile),
-    .payload_t(tcdm_slave_resp_t                                              )
+    .payload_t(tcdm_slave_resp_t                                              ),
+    // sel_i may change before handshake completes (e.g. resp port round-robin).
+    // Disable AXI valid/ready and lock-in to prevent phantom locked arbitration.
+    .AxiVldRdy(0                                                              ),
+    .LockIn   (0                                                              )
   ) i_local_resp_interco (
     .clk_i  (clk_i                                                            ),
     .rst_ni (rst_ni                                                           ),
@@ -1035,6 +1087,8 @@ module mempool_tile
     .NumGroups                            (NumGroups                           ),
     .ByteOffset                           (ByteOffset                          )
   ) i_mempool_tile_rw_demux (
+    .clk_i                                (clk_i                               ),
+    .rst_ni                               (rst_ni                              ),
     .group_id_i                           (group_id                            ),
     .remote_req_interco_valid_i           (remote_req_interco_valid            ),
     .remote_req_interco_ready_i           (remote_req_interco_ready            ),
