@@ -22,16 +22,16 @@ module mempool_group_mshr
   // Can be overridden from build defines with GROUP_MSHR_NUM.
   parameter int MshrNum        = `ifdef GROUP_MSHR_NUM `GROUP_MSHR_NUM `else NumTilesPerGroup `endif,
   parameter int MshrMergeWords = 1,
-  parameter int MshrMergeReqs  = 8,
+  parameter int MshrMergeReqs  = `ifdef GROUP_MSHR_MERGE_REQS `GROUP_MSHR_MERGE_REQS `else 8 `endif,
   // MSHR admission policy by effective load length:
   // - single      : req_len == 1
   // - non-full    : 1 < req_len < MshrFullBurstWords
   // - full-burst  : req_len == MshrFullBurstWords
   // req_len is after alignment handling (unaligned bursts are clamped to single).
   parameter int unsigned MshrFullBurstWords = MaxBurstWords,
-  parameter bit EnableMshrSingleReq         = 1'b0,
-  parameter bit EnableMshrNonFullBurstReq   = 1'b1,
-  parameter bit EnableMshrFullBurstReq      = 1'b1,
+  parameter bit EnableMshrSingleReq         = `ifdef GROUP_MSHR_ENABLE_SINGLE `GROUP_MSHR_ENABLE_SINGLE `else 1'b0 `endif,
+  parameter bit EnableMshrNonFullBurstReq   = `ifdef GROUP_MSHR_ENABLE_NON_FULL `GROUP_MSHR_ENABLE_NON_FULL `else 1'b1 `endif,
+  parameter bit EnableMshrFullBurstReq      = `ifdef GROUP_MSHR_ENABLE_FULL `GROUP_MSHR_ENABLE_FULL `else 1'b1 `endif,
   // Per-entry buffered response beats (for out-of-order/multi-channel returns).
   // Default tracks remote response bandwidth per tile.
   parameter int RespBufWords   = ((NumRemoteRespPortsPerTile > 1) ?
@@ -42,9 +42,9 @@ module mempool_group_mshr
   // Keep responded entries as a small read-response cache.
   parameter bit EnableRespCache = 1'b1,
   // Simulation-only statistics/prints (translate_off).
-  parameter bit EnableStats   = 1'b1,
+  parameter bit EnableStats   = `ifdef GROUP_MSHR_ENABLE_STATS `GROUP_MSHR_ENABLE_STATS `else 1'b0 `endif,
   // Stats print period in cycles while trace is active (0 disables periodic prints).
-  parameter int unsigned StatsPeriod = 1000,
+  parameter int unsigned StatsPeriod = `ifdef GROUP_MSHR_STATS_PERIOD `GROUP_MSHR_STATS_PERIOD `else 0 `endif,
   // Spill register enables (0 = pass-through).
   parameter bit SpillReqIn     = 1'b1,
   parameter bit SpillReqOut    = 1'b1,
@@ -1305,6 +1305,20 @@ module mempool_group_mshr
             if (resp_out_ready[tile_i][port_i]) begin
               mshr_d[resp_sel_mshr_id[tile_i][port_i]].beat_pending[
                   resp_sel_subreq_idx[tile_i][port_i]] = 1'b0;
+              // Root-cause fix (WAL-verified): clear sub_req.valid on drain
+              // handshake to prevent init from re-including it in next
+              // cycle's beat_pending mask. Without this, MSHR delivers the
+              // same response 3-5× to the tile (tile 5: 106 resps / 33 reqs
+              // measured); duplicates overwhelm Spatz LSU tag tracking and
+              // cause hart-stuck deadlock with EnableMshrSingleReq=1. Only
+              // applied to single-beat entries: multi-beat entries need
+              // valid to persist across beats so the full burst lands at
+              // the same set of sub_reqs (mass-clear / full-dealloc
+              // handles cleanup at end of burst).
+              if (mshr_d[resp_sel_mshr_id[tile_i][port_i]].burst_len == BurstLenWidth'(1)) begin
+                mshr_d[resp_sel_mshr_id[tile_i][port_i]].sub_reqs[
+                    resp_sel_subreq_idx[tile_i][port_i]].valid = 1'b0;
+              end
               drain_count[resp_sel_mshr_id[tile_i][port_i]] =
                   drain_count[resp_sel_mshr_id[tile_i][port_i]] + 1'b1;
             end
@@ -1366,6 +1380,12 @@ module mempool_group_mshr
 
               if (resp_out_ready[drain_dst_tile[mshr_i]][drain_dst_port[mshr_i]]) begin
                 mshr_d[mshr_i].beat_pending[drain_subreq_idx[mshr_i]] = 1'b0;
+                // Single-beat only: see DrainMultiPort branch above for
+                // rationale (avoids same-cycle init re-includes the slot in
+                // next cycle's beat_pending mask).
+                if (mshr_d[mshr_i].burst_len == BurstLenWidth'(1)) begin
+                  mshr_d[mshr_i].sub_reqs[drain_subreq_idx[mshr_i]].valid = 1'b0;
+                end
               end
               port_taken[drain_dst_tile[mshr_i]][drain_dst_port[mshr_i]] = 1'b1;
             end

@@ -633,7 +633,7 @@ module mempool_tb;
 /*******************
  * Group Profiling *
  *******************/
-`define GROUP_MERGE_PROFILING
+// `define GROUP_MERGE_PROFILING  // Disabled: focus on link utilization
 `define MERGE_BURST_WORDS 16
 `define MERGE_WINDOW_CYCLES 16
 `define MERGE_MSHR_NUM 16
@@ -647,5 +647,15 @@ module mempool_tb;
  * NoC Traffic Visualization *
  ****************************/
 `include "tb_noc_visualization.svh"
+
+/******************************
+ * NoC Link Utilization Debug *
+ ******************************/
+`include "tb_noc_link_profiling.svh"
+
+/*************************************
+ * Per-Stage Bottleneck Profiling    *
+ *************************************/
+`include "tb_noc_bottleneck_profiling.svh"
 
 endmodule : mempool_tb

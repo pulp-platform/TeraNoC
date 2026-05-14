@@ -46,6 +46,17 @@ noc_routing_algorithm ?= 0
 # 0: no remapping, 1: req remapping, 2: resp remapping 3: req+resp remapping
 noc_router_remapping ?= 3
 
+# Hash-based port spreading at tile level (bitmask)
+# Distributes traffic across multiple req/resp ports, preventing traffic
+# from concentrating on a single port.
+#   bit0 (1): req port hash     — spread req across remote req ports
+#   bit1 (2): resp temporal RR  — rotate resp port across cycles (resp_rr_q)
+#   bit2 (4): resp spatial RR   — offset resp port by bank id within a cycle,
+#                                 so multiple remote-destined bank responses
+#                                 in the same cycle spread across resp ports
+# Common values: 0 none, 3 req+temporal, 6 temporal+spatial, 7 all
+noc_port_hash ?= 0
+
 # Virtual channel number
 noc_virtual_channel_num ?= 1
 
@@ -88,6 +99,27 @@ noc_router_output_fifo_dep ?= 2
 
 # Router remapping configuration
 noc_router_remap_group_size ?= 8
+
+# Tile ID remapping (0=disabled).
+tile_id_remap ?= 0
+
+#####################
+##  Group MSHR     ##
+#####################
+# Number of MSHR entries per group (peak outstanding remote bursts).
+# mempool has fewer tiles/group than terapool — start at the RTL default
+# (NumTilesPerGroup). Increase if [MSHR stats] shows mshr_overflow.
+group_mshr_num           ?= 16
+# Max sub-requests coalesced into one MSHR entry.
+group_mshr_merge_reqs    ?= 8
+# Admit single-word reqs into MSHR merge pool (1) or let them bypass (0).
+group_mshr_enable_single ?= 1
+# Emit MSHR internal [MSHR stats] via $display (sim-only).
+group_mshr_enable_stats  ?= 1
+# Stats print period (cycles) while csr_trace is active (0 = final dump only).
+group_mshr_stats_period  ?= 1000
+# Enable tb_group_merge.svh (TB-side merge-opportunity analysis).
+group_merge_profiling    ?= 1
 
 ###########################
 ## 3. AXI and DMA Config

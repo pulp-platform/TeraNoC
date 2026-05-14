@@ -571,10 +571,10 @@ end : gen_router_req_to_slave_req_i
 // -------------------------------------------------------------------- //
 if (NocRouterRemapping == 2 || NocRouterRemapping == 3) begin: gen_resp_remapping
 
-  floo_tcdm_resp_t [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1] floo_tcdm_resp_to_remapper;
+  floo_tcdm_resp_t [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1] floo_tcdm_resp_to_remapper_raw;
   for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_slave_resp_to_remapper_resp_i
     for (genvar j = 1; j < NumRemoteRespPortsPerTile; j++) begin : gen_slave_resp_to_remapper_resp_j
-      assign floo_tcdm_resp_to_remapper[i][j] = floo_tcdm_resp_t'{
+      assign floo_tcdm_resp_to_remapper_raw[i][j] = floo_tcdm_resp_t'{
         payload: floo_tcdm_resp_payload_t'{
           amo  : tcdm_slave_resp[i][j].rdata.amo,
           data : tcdm_slave_resp[i][j].rdata.data,
@@ -601,7 +601,7 @@ if (NocRouterRemapping == 2 || NocRouterRemapping == 3) begin: gen_resp_remappin
   ) i_floo_tcdm_resp_remapper (
     .clk_i        (clk_i                                            ),
     .rst_ni       (rst_ni                                           ),
-    .inp_data_i   (floo_tcdm_resp_to_remapper                       ),
+    .inp_data_i   (floo_tcdm_resp_to_remapper_raw                   ),
     .inp_valid_i  (tcdm_slave_resp_valid                            ),
     .inp_ready_o  (tcdm_slave_resp_ready                            ),
     .oup_data_o   (floo_tcdm_resp_to_router                         ),

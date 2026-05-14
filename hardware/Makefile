@@ -151,7 +151,29 @@ vlog_defs += -DNUM_X=$(num_x)
 vlog_defs += -DNOC_TOPOLOGY=$(noc_topology)
 vlog_defs += -DNOC_ROUTING_ALGORITHM=$(noc_routing_algorithm)
 vlog_defs += -DNOC_ROUTER_REMAPPING=$(noc_router_remapping)
+noc_port_hash ?= 0
+vlog_defs += -DNOC_PORT_HASH=$(noc_port_hash)
 vlog_defs += -DNOC_VIRTUAL_CHANNEL_NUM=$(noc_virtual_channel_num)
+# --------------------------
+# Group MSHR Tuning & Stats
+# --------------------------
+# Values below are fallbacks used when a config .mk file did not set them.
+# Prefer setting these in the per-flavor config (e.g. config/terapool_spatz4_fpu.mk).
+# Keeping them minimal here so other configs match the RTL module defaults.
+group_mshr_num           ?= 16
+group_mshr_merge_reqs    ?= 8
+group_mshr_enable_single ?= 0
+group_mshr_enable_stats  ?= 0
+group_mshr_stats_period  ?= 0
+group_merge_profiling    ?= 0
+vlog_defs += -DGROUP_MSHR_NUM=$(group_mshr_num)
+vlog_defs += -DGROUP_MSHR_MERGE_REQS=$(group_mshr_merge_reqs)
+vlog_defs += -DGROUP_MSHR_ENABLE_SINGLE=$(group_mshr_enable_single)
+vlog_defs += -DGROUP_MSHR_ENABLE_STATS=$(group_mshr_enable_stats)
+vlog_defs += -DGROUP_MSHR_STATS_PERIOD=$(group_mshr_stats_period)
+ifeq ($(group_merge_profiling), 1)
+  vlog_defs += -DGROUP_MERGE_PROFILING
+endif
 # --------------------------
 # Snitch ISA Extensions
 # --------------------------
@@ -362,6 +384,9 @@ simc: clean-dasm compile
 	$(questa_cmd) vsim -c -voptargs=$(questa_voptargs) -wlf $(questa_wlf) $(questa_args) $(library).$(top_level) -do "log -r *" -do "run -a"
 	./scripts/return_status.sh $(buildpath)/transcript
 
+# 	$(questa_cmd) vsim -c $(questa_args) $(library).$(top_level) -do "run -a"
+# 	$(questa_cmd) vsim -c -voptargs=$(questa_voptargs) -wlf $(questa_wlf) $(questa_args) $(library).$(top_level) -do "log -r *" -do "run -a"
+
 # DPIs
 .PHONY: dpi
 dpi: $(buildpath)/$(dpi_library)/mempool_dpi.so
@@ -550,11 +575,16 @@ tracevis:
 ############################
 noc_vis_W ?= $(num_x)
 noc_vis_H ?= $(shell echo $$(( $(num_groups) / $(num_x) )))
+noc_vis_tiles_per_group ?= $(shell echo $$(( $(num_cores) / $(num_cores_per_tile) / $(num_groups) )))
 
 noc-vis: $(buildpath)/v4m_out/trace_events.csv
 	$(python) scripts/noc_visualization/gen_v4m_from_csv.py \
 		$< $(buildpath)/vis4mesh_out \
 		--W $(noc_vis_W) --H $(noc_vis_H) \
+		--tiles-per-group $(noc_vis_tiles_per_group) \
+		--narrow-req-ch $(noc_req_rd_channel_num) \
+		--wide-req-ch $(noc_req_rdwr_channel_num) \
+		--resp-ch $(noc_resp_channel_num) \
 		--cycles-per-slice 10 --debug
 
 ############################
