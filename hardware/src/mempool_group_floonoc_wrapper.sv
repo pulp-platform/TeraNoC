@@ -284,7 +284,8 @@ if (NocRouterRemapping == 1 || NocRouterRemapping == 3) begin: gen_req_remapping
             src_id: group_xy_id_t'({group_id_i, 1'b0}),                             // For NoC Router when response back
             dst_id: group_xy_id_t'({tcdm_master_req[i][j+(1)].tgt_group_id, 1'b0}), // For NoC Router when request send
             tgt_addr: tcdm_master_req[i][j+(1)].tgt_addr,                           // For Crossbar when request send (bank rows per Group)
-            last : 1'b1                                                             // Non Burst Request
+            last : 1'b1,                                                            // Non Burst Request
+            collective_op : 1'b0                                                    // Not used
           }
         };
         assign floo_tcdm_rd_req_to_remapper_valid[i][j] = tcdm_master_req_valid[i][j+(1)];
@@ -307,7 +308,8 @@ if (NocRouterRemapping == 1 || NocRouterRemapping == 3) begin: gen_req_remapping
           src_id: group_xy_id_t'({group_id_i, 1'b0}),                         // For NoC Router when response back
           dst_id: group_xy_id_t'({tcdm_master_req[i][j].tgt_group_id, 1'b0}), // For NoC Router when request send
           tgt_addr: tcdm_master_req[i][j].tgt_addr,                           // For Crossbar when request send (bank rows per Group)
-          last : 1'b1                                                         // Non Burst Request
+          last : 1'b1,                                                        // Non Burst Request
+          collective_op : 1'b0                                                // Not used
         }
       };
       assign floo_tcdm_rdwr_req_to_remapper_valid[i][j-(1 + NumNarrowRemoteReqPortsPerTile)] = tcdm_master_req_valid[i][j];
@@ -363,7 +365,8 @@ end else begin: gen_req_remapping_bypass
             src_id: group_xy_id_t'({group_id_i, 1'b0}),                             // For NoC Router when response back
             dst_id: group_xy_id_t'({tcdm_master_req[i][j+(1)].tgt_group_id, 1'b0}), // For NoC Router when request send
             tgt_addr: tcdm_master_req[i][j+(1)].tgt_addr,                           // For Crossbar when request send (bank rows per Group)
-            last : 1'b1                                                             // Non Burst Request
+            last : 1'b1,                                                            // Non Burst Request
+            collective_op : 1'b0                                                    // Not used
           }
         };
         assign floo_tcdm_rd_req_to_router_valid[i][j] = tcdm_master_req_valid[i][j+(1)];
@@ -386,7 +389,8 @@ end else begin: gen_req_remapping_bypass
           src_id: group_xy_id_t'({group_id_i, 1'b0}),                         // For NoC Router when response back
           dst_id: group_xy_id_t'({tcdm_master_req[i][j].tgt_group_id, 1'b0}), // For NoC Router when request send
           tgt_addr: tcdm_master_req[i][j].tgt_addr,                           // For Crossbar when request send (bank rows per Group)
-          last : 1'b1                                                         // Non Burst Request
+          last : 1'b1,                                                        // Non Burst Request
+          collective_op : 1'b0                                                // Not used
         }
       };
       assign floo_tcdm_rdwr_req_to_router_valid[i][j-(1 + NumNarrowRemoteReqPortsPerTile)] = tcdm_master_req_valid[i][j];
@@ -580,7 +584,8 @@ if (NocRouterRemapping == 2 || NocRouterRemapping == 3) begin: gen_resp_remappin
           tile_id : tcdm_slave_resp[i][j].ini_addr,                               // Sender's Tile ID
           src_id  : group_xy_id_t'({ group_id_i, 1'b0 }),                         // For NoC Router
           dst_id  : group_xy_id_t'({ tcdm_slave_resp[i][j].src_group_id, 1'b0 }), // Sender's Group ID
-          last    : 1'b1                                                          // Non Burst Request
+          last    : 1'b1,                                                         // Non Burst Request
+          collective_op : 1'b0                                                    // Not used
         }
       };
     end : gen_slave_resp_to_remapper_resp_j
@@ -617,7 +622,8 @@ end else begin: gen_resp_remapping_bypass
           tile_id : tcdm_slave_resp[i][j].ini_addr,                           // For Crossbar when response back (Sender's Tile ID, propagated from request)
           src_id: group_xy_id_t'({group_id_i, 1'b0}),                         // For NoC Router when response back
           dst_id: group_xy_id_t'({tcdm_slave_resp[i][j].src_group_id, 1'b0}), // For NoC Router when response back (Sender's Group ID, propagated from request)
-          last : 1'b1                                                         // Non Burst Request
+          last : 1'b1,                                                        // Non Burst Request
+          collective_op : 1'b0                                                // Not used
         }
       };
     end : gen_slave_resp_to_router_resp_j
@@ -803,10 +809,10 @@ for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_router_router_i
         .InFifoDepth      (mempool_pkg::NumRouterInFifoDepth                  ), // Input buffer depth
         .OutFifoDepth     (mempool_pkg::NumRouterOutFifoDepth                 ), // Output buffer depth, can try to set it to 0 for -1 cycle latency
         .RouteAlgo        (IdTable                                            ),
+        .VcImpl           (VcPreemptValid                                     ), // suppress StableValid warning
         .id_t             (routing_table_pkg::routing_rule_addr_t             ),
         .NumAddrRules     (NumGroups                                          ),
-        .addr_rule_t      (routing_table_pkg::routing_rule_t                  ),
-        .NoInputAssert    (NocRouterRemapping == 1 || NocRouterRemapping == 3 )
+        .addr_rule_t      (routing_table_pkg::routing_rule_t                  )
       ) i_floo_tcdm_narrow_req_router (
         .clk_i,
         .rst_ni,
@@ -818,7 +824,11 @@ for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_router_router_i
         .data_i         ({floo_tcdm_rd_req_to_router[i][j],            floo_tcdm_narrow_req_in_trans      [i][j]} ),
         .valid_o        ({floo_tcdm_rd_req_from_router_vc_valid[i][j], floo_tcdm_narrow_req_valid_out_trans[i][j]}),
         .ready_i        ({floo_tcdm_rd_req_from_router_vc_ready[i][j], floo_tcdm_narrow_req_ready_in_trans[i][j]} ),
-        .data_o         ({floo_tcdm_rd_req_from_router_vc[i][j],       floo_tcdm_narrow_req_out_trans      [i][j]})
+        .data_o         ({floo_tcdm_rd_req_from_router_vc[i][j],       floo_tcdm_narrow_req_out_trans      [i][j]}),
+        .credit_o       (                                                                                          ),
+        .credit_i       ('0                                                                                        ),
+        .offload_req_o  (                                                                                          ),
+        .offload_rsp_i  ('0                                                                                        )
       );
     end else begin: gen_xy_routing
       floo_router #(
@@ -828,10 +838,10 @@ for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_router_router_i
         .InFifoDepth      (mempool_pkg::NumRouterInFifoDepth                  ), // Input buffer depth
         .OutFifoDepth     (mempool_pkg::NumRouterOutFifoDepth                 ), // Output buffer depth, can try to set it to 0 for -1 cycle latency
         .RouteAlgo        (XYRouting                                          ),
+        .VcImpl           (VcPreemptValid                                     ), // suppress StableValid warning
         .id_t             (group_xy_id_t                                      ),
         .NumAddrRules     (1                                                  ),
-        .addr_rule_t      (logic                                              ),
-        .NoInputAssert    (NocRouterRemapping == 1 || NocRouterRemapping == 3 )
+        .addr_rule_t      (logic                                              )
       ) i_floo_tcdm_narrow_req_router (
         .clk_i,
         .rst_ni,
@@ -843,7 +853,11 @@ for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_router_router_i
         .data_i         ({floo_tcdm_rd_req_to_router[i][j],            floo_tcdm_narrow_req_in_trans      [i][j]} ),
         .valid_o        ({floo_tcdm_rd_req_from_router_vc_valid[i][j], floo_tcdm_narrow_req_valid_out_trans[i][j]}),
         .ready_i        ({floo_tcdm_rd_req_from_router_vc_ready[i][j], floo_tcdm_narrow_req_ready_in_trans[i][j]} ),
-        .data_o         ({floo_tcdm_rd_req_from_router_vc[i][j],       floo_tcdm_narrow_req_out_trans      [i][j]})
+        .data_o         ({floo_tcdm_rd_req_from_router_vc[i][j],       floo_tcdm_narrow_req_out_trans      [i][j]}),
+        .credit_o       (                                                                                          ),
+        .credit_i       ('0                                                                                        ),
+        .offload_req_o  (                                                                                          ),
+        .offload_rsp_i  ('0                                                                                        )
       );
     end
     assign floo_tcdm_rd_req_from_router[i][j] = floo_tcdm_rd_req_from_router_vc[i][j];
@@ -861,10 +875,10 @@ for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_router_router_i
         .InFifoDepth      (mempool_pkg::NumRouterInFifoDepth                  ), // Input buffer depth
         .OutFifoDepth     (mempool_pkg::NumRouterOutFifoDepth                 ), // Output buffer depth, can try to set it to 0 for -1 cycle latency
         .RouteAlgo        (IdTable                                            ),
+        .VcImpl           (VcPreemptValid                                     ), // suppress StableValid warning
         .id_t             (routing_table_pkg::routing_rule_addr_t             ),
         .NumAddrRules     (NumGroups                                          ),
-        .addr_rule_t      (routing_table_pkg::routing_rule_t                  ),
-        .NoInputAssert    (NocRouterRemapping == 1 || NocRouterRemapping == 3 )
+        .addr_rule_t      (routing_table_pkg::routing_rule_t                  )
       ) i_floo_tcdm_wide_req_router (
         .clk_i,
         .rst_ni,
@@ -876,7 +890,11 @@ for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_router_router_i
         .data_i         ({floo_tcdm_rdwr_req_to_router[i][j],            floo_tcdm_wide_req_in_trans      [i][j]} ),
         .valid_o        ({floo_tcdm_rdwr_req_from_router_vc_valid[i][j], floo_tcdm_wide_req_valid_out_trans[i][j]}),
         .ready_i        ({floo_tcdm_rdwr_req_from_router_vc_ready[i][j], floo_tcdm_wide_req_ready_in_trans[i][j]} ),
-        .data_o         ({floo_tcdm_rdwr_req_from_router_vc[i][j],       floo_tcdm_wide_req_out_trans      [i][j]})
+        .data_o         ({floo_tcdm_rdwr_req_from_router_vc[i][j],       floo_tcdm_wide_req_out_trans      [i][j]}),
+        .credit_o       (                                                                                          ),
+        .credit_i       ('0                                                                                        ),
+        .offload_req_o  (                                                                                          ),
+        .offload_rsp_i  ('0                                                                                        )
       );
     end else begin: gen_xy_routing
       floo_router #(
@@ -886,10 +904,10 @@ for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_router_router_i
         .InFifoDepth      (mempool_pkg::NumRouterInFifoDepth                  ), // Input buffer depth
         .OutFifoDepth     (mempool_pkg::NumRouterOutFifoDepth                 ), // Output buffer depth, can try to set it to 0 for -1 cycle latency
         .RouteAlgo        (XYRouting                                          ),
+        .VcImpl           (VcPreemptValid                                     ), // suppress StableValid warning
         .id_t             (group_xy_id_t                                      ),
         .NumAddrRules     (1                                                  ),
-        .addr_rule_t      (logic                                              ),
-        .NoInputAssert    (NocRouterRemapping == 1 || NocRouterRemapping == 3 )
+        .addr_rule_t      (logic                                              )
       ) i_floo_tcdm_wide_req_router (
         .clk_i,
         .rst_ni,
@@ -901,7 +919,11 @@ for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_router_router_i
         .data_i         ({floo_tcdm_rdwr_req_to_router[i][j],            floo_tcdm_wide_req_in_trans      [i][j]} ),
         .valid_o        ({floo_tcdm_rdwr_req_from_router_vc_valid[i][j], floo_tcdm_wide_req_valid_out_trans[i][j]}),
         .ready_i        ({floo_tcdm_rdwr_req_from_router_vc_ready[i][j], floo_tcdm_wide_req_ready_in_trans[i][j]} ),
-        .data_o         ({floo_tcdm_rdwr_req_from_router_vc[i][j],       floo_tcdm_wide_req_out_trans      [i][j]})
+        .data_o         ({floo_tcdm_rdwr_req_from_router_vc[i][j],       floo_tcdm_wide_req_out_trans      [i][j]}),
+        .credit_o       (                                                                                          ),
+        .credit_i       ('0                                                                                        ),
+        .offload_req_o  (                                                                                          ),
+        .offload_rsp_i  ('0                                                                                        )
       );
     end
     assign floo_tcdm_rdwr_req_from_router[i][j] = floo_tcdm_rdwr_req_from_router_vc[i][j];
@@ -918,10 +940,10 @@ for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_router_router_i
         .InFifoDepth      (mempool_pkg::NumRouterInFifoDepth                  ), // Input buffer depth
         .OutFifoDepth     (mempool_pkg::NumRouterOutFifoDepth                 ), // Output buffer depth, can try to set it to 0 for -1 cycle latency
         .RouteAlgo        (IdTable                                            ),
+        .VcImpl           (VcPreemptValid                                     ), // suppress StableValid warning
         .id_t             (routing_table_pkg::routing_rule_addr_t             ),
         .NumAddrRules     (NumGroups                                          ),
-        .addr_rule_t      (routing_table_pkg::routing_rule_t                  ),
-        .NoInputAssert    (NocRouterRemapping == 2 || NocRouterRemapping == 3 )
+        .addr_rule_t      (routing_table_pkg::routing_rule_t                  )
       ) i_floo_tcdm_wide_resp_router (
         .clk_i,
         .rst_ni,
@@ -933,7 +955,11 @@ for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_router_router_i
         .data_i         ({floo_tcdm_resp_to_router[i][j],            floo_tcdm_resp_in_trans[i][j]}       ),
         .valid_o        ({floo_tcdm_resp_from_router_vc_valid[i][j], floo_tcdm_resp_valid_out_trans[i][j]}),
         .ready_i        ({floo_tcdm_resp_from_router_vc_ready[i][j], floo_tcdm_resp_ready_in_trans[i][j]} ),
-        .data_o         ({floo_tcdm_resp_from_router_vc[i][j],       floo_tcdm_resp_out_trans[i][j]}      )
+        .data_o         ({floo_tcdm_resp_from_router_vc[i][j],       floo_tcdm_resp_out_trans[i][j]}      ),
+        .credit_o       (                                                                                  ),
+        .credit_i       ('0                                                                                ),
+        .offload_req_o  (                                                                                  ),
+        .offload_rsp_i  ('0                                                                                )
       );
     end else begin: gen_xy_routing
       floo_router #(
@@ -943,10 +969,10 @@ for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_router_router_i
         .InFifoDepth      (mempool_pkg::NumRouterInFifoDepth                  ), // Input buffer depth
         .OutFifoDepth     (mempool_pkg::NumRouterOutFifoDepth                 ), // Output buffer depth, can try to set it to 0 for -1 cycle latency
         .RouteAlgo        (XYRouting                                          ),
+        .VcImpl           (VcPreemptValid                                     ), // suppress StableValid warning
         .id_t             (group_xy_id_t                                      ),
         .NumAddrRules     (1                                                  ),
-        .addr_rule_t      (logic                                              ),
-        .NoInputAssert    (NocRouterRemapping == 2 || NocRouterRemapping == 3 )
+        .addr_rule_t      (logic                                              )
       ) i_floo_tcdm_wide_resp_router (
         .clk_i,
         .rst_ni,
@@ -958,7 +984,11 @@ for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_router_router_i
         .data_i         ({floo_tcdm_resp_to_router[i][j],            floo_tcdm_resp_in_trans[i][j]}       ),
         .valid_o        ({floo_tcdm_resp_from_router_vc_valid[i][j], floo_tcdm_resp_valid_out_trans[i][j]}),
         .ready_i        ({floo_tcdm_resp_from_router_vc_ready[i][j], floo_tcdm_resp_ready_in_trans[i][j]} ),
-        .data_o         ({floo_tcdm_resp_from_router_vc[i][j],       floo_tcdm_resp_out_trans[i][j]}      )
+        .data_o         ({floo_tcdm_resp_from_router_vc[i][j],       floo_tcdm_resp_out_trans[i][j]}      ),
+        .credit_o       (                                                                                  ),
+        .credit_i       ('0                                                                                ),
+        .offload_req_o  (                                                                                  ),
+        .offload_rsp_i  ('0                                                                                )
       );
     end
     assign floo_tcdm_resp_from_router[i][j] = floo_tcdm_resp_from_router_vc[i][j];
@@ -1043,15 +1073,19 @@ floo_nw_router #(
 ) i_floo_narrow_wide_router (
   .clk_i,
   .rst_ni,
-  .test_enable_i  ( testmode_i                ),
-  .id_i           ( '0                        ),
-  .id_route_map_i ( '0                        ),
-  .floo_req_i     ( floo_axi_req_in           ),
-  .floo_rsp_i     ( floo_axi_rsp_in           ),
-  .floo_req_o     ( floo_axi_req_out          ),
-  .floo_rsp_o     ( floo_axi_rsp_out          ),
-  .floo_wide_i    ( floo_axi_wide_in          ),
-  .floo_wide_o    ( floo_axi_wide_out         )
+  .test_enable_i        ( testmode_i        ),
+  .id_i                 ( '0                ),
+  .id_route_map_i       ( '0                ),
+  .floo_req_i           ( floo_axi_req_in   ),
+  .floo_rsp_i           ( floo_axi_rsp_in   ),
+  .floo_req_o           ( floo_axi_req_out  ),
+  .floo_rsp_o           ( floo_axi_rsp_out  ),
+  .floo_wide_i          ( floo_axi_wide_in  ),
+  .floo_wide_o          ( floo_axi_wide_out ),
+  .offload_wide_req_o   (                   ),
+  .offload_wide_rsp_i   ( '0                ),
+  .offload_narrow_req_o (                   ),
+  .offload_narrow_rsp_i ( '0                )
 );
 
 assign floo_axi_req_o  = floo_axi_req_out[West:North];

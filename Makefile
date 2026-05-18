@@ -252,11 +252,11 @@ $(info FLOO_DIR: $(FLOO_DIR))
 # Generates the sources for FlooNoC
 .PHONY: update-floonoc install-floogen clean-floonoc
 install-floogen:
-	$(MAKE) -C $(FLOO_DIR) install-floogen
+	pip install -e $(FLOO_DIR)
 
 update-floonoc: $(FLOO_NOC)
 $(FLOO_NOC): install-floogen $(FLOO_CFG)
-	floogen -c $(FLOO_CFG) -o $(FLOO_GEN_OUTDIR) --only-pkg
+	floogen pkg -c $(FLOO_CFG) -o $(FLOO_GEN_OUTDIR)
 
 # Helper targets
 .PHONY: clean format apps
