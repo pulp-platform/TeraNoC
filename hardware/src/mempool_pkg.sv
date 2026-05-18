@@ -370,6 +370,7 @@ package mempool_pkg;
     group_xy_id_t       dst_id;
     tcdm_addr_t         tgt_addr;
     logic               last;
+    logic               collective_op;
   } floo_tcdm_req_meta_t;
 
   typedef struct packed {
@@ -431,6 +432,7 @@ package mempool_pkg;
     group_xy_id_t       src_id;
     group_xy_id_t       dst_id;
     logic               last;
+    logic               collective_op;
   } floo_tcdm_resp_meta_t;
 
   typedef struct packed {

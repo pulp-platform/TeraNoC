@@ -16,7 +16,7 @@ dependencies:
   cluster_icache:       { git: "https://github.com/pulp-platform/cluster_icache.git",       version: 0.3.1   }
   tech_cells_generic:   { git: "https://github.com/pulp-platform/tech_cells_generic.git",   version: 0.2.13  }
   fpnew:                { git: "https://github.com/pulp-platform/cvfpu.git",                rev: feature/cfmadd }
-  floo_noc:             { git: "https://github.com/pulp-platform/FlooNoC.git",              rev: yr/adaptive_routing}
+  floo_noc:             { git: "https://github.com/pulp-platform/FlooNoC.git",              version: 0.8.1   }
   scm:                  { path: "hardware/deps/scm"                                                          }
 
 workspace:

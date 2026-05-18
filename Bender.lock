@@ -56,8 +56,8 @@ packages:
       Git: https://github.com/pulp-platform/common_verification.git
     dependencies: []
   floo_noc:
-    revision: 3b2f7bfd1a648d6757b640610ba748cd33904fc7
-    version: null
+    revision: c61284906a0c4d5a4955f35e693e8cc6c93689a0
+    version: 0.8.1
     source:
       Git: https://github.com/pulp-platform/FlooNoC.git
     dependencies:
@@ -65,7 +65,15 @@ packages:
     - axi_riscv_atomics
     - common_cells
     - common_verification
+    - floo_noc_pd
+    - fpnew
     - idma
+  floo_noc_pd:
+    revision: null
+    version: null
+    source:
+      Path: hardware/deps/floo_noc/./pd
+    dependencies: []
   fpnew:
     revision: 9481d57c161bb160fd294eae07279082bff06698
     version: null
