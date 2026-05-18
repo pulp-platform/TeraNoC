@@ -323,6 +323,8 @@ package mempool_pkg;
    *  FlooNoC INTERCONNECT PARAMETERS  *
    *************************************/
 
+  `include "floo_noc/typedef.svh"
+
   // FlooNoC parameters
   localparam integer unsigned NumRdRemoteReqPortsPerTile   = `ifdef NOC_REQ_RD_CHANNEL_NUM   `NOC_REQ_RD_CHANNEL_NUM   `else 0 `endif;
   localparam integer unsigned NumRdWrRemoteReqPortsPerTile = `ifdef NOC_REQ_RDWR_CHANNEL_NUM `NOC_REQ_RDWR_CHANNEL_NUM `else 2 `endif;
@@ -347,11 +349,10 @@ package mempool_pkg;
   localparam integer unsigned RouterRemapGroupSize = `ifdef NOC_ROUTER_REMAP_GROUP_SIZE `NOC_ROUTER_REMAP_GROUP_SIZE `else 2 `endif;
 
   // FlooNoC group id types for XY routing
-  typedef struct packed {
-    logic [idx_width(NumGroups)/2-1:0] x;
-    logic [idx_width(NumGroups)/2-1:0] y;
-    logic port_id;
-  } group_xy_id_t;
+  typedef logic [idx_width(NumX)-1:0] group_x_id_t;
+  typedef logic [idx_width(NumY)-1:0] group_y_id_t;
+  typedef logic group_port_id_t;
+  `FLOO_TYPEDEF_XY_NODE_ID_T(group_xy_id_t, group_x_id_t, group_y_id_t, group_port_id_t)
 
   // FlooNoC req types
   typedef struct packed {
