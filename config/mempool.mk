@@ -37,7 +37,7 @@ num_x          ?= 2
 noc_topology ?= 0
 
 # Routing algorithm
-# 0: xy, 1: odd-even, 2: o1
+# 0: xy, 1: id_table
 noc_routing_algorithm ?= 0
 
 # NoC remapping configuration
