@@ -795,7 +795,6 @@ module mempool_tile
     .NumInp   (NumCoresPerTile               ),
     .NumOut   (NumRemoteReqPortsPerTile      ),
     .payload_t(tcdm_master_req_t             ),
-    .ExtPrio  (1                             ),
     .AxiVldRdy(0                             ), // the sel_i can be changed before the hsk happen, as the priority of cores can be different
     .LockIn   (0                             )
   ) i_remote_req_interco (
