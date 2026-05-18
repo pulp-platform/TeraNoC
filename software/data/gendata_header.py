@@ -72,7 +72,7 @@ def print_array(arr, typ, name):
     """
 
     output_string = typ
-    attr = " __attribute__((aligned(16384), section(\".l2\"))) "
+    attr = " __attribute__((aligned(4 * NUM_BANKS), section(\".l2\"))) "
     if (arr.size > 1):
         output_string += attr
         output_string += name + '[{}] = {{\n'.format(arr.size)
