@@ -1,0 +1,104 @@
+{
+  "make_cwd": ".",
+  "out_dir": "../../bin/apps/baremetal",
+  "gendata_params": "../../data/gendata_params.hjson",
+
+  "rename_tag_rules": {
+    "axpy_f32": ["array_N"],
+    "axpy_f16": ["array_N"],
+    "batchnorm_f16": ["matrix_M", "matrix_N"],
+    "cfft_radix4_f16": ["N_CSAMPLES"],
+    "chest_f16": ["N_TX", "N_RX", "N_SAMPLES"],
+    "cholesky_f16": ["matrix_N", "N_SAMPLES"],
+    "dotp_f32": ["array_N"],
+    "dotp_f16": ["array_N"],
+    "gemv_f32": ["matrix_N", "matrix_P"],
+    "gemv_f16": ["matrix_N", "matrix_P"],
+    "layernorm_f16": ["matrix_M", "matrix_N"],
+    "matmul_f32": ["matrix_M", "matrix_N", "matrix_P"],
+    "matmul_f16": ["matrix_M", "matrix_N", "matrix_P"],
+    "mimo_mmse_f32": ["N_TX", "N_RX", "N_ITR"],
+    "mimo_mmse_f16": ["N_TX", "N_RX", "N_ITR"],
+    "softmax_f16": ["matrix_M", "matrix_N"]
+  },
+
+  "extra_args": {
+    "axpy_f32": "COMPILER=llvm",
+    "axpy_f16": "COMPILER=llvm",
+    "batchnorm_f16": "COMPILER=llvm",
+    "cfft_radix4_f16": "COMPILER=llvm",
+    "chest_f16": "COMPILER=llvm",
+    "cholesky_f16": "COMPILER=llvm",
+    "dotp_f32": "COMPILER=llvm",
+    "dotp_f16": "COMPILER=llvm",
+    "gemv_f32": "COMPILER=llvm",
+    "gemv_f16": "COMPILER=llvm",
+    "layernorm_f16": "COMPILER=llvm",
+    "matmul_f32": "COMPILER=llvm",
+    "matmul_f16": "COMPILER=llvm",
+    "mimo_mmse_f32": "COMPILER=llvm",
+    "mimo_mmse_f16": "COMPILER=llvm",
+    "softmax_f16": "COMPILER=llvm"
+  },
+
+  "configs": [
+    {
+      "name": "terapool",
+      "pack_dir": "terapool",
+      "apps": {
+        "axpy_f32": [
+          {"array_N": 262144}
+        ],
+        "axpy_f16": [
+          {"array_N": 524288}
+        ],
+        "batchnorm_f16": [
+          {"matrix_M": 384, "matrix_N": 2048}
+        ],
+        "cfft_radix4_f16": [
+          {"N_CSAMPLES": 4096}
+        ],
+        "chest_f16": [
+          {"N_TX": 8, "N_RX": 64, "N_SAMPLES": 1024}
+        ],
+        "cholesky_f16": [
+          {"matrix_N": 16, "N_SAMPLES": 1024}
+        ],
+        "dotp_f32": [
+          {"array_N": 262144}
+        ],
+        "dotp_f16": [
+          {"array_N": 524288}
+        ],
+        "gemv_f32": [
+          {"matrix_N": 4096, "matrix_P": 192}
+        ],
+        "gemv_f16": [
+          {"matrix_N": 8192, "matrix_P": 192}
+        ],
+        "layernorm_f16": [
+          {"matrix_M": 2048, "matrix_N": 384}
+        ],
+        "matmul_f32": [
+          {"matrix_M": 256, "matrix_N": 256, "matrix_P": 256},
+          {"matrix_M": 256, "matrix_N": 128, "matrix_P": 256},
+          {"matrix_M": 128, "matrix_N": 128, "matrix_P": 128}
+        ],
+        "matmul_f16": [
+          {"matrix_M": 256, "matrix_N": 256, "matrix_P": 256},
+          {"matrix_M": 256, "matrix_N": 128, "matrix_P": 256},
+          {"matrix_M": 128, "matrix_N": 128, "matrix_P": 128}
+        ],
+        "mimo_mmse_f32": [
+          {"N_TX": 8, "N_RX": 16, "N_ITR": 1024}
+        ],
+        "mimo_mmse_f16": [
+          {"N_TX": 8, "N_RX": 32, "N_ITR": 1024}
+        ],
+        "softmax_f16": [
+          {"matrix_M": 2048, "matrix_N": 384}
+        ]
+      }
+    }
+  ]
+}
