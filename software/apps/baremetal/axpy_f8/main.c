@@ -18,8 +18,10 @@
 #include "baremetal/mempool_axpy_f8.h"
 #include "baremetal/mempool_checks.h"
 
-__fp8 l1_X[array_N] __attribute__((aligned(NUM_BANKS), section(".l1_prio")));
-__fp8 l1_Y[array_N] __attribute__((aligned(NUM_BANKS), section(".l1_prio")));
+__fp8 l1_X[array_N]
+    __attribute__((aligned(4 * NUM_BANKS), section(".l1_prio")));
+__fp8 l1_Y[array_N]
+    __attribute__((aligned(4 * NUM_BANKS), section(".l1_prio")));
 
 int main() {
 
@@ -41,10 +43,10 @@ int main() {
   time_init = mempool_get_timer();
   mempool_start_benchmark();
   axpy_f8vec_local_unrolled4(a, l1_X, l1_Y, array_N);
+  mempool_log_barrier(2, core_id);
   mempool_stop_benchmark();
   time_end = mempool_get_timer();
 
-  mempool_barrier(num_cores);
   // Check results
   if (core_id == 0) {
     uint32_t clock_cycles = (time_end - time_init);

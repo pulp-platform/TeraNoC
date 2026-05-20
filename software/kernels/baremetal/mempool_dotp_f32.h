@@ -12,7 +12,7 @@ SINGLE_CORE_REDUCTION: Reduction with a single-core.
 BINARY_REDUCTION: Reduction with binary tree.
 */
 
-#define SINGLE_CORE_REDUCTION
+#define BINARY_REDUCTION
 
 #define DOTPF32_UNROLLED4_LOOP                                                 \
   {                                                                            \

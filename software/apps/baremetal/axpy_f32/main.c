@@ -19,8 +19,10 @@
 #include "baremetal/mempool_axpy_f32.h"
 #include "baremetal/mempool_checks.h"
 
-float l1_X[array_N] __attribute__((aligned(NUM_BANKS), section(".l1_prio")));
-float l1_Y[array_N] __attribute__((aligned(NUM_BANKS), section(".l1_prio")));
+float l1_X[array_N]
+    __attribute__((aligned(4 * NUM_BANKS), section(".l1_prio")));
+float l1_Y[array_N]
+    __attribute__((aligned(4 * NUM_BANKS), section(".l1_prio")));
 
 int main() {
 
@@ -42,6 +44,7 @@ int main() {
   time_init = mempool_get_timer();
   mempool_start_benchmark();
   axpy_f32p_local_unrolled4(a, l1_X, l1_Y, array_N);
+  mempool_log_barrier(2, core_id);
   mempool_stop_benchmark();
   time_end = mempool_get_timer();
 

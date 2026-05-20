@@ -16,11 +16,14 @@
 
 #include "data_dotp_i32.h"
 uint32_t red_barrier[NUM_BANKS]
-    __attribute__((aligned(NUM_BANKS), section(".l1_prio")));
+    __attribute__((aligned(NUM_BANKS * 4), section(".l1_prio")));
 
-int32_t l1_X[array_N] __attribute__((aligned(array_N), section(".l1_prio")));
-int32_t l1_Y[array_N] __attribute__((aligned(array_N), section(".l1_prio")));
-int32_t sum[NUM_BANKS] __attribute__((aligned(NUM_BANKS), section(".l1_prio")));
+int32_t l1_X[array_N]
+    __attribute__((aligned(NUM_BANKS * 4), section(".l1_prio")));
+int32_t l1_Y[array_N]
+    __attribute__((aligned(NUM_BANKS * 4), section(".l1_prio")));
+int32_t sum[NUM_BANKS]
+    __attribute__((aligned(NUM_BANKS * 4), section(".l1_prio")));
 
 #include "baremetal/mempool_dotp_i32.h"
 
@@ -45,11 +48,12 @@ int main() {
 
   // PARALLEL, LOCAL ACCESSES
   time_init = mempool_get_timer();
+  mempool_start_benchmark();
   dotp_i32p_local_unrolled4(l1_X, l1_Y, sum, array_N);
+  mempool_stop_benchmark();
   time_end = mempool_get_timer();
 
   // Check results
-  mempool_barrier(num_cores);
   if (core_id == 0) {
     uint32_t clock_cycles = (time_end - time_init);
     printf("\nKernel execution takes %d clock cycles\n", clock_cycles);

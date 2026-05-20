@@ -16,22 +16,25 @@
 
 #include "data_gemv_f16.h"
 uint32_t red_barrier[NUM_BANKS]
-    __attribute__((aligned(NUM_BANKS), section(".l1_prio")));
+    __attribute__((aligned(4 * NUM_BANKS), section(".l1_prio")));
 __fp16 sum[2 * NUM_BANKS]
-    __attribute__((aligned(NUM_BANKS), section(".l1_prio")));
+    __attribute__((aligned(4 * NUM_BANKS), section(".l1_prio")));
 
 #include "baremetal/mempool_checks.h"
 #include "baremetal/mempool_gemv_f16.h"
 
 __fp16 l1_A[matrix_N * matrix_P]
-    __attribute__((aligned(NUM_BANKS), section(".l1_prio")));
-__fp16 l1_X[matrix_N] __attribute__((aligned(NUM_BANKS), section(".l1_prio")));
-__fp16 l1_Y[matrix_P] __attribute__((aligned(NUM_BANKS), section(".l1_prio")));
+    __attribute__((aligned(4 * NUM_BANKS), section(".l1_prio")));
+__fp16 l1_X[matrix_N]
+    __attribute__((aligned(4 * NUM_BANKS), section(".l1_prio")));
+__fp16 l1_Y[matrix_P]
+    __attribute__((aligned(4 * NUM_BANKS), section(".l1_prio")));
 
 int main() {
 
   uint32_t core_id = mempool_get_core_id();
   uint32_t num_cores = mempool_get_core_count();
+  uint32_t time_init, time_end;
   mempool_barrier_init(core_id);
 
   if (core_id == 0) {
@@ -44,10 +47,16 @@ int main() {
   }
   mempool_barrier(num_cores);
 
+  time_init = mempool_get_timer();
   mempool_start_benchmark();
   gemv_f16vecp_local_unrolled4(l1_A, l1_X, l1_Y, matrix_N, matrix_P);
   mempool_stop_benchmark();
+  time_end = mempool_get_timer();
 
+  if (core_id == 0) {
+    uint32_t clock_cycles = (time_end - time_init);
+    printf("\nKernel execution takes %d clock cycles\n", clock_cycles);
+  }
   // Check results
   mempool_check_f16(l1_Y, l2_Y, matrix_P, 0.01f, 0);
   mempool_barrier(num_cores);

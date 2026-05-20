@@ -26,15 +26,16 @@ OUTER: When defined runs outer product based matmul.
 #define INNER
 
 __fp8 matrix_a[matrix_M * matrix_N]
-    __attribute__((aligned(sizeof(int32_t)), section(".l1_prio")));
+    __attribute__((aligned(4 * NUM_BANKS), section(".l1_prio")));
 __fp8 matrix_b[matrix_N * matrix_P]
-    __attribute__((aligned(sizeof(int32_t)), section(".l1_prio")));
+    __attribute__((aligned(4 * NUM_BANKS), section(".l1_prio")));
 __fp8 matrix_c[matrix_M * matrix_P]
-    __attribute__((aligned(sizeof(int32_t)), section(".l1_prio")));
+    __attribute__((aligned(4 * NUM_BANKS), section(".l1_prio")));
 
 int main() {
   uint32_t core_id = mempool_get_core_id();
   uint32_t num_cores = mempool_get_core_count();
+  uint32_t time_init, time_end;
   // uint32_t num_cores = 64;
   //  Initialize barrier and synchronize
   mempool_barrier_init(core_id);
@@ -48,11 +49,13 @@ int main() {
 
 #if defined(INNER)
   // Matmul based on inner product (between rows of A and cols of B)
+  time_init = mempool_get_timer();
   mempool_start_benchmark();
   matmul_4x4_parallel_inner_f8vec(matrix_a, matrix_b, matrix_c, matrix_M,
                                   matrix_N, matrix_P, core_id, num_cores);
-  mempool_barrier(num_cores);
+  mempool_log_barrier(2, core_id);
   mempool_stop_benchmark();
+  time_end = mempool_get_timer();
 #endif
 
 #if defined(OUTER)
@@ -64,9 +67,12 @@ int main() {
   mempool_stop_benchmark();
 #endif
 
-  // For small matrices, replace 150 with matrix_M * matrix_P (dimension of
-  // matrix C)
-  mempool_check_f8(matrix_c, l2_C, 50, 0x34, 0); // tol = 0.25 = 0x34 (__fp8)
+  if (core_id == 0) {
+    uint32_t clock_cycles = (time_end - time_init);
+    printf("\nKernel execution takes %d clock cycles\n", clock_cycles);
+  }
+  mempool_check_f8(matrix_c, l2_C, matrix_M * matrix_P, 0x34,
+                   0); // tol = 0.25 = 0x34 (__fp8)
   mempool_barrier(num_cores);
   return 0;
 }
