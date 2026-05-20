@@ -26,14 +26,20 @@ SINGLE: When defined runs single-core matmul.
 PARALLEL: When defined runs parallel matmul.
 */
 
-float matrix_a[matrix_M * matrix_N] __attribute__((section(".l1_prio")));
-float matrix_b[matrix_N * matrix_P] __attribute__((section(".l1_prio")));
-float matrix_c[matrix_M * matrix_P] __attribute__((section(".l1_prio")));
+#define NOC_OPT
+
+float matrix_a[matrix_M * matrix_N]
+    __attribute__((aligned(4 * NUM_BANKS), section(".l1_prio")));
+float matrix_b[matrix_N * matrix_P]
+    __attribute__((aligned(4 * NUM_BANKS), section(".l1_prio")));
+float matrix_c[matrix_M * matrix_P]
+    __attribute__((aligned(4 * NUM_BANKS), section(".l1_prio")));
 
 int main() {
 
   uint32_t core_id = mempool_get_core_id();
   uint32_t num_cores = mempool_get_core_count();
+  uint32_t time_init, time_end;
   mempool_barrier_init(core_id);
 
   // Initialize data
@@ -73,13 +79,19 @@ int main() {
 #endif
 
 #if defined(NOC_OPT)
+  time_init = mempool_get_timer();
   mempool_start_benchmark();
   matmul_4x4_parallel_f32_nocopt_asm(matrix_a, matrix_b, matrix_c, matrix_M,
                                      matrix_N, matrix_P, core_id, num_cores);
   mempool_log_barrier(2, core_id);
   mempool_stop_benchmark();
+  time_end = mempool_get_timer();
 #endif
 
+  if (core_id == 0) {
+    uint32_t clock_cycles = (time_end - time_init);
+    printf("\nKernel execution takes %d clock cycles\n", clock_cycles);
+  }
   mempool_check_f32(matrix_c, l2_C, matrix_M * matrix_P, 0.01f, 0);
   mempool_barrier(num_cores);
   return 0;

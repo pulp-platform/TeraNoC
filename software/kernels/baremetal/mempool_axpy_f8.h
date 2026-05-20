@@ -42,8 +42,6 @@ void axpy_f8vec_local_unrolled4(uint32_t a, __fp8 *in_x, __fp8 *in_y,
   for (uint32_t i = 4 * core_id * BANKING_FACTOR; i < Len; i += 4 * NUM_BANKS) {
     AXPYF8VEC_UNROLLED4_LOOP;
   }
-  // Barrier synchronization
-  mempool_log_barrier(2, core_id);
 
   return;
 }

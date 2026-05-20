@@ -18,13 +18,19 @@
 #include "baremetal/mempool_checks.h"
 #include "baremetal/mempool_matmul_i32p.h"
 
-int32_t matrix_a[matrix_M * matrix_N] __attribute__((section(".l1_prio")));
-int32_t matrix_b[matrix_N * matrix_P] __attribute__((section(".l1_prio")));
-int32_t matrix_c[matrix_M * matrix_P] __attribute__((section(".l1_prio")));
+#define NOC_OPT
+
+int32_t matrix_a[matrix_M * matrix_N]
+    __attribute__((aligned(NUM_BANKS * 4), section(".l1_prio")));
+int32_t matrix_b[matrix_N * matrix_P]
+    __attribute__((aligned(NUM_BANKS * 4), section(".l1_prio")));
+int32_t matrix_c[matrix_M * matrix_P]
+    __attribute__((aligned(NUM_BANKS * 4), section(".l1_prio")));
 
 int main() {
   uint32_t core_id = mempool_get_core_id();
   uint32_t num_cores = mempool_get_core_count();
+  uint32_t time_init, time_end;
   mempool_barrier_init(core_id);
 
   // Initialize data
@@ -35,6 +41,7 @@ int main() {
   mempool_barrier(num_cores);
 
   // Benchmark
+  time_init = mempool_get_timer();
 #if defined(NOC_OPT)
   mempool_start_benchmark();
   mat_mul_unrolled_4x4_conflict_nocopt_parallel_asm(
@@ -49,21 +56,33 @@ int main() {
                                                  core_id, num_cores);
   mempool_log_barrier(2, core_id);
   mempool_stop_benchmark();
+#elif defined(NO_OPT)
+  mempool_start_benchmark();
+  mat_mul_unrolled_4x4_parallel_asm(matrix_a, matrix_b, matrix_c, matrix_M,
+                                    matrix_N, matrix_P, core_id, num_cores);
+  mempool_log_barrier(2, core_id);
+  mempool_stop_benchmark();
 #elif defined(__XPULPIMG)
   mempool_start_benchmark();
   matmul_unrolled_2x2_parallel_i32_xpulpv2(matrix_a, matrix_b, matrix_c,
                                            matrix_M, matrix_N, matrix_P,
                                            core_id, num_cores);
-  mempool_barrier(num_cores);
+  mempool_log_barrier(2, core_id);
   mempool_stop_benchmark();
 #else
   mempool_start_benchmark();
   matmul_unrolled_2x2_parallel_i32_rv32im(matrix_a, matrix_b, matrix_c,
                                           matrix_M, matrix_N, matrix_P, core_id,
                                           num_cores);
-  mempool_barrier(num_cores);
+  mempool_log_barrier(2, core_id);
   mempool_stop_benchmark();
 #endif
+  time_end = mempool_get_timer();
+
+  if (core_id == 0) {
+    uint32_t clock_cycles = (time_end - time_init);
+    printf("\nKernel execution takes %d clock cycles\n", clock_cycles);
+  }
 
   // Verify results
   mempool_check_i32(matrix_c, l2_C, matrix_M * matrix_P, 0, 0);

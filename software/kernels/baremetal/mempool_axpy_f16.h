@@ -36,7 +36,6 @@ void axpy_f16s(uint32_t a, __fp16 *in_x, __fp16 *in_y, uint32_t Len) {
 
   uint32_t core_id = mempool_get_core_id();
   if (core_id == 0) {
-    mempool_start_benchmark();
     // Kernel execution
     __fp16 *end = in_x + Len / 2;
     do {
@@ -46,7 +45,6 @@ void axpy_f16s(uint32_t a, __fp16 *in_x, __fp16 *in_y, uint32_t Len) {
       in_x++;
       in_y++;
     } while (in_x < end);
-    mempool_stop_benchmark();
   }
 
   return;
@@ -57,7 +55,6 @@ void axpy_f16s_unrolled4(uint32_t a, __fp16 *in_x, __fp16 *in_y, uint32_t Len) {
 
   uint32_t core_id = mempool_get_core_id();
   if (core_id == 0) {
-    mempool_start_benchmark();
     uint32_t i = 0;
     uint32_t aa = (a << 16U) | a;
     v2h x01, x23, x45, x67;
@@ -65,7 +62,6 @@ void axpy_f16s_unrolled4(uint32_t a, __fp16 *in_x, __fp16 *in_y, uint32_t Len) {
     for (i = 0; i < Len; i += 8) {
       AXPYF16VEC_UNROLLED4_LOOP;
     }
-    mempool_stop_benchmark();
   }
 
   return;
@@ -84,7 +80,6 @@ void axpy_f16p(uint32_t a, __fp16 *in_x, __fp16 *in_y, uint32_t Len,
     asm volatile("fmadd.h %0, %1, %2, %0;" : "+&r"(y) : "r"(a), "r"(x));
     in_y[i] = y;
   }
-  mempool_log_barrier(2, core_id);
 
   return;
 }
@@ -103,7 +98,6 @@ void axpy_f16vecp_unrolled4(uint32_t a, __fp16 *in_x, __fp16 *in_y,
   for (i = core_id * step; i < (core_id * step + step); i += 8) {
     AXPYF16VEC_UNROLLED4_LOOP;
   }
-  mempool_log_barrier(2, core_id);
 
   return;
 }
@@ -121,7 +115,6 @@ void axpy_f16vecp_local_unrolled4(uint32_t a, __fp16 *in_x, __fp16 *in_y,
   for (uint32_t i = 2 * core_id * BANKING_FACTOR; i < Len; i += 2 * NUM_BANKS) {
     AXPYF16VEC_UNROLLED4_LOOP;
   }
-  mempool_log_barrier(2, core_id);
 
   return;
 }

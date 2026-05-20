@@ -14,7 +14,7 @@ ATOMIC_REDUCTION: Reduction with atomics.
 LOG_BARRIERS: Use binary reduction
 */
 
-#define SINGLE_CORE_REDUCTION
+#define BINARY_REDUCTION
 
 #define DOTPI32_UNROLLED4_LOOP                                                 \
   {                                                                            \

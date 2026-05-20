@@ -32,7 +32,6 @@ void axpy_f32s(float a, float *in_x, float *in_y, uint32_t Len) {
 
   uint32_t core_id = mempool_get_core_id();
   if (core_id == 0) {
-    mempool_start_benchmark();
     // Kernel execution
     float *end = in_x + Len;
     do {
@@ -42,7 +41,6 @@ void axpy_f32s(float a, float *in_x, float *in_y, uint32_t Len) {
       in_x++;
       in_y++;
     } while (in_x < end);
-    mempool_stop_benchmark();
   }
   return;
 }
@@ -52,7 +50,6 @@ void axpy_f32s_unrolled4(float a, float *in_x, float *in_y, uint32_t Len) {
 
   uint32_t core_id = mempool_get_core_id();
   if (core_id == 0) {
-    mempool_start_benchmark();
     uint32_t reminder = Len % 4;
     uint32_t i = 0;
 
@@ -68,7 +65,6 @@ void axpy_f32s_unrolled4(float a, float *in_x, float *in_y, uint32_t Len) {
       in_y[i] = y0;
       i++;
     }
-    mempool_stop_benchmark();
   }
   return;
 }
@@ -86,7 +82,6 @@ void axpy_f32p(float a, float *in_x, float *in_y, uint32_t Len, uint32_t nPE) {
     asm volatile("fmadd.s %0, %1, %2, %0;" : "+&r"(y) : "r"(a), "r"(x));
     in_y[i] = y;
   }
-  mempool_log_barrier(2, core_id);
 
   return;
 }
@@ -113,7 +108,6 @@ void axpy_f32p_unrolled4(float a, float *in_x, float *in_y, uint32_t Len,
     in_y[i] = y0;
     i++;
   }
-  mempool_log_barrier(2, core_id);
 
   return;
 }
@@ -139,7 +133,6 @@ void axpy_f32p_local_unrolled4(float a, float *in_x, float *in_y,
       in_y[i] = y0;
     }
   }
-  mempool_log_barrier(2, core_id);
 
   return;
 }
