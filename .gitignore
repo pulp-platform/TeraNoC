@@ -17,6 +17,8 @@ tags
 # Python
 **.idea
 venv
+__pycache__/
+*.pyc
 # Visual Studio Code
 .vscode
 *.code-workspace
