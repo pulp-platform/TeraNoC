@@ -1,0 +1,137 @@
+{
+  "exec_root": "..",
+  "results_dir": "../results",
+
+  "abbr_map": {
+    "noc_req_rd_channel_num": "rd",
+    "noc_req_rdwr_channel_num": "rw",
+    "noc_resp_channel_num": "rsp",
+    "noc_router_input_fifo_dep": "idep",
+    "noc_router_output_fifo_dep": "odep",
+    "noc_router_remapping": "rrmp",
+    "noc_router_remap_group_size": "rgrp",
+    "spm_bank_id_remap": "brmp",
+    "tile_id_remap": "trmp"
+  },
+
+  "ulimit_nofile": 4096,
+
+  "env": {
+    "conda_sh": "/usr/local/anaconda3-2025.06/etc/profile.d/conda.sh",
+    "conda_env": "/home/msc26f31/.conda/envs/teranoc"
+  },
+
+  "paths": {
+    "build_prefix": "build_"
+  },
+
+  "make_steps": [
+    "make clean buildpath={buildpath}",
+    "make simcvcs app={app} {config} buildpath={buildpath}",
+    "make trace {config} result_dir={result_dir} buildpath={buildpath}",
+    "make clean buildpath={buildpath}"
+  ],
+
+  "copy_rules": [
+    {
+      "type": "dir",
+      "src": "{buildpath}/noc_profiling",
+      "dst": "{result_dir}/noc_profiling",
+      "optional": true
+    },
+    {
+      "type": "file",
+      "src": "{buildpath}/dma.log",
+      "dst": "{result_dir}/dma.log",
+      "optional": true
+    }
+  ],
+
+  "load_control": {
+    "max_parallel": 8,
+    "poll_interval_sec": 1.0,
+    "cpu_threshold_percent": 70.0,
+    "mem_threshold_percent": 70.0,
+    "disk_threshold_percent": 90.0,
+    "nice": 10,
+    "ionice_class": 2,
+    "ionice_level": 7
+  },
+
+  "configs": [
+    {
+      "config": "terapool",
+      "name": "base_rmpoff",
+      "binary_dir": "terapool_v1",
+      "extra_info": "",
+      "params": {
+        "noc_req_rd_channel_num": 0,
+        "noc_req_rdwr_channel_num": 2,
+        "noc_resp_channel_num": 2,
+        "noc_router_input_fifo_dep": 2,
+        "noc_router_output_fifo_dep": 2,
+        "noc_router_remapping": 0,
+        "noc_router_remap_group_size": 4,
+        "spm_bank_id_remap": 0,
+        "tile_id_remap": 0
+      },
+      "apps": [
+        "axpy_f16_524288",
+        "axpy_f32_262144",
+        "batchnorm_f16_384x2048",
+        "cholesky_f16_16x1024",
+        "dotp_f16_524288",
+        "dotp_f32_262144",
+        "gemv_f16_8192x192",
+        "gemv_f32_4096x192",
+        "layernorm_f16_2048x384",
+        "matmul_f16_128x128x128",
+        "matmul_f16_256x128x256",
+        "matmul_f16_256x256x256",
+        "matmul_f32_128x128x128",
+        "matmul_f32_256x128x256",
+        "matmul_f32_256x256x256",
+        "mimo_mmse_f16_8x32x1024",
+        "mimo_mmse_f32_8x16x1024",
+        "softmax_f16_2048x384"
+      ]
+    },
+    {
+      "config": "terapool",
+      "name": "base_rmp4",
+      "binary_dir": "terapool_v1",
+      "extra_info": "",
+      "params": {
+        "noc_req_rd_channel_num": 0,
+        "noc_req_rdwr_channel_num": 2,
+        "noc_resp_channel_num": 2,
+        "noc_router_input_fifo_dep": 2,
+        "noc_router_output_fifo_dep": 2,
+        "noc_router_remapping": 3,
+        "noc_router_remap_group_size": 4,
+        "spm_bank_id_remap": 0,
+        "tile_id_remap": 0
+      },
+      "apps": [
+        "axpy_f16_524288",
+        "axpy_f32_262144",
+        "batchnorm_f16_384x2048",
+        "cholesky_f16_16x1024",
+        "dotp_f16_524288",
+        "dotp_f32_262144",
+        "gemv_f16_8192x192",
+        "gemv_f32_4096x192",
+        "layernorm_f16_2048x384",
+        "matmul_f16_128x128x128",
+        "matmul_f16_256x128x256",
+        "matmul_f16_256x256x256",
+        "matmul_f32_128x128x128",
+        "matmul_f32_256x128x256",
+        "matmul_f32_256x256x256",
+        "mimo_mmse_f16_8x32x1024",
+        "mimo_mmse_f32_8x16x1024",
+        "softmax_f16_2048x384"
+      ]
+    }
+  ]
+}
