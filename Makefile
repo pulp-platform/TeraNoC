@@ -249,14 +249,15 @@ FLOO_NOC  ?= $(addprefix $(FLOO_GEN_OUTDIR)/,$(subst .yml,_floo_noc.sv,$(notdir 
 
 $(info FLOO_DIR: $(FLOO_DIR))
 
-# Generates the sources for FlooNoC
-.PHONY: update-floonoc install-floogen clean-floonoc
-install-floogen:
-	pip install -e $(FLOO_DIR)
-
+# Generates the sources for FlooNoC.
+# floogen is invoked as a Python module via PYTHONPATH — no install of the
+# floogen package itself is required. Its runtime deps (pydantic, networkx,
+# matplotlib, mako, ruamel.yaml, click) must be importable in the active env;
+# in the `teranoc` conda env these are present.
+.PHONY: update-floonoc clean-floonoc
 update-floonoc: $(FLOO_NOC)
-$(FLOO_NOC): install-floogen $(FLOO_CFG)
-	floogen pkg -c $(FLOO_CFG) -o $(FLOO_GEN_OUTDIR)
+$(FLOO_NOC): $(FLOO_CFG)
+	PYTHONPATH=$(FLOO_DIR) python3 -m floogen.cli pkg -c $(FLOO_CFG) -o $(FLOO_GEN_OUTDIR)
 
 # Helper targets
 .PHONY: clean format apps
