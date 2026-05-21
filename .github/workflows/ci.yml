@@ -252,6 +252,8 @@ jobs:
         name: bender
     - name: Untar bender
       run: tar --use-compress-program zstd -xf bender.tzst
+    - name: Install Python requirements
+      run: pip install -r python-requirements.txt
     - name: Build Model
       if: steps.verilator-model.outputs.cache-hit != 'true'
       env:
@@ -259,10 +261,6 @@ jobs:
         CI: true
       run: |
         sudo apt install libelf-dev
-        source /usr/share/miniconda/etc/profile.d/conda.sh
-        conda activate base
-        pip install --upgrade pip
-        conda install -c conda-forge verible
         ln -s $GITHUB_WORKSPACE/install/verilator/share/verilator/include $GITHUB_WORKSPACE/install/verilator/include
         ln -s $GITHUB_WORKSPACE/install/verilator/share/verilator/bin/verilator_includer $GITHUB_WORKSPACE/install/verilator/bin/verilator_includer
         make bender
