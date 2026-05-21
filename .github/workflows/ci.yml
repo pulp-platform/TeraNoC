@@ -18,13 +18,13 @@ jobs:
   tc-gcc:
     runs-on: ubuntu-22.04
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - name: Recover the submodule commit hash
       run: |
         git rev-parse HEAD:toolchain/riscv-gnu-toolchain
         echo "riscv-gnu-toolchain-hash=`git rev-parse HEAD:toolchain/riscv-gnu-toolchain`" >> $GITHUB_ENV
     - name: Cache riscv-gnu-toolchain
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       id: riscv-gnu-toolchain
       with:
         path: install/riscv-gcc
@@ -40,7 +40,7 @@ jobs:
     - name: Tar riscv-gnu-toolchain
       run: tar --posix --use-compress-program zstd -cf riscv-gnu-toolchain.tzst install/riscv-gcc
     - name: Upload riscv-gnu-toolchain
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: riscv-gnu-toolchain
         path: riscv-gnu-toolchain.tzst
@@ -48,13 +48,13 @@ jobs:
   tc-llvm:
     runs-on: ubuntu-22.04
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - name: Recover the submodule commit hash
       run: |
         git rev-parse HEAD:toolchain/llvm-project
         echo "llvm-project-hash=`git rev-parse HEAD:toolchain/llvm-project`" >> $GITHUB_ENV
     - name: Cache llvm-project
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       id: llvm-project
       with:
         path: install/llvm
@@ -69,7 +69,7 @@ jobs:
     - name: Tar llvm-project
       run: tar --posix --use-compress-program zstd -cf llvm-project.tzst install/llvm
     - name: Upload llvm-project
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: llvm-project
         path: llvm-project.tzst
@@ -78,20 +78,20 @@ jobs:
     runs-on: ubuntu-22.04
     needs: tc-llvm
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - name: Recover the submodule commit hash
       run: |
         git rev-parse HEAD:toolchain/halide
         echo "halide-hash=`git rev-parse HEAD:toolchain/halide`" >> $GITHUB_ENV
     - name: Cache halide
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       id: halide
       with:
         path: install/halide
         key: ${{ runner.os }}-halide-${{ env.halide-hash }}
     - name: Get llvm-project artifacts
       if: steps.halide.outputs.cache-hit != 'true'
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: llvm-project
     - name: Untar llvm-project
@@ -107,7 +107,7 @@ jobs:
     - name: Tar halide
       run: tar --posix --use-compress-program zstd -cf halide.tzst install/halide
     - name: Upload halide
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: halide
         path: halide.tzst
@@ -115,12 +115,12 @@ jobs:
   bender:
     runs-on: ubuntu-22.04
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - name: Recover the submodule commit hash
       run: |
         echo "bender-version=0.28.2" >> $GITHUB_ENV
     - name: Cache bender
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       id: bender
       with:
         path: install/bender
@@ -132,7 +132,7 @@ jobs:
     - name: Tar bender
       run: tar --posix --use-compress-program zstd -cf bender.tzst install/bender
     - name: Upload bender
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: bender
         path: bender.tzst
@@ -143,9 +143,9 @@ jobs:
   riscv-isa-sim:
     runs-on: ubuntu-22.04
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - name: Cache riscv-isa-sim
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       id: riscv-isa-sim
       with:
         path: install/riscv-isa-sim
@@ -161,7 +161,7 @@ jobs:
     - name: Tar riscv-isa-sim
       run: tar --posix --use-compress-program zstd -cf riscv-isa-sim.tzst install/riscv-isa-sim
     - name: Upload riscv-isa-sim
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: riscv-isa-sim
         path: riscv-isa-sim.tzst
@@ -169,13 +169,13 @@ jobs:
   verilator:
     runs-on: ubuntu-22.04
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - name: Recover the submodule commit hash
       run: |
         git rev-parse HEAD:toolchain/verilator
         echo "tc-verilator-hash=`git rev-parse HEAD:toolchain/verilator`" >> $GITHUB_ENV
     - name: Cache Verilator
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       id: verilator-cache
       with:
         path: install/verilator
@@ -204,7 +204,7 @@ jobs:
     - name: Tar verilator
       run: tar --posix --use-compress-program zstd -cf verilator.tzst install/verilator
     - name: Upload verilator
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: verilator
         path: verilator.tzst
@@ -220,9 +220,9 @@ jobs:
       matrix:
         mempool_config: [minpool, test_4x4noc_64core, mempool]
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - name: Cache Verilator Model
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       id: verilator-model
       with:
         path: hardware/verilator_build/Vmempool_tb_verilator
@@ -240,14 +240,14 @@ jobs:
         swap-storage: true
     - name: Get Verilator artifacts
       if: steps.verilator-model.outputs.cache-hit != 'true'
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: verilator
     - name: Untar Verilator
       if: steps.verilator-model.outputs.cache-hit != 'true'
       run: tar --use-compress-program zstd -xf verilator.tzst
     - name: Get bender artifacts
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: bender
     - name: Untar bender
@@ -271,7 +271,7 @@ jobs:
     - name: Tar Verilator Model
       run: tar --posix --use-compress-program zstd -cf verilator-model.tzst hardware/verilator_build/Vmempool_tb_verilator
     - name: Upload Verilator Model
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: verilator-model-${{ matrix.mempool_config }}
         path: verilator-model.tzst
@@ -283,9 +283,9 @@ jobs:
     runs-on: ubuntu-22.04
     needs: tc-gcc
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - name: Get riscv-gnu-toolchain artifacts
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: riscv-gnu-toolchain
     - name: Untar riscv-gnu-toolchain
@@ -301,7 +301,7 @@ jobs:
   check-control-registers:
     runs-on: ubuntu-22.04
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - name: Install Python requirements
       run: pip install -r python-requirements.txt
     - name: Build Control Registers
@@ -315,7 +315,7 @@ jobs:
   check-opcodes:
     runs-on: ubuntu-22.04
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - name: Regenerate opcodes
       run: |
         make update_opcodes
@@ -331,9 +331,9 @@ jobs:
       matrix:
         mempool_config: [minpool, test_4x4noc_64core, mempool]
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - name: Get riscv-gnu-toolchain artifacts
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: riscv-gnu-toolchain
     - name: Untar riscv-gnu-toolchain
@@ -350,7 +350,7 @@ jobs:
     - name: Tar apps-gcc Model
       run: tar --posix --use-compress-program zstd -cf apps-gcc.tzst software/bin
     - name: Upload apps-gcc
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: apps-gcc-${{ matrix.mempool_config }}
         path: apps-gcc.tzst
@@ -362,15 +362,15 @@ jobs:
       matrix:
         mempool_config: [minpool, test_4x4noc_64core, mempool]
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - name: Get riscv-gnu-toolchain artifacts
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: riscv-gnu-toolchain
     - name: Untar riscv-gnu-toolchain
       run: tar --use-compress-program zstd -xf riscv-gnu-toolchain.tzst
     - name: Get llvm-project artifacts
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: llvm-project
     - name: Untar llvm-project
@@ -387,7 +387,7 @@ jobs:
     - name: Tar apps-llvm Model
       run: tar --posix --use-compress-program zstd -cf apps-llvm.tzst software/bin
     - name: Upload apps-llvm
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: apps-llvm-${{ matrix.mempool_config }}
         path: apps-llvm.tzst
@@ -399,21 +399,21 @@ jobs:
       matrix:
         mempool_config: [minpool, test_4x4noc_64core, mempool]
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - name: Get riscv-gnu-toolchain artifacts
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: riscv-gnu-toolchain
     - name: Untar riscv-gnu-toolchain
       run: tar --use-compress-program zstd -xf riscv-gnu-toolchain.tzst
     - name: Get llvm-project artifacts
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: llvm-project
     - name: Untar llvm-project
       run: tar --use-compress-program zstd -xf llvm-project.tzst
     - name: Get halide artifacts
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: halide
     - name: Untar halide
@@ -427,7 +427,7 @@ jobs:
     - name: Tar apps-halide Model
       run: tar --posix --use-compress-program zstd -cf apps-halide.tzst software/bin
     - name: Upload apps-halide
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: apps-halide-${{ matrix.mempool_config }}
         path: apps-halide.tzst
@@ -443,21 +443,21 @@ jobs:
       matrix:
         mempool_config: [minpool, test_4x4noc_64core, mempool]
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - name: Get apps-gcc artifacts
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: apps-gcc-${{ matrix.mempool_config }}
     - name: Untar apps-gcc
       run: tar --use-compress-program zstd -xf apps-gcc.tzst
     - name: Get riscv-isa-sim artifacts
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: riscv-isa-sim
     - name: Untar riscv-isa-sim
       run: tar --use-compress-program zstd -xf riscv-isa-sim.tzst
     - name: Get verilator-model artifacts
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: verilator-model-${{ matrix.mempool_config }}
     - name: Untar verilator-model
@@ -481,21 +481,21 @@ jobs:
       matrix:
         mempool_config: [minpool, test_4x4noc_64core, mempool]
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - name: Get apps-llvm artifacts
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: apps-llvm-${{ matrix.mempool_config }}
     - name: Untar apps-llvm
       run: tar --use-compress-program zstd -xf apps-llvm.tzst
     - name: Get riscv-isa-sim artifacts
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: riscv-isa-sim
     - name: Untar riscv-isa-sim
       run: tar --use-compress-program zstd -xf riscv-isa-sim.tzst
     - name: Get verilator-model artifacts
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: verilator-model-${{ matrix.mempool_config }}
     - name: Untar verilator-model
@@ -519,21 +519,21 @@ jobs:
       matrix:
         mempool_config: [minpool, test_4x4noc_64core, mempool]
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - name: Get apps-halide artifacts
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: apps-halide-${{ matrix.mempool_config }}
     - name: Untar apps-halide
       run: tar --use-compress-program zstd -xf apps-halide.tzst
     - name: Get riscv-isa-sim artifacts
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: riscv-isa-sim
     - name: Untar riscv-isa-sim
       run: tar --use-compress-program zstd -xf riscv-isa-sim.tzst
     - name: Get verilator-model artifacts
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: verilator-model-${{ matrix.mempool_config }}
     - name: Untar verilator-model
@@ -554,28 +554,28 @@ jobs:
     timeout-minutes: 30
     needs: [tc-gcc, riscv-isa-sim, verilator-model, bender]
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - name: Get riscv-gnu-toolchain artifacts
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: riscv-gnu-toolchain
     - name: Untar riscv-gnu-toolchain
       run: tar --use-compress-program zstd -xf riscv-gnu-toolchain.tzst
     - name: Get riscv-isa-sim artifacts
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: riscv-isa-sim
     - name: Untar riscv-isa-sim
       run: tar --use-compress-program zstd -xf riscv-isa-sim.tzst
     - name: Get verilator-model artifacts
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: verilator-model-minpool
         # name: verilator-model-test_4x4noc_64core
     - name: Untar verilator-model
       run: tar --use-compress-program zstd -xf verilator-model.tzst
     - name: Get bender artifacts
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: bender
     - name: Untar bender
@@ -603,7 +603,7 @@ jobs:
     needs: [unit-test, run-apps-gcc, run-apps-llvm, run-apps-halide]
     steps:
     - name: Delete artifacts
-      uses: geekyeggo/delete-artifact@v5
+      uses: geekyeggo/delete-artifact@v6
       with:
         name: |
           riscv-gnu-toolchain
@@ -623,7 +623,7 @@ jobs:
         mempool_config: [minpool, test_4x4noc_64core, mempool]
     steps:
     - name: Delete artifacts
-      uses: geekyeggo/delete-artifact@v5
+      uses: geekyeggo/delete-artifact@v6
       with:
         name: |
           verilator-model-${{ matrix.mempool_config }}
