@@ -2,17 +2,36 @@
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
-dataclasses
+# Lint / build tooling ----------------------------------------------------
 flake8
-gitpython
+
+# General Python utilities ------------------------------------------------
 hjson
-jsonref
-jsonschema
-mako
+tabulate
+
+# Numeric / scientific stack ----------------------------------------------
 numpy
 pandas
-progressbar2
-tabulate
-sympy
 scipy
+sympy
+statsmodels
+scikit-learn
 pyflexfloat
+
+# Plotting / data export --------------------------------------------------
+matplotlib
+seaborn
+openpyxl
+
+# Terminal UI -------------------------------------------------------------
+# Used by hardware/scripts/bench_runner.py for the live progress panes.
+rich
+
+# FlooGen runtime ---------------------------------------------------------
+# Required by `python -m floogen.cli` (invoked from the top-level Makefile).
+# Versions mirror hardware/deps/floo_noc/pyproject.toml.
+click>=8.3.1
+mako
+networkx
+pydantic
+ruamel.yaml
