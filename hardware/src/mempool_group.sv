@@ -536,10 +536,31 @@ module mempool_group
       .reqrsp_rsp_i(dma_reqrsp_rsp)
     );
 
-    mempool_dma_tile_id_remapper i_mempool_group_tile_id_remapper (
-      .dma_reqrsp_req_i (dma_reqrsp_req),
-      .tile_id_remap_o  (tile_id_remap[d])
+    // SPM address pipeline for the DMA request: tile-id remap selects the dest tile.
+    // The seq↔interleave swap is SKIPPED (DMA addresses are already interleaved).
+    addr_t dma_scrambled_addr;
+
+    mempool_addr_scrambler #(
+      .AddrWidth               (AddrWidth        ),
+      .ByteOffset              (ByteOffset       ),
+      .NumTiles                (NumTiles         ),
+      .NumTilesPerDma          (NumTilesPerDma   ),
+      .NumBanksPerTile         (NumBanksPerTile  ),
+      .Bypass                  (0                ),
+      .SeqMemSizePerTile       (SeqMemSizePerTile),
+      .TCDMBaseAddr            (TCDMBaseAddr     ),
+      .TCDMMask                (TCDMMask         ),
+      .EnableSeqInterleaveSwap (1'b0             ),
+      .EnableTileIdRemap       (TileIdRemap      )
+    ) i_dma_addr_scrambler (
+      .address_i (dma_reqrsp_req.q.addr ),
+      .address_o (dma_scrambled_addr    )
     );
+
+    // Extract the (post-remap) tile-id slice for the reqrsp_demux select.
+    assign tile_id_remap[d] =
+        dma_scrambled_addr[ByteOffset + idx_width(NumBanksPerTile)
+                           +: idx_width(NumTilesPerDma)];
 
     if (NumTilesPerDma > 1) begin: gen_dma_reqrsp_demux
       reqrsp_demux #(
