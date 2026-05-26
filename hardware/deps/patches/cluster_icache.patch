@@ -10,3 +10,18 @@ index 22748c8..3535341 100644
  
      end
    end else begin : gen_sram
+diff --git a/hardware/deps/cluster_icache/src/snitch_axi_to_cache.sv b/hardware/deps/cluster_icache/src/snitch_axi_to_cache.sv
+index b45cde3..a0ace6e 100644
+--- a/hardware/deps/cluster_icache/src/snitch_axi_to_cache.sv
++++ b/hardware/deps/cluster_icache/src/snitch_axi_to_cache.sv
+@@ -459,7 +459,9 @@ module axi_burst_splitter_table #(
+     .oup_req_i       (cnt_req_i),
+     .oup_data_o      (cnt_r_idx),
+     .oup_data_valid_o(idq_oup_valid),
+-    .oup_gnt_o       (idq_oup_gnt)
++    .oup_gnt_o       (idq_oup_gnt),
++    .full_o          (  /* unused */),
++    .empty_o         (  /* unused */)
+   );
+   logic [8:0] read_len;
+   assign idq_inp_req  = alloc_req_i & alloc_gnt_o;
