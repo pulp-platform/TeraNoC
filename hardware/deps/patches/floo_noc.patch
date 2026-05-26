@@ -1,0 +1,67 @@
+diff --git a/hardware/deps/floo_noc/hw/floo_meta_buffer.sv b/hardware/deps/floo_noc/hw/floo_meta_buffer.sv
+index 1293f46..ca48bc8 100644
+--- a/hardware/deps/floo_noc/hw/floo_meta_buffer.sv
++++ b/hardware/deps/floo_noc/hw/floo_meta_buffer.sv
+@@ -165,7 +165,9 @@ module floo_meta_buffer #(
+       .oup_req_i        ( axi_rsp_i.b_valid           ),
+       .oup_data_o       ( no_atop_b_buf               ),
+       .oup_data_valid_o ( b_oup_data_valid            ),
+-      .oup_gnt_o        ( b_oup_gnt                   )
++      .oup_gnt_o        ( b_oup_gnt                   ),
++      .full_o           (                             ),
++      .empty_o          (                             )
+     );
+ 
+     id_queue #(
+@@ -190,7 +192,9 @@ module floo_meta_buffer #(
+       .oup_req_i        ( axi_rsp_i.r_valid           ),
+       .oup_data_o       ( no_atop_r_buf               ),
+       .oup_data_valid_o ( r_oup_data_valid            ),
+-      .oup_gnt_o        ( r_oup_gnt                   )
++      .oup_gnt_o        ( r_oup_gnt                   ),
++      .full_o           (                             ),
++      .empty_o          (                             )
+     );
+ 
+     assign ar_no_atop_buf_full = !ar_no_atop_buf_not_full;
+diff --git a/hardware/deps/floo_noc/hw/floo_nw_chimney.sv b/hardware/deps/floo_noc/hw/floo_nw_chimney.sv
+index 166b5cb..6617c9f 100644
+--- a/hardware/deps/floo_noc/hw/floo_nw_chimney.sv
++++ b/hardware/deps/floo_noc/hw/floo_nw_chimney.sv
+@@ -1176,9 +1176,9 @@ module floo_nw_chimney
+     // Reduction --> Multicast the B response to all members
+     floo_narrow_b.hdr.collective_op  = floo_pkg::collect_op_e'('0);
+     if(en_narrow_collective(CollectOpCfg)) begin: gen_nar_b_coll
+-      if(is_multicast_op(narrow_aw_buf_hdr_out.hdr.collective_op)) begin: gen_nar_red_rsp
++      if(is_multicast_op(floo_pkg::collect_op_e'(narrow_aw_buf_hdr_out.hdr.collective_op))) begin: gen_nar_red_rsp
+         floo_narrow_b.hdr.collective_op = CollectB;
+-      end else if(is_reduction_op(narrow_aw_buf_hdr_out.hdr.collective_op)) begin: gen_nar_mcast
++      end else if(is_reduction_op(floo_pkg::collect_op_e'(narrow_aw_buf_hdr_out.hdr.collective_op))) begin: gen_nar_mcast
+         floo_narrow_b.hdr.collective_op = Multicast;
+       end
+     end
+@@ -1267,9 +1267,9 @@ module floo_nw_chimney
+     // Reduction --> Multicast the B response to all members
+     floo_wide_b.hdr.collective_op  = Unicast;
+     if(en_wide_collective(CollectOpCfg)) begin: gen_wide_b_coll
+-      if(is_multicast_op(wide_aw_buf_hdr_out.hdr.collective_op)) begin: gen_wide_red_rsp
++      if(is_multicast_op(floo_pkg::collect_op_e'(wide_aw_buf_hdr_out.hdr.collective_op))) begin: gen_wide_red_rsp
+         floo_wide_b.hdr.collective_op = CollectB;
+-      end else if(is_reduction_op(wide_aw_buf_hdr_out.hdr.collective_op)) begin: gen_wide_mcast
++      end else if(is_reduction_op(floo_pkg::collect_op_e'(wide_aw_buf_hdr_out.hdr.collective_op))) begin: gen_wide_mcast
+         floo_wide_b.hdr.collective_op = Multicast;
+       end
+     end
+diff --git a/hardware/deps/floo_noc/hw/floo_output_arbiter.sv b/hardware/deps/floo_noc/hw/floo_output_arbiter.sv
+index 7926162..9603c4f 100644
+--- a/hardware/deps/floo_noc/hw/floo_output_arbiter.sv
++++ b/hardware/deps/floo_noc/hw/floo_output_arbiter.sv
+@@ -56,7 +56,7 @@ module floo_output_arbiter import floo_pkg::*;
+     reduce_mask = '0;
+     if (EnParallelReduction) begin
+       for (int i = 0; i < NumParallelRedRoutes; i++) begin
+-        reduce_mask[i] = (is_parallel_reduction_op(data_i[i].hdr.collective_op));
++        reduce_mask[i] = (is_parallel_reduction_op(collect_op_e'(data_i[i].hdr.collective_op)));
+       end
+     end
+   end

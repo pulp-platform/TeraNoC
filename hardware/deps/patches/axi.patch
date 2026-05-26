@@ -1,0 +1,30 @@
+diff --git a/hardware/deps/axi/src/axi_burst_splitter_gran.sv b/hardware/deps/axi/src/axi_burst_splitter_gran.sv
+index 1edf839d..dc4a4da8 100644
+--- a/hardware/deps/axi/src/axi_burst_splitter_gran.sv
++++ b/hardware/deps/axi/src/axi_burst_splitter_gran.sv
+@@ -696,7 +696,9 @@ module axi_burst_splitter_gran_counters #(
+     .oup_req_i        ( cnt_req_i     ),
+     .oup_data_o       ( cnt_r_idx     ),
+     .oup_data_valid_o ( idq_oup_valid ),
+-    .oup_gnt_o        ( idq_oup_gnt   )
++    .oup_gnt_o        ( idq_oup_gnt   ),
++    .full_o           (/* keep open */),
++    .empty_o          (/* keep open */)
+   );
+   assign idq_inp_req = alloc_req   & alloc_gnt;
+   assign alloc_gnt   = idq_inp_gnt & |(cnt_free);
+diff --git a/hardware/deps/axi/src/axi_dw_downsizer.sv b/hardware/deps/axi/src/axi_dw_downsizer.sv
+index 8ec51b83..b508e31c 100644
+--- a/hardware/deps/axi/src/axi_dw_downsizer.sv
++++ b/hardware/deps/axi/src/axi_dw_downsizer.sv
+@@ -330,7 +330,9 @@ module axi_dw_downsizer #(
+     .exists_mask_i   ('0              ),
+     .exists_req_i    ('0              ),
+     .exists_o        (/* Unused  */   ),
+-    .exists_gnt_o    (/* Unused  */   )
++    .exists_gnt_o    (/* Unused  */   ),
++    .full_o          (/* Unused  */   ),
++    .empty_o         (/* Unused  */   )
+   );
+ 
+   for (genvar t = 0; unsigned'(t) < AxiMaxReads; t++) begin: gen_read_downsizer
