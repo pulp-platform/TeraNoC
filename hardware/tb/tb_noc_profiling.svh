@@ -29,30 +29,38 @@
   //   routers -> router_g<g>_{req,resp}.log  (one per group; <idx> = in-group router id
   //              <rid>, a flat slot t*ports+p -- routers are remapped so NOT tile/port)
   //   cores   -> pe_g<g>_t<t>.log            (one per tile; <idx> = core)
+  //   RedMulE -> rm_g<g>_t<t>.log            (one per tile; <idx> = master port)
   //   tiles   -> tile_g<g>_t<t>.log          (already one per tile; NO prefix)
   string  app, log_path;
   integer retval;
   // MERGED file handles: routers -> ONE req + ONE resp file per group (line tagged with
-  // router id); Snitch cores -> ONE file per tile (line tagged with core idx). PE = the
-  // Snitch core's data memory port.
+  // router id); Snitch cores / RedMulE master ports -> ONE file per tile (line tagged with
+  // core / port idx). PE = the Snitch core's data memory port.
   int f_rreq  [NumGroups];
   int f_rresp [NumGroups];
   int f_tile  [NumGroups][NumTilesPerGroup];
   int f_pe    [NumGroups][NumTilesPerGroup];
+  // RMPorts>=1 keeps the state-register array legal when RedMulE is disabled.
+  localparam int unsigned RMPorts = (RMMasterPorts > 0) ? RMMasterPorts : 1;
+  int f_rm    [NumGroups][NumTilesPerGroup];
 
   initial begin
     void'($value$plusargs("APP=%s", app));
     log_path = "noc_profiling";
     retval   = $system({"mkdir -p ", log_path});
-    // Tiles keep their id. Routers use a FLAT in-group router id (r = t*NumPortsPerTile + p):
-    // the req/resp remappers shuffle logical traffic across physical routers, so [tile][port]
-    // is just a physical slot, not a tile/port assignment.
+    // Tiles keep their id (a tile is a fixed compute node, never remapped). Routers
+    // are identified by a FLAT router id within the group's network -- because the
+    // req/resp remappers shuffle which logical traffic lands on which physical
+    // router, the [tile][port] index is NOT a tile/port assignment, just a physical
+    // slot, so we expose it as a plain router id (r = t*NumPortsPerTile + p).
     for (int g = 0; g < NumGroups; g++) begin
       f_rreq[g]  = $fopen($sformatf("%s/router_g%0d_req.log",  log_path, g), "w");
       f_rresp[g] = $fopen($sformatf("%s/router_g%0d_resp.log", log_path, g), "w");
       for (int t = 0; t < NumTilesPerGroup; t++) begin
         f_tile[g][t] = $fopen($sformatf("%s/tile_g%0d_t%0d.log", log_path, g, t), "w");
         f_pe[g][t]   = $fopen($sformatf("%s/pe_g%0d_t%0d.log",   log_path, g, t), "w");
+        if (t < NumRMTilesPerGroup)
+          f_rm[g][t] = $fopen($sformatf("%s/rm_g%0d_t%0d.log",   log_path, g, t), "w");
       end
     end
   end
@@ -71,6 +79,9 @@
   // PE (Snitch core data port): req = data_q* (out, read/write by qwrite), resp = data_p* (in).
   logic [1:0]  pe_req_st [NumGroups][NumTilesPerGroup][NumCoresPerTile]; logic [63:0] pe_req_s [NumGroups][NumTilesPerGroup][NumCoresPerTile];
   logic [1:0]  pe_rsp_st [NumGroups][NumTilesPerGroup][NumCoresPerTile]; logic [63:0] pe_rsp_s [NumGroups][NumTilesPerGroup][NumCoresPerTile];
+  // RedMulE master-port state (RedMulE tiles only); same S/P format as PE cores.
+  logic [1:0]  rm_req_st [NumGroups][NumTilesPerGroup][RMPorts]; logic [63:0] rm_req_s [NumGroups][NumTilesPerGroup][RMPorts];
+  logic [1:0]  rm_rsp_st [NumGroups][NumTilesPerGroup][RMPorts]; logic [63:0] rm_rsp_s [NumGroups][NumTilesPerGroup][RMPorts];
 
   // ------------------------------------------------------------
   // Router port capture (4 mesh dirs + local, input + output) -> per-router file.
@@ -377,6 +388,54 @@
   endgenerate
 
   // ------------------------------------------------------------
+  // RedMulE master-port capture -> per-tile file (RedMulE tiles only). Tapped at the
+  // per-port tcdm_shim INPUT (gen_redmule.redmule_tcdm_req/resp[p]) -- BEFORE the shim's
+  // local/remote split -- so it sees every access (local AND remote NoC ones). Remote
+  // requests carry core_id = NumCoresPerTile+p, so a NoC packet maps back to rm port p.
+  // Same S/P format as a PE core port:
+  //   S <rr> <io> 0 <start> <end> <state> ; req P 1 0 <cyc> <wen> <addr> <meta_id> ;
+  //   resp P 0 0 <cyc> <meta_id>.
+  // ------------------------------------------------------------
+  generate
+    if (NumRMTiles > 0) begin : gen_rm
+      for (genvar g = 0; g < NumGroups; g++) begin : gen_rm_g
+        for (genvar t = 0; t < NumRMTilesPerGroup; t++) begin : gen_rm_t
+          always_ff @(posedge clk or negedge rst_n) begin
+            if (!rst_n) begin
+              rm_req_st[g][t] <= '{default: '0}; rm_req_s[g][t] <= '{default: '0};
+              rm_rsp_st[g][t] <= '{default: '0}; rm_rsp_s[g][t] <= '{default: '0};
+            end else begin
+              for (int p = 0; p < RMMasterPorts; p++) begin
+                automatic logic [1:0] rq = `NOC_GRP(g).i_mempool_group.gen_tiles[t].i_tile.gen_redmule.redmule_tcdm_req_valid[p]
+                  ? (`NOC_GRP(g).i_mempool_group.gen_tiles[t].i_tile.gen_redmule.redmule_tcdm_req_ready[p]
+                     ? (`NOC_GRP(g).i_mempool_group.gen_tiles[t].i_tile.gen_redmule.redmule_tcdm_req[p].write ? 2'd3 : 2'd2) : 2'd1) : 2'd0;
+                automatic logic [1:0] rp = `NOC_GRP(g).i_mempool_group.gen_tiles[t].i_tile.gen_redmule.redmule_tcdm_resp_valid[p]
+                  ? (`NOC_GRP(g).i_mempool_group.gen_tiles[t].i_tile.gen_redmule.redmule_tcdm_resp_ready[p] ? 2'd2 : 2'd1) : 2'd0;
+                if (rq != rm_req_st[g][t][p]) begin
+                  $fwrite(f_rm[g][t], "%0d S 0 1 0 %0d %0d %0d\n", p, rm_req_s[g][t][p], cycle_q, rm_req_st[g][t][p]);
+                  rm_req_st[g][t][p] <= rq; rm_req_s[g][t][p] <= cycle_q;
+                end
+                if (rp != rm_rsp_st[g][t][p]) begin
+                  $fwrite(f_rm[g][t], "%0d S 1 0 0 %0d %0d %0d\n", p, rm_rsp_s[g][t][p], cycle_q, rm_rsp_st[g][t][p]);
+                  rm_rsp_st[g][t][p] <= rp; rm_rsp_s[g][t][p] <= cycle_q;
+                end
+                if (rq >= 2)  // req handshake -> one RedMulE load/store accepted (id = meta_id)
+                  $fwrite(f_rm[g][t], "%0d P 1 0 %0d %0d %0h %0d\n", p, cycle_q,
+                    `NOC_GRP(g).i_mempool_group.gen_tiles[t].i_tile.gen_redmule.redmule_tcdm_req[p].write,
+                    `NOC_GRP(g).i_mempool_group.gen_tiles[t].i_tile.gen_redmule.redmule_tcdm_req[p].addr,
+                    `NOC_GRP(g).i_mempool_group.gen_tiles[t].i_tile.gen_redmule.redmule_tcdm_req[p].id);
+                if (rp >= 2)  // resp handshake -> a response returns to this RedMulE port (id = meta_id)
+                  $fwrite(f_rm[g][t], "%0d P 0 0 %0d %0d\n", p, cycle_q,
+                    `NOC_GRP(g).i_mempool_group.gen_tiles[t].i_tile.gen_redmule.redmule_tcdm_resp[p].id);
+              end
+            end
+          end
+        end
+      end
+    end
+  endgenerate
+
+  // ------------------------------------------------------------
   // End-of-sim flush: write every port's still-open S run, then close every file.
   // P lines are written as they happen, so they need no flush.
   // ------------------------------------------------------------
@@ -415,6 +474,13 @@
           $fwrite(f_pe[g][t], "%0d S 1 0 0 %0d %0d %0d\n", c, pe_rsp_s[g][t][c], cycle_q, pe_rsp_st[g][t][c]);
         end
         $fclose(f_pe[g][t]);
+        if (t < NumRMTilesPerGroup) begin
+          for (int p = 0; p < RMMasterPorts; p++) begin
+            $fwrite(f_rm[g][t], "%0d S 0 1 0 %0d %0d %0d\n", p, rm_req_s[g][t][p], cycle_q, rm_req_st[g][t][p]);
+            $fwrite(f_rm[g][t], "%0d S 1 0 0 %0d %0d %0d\n", p, rm_rsp_s[g][t][p], cycle_q, rm_rsp_st[g][t][p]);
+          end
+          $fclose(f_rm[g][t]);
+        end
       end
       $fclose(f_rreq[g]);
       $fclose(f_rresp[g]);

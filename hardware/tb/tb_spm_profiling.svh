@@ -10,9 +10,10 @@
 // cycle (explains tile slave_req-in stalls from bank contention).
 //   S <bank> <start> <end> <state>   state 0=idle 1=stall 2=read 3=write
 //   P <bank> <cycle> <wen> <tgt_addr(hex)> <loc> <wide> <port> <src_grp> <src_tile> <src_core> <meta_id>
-//       loc=1 iff winning input port is local; wide=1 = DMA. Local requests zero
-//       their src_{grp,tile,core} payload fields, so use port for local accesses;
-//       remote accesses carry the true NoC origin in src_{grp,tile,core}.
+//       winning input port (bank_req_ini_addr): [0,NumCoresPerTile)=local core,
+//       [NumCoresPerTile,NumLocalPorts)=local RedMulE, else remote. loc=1 iff
+//       local; wide=1 = DMA. Local requests zero their src_{grp,tile,core}
+//       fields, so use port for local accesses; remote accesses carry origin.
 //
 // The old per-cycle bank-conflict counters and heavy per-word profiler
 // (dbg_profile_q, mirroring mempool_tile.profile_d) are commented out at the
@@ -55,8 +56,11 @@
   generate
     for (genvar g = 0; g < NumGroups; g++) begin : gen_spm_bank_g
       for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_spm_bank_t
-        // local/remote boundary = NumCoresPerTile core ports on the local side.
-        localparam int unsigned NLP = NumCoresPerTile;
+        // local/remote boundary = this tile's NumLocalPorts. Only the first
+        // NumRMTilesPerGroup tiles host a RedMulE (widening the local side by
+        // RMMasterPorts); the rest expose just the NumCoresPerTile core ports.
+        localparam int unsigned NLP =
+            (t < NumRMTilesPerGroup) ? (RMMasterPorts + NumCoresPerTile) : NumCoresPerTile;
         always_ff @(posedge clk or negedge rst_n) begin
           if (!rst_n) begin
             bank_st[g][t] <= '{default: '0}; bank_s[g][t] <= '{default: '0};

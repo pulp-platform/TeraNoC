@@ -663,4 +663,11 @@ module mempool_tb;
 `include "tb_noc_profiling.svh"
 `include "tb_spm_profiling.svh"
 
+/*********************
+ * RedMulE Profiling *
+ ********************/
+// Always-on engine trace (gated only by RedMulE presence); must follow
+// tb_noc_profiling.svh, which declares the shared cycle_q counter.
+`include "tb_redmule_profiling.svh"
+
 endmodule : mempool_tb

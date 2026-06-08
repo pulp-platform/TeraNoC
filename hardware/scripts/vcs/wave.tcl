@@ -31,5 +31,11 @@ wvAddSignal -win $_nWave2 {/mempool_tb/dut/i_ctrl_registers/wake_up_o}
 wvAddSignal -win $_nWave2 {/mempool_tb/dut/i_mempool_cluster/gen_groups_x[0]/gen_groups_y[0]/gen_rtl_group/i_group/i_mempool_group/gen_tiles[0]/i_tile/gen_cores[0]/gen_mempool_cc/riscv_core/i_snitch/pc_q}
 wvAddSignal -win $_nWave2 {/mempool_tb/dut/i_mempool_cluster/gen_groups_x[0]/gen_groups_y[0]/gen_rtl_group/i_group/i_mempool_group/gen_tiles[0]/i_tile/gen_cores[0]/gen_mempool_cc/riscv_core/i_snitch/wfi_q}
 
+# --- Group 0 / Tile 0 RedMulE tensor core ---
+wvAddSignal -win $_nWave2 {/mempool_tb/dut/i_mempool_cluster/gen_groups_x[0]/gen_groups_y[0]/gen_rtl_group/i_group/i_mempool_group/gen_tiles[0]/i_tile/gen_redmule/i_redmule_top/i_control/current}
+wvAddSignal -win $_nWave2 {/mempool_tb/dut/i_mempool_cluster/gen_groups_x[0]/gen_groups_y[0]/gen_rtl_group/i_group/i_mempool_group/gen_tiles[0]/i_tile/gen_redmule/i_redmule_top/busy_o}
+wvAddSignal -win $_nWave2 {/mempool_tb/dut/i_mempool_cluster/gen_groups_x[0]/gen_groups_y[0]/gen_rtl_group/i_group/i_mempool_group/gen_tiles[0]/i_tile/gen_redmule/redmule_evt}
+wvAddSignal -win $_nWave2 {/mempool_tb/dut/i_mempool_cluster/gen_groups_x[0]/gen_groups_y[0]/gen_rtl_group/i_group/i_mempool_group/gen_tiles[0]/i_tile/gen_redmule/i_redmule_top/i_scheduler/current_state}
+wvAddSignal -win $_nWave2 {/mempool_tb/dut/i_mempool_cluster/gen_groups_x[0]/gen_groups_y[0]/gen_rtl_group/i_group/i_mempool_group/gen_tiles[0]/i_tile/gen_redmule/i_redmule_top/i_scheduler/stall_engine}
 
 wvZoomAll -win $_nWave2

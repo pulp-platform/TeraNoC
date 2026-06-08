@@ -481,34 +481,21 @@ def process_dasm(path, hart, builder, uu, args, a2l, pe_data=None, flows=None):
     pe = pe_data.get((g, t, c)) if pe_data else None
     if pe:
         pe_runs, pe_pkts = pe
-        for j, (rr, io, port) in enumerate(sorted(pe_runs)):
-            label = ("req" if rr == 0 else "resp") + \
-                (f" {port}" if port else "")
-            leaf = add_track(
-                builder,
-                uu.get(
-                    ("pe",
-                     hart,
-                     rr,
-                     io,
-                     port)),
-                label,
-                parent=core_uuid,
-                order_rank=len(METRICS) +
-                j)
-            if args.noc_slices == "packet" and rr == 0 and (
-                    io, port) in pe_pkts:
-                _emit_req_packet_slices(
-                    pe_runs[(rr, io, port)], pe_pkts[(io, port)],
-                    leaf, rr, builder, args, pe=True, flows=flows,
-                    req_ctx=(g, t, c), flow_rank=0)
-            elif (flows and args.noc_slices == "packet" and rr == 1
-                  and (io, port) in pe_pkts):
-                _emit_pe_resp_packets(pe_runs[(rr, io, port)], pe_pkts[(
-                    io, port)], leaf, builder, args, flows, (g, t, c))
-            else:
-                _emit_state_slices(
-                    pe_runs[(rr, io, port)], leaf, rr, builder, args)
+        _emit_pe_ports(
+            builder,
+            uu,
+            core_uuid,
+            ("pe",
+             hart),
+            pe_runs,
+            pe_pkts,
+            args,
+            len(METRICS),
+            flows=flows,
+            req_ctx=(
+                g,
+                t,
+                c))
 
     if need_names:
         a2l.resolve(collect_pcs(path))
@@ -663,7 +650,30 @@ ROUTER_LOG_RE = re.compile(r"router_g(\d+)_(req|resp)\.log$")
 TILE_LOG_RE = re.compile(r"tile_g(\d+)_t(\d+)\.log$")
 # merged: one file per tile (core in line)
 PE_LOG_RE = re.compile(r"pe_g(\d+)_t(\d+)\.log$")
+# merged: one file per tile (port in line)
+RM_LOG_RE = re.compile(r"rm_g(\d+)_t(\d+)\.log$")
+REDMULE_LOG_RE = re.compile(r"redmule_g(\d+)_t(\d+)\.log$")
 SPM_BANK_LOG_RE = re.compile(r"bank_g(\d+)_t(\d+)\.log$")
+
+# RedMulE engine FSM state names (index = the integer state code in the trace).
+RM_CTRL_STATES = [
+    "LATCH_RST",
+    "IDLE",
+    "STARTING",
+    "COMPUTING",
+    "LOOPBACK",
+    "FINISHED"]
+RM_SCHED_STATES = ["IDLE", "PRELOAD", "LOAD_W", "WAIT"]
+# 7-way CPI stack (per-cycle, mutually exclusive, sums to 1 over a window).
+# drain = scheduler PRELOAD/WAIT fill+drain; idle = the cycles with no job.
+RM_CPI = [
+    "compute",
+    "stall_W",
+    "stall_X",
+    "stall_Y",
+    "stall_Z",
+    "drain",
+    "idle"]
 
 
 def load_spm_bank_logs(spm_dir):
@@ -720,17 +730,19 @@ def load_spm_bank_logs(spm_dir):
     return out
 
 
-def load_pe_logs(noc_dir):
-    """Glob the MERGED per-tile core-port logs -> {(g,t,c): (runs, packets)}.
-    pe_g<g>_t<t>.log is one file PER TILE with every line PREFIXED by its core
-    index (idx), so idx is read from the line, not the filename.
+def load_pe_logs(noc_dir, pattern="pe_g*_t*.log", regex=PE_LOG_RE):
+    """Glob the MERGED per-tile local-port logs -> {(g,t,idx): (runs,
+    packets)}. Handles both the Snitch core data ports (pe_g<g>_t<t>.log;
+    idx=core) and the RedMulE master ports (rm_g<g>_t<t>.log; idx=port) --
+    identical S/P format. One file PER TILE with every line PREFIXED by its
+    core/port index (idx), so idx is read from the line, not the filename.
       runs[(rr,io,port)] = [(s,e,st)]                                 (S lines)
       packets[(io,port)] : req (io=1) [[cyc,wen,addr,meta_id]]
                            resp (io=0) [[cyc,meta_id]]                (P lines)
     The trailing meta_id ties each packet to its originating request."""
     out = {}
-    for path in glob.glob(os.path.join(noc_dir, "pe_g*_t*.log")):
-        m = PE_LOG_RE.search(os.path.basename(path))
+    for path in glob.glob(os.path.join(noc_dir, pattern)):
+        m = regex.search(os.path.basename(path))
         if not m:
             continue
         g, t = int(m.group(1)), int(m.group(2))
@@ -946,27 +958,30 @@ class Flows:
     """Transaction correlation across every packet trace, via (requester,
     meta_id).
 
-    For a reorder-buffered requester (the Snitch load/store port) meta_id is
-    unique among that requester's OUTSTANDING requests and carried unchanged
-    end-to-end, so per (requester, meta_id) the req/resp pairs are strictly
-    ordered (a meta_id cannot be reused until its response returns), even
-    though responses across DIFFERENT meta_ids may return out of order (NUMA).
-    So we segment each (group, tile, core idx, meta_id) timeline into
-    non-overlapping [req_cyc, resp_cyc] intervals (k-th req pairs with k-th
-    resp), each given a unique Perfetto flow_id. Any packet carrying that
-    requester+meta_id inside the interval binds to the flow.
+    For a reorder-buffered requester (Snitch core load/store, RedMulE X/W/Y
+    load streams) meta_id is unique among that requester's OUTSTANDING requests
+    and carried unchanged end-to-end, so per (requester, meta_id) the req/resp
+    pairs are strictly ordered (a meta_id cannot be reused until its response
+    returns), even though responses across DIFFERENT meta_ids may return out of
+    order (NUMA). So we segment each (group, tile, local-port idx, meta_id)
+    timeline into non-overlapping [req_cyc, resp_cyc] intervals (k-th req pairs
+    with k-th resp), each given a unique Perfetto flow_id. Any packet carrying
+    that requester+meta_id inside the interval binds to the flow.
 
-    NOT every requester reorders: an in-order requester may reuse one meta_id
-    for many concurrently-outstanding requests (a stream tag, not a unique id),
-    and the interconnect re-derives the address at each hop, so no key spans
-    the path. We auto-detect such buckets (overlapping outstanding) and leave
-    them UNFLOWED -- their packets keep annotations, just no arrows.
+    NOT every requester reorders: the RedMulE Z writeback uses an IN-ORDER FIFO
+    (no ROB), reusing one meta_id for many concurrently-outstanding stores (a
+    stream tag, not a unique id), and the interconnect re-derives the address
+    at each hop, so no key spans the path. We auto-detect such buckets
+    (overlapping outstanding) and leave them UNFLOWED -- their packets keep
+    annotations, just no arrows.
 
-    The local-port idx is the core_id space ([0,cpt) Snitch cores)."""
+    The local-port idx is the unified core_id space: [0,cpt) Snitch cores,
+    [cpt,..) RedMulE ports (a remote RedMulE request carries core_id =
+    cpt+port; a local one is named by the bank's winning input-port index)."""
 
     INF = float("inf")
 
-    def __init__(self, pe_data):
+    def __init__(self, pe_data, rm_data, cpt):
         # (g,t,idx) -> {meta_id: (req_cyc list, resp_cyc list, [(rc,sc,fid)])}
         self.ix = {}
         # (g,t,idx,meta_id) buckets that are in-order streams (no flows)
@@ -976,6 +991,7 @@ class Flows:
         self.n_txn = self.n_inflight = self.n_orphan_resp = self.n_stream = 0
         self.bound = self.unbound = self.stream_pkts = 0
         self._build(pe_data or {}, 0)
+        self._build(rm_data or {}, cpt)
 
     def _build(self, data, base):
         for (g, t, sub), (_runs, pkts) in data.items():
@@ -996,11 +1012,12 @@ class Flows:
                 # In-order STREAM detection: a request issued before the
                 # previous response of the same (requester, meta_id) returned
                 # => >1 concurrent outstanding => meta_id is reused as a stream
-                # tag, not a unique reorder id. Such a bucket has no
-                # per-request identity to follow (and the address is re-derived
-                # per hop), so we do NOT fabricate flows -- its packets keep
-                # annotations, no arrows. Loads keep a unique meta_id per
-                # outstanding, so they never trip this.
+                # tag, not a unique reorder id (e.g. the RedMulE Z writeback's
+                # in-order FIFO). Such a bucket has no per-request identity to
+                # follow (and the address is re-derived per hop), so we do NOT
+                # fabricate flows -- its packets keep annotations, no arrows.
+                # Loads keep a unique meta_id per outstanding, never tripping
+                # this.
                 if any(rcs[k + 1] < scs[k] for k in range(len(rcs) - 1)):
                     self.streams.add((g, t, idx, m))
                     self.n_stream += len(rcs)
@@ -1090,8 +1107,9 @@ def _emit_state_slices(rl, leaf, rr, builder, args, only=None):
 
 
 def _req_eng(core, cpt):
-    """Render an originating local-port id as a core (C{core})."""
-    return f"C{core}"
+    """Render an originating local-port id as a core (C) or RedMulE master port
+    (RM): ports [0,cpt) are Snitch cores, [cpt,..) RedMulE master ports."""
+    return f"C{core}" if core < cpt else f"RM{core - cpt}"
 
 
 def _emit_req_packet_slices(
@@ -1114,7 +1132,7 @@ def _emit_req_packet_slices(
     boundary timestamps, and two separate passes make Perfetto's timestamp sort
     nest the stall INSIDE the just-closed packet (a malformed marker arrow).
     Every NoC packet is annotated with src (x,y), dst (x,y), and the
-    originating requester as a LINEAR G<group> T<tile> C<port>. Layout:
+    originating requester as a LINEAR G<group> T<tile> C/RM<port>. Layout:
       router req =[cyc,wen,addr,dstx,dsty,srcx,srcy,src_tile,core,meta_id]
       router resp=[cyc,dstx,dsty,srcx,srcy,req_tile,req_core,meta_id] (is_resp)
       tile req =[cyc,wen,addr,src_grp,dst_grp,req_tile,req_core,meta_id]
@@ -1256,7 +1274,8 @@ def _emit_port(
             flows=flows,
             flow_rank=flow_rank)
     # NOTE: stats below are ALWAYS derived from the state runs (rl),
-    # independent of slice granularity.
+    # independent
+    # of slice granularity.
     # window -> [handshake_cyc, stall_cyc]
     acc = collections.defaultdict(lambda: [0, 0])
     maxw = -1
@@ -1327,6 +1346,297 @@ def _emit_pe_resp_packets(rl, recs, leaf, builder, args, flows, req_ctx):
             rank=3)  # terminator = sink, last in the cycle
         emit_slice_end(builder, e * TICK, leaf)
     return len(items)
+
+
+def _emit_pe_ports(
+        builder,
+        uu,
+        parent_uuid,
+        key_prefix,
+        runs,
+        pkts,
+        args,
+        rank0,
+        flows=None,
+        req_ctx=None,
+        port_label=None):
+    """Emit a local port's req/resp child tracks under parent_uuid -- shared by
+    the Snitch core data ports (parent = Core node) and the RedMulE master
+    ports (parent = the engine node). req = read/write/stall (packet mode: one
+    slice per access w/ addr+meta_id); resp = hsk/stall, or -- under --flows
+    packet mode -- one slice per returned response with the terminating arrow.
+    req_ctx=(g,t,idx) is this port's requester key (idx = core for a core,
+    NumCoresPerTile+p for a RedMulE port). port_label, when given (RedMulE
+    ports), suffixes the names ('req 00'/'resp 00') so each port is two flat
+    sibling lines. key_prefix uniquifies the per-leaf uuids; rank0 offsets the
+    sibling_order_rank. No bw/util."""
+    n = 0
+    for j, (rr, io, port) in enumerate(sorted(runs)):
+        base = "req" if rr == 0 else "resp"
+        label = f"{base} {port_label}" if port_label is not None \
+            else base + (f" {port}" if port else "")
+        leaf = add_track(builder, uu.get(key_prefix + (rr, io, port)), label,
+                         parent=parent_uuid, order_rank=rank0 + j)
+        if args.noc_slices == "packet" and rr == 0 and (io, port) in pkts:
+            _emit_req_packet_slices(
+                runs[(rr, io, port)], pkts[(io, port)], leaf, rr,
+                builder, args, pe=True, flows=flows, req_ctx=req_ctx,
+                flow_rank=0)   # origin = send, first in the cycle
+        elif (flows and args.noc_slices == "packet" and rr == 1
+              and (io, port) in pkts):
+            _emit_pe_resp_packets(runs[(rr, io, port)], pkts[(
+                io, port)], leaf, builder, args, flows, req_ctx)
+        else:
+            _emit_state_slices(runs[(rr, io, port)], leaf, rr, builder, args)
+        n += 1
+    return n
+
+
+def _ensure_rm_engine(builder, uu, g, t):
+    """Idempotently ensure the Core>Group>Tile>RedMulE engine container chain
+    and return the engine node's uuid. Shared by process_redmule (fills the
+    engine timeline/counters) and process_rm_ports (nests the master ports)."""
+    if ("core_root",) not in uu._seen:
+        add_track(builder, uu.get(("core_root",)), "1 Core")
+        uu._seen.add(("core_root",))
+    if ("g", g) not in uu._seen:
+        add_track(
+            builder, uu.get(
+                ("g", g)), _gname(g), parent=uu.get(
+                ("core_root",)))
+        uu._seen.add(("g", g))
+    if ("t", g, t) not in uu._seen:
+        add_track(
+            builder, uu.get(
+                ("t", g, t)), _tname(t), parent=uu.get(
+                ("g", g)))
+        uu._seen.add(("t", g, t))
+    if ("rm_engine", g, t) not in uu._seen:
+        add_track(
+            builder, uu.get(
+                ("rm_engine", g, t)), "RedMulE", parent=uu.get(
+                ("t", g, t)), child_order=CHILD_ORDER_EXPLICIT)
+        uu._seen.add(("rm_engine", g, t))
+    return uu.get(("rm_engine", g, t))
+
+
+def process_rm_ports(noc_dir, builder, uu, args, flows=None, rm_data=None):
+    """RedMulE master-port traffic, emitted as FLAT req/resp sibling lines (req
+    00, resp 00, req 01, ...) directly under each Tile's RedMulE ENGINE node
+    (created by process_redmule / _ensure_rm_engine). The rank base (>0) keeps
+    the ports below the FSM/CPI children. Returns #RM ports emitted."""
+    cpt = args.cores_per_tile
+    rm = rm_data if rm_data is not None else load_pe_logs(
+        noc_dir, "rm_g*_t*.log", RM_LOG_RE)
+    if not rm:
+        return 0
+    nrm = 0
+    for (g, t, p), (runs, pkts) in sorted(rm.items()):
+        eng = _ensure_rm_engine(builder, uu, g, t)
+        _emit_pe_ports(
+            builder,
+            uu,
+            eng,
+            ("rmpe",
+             g,
+             t,
+             p),
+            runs,
+            pkts,
+            args,
+            100 + 2 * p,
+            flows=flows,
+            req_ctx=(
+                g,
+                t,
+                cpt + p),
+            port_label=f"{p:02d}")
+        nrm += 1
+    print(
+        f"RedMulE ports: {nrm} flat req/resp port lines under the RedMulE "
+        f"engine node")
+    return nrm
+
+
+def load_redmule_logs(rm_dir):
+    """Parse the always-on engine logs redmule_g<g>_t<t>.log into {(g,t):
+    (dims=(H,W,PIPE_REGS), rows, end_cyc)}: each row (one ACTIVE cycle) is
+    (cyc, ctrl, sched, reg_en, stall, sw, sx, sy, busy, pc_ov); end_cyc is the
+    E footer (last sim cycle) so the exporter renders every row-less cycle as
+    the engine sitting IDLE out to the end. Engines that never ran (only D+E,
+    no C rows) are kept so they show as fully idle."""
+    out = {}
+    for path in sorted(glob.glob(os.path.join(rm_dir, "redmule_g*_t*.log"))):
+        m = REDMULE_LOG_RE.search(os.path.basename(path))
+        if not m:
+            continue
+        g, t = int(m.group(1)), int(m.group(2))
+        dims, rows, end_cyc = (0, 0, 0), [], 0
+        with open(path) as f:
+            for line in f:
+                x = line.split()
+                if not x:
+                    continue
+                if x[0] == "D" and len(x) == 4:
+                    dims = (int(x[1]), int(x[2]), int(x[3]))
+                elif x[0] == "C" and len(x) == 11:
+                    try:
+                        if not (WIN_CYC_LO <= int(x[1]) < WIN_CYC_HI):
+                            continue
+                        rows.append(tuple(int(v) for v in x[1:]))
+                    except ValueError:
+                        continue
+                elif x[0] == "E" and len(x) == 2:
+                    try:
+                        end_cyc = int(x[1])
+                    except ValueError:
+                        pass
+        # clamp the idle tail to the export window
+        end_cyc = min(end_cyc, WIN_CYC_HI)
+        # safety: E must cover the last active row
+        if rows and end_cyc < rows[-1][0]:
+            end_cyc = rows[-1][0]
+        if rows or end_cyc:
+            out[(g, t)] = (dims, rows, end_cyc)
+    return out
+
+
+def _rm_bucket(ctrl, sched, reg_en, stall, sw, sx, sy, busy):
+    """Map one active engine cycle to a CPI bucket (priority order, mutually
+    exclusive). The compute gate reg_enable_o dominates; otherwise the stall is
+    attributed to the starved operand stream (W/X/Y loads in LOAD_W) or, as the
+    only remaining stall_engine term, the Z-writeback priority stall; non-stall
+    non-compute cycles are PRELOAD/WAIT fill/drain. (idle = the row-less gaps,
+    handled by the caller.)"""
+    if reg_en:
+        return "compute"
+    if stall:
+        if sched == 2 and sw:        # 2 = LOAD_W
+            return "stall_W"
+        if sched == 2 and sx:
+            return "stall_X"
+        if sched == 2 and sy:
+            return "stall_Y"
+        return "stall_Z"
+    return "drain"                    # PRELOAD/WAIT/transitional
+
+
+def _emit_fsm_slices(builder, leaf, rows, idx, names, args, end_cyc):
+    """Render the FSM state timeline as colored slices (Perfetto auto-colors by
+    name): each contiguous run of the same state is one slice, and every
+    row-less cycle (lead-in from 0, any gap, the tail out to end_cyc) is the
+    engine sitting IDLE, drawn as an explicit 'IDLE' slice. Returns #slices."""
+    n = 0
+
+    def slc(s, e, nm):
+        nonlocal n
+        if e <= s:
+            return
+        emit_slice_begin(builder, s * TICK, leaf, nm)
+        emit_slice_end(builder, e * TICK, leaf)
+        n += 1
+
+    def sname(st):
+        return names[st] if 0 <= st < len(names) else str(st)
+
+    cur = start = prev = None
+    for r in rows:
+        cyc, state = r[0], r[idx]
+        if cur is None:
+            # lead-in idle (from the window start)
+            slc(WIN_CYC_LO, cyc, "IDLE")
+            cur, start = state, cyc
+        elif cyc != prev + 1:  # gap -> close run, idle fills it
+            slc(start, prev + 1, sname(cur))
+            slc(prev + 1, cyc, "IDLE")
+            cur, start = state, cyc
+        elif state != cur:                            # contiguous state change
+            slc(start, cyc, sname(cur))
+            cur, start = state, cyc
+        prev = cyc
+    if cur is None:  # never active -> fully idle
+        slc(WIN_CYC_LO, end_cyc + 1, "IDLE")
+    else:
+        slc(start, prev + 1, sname(cur))
+        # trailing idle to end of run
+        slc(prev + 1, end_cyc + 1, "IDLE")
+    return n
+
+
+def _emit_rm_counters(builder, ctr, rows, win, args, end_cyc):
+    """Windowed CPI stack (change-detected, pinned [0,1]): the 6 active buckets
+    as per-cycle fractions (cycles-in-bucket / window) plus idle = the row-less
+    window cycles, computed across the WHOLE run [0, end_cyc] so the engine's
+    idle time shows. The seven series sum to 1 over every full window."""
+    bcyc = collections.defaultdict(lambda: collections.defaultdict(int))
+    act = collections.defaultdict(int)
+    for (cyc, ctrl, sched, reg_en, stall, sw, sx, sy, busy, pcov) in rows:
+        w = cyc // win
+        bcyc[w][_rm_bucket(ctrl, sched, reg_en, stall, sw, sx, sy, busy)] += 1
+        act[w] += 1
+    maxw = end_cyc // win
+    last = {}
+    for w in range(WIN_CYC_LO // win, maxw + 1):
+        ts = w * win * TICK
+        a = act.get(w, 0)
+        vals = {b: (max(0.0, (win - a) / win) if b ==
+                    "idle" else bcyc[w].get(b, 0) / win) for b in RM_CPI}
+        for m, u in ctr.items():
+            if last.get(m) != vals[m]:
+                emit_counter(builder, ts, u, vals[m])
+                last[m] = vals[m]
+    ts_end = (maxw + 1) * win * TICK
+    for m, u in ctr.items():
+        if last.get(m):
+            emit_counter(builder, ts_end, u, 0.0)
+    pin_counter_range(builder, list(ctr.values()), ts_end + 2 * TICK, TICK)
+
+
+def process_redmule(rm_dir, builder, uu, args):
+    """Always-on RedMulE ENGINE trace: a RedMulE node under each Tile carrying
+    the control FSM as its slice timeline, with the scheduler FSM (child slice
+    line) and the 7-way CPI stall stack (compute / stall_W/X/Y/Z / drain /
+    idle) as expandable counter children. The RedMulE master ports are nested
+    here too (re-parented by process_rm_ports). Returns #engine nodes."""
+    data = load_redmule_logs(rm_dir)
+    if not data:
+        print(
+            f"  RedMulE engine: no redmule_g*_t*.log in {rm_dir}; skipping",
+            file=sys.stderr)
+        return 0
+    win = max(1, int(round(args.window_ns / args.clk_ns)))
+    neng = nsl = 0
+    for (g, t), (_dims, rows, end_cyc) in sorted(data.items()):
+        eng = _ensure_rm_engine(builder, uu, g, t)
+        nsl += _emit_fsm_slices(builder,
+                                eng,
+                                rows,
+                                1,
+                                RM_CTRL_STATES,
+                                args,
+                                end_cyc)   # ctrl ON the line
+        sched_leaf = add_track(
+            builder, uu.get(
+                ("rm_sched", g, t)), "scheduler", parent=eng)
+        nsl += _emit_fsm_slices(builder, sched_leaf,
+                                rows, 2, RM_SCHED_STATES, args, end_cyc)
+        ctr = {
+            b: add_track(
+                builder,
+                uu.get(
+                    ("rm_cpi",
+                     g,
+                     t,
+                     b)),
+                b,
+                parent=eng,
+                counter=True) for b in RM_CPI}
+        _emit_rm_counters(builder, ctr, rows, win, args, end_cyc)
+        neng += 1
+    print(f"  RedMulE engine: {neng} engine nodes "
+          f"(ctrl+scheduler FSM + 7-way CPI incl. idle), "
+          f"{nsl} state slices")
+    return neng
 
 
 def process_noc_routers(noc_dir, builder, uu, args, flows=None):
@@ -1427,16 +1737,17 @@ def _emit_bank_packets(rl, recs, leaf, bg, bt, builder, args, flows=None):
     (address + the requester that won the bank on hover) merged with the bank's
     stall runs, start-sorted (same anti-nesting reason as
     _emit_req_packet_slices). The requester uses the SAME uniform
-    "G<grp> T<tile> C<idx>" format as NoC packets (no local/remote/DMA words):
-    a true local input is named by the bank's own (bg,bt) + the winning port
-    index, since local requests zero their payload src fields; remote NoC and
-    wide DMA carry the origin in sg/it/core. DMA/wide accesses have no core
-    flow -> they stay unbound."""
+    "G<grp> T<tile> {C|RM}<idx>" format as NoC packets (no local/remote/DMA
+    words): a true local input (this tile's own core/RedMulE port) is named by
+    the bank's own (bg,bt) + the winning port index, since local requests zero
+    their payload src fields; remote NoC and wide DMA carry the origin in
+    sg/it/core. DMA/wide accesses have no core/RedMulE flow -> they stay
+    unbound."""
     cpt = args.cores_per_tile
 
     # (group, tile, local-port idx) + label
     def _req(loc, wide, port, sg, it, core):
-        if loc and not wide:                     # this tile's own core port
+        if loc and not wide:  # this tile's own core / RedMulE port
             return (bg, bt, port), f"G{bg} T{bt} {_req_eng(port, cpt)}"
         return (sg, it, core), f"G{sg} T{it} {_req_eng(core, cpt)}"
 
@@ -1444,8 +1755,8 @@ def _emit_bank_packets(rl, recs, leaf, bg, bt, builder, args, flows=None):
     for cyc, wen, addr, loc, wide, port, sg, it, core, meta_id in recs:
         op = "write" if wen else "read"
         (rg, rt, ridx), who = _req(loc, wide, port, sg, it, core)
-        # wide = a 512-bit DMA burst (separate initiator, no core flow); don't
-        # even probe, to keep the unbound count clean.
+        # wide = a 512-bit DMA burst (separate initiator, no core/RedMulE
+        # flow); don't even probe, to keep the unbound count clean.
         fid = flows.fid(
             rg, rt, ridx, meta_id, cyc) if (
             flows and not wide) else None
@@ -1575,6 +1886,11 @@ def main():
         "--spm", help="spm_profiling/ dir (bank_g*_t*.log); adds per-SPM-bank "
         "access tracks under each Tile node (needs --noc for the tiles)")
     ap.add_argument(
+        "--redmule",
+        help="redmule_profiling/ dir (redmule_g*_t*.log); adds the "
+        "always-on RedMulE engine node (ctrl+scheduler FSM, array "
+        "util, 7-way CPI stack) under each RedMulE tile")
+    ap.add_argument(
         "--cycle-start",
         type=int,
         default=0,
@@ -1606,7 +1922,7 @@ def main():
         action="store_true",
         help="correlate packets into Perfetto flows via (requester, meta_id): "
         "click any NoC/bank packet to follow arrows to the originating "
-        "core request and back. Requires --noc-slices packet.")
+        "core/RedMulE request and back. Requires --noc-slices packet.")
     args = ap.parse_args()
 
     # ns per cycle (honest real-ns axis)
@@ -1663,6 +1979,8 @@ def main():
 
     pe_data = load_pe_logs(args.noc) if args.noc else {
     }    # per-core PE port traffic
+    rm_data = (load_pe_logs(args.noc, "rm_g*_t*.log", RM_LOG_RE)
+               if args.noc else {})  # per-RedMulE-port traffic
     flows = None
     if args.flows:  # flows only in packet mode
         if args.noc_slices != "packet":
@@ -1670,7 +1988,7 @@ def main():
                 "  WARNING: --flows needs --noc-slices packet; flows disabled",
                 file=sys.stderr)
         else:
-            flows = Flows(pe_data)
+            flows = Flows(pe_data, rm_data, args.cores_per_tile)
     n = 0
     for path in files:
         m = HART_RE.search(path)
@@ -1684,7 +2002,18 @@ def main():
         print(
             f"  PE ports: attached {len(pe_data)} core port "
             "traces under Core nodes")
+    # always-on RedMulE engine node (under Tile);
+    if args.redmule:
+        # creates the node BEFORE rm ports nest in it
+        process_redmule(args.redmule, builder, uu, args)
     if args.noc:
+        process_rm_ports(
+            args.noc,
+            builder,
+            uu,
+            args,
+            flows=flows,
+            rm_data=rm_data)
         # Tiles BEFORE routers so the root order is Core / NoC tiles / NoC
         # routers: a memory access enters/exits the mesh at the tile, so
         # keeping tiles adjacent to the cores makes the
