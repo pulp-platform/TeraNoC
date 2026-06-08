@@ -18,6 +18,8 @@ dependencies:
   fpnew:                { git: "https://github.com/pulp-platform/cvfpu.git",                rev: feature/cfmadd }
   floo_noc:             { git: "https://github.com/pulp-platform/FlooNoC.git",              version: 0.8.1   }
   scm:                  { path: "hardware/deps/scm"                                                          }
+  redmule:              { git: "https://github.com/pulp-platform/redmule.git",              rev: mbertuletti/outstanding   }
+  hci:                  { git: "https://github.com/pulp-platform/hci.git",                  rev: 86c7319   }
 
 workspace:
   checkout_dir: "./hardware/deps"
@@ -40,6 +42,7 @@ sources:
   - hardware/src/bootrom.sv
   - hardware/src/selector.sv
   - hardware/src/mempool_tile_rw_demux.sv
+  - hardware/src/transactions_table.sv
   - hardware/src/control_registers/control_registers_reg_pkg.sv
   - hardware/src/control_registers/control_registers_reg_top.sv
   # Level 1
