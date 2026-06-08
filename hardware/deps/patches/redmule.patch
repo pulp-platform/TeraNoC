@@ -1,0 +1,61 @@
+diff --git a/hardware/deps/redmule/rtl/redmule_memory_scheduler.sv b/hardware/deps/redmule/rtl/redmule_memory_scheduler.sv
+index d6d00ae..8f3345e 100644
+--- a/hardware/deps/redmule/rtl/redmule_memory_scheduler.sv
++++ b/hardware/deps/redmule/rtl/redmule_memory_scheduler.sv
+@@ -155,8 +155,11 @@ module redmule_memory_scheduler
+   // for the Y stream source
+   assign cntrl_streamer_o.y_stream_source_ctrl.req_start = cntrl_scheduler_i.first_load && reg_file_i.hwpe_params[OP_SELECTION][0] && flgs_streamer_i.y_stream_source_flags.ready_start;
+   assign cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.base_addr = reg_file_i.hwpe_params[Z_ADDR];
+-  assign cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.tot_len = reg_file_i.hwpe_params[Z_TOT_LEN];
+-  assign cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.d0_len = W;
++  // Y/Z move the M dimension on d0 (d0_len columns) over the K tiles on d1. For a single
++  // M-tile (x_rows_iter==1) only num_x_reads of the W columns are real M rows, so clamp
++  // d0_len and tot_len to the valid count; multi-M-tile keeps the full tiled length.
++  assign cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.tot_len = (reg_file_i.hwpe_params[X_ITERS][31:16] == 'd1) ? num_x_reads * reg_file_i.hwpe_params[W_ITERS][15:0] : reg_file_i.hwpe_params[Z_TOT_LEN];
++  assign cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.d0_len = num_x_reads;
+   assign cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.d0_stride = reg_file_i.hwpe_params[Z_D0_STRIDE];
+   assign cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.d1_len = reg_file_i.hwpe_params[W_ITERS][15:0];
+   assign cntrl_streamer_o.y_stream_source_ctrl.addressgen_ctrl.d1_stride = JMP;
+@@ -167,8 +170,8 @@ module redmule_memory_scheduler
+   // the Z stream sink
+   assign cntrl_streamer_o.z_stream_sink_ctrl.req_start = cntrl_scheduler_i.first_load && flgs_streamer_i.z_stream_sink_flags.ready_start;
+   assign cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.base_addr = reg_file_i.hwpe_params[Z_ADDR];
+-  assign cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.tot_len = reg_file_i.hwpe_params[Z_TOT_LEN];
+-  assign cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.d0_len = W;
++  assign cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.tot_len = (reg_file_i.hwpe_params[X_ITERS][31:16] == 'd1) ? num_x_reads * reg_file_i.hwpe_params[W_ITERS][15:0] : reg_file_i.hwpe_params[Z_TOT_LEN];
++  assign cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.d0_len = num_x_reads;
+   assign cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.d0_stride = reg_file_i.hwpe_params[Z_D0_STRIDE];
+   assign cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.d1_len = reg_file_i.hwpe_params[W_ITERS][15:0];
+   assign cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.d1_stride = JMP;
+diff --git a/hardware/deps/redmule/rtl/redmule_scheduler.sv b/hardware/deps/redmule/rtl/redmule_scheduler.sv
+index f028c90..7d28750 100644
+--- a/hardware/deps/redmule/rtl/redmule_scheduler.sv
++++ b/hardware/deps/redmule/rtl/redmule_scheduler.sv
+@@ -417,7 +417,11 @@ module redmule_scheduler
+   assign y_push_counter_d = y_push_counter_q == y_height-1 ? '0 : y_push_counter_q + 1;
+   assign y_push_clr       = y_push_en && ~stall_engine && y_push_counter_q == y_height-1;
+ 
+-  assign y_width  = y_rows_iter_q == reg_file_i.hwpe_params[W_ITERS][31:16]-1 && reg_file_i.hwpe_params[LEFTOVERS][15:8] != '0 ? reg_file_i.hwpe_params[LEFTOVERS][15:8] : W;
++  // y_width/z_width count Z STORE columns = the M dimension (M -> ARRAY_WIDTH), so they
++  // must clamp on the X-rows (M) leftover like cntrl_x_buffer_o.width does (line 149),
++  // NOT on the w_rows (N) leftover. Clamping on N left the Z store streaming W columns
++  // of which only x_rows_lftovr were valid, clobbering the neighbouring tile's Z.
++  assign y_width  = x_rows_iter_q == reg_file_i.hwpe_params[X_ITERS][31:16]-1 && reg_file_i.hwpe_params[LEFTOVERS][31:24] != '0 ? reg_file_i.hwpe_params[LEFTOVERS][31:24] : W;
+   assign y_height = y_cols_iter_q == reg_file_i.hwpe_params[W_ITERS][15:0]-1 && reg_file_i.hwpe_params[LEFTOVERS][7:0] != '0 ? reg_file_i.hwpe_params[LEFTOVERS][7:0] : D;
+ 
+   always_ff @(posedge clk_i or negedge rst_ni) begin : z_width_register
+@@ -565,11 +569,12 @@ module redmule_scheduler
+    *           FLAGS            *
+    ******************************/
+ 
+-  assign stall_engine = current_state == LOAD_W && (
++  assign stall_engine = (current_state == LOAD_W && (
+                           ~check_w_valid  && check_w_valid_en  ||
+                           ~check_x_full   && check_x_full_en   ||
+                           ~check_y_loaded && check_y_loaded_en
+-                        );
++                        ))
++                        || (z_wait_counter_q == PIPE_REGS && flgs_z_buffer_i.z_priority);
+ 
+   always_ff @(posedge clk_i or negedge rst_ni) begin : first_load_register
+     if(~rst_ni) begin
