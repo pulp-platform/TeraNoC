@@ -6,9 +6,9 @@
 
 {
     kernel: "GEMM"
-    M: 128,
-    N: 128,
-    P: 128,
+    M: 256,
+    N: 256,
+    P: 256,
     alpha: 0,
     transpose_A: false,
     transpose_B: false,
