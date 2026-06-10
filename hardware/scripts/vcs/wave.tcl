@@ -2,117 +2,34 @@
 # Solderpad Hardware License, Version 0.51, see LICENSE for details.
 # SPDX-License-Identifier: SHL-0.51
 
-# Create an nWave window
-wvCreateWindow
+# VCS + Verdi (nWave) curated overview for the 2D-mesh FlooNoC topology.
+# `make simvcs` auto-sources this from run.tcl; re-source any time from Verdi's
+# Tcl console: source ../scripts/vcs/wave.tcl. run.tcl dumps EVERY signal to the
+# FSDB, so anything not listed here can still be dragged into nWave (no re-run).
+#
+# GOTCHA: interpreted by VERDI (nWave), NOT the UCLI shell -- use only `wv*`
+# commands (no `dump`/`run`/`get`) and hard-code loop bounds (no
+# `get mempool_pkg::...`). Wrap `[0]`/`[3]` indices in {braces} so Tcl does not
+# treat them as command substitution.
 
-# Add a vector of the core's wfi signal to quickly see which cores are active
-wvAddGroup wfi
-wvAddSignal -group {wfi {mempool_tb/wfi}}
+# GOTCHA: capture wvCreateWindow's return -- it does NOT auto-set $_nWave2 from
+# the -do/TclPlay console, so `wvAddSignal -win $_nWave2` would otherwise fail.
+set _nWave2 [wvCreateWindow]
 
-# Add min function (DVE does not support TCL8.5)
-proc min args {
-    set minval [lindex args 0]
-    foreach arg $args {
-        if { $arg < $minval } {
-            set minval $arg
-        }
-    }
-    return $minval
-}
+# --- System overview (testbench level) ---
+wvAddSignal -win $_nWave2 {/mempool_tb/wfi}
+wvAddSignal -win $_nWave2 {/mempool_tb/eoc_valid}
+wvAddSignal -win $_nWave2 {/mempool_tb/snitch_utilization}
+wvAddSignal -win $_nWave2 {/mempool_tb/lsu_utilization}
 
-# Add all cores from group 0 tile 0
-set group 0
-set tile 0
-for {set core 0}  {$core < [min 4 [get -radix dec mempool_pkg::NumCoresPerTile]]} {incr core} {
-    source ../scripts/vcs/wave_core.tcl
-}
+# --- Control registers (end-of-computation / wake-up) ---
+wvAddSignal -win $_nWave2 {/mempool_tb/dut/i_ctrl_registers/eoc_o}
+wvAddSignal -win $_nWave2 {/mempool_tb/dut/i_ctrl_registers/eoc_valid_o}
+wvAddSignal -win $_nWave2 {/mempool_tb/dut/i_ctrl_registers/wake_up_o}
 
-# Add specific cores from different tiles
-set group 1
-set tile 0
-set core 0
-source ../scripts/vcs/wave_core.tcl
+# --- Group 0 / Tile 0, core 0 (snitch front-end) ---
+wvAddSignal -win $_nWave2 {/mempool_tb/dut/i_mempool_cluster/gen_groups_x[0]/gen_groups_y[0]/gen_rtl_group/i_group/i_mempool_group/gen_tiles[0]/i_tile/gen_cores[0]/gen_mempool_cc/riscv_core/i_snitch/pc_q}
+wvAddSignal -win $_nWave2 {/mempool_tb/dut/i_mempool_cluster/gen_groups_x[0]/gen_groups_y[0]/gen_rtl_group/i_group/i_mempool_group/gen_tiles[0]/i_tile/gen_cores[0]/gen_mempool_cc/riscv_core/i_snitch/wfi_q}
 
-# Add groups
-for {set group 0} {$group < [get -radix dec mempool_pkg::NumGroups]} {incr group} {
-    # Create the group
-    wvAddGroup group\[$group\]
 
-    # Add tiles
-    for {set tile 0} {$tile < [min 2 [get -radix dec mempool_pkg::NumTilesPerGroup]]} {incr tile} {
-        source ../scripts/vcs/wave_tile.tcl
-    }
-
-    # Interconnects
-    for {set tgtgroup 0} {$tgtgroup < [get -radix dec mempool_pkg::NumGroups]} {incr tgtgroup} {
-        if {$tgtgroup != $group} {
-            set interco_idx [expr $group ^ $tgtgroup]
-            wvSelectGroup group\[$group\]
-            wvAddSubGroup interconnect_to_group\[$tgtgroup\]
-            wvSetPosition [subst {(group\[$group\]/interconnect_to_group\[$tgtgroup\] last)}]
-
-            wvAddSignal mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/gen_remote_interco\[$interco_idx\]/i_remote_interco/clk_i \
-                        mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/gen_remote_interco\[$interco_idx\]/i_remote_interco/rst_ni \
-                        mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/gen_remote_interco\[$interco_idx\]/i_remote_interco/req_valid_i \
-                        mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/gen_remote_interco\[$interco_idx\]/i_remote_interco/req_ready_o \
-                        mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/gen_remote_interco\[$interco_idx\]/i_remote_interco/req_tgt_addr_i \
-                        mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/gen_remote_interco\[$interco_idx\]/i_remote_interco/req_wen_i \
-                        mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/gen_remote_interco\[$interco_idx\]/i_remote_interco/req_wdata_i \
-                        mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/gen_remote_interco\[$interco_idx\]/i_remote_interco/req_be_i \
-                        mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/gen_remote_interco\[$interco_idx\]/i_remote_interco/resp_valid_o \
-                        mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/gen_remote_interco\[$interco_idx\]/i_remote_interco/resp_ready_i \
-                        mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/gen_remote_interco\[$interco_idx\]/i_remote_interco/resp_rdata_o \
-                        mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/gen_remote_interco\[$interco_idx\]/i_remote_interco/req_valid_o \
-                        mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/gen_remote_interco\[$interco_idx\]/i_remote_interco/req_ready_i \
-                        mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/gen_remote_interco\[$interco_idx\]/i_remote_interco/req_ini_addr_o \
-                        mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/gen_remote_interco\[$interco_idx\]/i_remote_interco/req_tgt_addr_o \
-                        mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/gen_remote_interco\[$interco_idx\]/i_remote_interco/req_wen_o \
-                        mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/gen_remote_interco\[$interco_idx\]/i_remote_interco/req_wdata_o \
-                        mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/gen_remote_interco\[$interco_idx\]/i_remote_interco/req_be_o \
-                        mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/gen_remote_interco\[$interco_idx\]/i_remote_interco/resp_valid_i \
-                        mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/gen_remote_interco\[$interco_idx\]/i_remote_interco/resp_ready_o \
-                        mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/gen_remote_interco\[$interco_idx\]/i_remote_interco/resp_ini_addr_i \
-                        mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/gen_remote_interco\[$interco_idx\]/i_remote_interco/resp_rdata_i
-        }
-    }
-
-    wvSelectGroup group\[$group\]
-    wvAddSubGroup local_interconnect
-    wvSetPosition [subst {(group\[$group\]/local_interconnect last)}]
-
-    wvAddSignal mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/i_local_interco/clk_i \
-                mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/i_local_interco/rst_ni \
-                mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/i_local_interco/req_valid_i \
-                mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/i_local_interco/req_ready_o \
-                mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/i_local_interco/req_tgt_addr_i \
-                mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/i_local_interco/req_wen_i \
-                mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/i_local_interco/req_wdata_i \
-                mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/i_local_interco/req_be_i \
-                mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/i_local_interco/resp_valid_o \
-                mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/i_local_interco/resp_ready_i \
-                mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/i_local_interco/resp_rdata_o \
-                mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/i_local_interco/req_valid_o \
-                mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/i_local_interco/req_ready_i \
-                mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/i_local_interco/req_ini_addr_o \
-                mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/i_local_interco/req_tgt_addr_o \
-                mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/i_local_interco/req_wen_o \
-                mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/i_local_interco/req_wdata_o \
-                mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/i_local_interco/req_be_o \
-                mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/i_local_interco/resp_valid_i \
-                mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/i_local_interco/resp_ready_o \
-                mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/i_local_interco/resp_ini_addr_i \
-                mempool_tb/dut/i_mempool_cluster/gen_groups\[$group\]/i_group/i_local_interco/resp_rdata_i
-}
-
-wvAddGroup Control_Registers
-wvSetPosition {(Control_Registers last)}
-wvAddSignal mempool_tb/dut/i_ctrl_registers/clk_i \
-            mempool_tb/dut/i_ctrl_registers/rst_ni \
-            mempool_tb/dut/i_ctrl_registers/axi_lite_slave_req_i \
-            mempool_tb/dut/i_ctrl_registers/axi_lite_slave_resp_o \
-            mempool_tb/dut/i_ctrl_registers/eoc_o \
-            mempool_tb/dut/i_ctrl_registers/eoc_valid_o \
-            mempool_tb/dut/i_ctrl_registers/wake_up_o \
-            mempool_tb/dut/i_ctrl_registers/tcdm_start_address_o \
-            mempool_tb/dut/i_ctrl_registers/tcdm_end_address_o \
-            mempool_tb/dut/i_ctrl_registers/num_cores_o
+wvZoomAll -win $_nWave2

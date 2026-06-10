@@ -35,6 +35,7 @@ questa_config    ?=
 vcs_version      ?= 2024.09-zr
 vcs_cmd          ?= vcs-$(vcs_version)
 vcs_config       ?=
+vcs_gui          ?= -verdi
 # Path to the application binaries
 app_path         ?= $(abspath $(ROOT_DIR)/../software/bin)
 # Bender
@@ -96,6 +97,8 @@ vlogan_args += -assert svaext +v2k -override_timescale=1ns/1ps -kdb
 ifdef preload
   vcs_args += +PRELOAD=$(preload)
 endif
+vcs_assert_args ?= -assert nopostproc
+vcs_args        += $(vcs_assert_args)
 
 # ============================================================================
 # DPI and Trace Configuration
@@ -365,13 +368,20 @@ $(buildpath)/mempool_simvopt: $(buildpath)/compilevcs.sh $(buildpath)/$(dpi_libr
 	$(vcs_cmd) vcs -full64 $(top_level) -cc $(CC) -cpp $(CXX) -ld $(CXX) $(dpi_library)/mempool_vcs_dpi.so $(vcs_config) -assert disable_cover -o mempool_simvopt
 
 # Simulation
-simvcs: compile_vcs_simv
+simvcs: clean-dasm compile_vcs_simv
 	cd $(buildpath) && \
-	./mempool_simv $(vcs_args) -ucli -l transcript -do ../scripts/vcs/run.tcl -gui
+	./mempool_simv $(vcs_args) $(vcs_gui) -ucli -do ../scripts/vcs/run.tcl -l transcript
+	./scripts/return_status.sh $(buildpath)/transcript
 
-simcvcs: compile_vcs_simvopt
+simcvcs: clean-dasm compile_vcs_simvopt
 	cd $(buildpath) && \
 	./mempool_simvopt $(vcs_args) -l transcript
+	./scripts/return_status.sh $(buildpath)/transcript
+
+simcvcs_fsdb: clean-dasm compile_vcs_simv
+	cd $(buildpath) && \
+	./mempool_simv $(vcs_args) -ucli -do ../scripts/vcs/dump_all.tcl -l transcript
+	./scripts/return_status.sh $(buildpath)/transcript
 
 # DPIs
 .PHONY: dpivcs
