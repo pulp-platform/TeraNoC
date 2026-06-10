@@ -658,4 +658,18 @@ module mempool_tb;
  *************************************/
 `include "tb_noc_bottleneck_profiling.svh"
 
+/*****************************************************
+ * Core Memory Scoreboard VIP (inflight req tracker) *
+ * Module definition lives in tb_core_mem_scoreboard.sv;
+ * waveform signals are visible under /mempool_tb/u_cms/.
+ *****************************************************/
+`ifndef VERILATOR
+`ifndef CMS_DISABLE
+  tb_core_mem_scoreboard u_cms (
+    .clk_i  (clk),
+    .rst_ni (rst_n)
+  );
+`endif
+`endif
+
 endmodule : mempool_tb
