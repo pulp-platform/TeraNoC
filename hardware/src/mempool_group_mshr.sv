@@ -927,6 +927,9 @@ module mempool_group_mshr
   // Debug-only view of cached/uncached valid entries.
   // pragma translate_off
   `ifndef VERILATOR
+  // Verbose MSHR debug tracer ([E16D]/[T5*]/[GMA] lines) — SILENT by default.
+  // Recompile with +define+GROUP_MSHR_DEBUG_TRACE to re-enable when debugging.
+  `ifdef GROUP_MSHR_DEBUG_TRACE
   logic [MshrNum-1:0] mshr_q_valid_cached;
   logic [MshrNum-1:0] mshr_q_valid_uncached;
   generate
@@ -943,6 +946,198 @@ module mempool_group_mshr
            !mshr_q[mshr_i].resp_valid);
     end
   endgenerate
+
+  // ---- DEBUG: focused trace of entry 16 in group 12 (where hart 0xc5 stuck) ----
+  // Dumps a [E16D] line on every cycle where entry 16's mshr_q state, valid bits,
+  // sub_reqs_num, beat_pending, or sub_reqs[*].valid changes. Filter by group 12
+  // (hart 0xc5 lives in (gx=3, gy=0) → group_id = 12) by checking group_id_i.
+  // Also dumps [E16D-EVT] one-shot events for alloc / merge / drain handshake /
+  // response capture / cache transition / full reset for entry 16.
+  logic [255:0] e16_prev_sig;
+  logic [255:0] e16_curr_sig;
+  always_comb begin
+    e16_curr_sig = '0;
+    e16_curr_sig[1:0]   = mshr_q[16].state;
+    e16_curr_sig[2]     = mshr_q_valid[16];
+    e16_curr_sig[10:3]  = mshr_q[16].sub_reqs_num;
+    e16_curr_sig[18:11] = mshr_q[16].beat_pending[7:0];
+    e16_curr_sig[26:19] = {mshr_q[16].sub_reqs[7].valid,
+                            mshr_q[16].sub_reqs[6].valid,
+                            mshr_q[16].sub_reqs[5].valid,
+                            mshr_q[16].sub_reqs[4].valid,
+                            mshr_q[16].sub_reqs[3].valid,
+                            mshr_q[16].sub_reqs[2].valid,
+                            mshr_q[16].sub_reqs[1].valid,
+                            mshr_q[16].sub_reqs[0].valid};
+    e16_curr_sig[34:27] = 8'(mshr_q[16].resp_buf_cnt); // zero-extend (width varies by config)
+    e16_curr_sig[35]    = mshr_q[16].resp_valid;
+    e16_curr_sig[39:36] = mshr_q[16].beats_left[3:0];
+  end
+  always_ff @(posedge clk_i) begin
+    if (rst_ni && (group_id_i == 4'd12) && 1'b1) begin
+      // ---- T5/p1 contention trace: log all entries with sub_req at t5/p1 ----
+      // Fires once per cycle per matching entry to show drain competition.
+      for (int unsigned ei = 0; ei < MshrNum; ei++) begin
+        if (mshr_q_valid[ei] && (mshr_q[ei].state == MSHR_DRAIN_RESP)) begin
+          for (int unsigned si = 0; si < MshrMergeReqs; si++) begin
+            if (mshr_q[ei].sub_reqs[si].valid &&
+                mshr_q[ei].beat_pending[si] &&
+                (mshr_q[ei].sub_reqs[si].tile_id == 5) &&
+                (mshr_q[ei].sub_reqs[si].port_id == 1)) begin
+              $display("[T5C %0t] g=12 e=%0d s%0d=t5/p1/c%0d/m%0h bp_pending sub_n=%0d resp_buf_cnt=%0d",
+                       $time, ei, si,
+                       mshr_q[ei].sub_reqs[si].core_id,
+                       mshr_q[ei].sub_reqs[si].meta_id_base,
+                       mshr_q[ei].sub_reqs_num,
+                       mshr_q[ei].resp_buf_cnt);
+            end
+          end
+        end
+      end
+      // T5 handshakes (req_in, req_out, resp_in, resp_out)
+      for (int unsigned p = 1; p < NumRemoteReqPortsPerTile; p++) begin
+        if (group_mshr_req_valid_i[5][p] && group_mshr_req_ready_o[5][p]) begin
+          $display("[T5 %0t] g=12 t5 REQ_IN p=%0d core=%0d meta=%0h wen=%b",
+                   $time, p, group_mshr_req_i[5][p].wdata.core_id,
+                   group_mshr_req_i[5][p].wdata.meta_id, group_mshr_req_i[5][p].wen);
+        end
+      end
+      // T5SEL: drain selection for (tile=5, port=1 or 2). Show which mshr/subreq selected.
+      for (int unsigned p = 1; p < NumRemoteRespPortsPerTile; p++) begin
+        if (resp_sel_valid[5][p]) begin
+          $display("[T5SEL %0t] g=12 t5 p=%0d sel_mshr=%0d sel_subreq=%0d",
+                   $time, p, resp_sel_mshr_id[5][p], resp_sel_subreq_idx[5][p]);
+        end
+        // T5BP: log bp/valid for each MSHR with matching tile=5 sub_req at posedge
+        for (int unsigned ei = 0; ei < MshrNum; ei++) begin
+          if (mshr_d_valid[ei] && (mshr_d[ei].state == MSHR_DRAIN_RESP)) begin
+            for (int unsigned si = 0; si < MshrMergeReqs; si++) begin
+              if (mshr_d[ei].sub_reqs[si].valid &&
+                  (mshr_d[ei].sub_reqs[si].tile_id == 5) &&
+                  (mshr_d[ei].sub_reqs[si].port_id == p)) begin
+                $display("[T5BP %0t] g=12 t5 e=%0d s%0d=t5/p%0d/c%0d/m%0h bp(d)=%b state(d)=%0d",
+                         $time, ei, si, p,
+                         mshr_d[ei].sub_reqs[si].core_id,
+                         mshr_d[ei].sub_reqs[si].meta_id_base,
+                         mshr_d[ei].beat_pending[si],
+                         mshr_d[ei].state);
+              end
+            end
+          end
+        end
+      end
+      for (int unsigned p = 1; p < NumRemoteRespPortsPerTile; p++) begin
+        // Log valid alone (no handshake needed) to see backpressure.
+        if (group_mshr_resp_valid_o[5][p]) begin
+          $display("[T5V %0t] g=12 t5 RESP_VLD p=%0d core=%0d meta=%0h ready=%b",
+                   $time, p, group_mshr_resp_o[5][p].rdata.core_id,
+                   group_mshr_resp_o[5][p].rdata.meta_id,
+                   group_mshr_resp_ready_i[5][p]);
+        end
+        if (group_mshr_resp_valid_o[5][p] && group_mshr_resp_ready_i[5][p]) begin
+          $display("[T5 %0t] g=12 t5 RESP_OUT p=%0d core=%0d meta=%0h data=0x%0h wen=%b",
+                   $time, p, group_mshr_resp_o[5][p].rdata.core_id,
+                   group_mshr_resp_o[5][p].rdata.meta_id,
+                   group_mshr_resp_o[5][p].rdata.data,
+                   group_mshr_resp_o[5][p].wen);
+        end
+      end
+      e16_prev_sig <= e16_curr_sig;
+      // Also dump ALLOC events (entry 16 transitions IDLE→WAIT_RESP)
+      if (mshr_d_valid[16] && !mshr_q_valid[16]) begin
+        $display("[E16D-EVT %0t] g=%0d ALLOC entry 16, base_addr=0x%0h, sub_reqs_num(d)=%0d, sub_req[0].tile=%0d port=%0d core=%0d meta=%0h",
+                 $time, group_id_i,
+                 mshr_d[16].base_addr, mshr_d[16].sub_reqs_num,
+                 mshr_d[16].sub_reqs[0].tile_id, mshr_d[16].sub_reqs[0].port_id,
+                 mshr_d[16].sub_reqs[0].core_id, mshr_d[16].sub_reqs[0].meta_id_base);
+      end
+      // Dump full reset (deallocation)
+      if (!mshr_d_valid[16] && mshr_q_valid[16]) begin
+        $display("[E16D-EVT %0t] g=%0d DEALLOC entry 16 (was state=%0d, sub_reqs_num=%0d)",
+                 $time, group_id_i, mshr_q[16].state, mshr_q[16].sub_reqs_num);
+      end
+      // ---- Wide event log: ALL entries ALLOC/DEALLOC/MERGE in g=12 ----
+      for (int unsigned ei = 0; ei < MshrNum; ei++) begin
+        // ALLOC: full sub_req[0..7] dump
+        // REUSE: mshr_d_valid stays 1 but base_addr or burst_len changed → CACHED slot got reused
+        if (mshr_d_valid[ei] && mshr_q_valid[ei] &&
+            ((mshr_d[ei].base_addr != mshr_q[ei].base_addr) ||
+             (mshr_d[ei].burst_len != mshr_q[ei].burst_len))) begin
+          $display("[GMA %0t] g=%0d REUSE e=%0d old_base=0x%0h old_burst=%0d new_base=0x%0h new_burst=%0d new_s0=t%0d/p%0d/c%0d/m%0h",
+                   $time, group_id_i, ei, mshr_q[ei].base_addr, mshr_q[ei].burst_len,
+                   mshr_d[ei].base_addr, mshr_d[ei].burst_len,
+                   mshr_d[ei].sub_reqs[0].tile_id, mshr_d[ei].sub_reqs[0].port_id,
+                   mshr_d[ei].sub_reqs[0].core_id, mshr_d[ei].sub_reqs[0].meta_id_base);
+        end
+        if (mshr_d_valid[ei] && !mshr_q_valid[ei]) begin
+          $display("[GMA %0t] g=%0d ALLOC e=%0d base=0x%0h burst=%0d sub_n=%0d s0=t%0d/p%0d/c%0d/m%0h v0=%b s1=t%0d/p%0d/c%0d/m%0h v1=%b s2=t%0d/p%0d/c%0d/m%0h v2=%b s3=t%0d/p%0d/c%0d/m%0h v3=%b s4=t%0d/p%0d/c%0d/m%0h v4=%b s5=t%0d/p%0d/c%0d/m%0h v5=%b s6=t%0d/p%0d/c%0d/m%0h v6=%b s7=t%0d/p%0d/c%0d/m%0h v7=%b",
+                   $time, group_id_i, ei, mshr_d[ei].base_addr, mshr_d[ei].burst_len, mshr_d[ei].sub_reqs_num,
+                   mshr_d[ei].sub_reqs[0].tile_id, mshr_d[ei].sub_reqs[0].port_id, mshr_d[ei].sub_reqs[0].core_id, mshr_d[ei].sub_reqs[0].meta_id_base, mshr_d[ei].sub_reqs[0].valid,
+                   mshr_d[ei].sub_reqs[1].tile_id, mshr_d[ei].sub_reqs[1].port_id, mshr_d[ei].sub_reqs[1].core_id, mshr_d[ei].sub_reqs[1].meta_id_base, mshr_d[ei].sub_reqs[1].valid,
+                   mshr_d[ei].sub_reqs[2].tile_id, mshr_d[ei].sub_reqs[2].port_id, mshr_d[ei].sub_reqs[2].core_id, mshr_d[ei].sub_reqs[2].meta_id_base, mshr_d[ei].sub_reqs[2].valid,
+                   mshr_d[ei].sub_reqs[3].tile_id, mshr_d[ei].sub_reqs[3].port_id, mshr_d[ei].sub_reqs[3].core_id, mshr_d[ei].sub_reqs[3].meta_id_base, mshr_d[ei].sub_reqs[3].valid,
+                   mshr_d[ei].sub_reqs[4].tile_id, mshr_d[ei].sub_reqs[4].port_id, mshr_d[ei].sub_reqs[4].core_id, mshr_d[ei].sub_reqs[4].meta_id_base, mshr_d[ei].sub_reqs[4].valid,
+                   mshr_d[ei].sub_reqs[5].tile_id, mshr_d[ei].sub_reqs[5].port_id, mshr_d[ei].sub_reqs[5].core_id, mshr_d[ei].sub_reqs[5].meta_id_base, mshr_d[ei].sub_reqs[5].valid,
+                   mshr_d[ei].sub_reqs[6].tile_id, mshr_d[ei].sub_reqs[6].port_id, mshr_d[ei].sub_reqs[6].core_id, mshr_d[ei].sub_reqs[6].meta_id_base, mshr_d[ei].sub_reqs[6].valid,
+                   mshr_d[ei].sub_reqs[7].tile_id, mshr_d[ei].sub_reqs[7].port_id, mshr_d[ei].sub_reqs[7].core_id, mshr_d[ei].sub_reqs[7].meta_id_base, mshr_d[ei].sub_reqs[7].valid);
+        end
+        // DEALLOC
+        if (!mshr_d_valid[ei] && mshr_q_valid[ei]) begin
+          $display("[GMA %0t] g=%0d DEALLOC e=%0d state=%0d burst=%0d sub_n=%0d bpend=%h subv=%b%b%b%b%b%b%b%b cnt=%0d bl=%0d s0=t%0d/p%0d/c%0d/m%0h s1=t%0d/p%0d/c%0d/m%0h",
+                   $time, group_id_i, ei, mshr_q[ei].state, mshr_q[ei].burst_len,
+                   mshr_q[ei].sub_reqs_num, mshr_q[ei].beat_pending,
+                   mshr_q[ei].sub_reqs[7].valid, mshr_q[ei].sub_reqs[6].valid,
+                   mshr_q[ei].sub_reqs[5].valid, mshr_q[ei].sub_reqs[4].valid,
+                   mshr_q[ei].sub_reqs[3].valid, mshr_q[ei].sub_reqs[2].valid,
+                   mshr_q[ei].sub_reqs[1].valid, mshr_q[ei].sub_reqs[0].valid,
+                   mshr_q[ei].resp_buf_cnt, mshr_q[ei].beats_left,
+                   mshr_q[ei].sub_reqs[0].tile_id, mshr_q[ei].sub_reqs[0].port_id, mshr_q[ei].sub_reqs[0].core_id, mshr_q[ei].sub_reqs[0].meta_id_base,
+                   mshr_q[ei].sub_reqs[1].tile_id, mshr_q[ei].sub_reqs[1].port_id, mshr_q[ei].sub_reqs[1].core_id, mshr_q[ei].sub_reqs[1].meta_id_base);
+        end
+        // MERGE: any sub_req that goes from invalid to valid while entry stays valid
+        if (mshr_d_valid[ei] && mshr_q_valid[ei]) begin
+          for (int unsigned si = 0; si < MshrMergeReqs; si++) begin
+            if (mshr_d[ei].sub_reqs[si].valid && !mshr_q[ei].sub_reqs[si].valid) begin
+              $display("[GMA %0t] g=%0d MERGE e=%0d s%0d=t%0d/p%0d/c%0d/m%0h sub_n=%0d bpend=%h",
+                       $time, group_id_i, ei, si,
+                       mshr_d[ei].sub_reqs[si].tile_id, mshr_d[ei].sub_reqs[si].port_id,
+                       mshr_d[ei].sub_reqs[si].core_id, mshr_d[ei].sub_reqs[si].meta_id_base,
+                       mshr_d[ei].sub_reqs_num, mshr_d[ei].beat_pending);
+            end
+            // DRAIN: sub_req valid 1→0 while entry stays allocated → log who got cleared
+            if (!mshr_d[ei].sub_reqs[si].valid && mshr_q[ei].sub_reqs[si].valid) begin
+              $display("[GMA %0t] g=%0d DRAIN e=%0d s%0d=t%0d/p%0d/c%0d/m%0h sub_n(d)=%0d bl(d)=%0d state(d)=%0d bpq[s]=%b bpd[s]=%b",
+                       $time, group_id_i, ei, si,
+                       mshr_q[ei].sub_reqs[si].tile_id, mshr_q[ei].sub_reqs[si].port_id,
+                       mshr_q[ei].sub_reqs[si].core_id, mshr_q[ei].sub_reqs[si].meta_id_base,
+                       mshr_d[ei].sub_reqs_num, mshr_d[ei].beats_left, mshr_d[ei].state,
+                       mshr_q[ei].beat_pending[si], mshr_d[ei].beat_pending[si]);
+            end
+            // BP_SET: beat_pending[s] transitioned 0→1 (init block fired and set it)
+            if (mshr_d[ei].beat_pending[si] && !mshr_q[ei].beat_pending[si]) begin
+              $display("[GMA %0t] g=%0d BPSET e=%0d s%0d=t%0d/p%0d/c%0d/m%0h subv(q)=%b%b%b%b%b%b%b%b state(q)=%0d state(d)=%0d",
+                       $time, group_id_i, ei, si,
+                       mshr_d[ei].sub_reqs[si].tile_id, mshr_d[ei].sub_reqs[si].port_id,
+                       mshr_d[ei].sub_reqs[si].core_id, mshr_d[ei].sub_reqs[si].meta_id_base,
+                       mshr_q[ei].sub_reqs[7].valid, mshr_q[ei].sub_reqs[6].valid,
+                       mshr_q[ei].sub_reqs[5].valid, mshr_q[ei].sub_reqs[4].valid,
+                       mshr_q[ei].sub_reqs[3].valid, mshr_q[ei].sub_reqs[2].valid,
+                       mshr_q[ei].sub_reqs[1].valid, mshr_q[ei].sub_reqs[0].valid,
+                       mshr_q[ei].state, mshr_d[ei].state);
+            end
+            // BP_CLR: beat_pending[s] transitioned 1→0 while sub_req still valid → drain handshake
+            if (!mshr_d[ei].beat_pending[si] && mshr_q[ei].beat_pending[si] && mshr_d[ei].sub_reqs[si].valid) begin
+              $display("[GMA %0t] g=%0d BPCLR e=%0d s%0d=t%0d/p%0d/c%0d/m%0h handshake_completed",
+                       $time, group_id_i, ei, si,
+                       mshr_d[ei].sub_reqs[si].tile_id, mshr_d[ei].sub_reqs[si].port_id,
+                       mshr_d[ei].sub_reqs[si].core_id, mshr_d[ei].sub_reqs[si].meta_id_base);
+            end
+          end
+        end
+      end
+    end
+  end
+  `endif // GROUP_MSHR_DEBUG_TRACE
   `endif
   // pragma translate_on
 
@@ -1380,9 +1575,6 @@ module mempool_group_mshr
 
               if (resp_out_ready[drain_dst_tile[mshr_i]][drain_dst_port[mshr_i]]) begin
                 mshr_d[mshr_i].beat_pending[drain_subreq_idx[mshr_i]] = 1'b0;
-                // Single-beat only: see DrainMultiPort branch above for
-                // rationale (avoids same-cycle init re-includes the slot in
-                // next cycle's beat_pending mask).
                 if (mshr_d[mshr_i].burst_len == BurstLenWidth'(1)) begin
                   mshr_d[mshr_i].sub_reqs[drain_subreq_idx[mshr_i]].valid = 1'b0;
                 end
