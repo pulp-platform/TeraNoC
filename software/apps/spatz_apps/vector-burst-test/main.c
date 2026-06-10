@@ -12,7 +12,7 @@
 #include "synchronization.h"
 
 #ifndef ACTIVE_CORES
-#define ACTIVE_CORES 32 // 0 => use all cores
+#define ACTIVE_CORES 0 // 0 => use all cores
 #endif
 
 #define BURST_WORDS 16
