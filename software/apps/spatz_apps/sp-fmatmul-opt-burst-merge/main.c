@@ -110,8 +110,11 @@ int verify_matrix(float *matrix, const float *checksum,
     if (diff < 0)
       diff = -diff;
     if (diff > prec) {
-      // Checksum mismatch - return row index
-      return (i) == 0 ? -1 : (int)(i);
+      // Checksum mismatch. Return the failing row as 1-based (0 == success)
+      // so the caller can index the checksum array safely. The previous
+      // "-1 for row 0" convention caused an r[-1] out-of-bounds read in the
+      // error path.
+      return (int)(i) + 1;
     }
   }
   return 0;  // All checksums matched
@@ -147,6 +150,15 @@ int main() {
   const uint32_t active_cores = cores_per_group * active_groups;
   const uint32_t is_core_active = cid < active_cores;
 
+  // Kernel preconditions for the current work-distribution scheme. Every core
+  // evaluates these identical constants, so on a violation they all return
+  // together here (before any barrier), avoiding the barrier-skip hang noted
+  // near the end of main. Without these guards, non-conforming dimensions
+  // silently produce wrong results or out-of-bounds accesses (e.g. an odd N
+  // makes the n+=2 unrolled inner loop read one B row past the matrix).
+  if ((gemm_l.N % 2u) != 0u)            return -3;  // inner loop unrolls n by 2
+  if ((gemm_l.M % active_groups) != 0u) return -4;  // M rows split across groups
+
   const uint32_t measure_iterations = 1;  // Run matmul once
 
   uint32_t timer_start, timer_end, timer;
@@ -178,11 +190,19 @@ int main() {
   // Calculate how many cores we have for the M dimension
   const uint32_t split_m_count = dim_group / kernel_size;
 
+  // Uniform across cores (before the work barrier): guard the column-split
+  // divisor below. split_m_count==0 (dim_group < kernel_size) would divide by
+  // zero at split_p_count; a non-multiple dim_group would mis-cover M rows.
+  if ((dim_group % kernel_size) != 0u || split_m_count == 0u) return -6;
+
   if (split_m_count < cores_per_group) {
     // Not enough rows to keep all cores busy in M dimension
     // Split the P dimension (columns) instead
     const uint32_t split_p_count = cores_per_group / split_m_count;
     
+    // Uniform across cores: safe to return here (before the work barrier).
+    if ((gemm_l.P % split_p_count) != 0u) return -5;  // P columns split per core
+
     // My column range in P dimension
     p_start = gemm_l.P / split_p_count * (core_gid % split_p_count);
     p_end   = gemm_l.P / split_p_count * ((core_gid % split_p_count) + 1);
@@ -319,8 +339,31 @@ int main() {
   if (cid == 0) {
     error = verify_matrix((float *)c, (const float *)r, gemm_l.M, gemm_l.P);
 
+#ifdef STRICT_VERIFY
+    // Optional exhaustive element-wise check against the golden result.
+    // Off by default: it reads the full MxP reference from DRAM (slow in RTL
+    // simulation), but unlike the row-sum checksum it catches errors that
+    // preserve row sums (e.g. a column-block swap or a wrong p_start).
+    if (error == 0) {
+      for (uint32_t i = 0; i < gemm_l.M && error == 0; ++i) {
+        for (uint32_t j = 0; j < gemm_l.P; ++j) {
+          float d = c[i * gemm_l.P + j] - gemm_C_dram[i * gemm_l.P + j];
+          if (d < 0) d = -d;
+          if (d > (float)0.01) {  // 1-based row index, matches verify_matrix
+            error = (int)(i) + 1;
+            break;
+          }
+        }
+      }
+      if (error == 0) printf("strict verify: success!\n");
+    }
+#endif
+
     if (error != 0) {
-      printf("Error core %d: checksum[%d]=%u\n", cid, error, (uint32_t)r[error]);
+      // error is 1-based; index the checksum array with (error - 1).
+      uint32_t bad_row = (uint32_t)error - 1u;
+      printf("Error core %d: row=%u checksum[%u]=%u\n", cid, bad_row, bad_row,
+             (uint32_t)r[bad_row]);
     } else {
       printf("success!\n");
     }
