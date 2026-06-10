@@ -71,6 +71,7 @@ sources:
       # Level 1
       - hardware/tb/axi_uart.sv
       - hardware/tb/traffic_generator.sv
+      - hardware/tb/tb_core_mem_scoreboard.sv
       # Level 2
       - hardware/tb/mempool_tb.sv
       # # DRAMsys
