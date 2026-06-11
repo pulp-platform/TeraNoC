@@ -42,6 +42,17 @@ static const burst_test_t tests[NUM_TESTS] = {
 static uint32_t __attribute__((aligned(BURST_BYTES))) src[NUM_CORES * PER_CORE_WORDS];
 static uint32_t __attribute__((aligned(BURST_BYTES))) dst[NUM_CORES * PER_CORE_WORDS];
 
+// Shared error accumulator. The verdict is reported via the EOC return value
+// (0 = PASS); [UART] detail is opt-in (-DVERDICT_PRINTF) to keep main's stack
+// frame + printf within the 512B per-core stack.
+static volatile uint32_t g_errors;
+
+static inline uint32_t amo_add(volatile uint32_t *a, uint32_t v) {
+  uint32_t old;
+  asm volatile("amoadd.w %0, %2, (%1)" : "=r"(old) : "r"(a), "r"(v) : "memory");
+  return old;
+}
+
 static inline void vload_store(uint32_t *src_ptr, uint32_t *dst_ptr, uint32_t len) {
   size_t gvl;
   uint32_t remaining = len;
@@ -80,6 +91,8 @@ int main() {
 
   mempool_barrier_init(cid);
 
+  if (cid == 0) g_errors = 0;
+
   if (cursor > PER_CORE_WORDS) {
     if (cid == 0) {
       printf("vector-burst-test: ERROR PER_CORE_WORDS too small (%u > %u)\n",
@@ -113,39 +126,38 @@ int main() {
 
   mempool_barrier(num_cores);
 
-  if (cid == 0) {
-    uint32_t errors = 0;
-    for (uint32_t c = 0; c < active_cores; ++c) {
-      const uint32_t core_base = c * PER_CORE_WORDS;
-      for (uint32_t t = 0; t < NUM_TESTS; ++t) {
-        const uint32_t base = core_base + test_base[t];
-        for (uint32_t i = 0; i < tests[t].len; ++i) {
-          const uint32_t exp = (c << 24) ^ (t << 16) ^ i;
-          const uint32_t got = dst[base + i];
-          if (got != exp) {
-            printf("[FAIL] core=%u test=%u idx=%u exp=0x%08x got=0x%08x\n",
-                   (unsigned)c, (unsigned)t, (unsigned)i,
-                   (unsigned)exp, (unsigned)got);
-            errors++;
-            if (errors > 32) {
-              printf("vector-burst-test: too many errors, aborting checks\n");
-              goto done_check;
-            }
-          }
-        }
+  // Parallel verify: each core checks only its OWN dst region. The old design
+  // had core 0 serially check all active_cores' data (~O(cores*data) remote
+  // loads on one core) -> far too slow at 256 cores. Mismatches accumulate into
+  // the shared g_errors via AMO.
+  if (cid < active_cores) {
+    const uint32_t core_base = cid * PER_CORE_WORDS;
+    uint32_t my_errors = 0;
+    for (uint32_t t = 0; t < NUM_TESTS; ++t) {
+      const uint32_t base = core_base + test_base[t];
+      for (uint32_t i = 0; i < tests[t].len; ++i) {
+        const uint32_t exp = (cid << 24) ^ (t << 16) ^ i;
+        if (dst[base + i] != exp) my_errors++;
       }
     }
-  done_check:
-    if (errors == 0) {
-      printf("vector-burst-test: PASS (cores=%u tests=%u)\n",
-             (unsigned)active_cores, (unsigned)NUM_TESTS);
-    } else {
-      printf("vector-burst-test: FAIL errors=%u\n", (unsigned)errors);
-    }
+    if (my_errors) (void)amo_add(&g_errors, my_errors);
   }
 
   mempool_barrier(num_cores);
-  return 0;
+
+#ifdef VERDICT_PRINTF
+  if (cid == 0) {
+    if (g_errors == 0) {
+      printf("vector-burst-test: PASS (cores=%u tests=%u)\n",
+             (unsigned)active_cores, (unsigned)NUM_TESTS);
+    } else {
+      printf("vector-burst-test: FAIL errors=%u\n", (unsigned)g_errors);
+    }
+  }
+#endif
+
+  mempool_barrier(num_cores);
+  return (int)g_errors;
 }
 
 // clang-format on
