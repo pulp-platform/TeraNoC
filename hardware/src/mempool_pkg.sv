@@ -4,7 +4,6 @@
 
 package mempool_pkg;
 
-  import snitch_pkg::MetaIdWidth;
   import cf_math_pkg::idx_width;
 
   /*********************
@@ -18,6 +17,8 @@ package mempool_pkg;
   localparam integer unsigned NumCoresPerTile         = `ifdef NUM_CORES_PER_TILE `NUM_CORES_PER_TILE `else 0 `endif;
   localparam integer unsigned NumDivsqrtPerTile       = `ifdef NUM_DIVSQRT_PER_TILE `NUM_DIVSQRT_PER_TILE `else (snitch_pkg::XDIVSQRT) `endif;
   localparam integer unsigned NumGroups               = `ifdef NUM_GROUPS `NUM_GROUPS `else 0 `endif;
+  localparam integer unsigned NumRMTiles              = `ifdef NUM_REDMULE_TILES `NUM_REDMULE_TILES `else 0 `endif;
+  localparam integer unsigned NumRMTilesPerGroup      = NumGroups == 0 ? 0 : NumRMTiles / NumGroups;
   localparam integer unsigned MAX_NumGroups           = 16;
   localparam integer unsigned RemoteGroupLatencyCycle = `ifdef REMOTE_GROUP_LATENCY_CYCLES `REMOTE_GROUP_LATENCY_CYCLES `else 7 `endif;
   localparam integer unsigned NumTiles                = NumCores / NumCoresPerTile;
@@ -250,6 +251,32 @@ package mempool_pkg;
     logic trans_complete;
   } dma_meta_t;
 
+  /***********************
+   *  REDMULE PARAMETERS *
+   ***********************/
+
+  localparam integer unsigned ARRAY_HEIGHT = `ifdef ARRAY_HEIGHT `ARRAY_HEIGHT `else 4 `endif;
+  localparam integer unsigned PIPE_REGS    = `ifdef PIPE_REGS `PIPE_REGS `else 3 `endif;
+  localparam integer unsigned ARRAY_WIDTH  = `ifdef ARRAY_WIDTH `ARRAY_WIDTH `else (ARRAY_HEIGHT*PIPE_REGS) `endif;
+  localparam integer unsigned ROB_DEPTH    = `ifdef ROB_DEPTH `ROB_DEPTH `else 16 `endif;
+
+  localparam integer unsigned RMNumStreams              = 4;
+  localparam integer unsigned RMOutstandingTransactions = ROB_DEPTH;
+  localparam integer unsigned RMDataWidth               = 16 * ARRAY_HEIGHT * (PIPE_REGS + 1);
+  localparam integer unsigned RMMasterPorts             = RMDataWidth / DataWidth;
+  localparam integer unsigned RMRegSize                 = 256;
+
+  localparam integer unsigned RMBaseAddr = 32'h4002_0000;
+  localparam integer unsigned RMMask     = ~((1 << idx_width(RMRegSize)) - 1);
+
+  localparam integer unsigned MaxLocalPortsPerTile =
+      NumRMTiles > 0 ? RMMasterPorts + NumCoresPerTile : NumCoresPerTile;
+
+  localparam integer unsigned MetaIdWidth =
+      (NumRMTiles > 0 &&
+       idx_width(RMNumStreams * RMOutstandingTransactions) > snitch_pkg::MetaIdWidth) ?
+      idx_width(RMNumStreams * RMOutstandingTransactions) : snitch_pkg::MetaIdWidth;
+
   /**********************************
    *  TCDM INTERCONNECT PARAMETERS  *
    **********************************/
@@ -258,10 +285,26 @@ package mempool_pkg;
   typedef logic [TCDMAddrMemWidth-1:0] bank_addr_t;
   typedef logic [TCDMAddrMemWidth+idx_width(NumBanksPerTile)-1:0] tile_addr_t;
   typedef logic [MetaIdWidth-1:0] meta_id_t;
-  typedef logic [idx_width(NumCoresPerTile)-1:0] tile_core_id_t;
+  typedef logic [idx_width(MaxLocalPortsPerTile)-1:0] tile_core_id_t;
   typedef logic [idx_width(NumTilesPerGroup)-1:0] tile_group_id_t;
   typedef logic [idx_width(NumGroups)-1:0] group_id_t;
   typedef logic [3:0] amo_t;
+
+  typedef struct packed {
+    addr_t    addr;
+    meta_id_t id;
+    logic [3:0] amo;
+    logic     write;
+    data_t    data;
+    strb_t    strb;
+  } rm_dreq_t;
+
+  typedef struct packed {
+    data_t    data;
+    meta_id_t id;
+    logic     write;
+    logic     error;
+  } rm_dresp_t;
 
   typedef struct packed {
     meta_id_t meta_id;

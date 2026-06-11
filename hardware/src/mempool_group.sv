@@ -121,8 +121,10 @@ module mempool_group
     logic              [NumRemoteRespPortsPerTile-1:0] tran_tcdm_slave_resp_ready;
 
     mempool_tile #(
-      .TCDMBaseAddr(TCDMBaseAddr),
-      .BootAddr    (BootAddr    )
+      .TCDMBaseAddr(TCDMBaseAddr            ),
+      .BootAddr    (BootAddr                ),
+      // First NumRMTilesPerGroup tiles in the group host a RedMulE tensor core.
+      .RedMulE     (t < NumRMTilesPerGroup  )
     ) i_tile (
       .clk_i                   (clk_i                                          ),
       .rst_ni                  (rst_ni                                         ),

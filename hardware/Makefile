@@ -158,6 +158,16 @@ vlog_defs += -DZQUARTERINX=$(zquarterinx)
 vlog_defs += -DXDIVSQRT=$(xDivSqrt)
 vlog_defs += -DSNITCH_TRACE=$(snitch_trace)
 # --------------------------
+# RedMulE Tensor-Core
+# --------------------------
+vlog_defs += -DNUM_REDMULE_TILES=$(num_redmule_tiles)
+ifneq ($(num_redmule_tiles), 0)
+vlog_defs += -DARRAY_HEIGHT=$(redmule_height)
+vlog_defs += -DARRAY_WIDTH=$(redmule_width)
+vlog_defs += -DPIPE_REGS=$(redmule_regs)
+vlog_defs += -DROB_DEPTH=$(rob_depth)
+endif
+# --------------------------
 # AXI & DMA Configuration
 # --------------------------
 vlog_defs += -DAXI_DATA_WIDTH=$(axi_data_width)
