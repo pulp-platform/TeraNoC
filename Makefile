@@ -192,6 +192,29 @@ $(VERILATOR_INSTALL_DIR)/bin/verilator: toolchain/verilator Makefile
 	cp toolchain/verilator/bin/verilator_bin $(VERILATOR_INSTALL_DIR)/share/verilator/bin/verilator_bin
 	cp toolchain/verilator/bin/verilator_bin $(VERILATOR_INSTALL_DIR)/bin/verilator_bin
 
+# Perfetto trace_processor (native, large-trace acceleration). The prebuilt
+# shell needs a newer GLIBC than older hosts ship, so run it in an Ubuntu
+# singularity container; shell + image install under install/perfetto.
+PERFETTO_INSTALL_DIR ?= $(INSTALL_DIR)/perfetto
+PERFETTO_IMAGE       ?= docker://ubuntu:24.04
+PERFETTO_SHELL       := $(PERFETTO_INSTALL_DIR)/trace_processor_shell
+PERFETTO_SIF         := $(PERFETTO_INSTALL_DIR)/ubuntu2404.sif
+
+.PHONY: perfetto
+perfetto: $(PERFETTO_SHELL) $(PERFETTO_SIF)
+$(PERFETTO_SHELL):
+	mkdir -p $(PERFETTO_INSTALL_DIR)
+	@url=$$(curl -sSL --fail https://get.perfetto.dev/trace_processor | \
+		grep -oE 'https://\S+linux-amd64/trace_processor_shell' | head -1); \
+	test -n "$$url" || { echo "ERROR: cannot resolve latest trace_processor URL"; exit 1; }; \
+	echo ">> latest trace_processor: $$url"; \
+	curl -L --fail -o $@ "$$url"
+	chmod +x $@
+$(PERFETTO_SIF):
+	mkdir -p $(PERFETTO_INSTALL_DIR)
+	SINGULARITY_CACHEDIR=$(PERFETTO_INSTALL_DIR)/.cache singularity build --force $@ $(PERFETTO_IMAGE)
+	rm -rf $(PERFETTO_INSTALL_DIR)/.cache
+
 # Update and patch hardware dependencies for MemPool
 # Previous changes will be stashed. Clear all the stashes with `git stash clear`
 .PHONY: update-deps

@@ -519,6 +519,56 @@ $(buildpath)/%.trace: $(buildpath)/%.dasm
 tracevis:
 	$(MEMPOOL_DIR)/scripts/tracevis.py $(preload) $(buildpath)/*.trace -o $(buildpath)/tracevis.json
 
+# Perfetto protobuf export. Knobs:
+#   slices=function|instruction|none   core slice granularity (instruction needs spike-dasm)
+#   noc_slices=state|packet            NoC port slice granularity
+#   free_range=1                       auto-scale counter y-axes (default: pinned to [0,1])
+#   flows=1                            correlate packets to core requests via (requester, meta_id); forces noc_slices=packet
+#   freq=<MHz>                         clock freq for the real-ns axis (default 500 MHz)
+slices ?= function
+freq ?= 500
+noc_slices ?= state
+ifeq ($(flows),1)
+override noc_slices := packet
+endif
+# Optional cycle window: window=START:END exports only that cycle range (smaller/faster trace).
+ifdef window
+  win_start := $(word 1,$(subst :, ,$(window)))
+  win_end   := $(word 2,$(subst :, ,$(window)))
+endif
+.PHONY: perfetto-gen
+perfetto-gen:
+	$(python) $(ROOT_DIR)/scripts/perfetto_gen.py $(buildpath)/trace_hart_*.dasm \
+		--cores-per-tile $(num_cores_per_tile) \
+		--tiles-per-group $(shell echo $$(( $(num_cores) / $(num_cores_per_tile) / $(num_groups) ))) \
+		--mesh-y $(shell echo $$(( $(num_groups) / $(num_x) ))) \
+		--clk-freq $(freq) \
+		--slices $(slices) $(if $(preload),--elf $(preload),) \
+		$(if $(wildcard $(buildpath)/noc_profiling),--noc $(buildpath)/noc_profiling,) \
+		$(if $(wildcard $(buildpath)/spm_profiling),--spm $(buildpath)/spm_profiling,) \
+		--noc-slices $(noc_slices) $(if $(filter 1,$(free_range)),--free-range,) \
+		$(if $(filter 1,$(flows)),--flows,) \
+		$(if $(win_start),--cycle-start $(win_start),) $(if $(win_end),--cycle-end $(win_end),) \
+		-o $(buildpath)/perf.perfetto-trace
+
+# Native Perfetto trace_processor lives under $(INSTALL_DIR)/perfetto, installed
+# by the root `make perfetto`. perfetto-gen exports the trace; perfetto-view
+# serves it through the installed shell + container.
+perfetto_dir := $(INSTALL_DIR)/perfetto
+tp_shell     := $(perfetto_dir)/trace_processor_shell
+perfetto_sif := $(perfetto_dir)/ubuntu2404.sif
+
+.PHONY: perfetto-view
+perfetto-view:
+	@test -f $(tp_shell) -a -f $(perfetto_sif) || \
+		{ echo "ERROR: trace_processor not installed -- run 'make perfetto' in the repo root"; exit 1; }
+	@test -f $(buildpath)/perf.perfetto-trace || \
+		{ echo "ERROR: $(buildpath)/perf.perfetto-trace not found -- run 'make perfetto-gen' first"; exit 1; }
+	@echo ">> Serving $(abspath $(buildpath))/perf.perfetto-trace on 127.0.0.1:9001"
+	@echo ">> Reload https://ui.perfetto.dev and click YES on 'Trace Processor native acceleration'"
+	singularity exec -B $(abspath $(buildpath)) -B $(perfetto_dir) $(perfetto_sif) \
+		$(tp_shell) --httpd $(abspath $(buildpath))/perf.perfetto-trace
+
 ############################
 # Unit tests simulation    #
 ############################
