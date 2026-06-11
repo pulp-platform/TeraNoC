@@ -457,5 +457,6 @@ module mempool_tb;
  * NoC Profiling *
  ****************/
 `include "tb_noc_profiling.svh"
+`include "tb_spm_profiling.svh"
 
 endmodule : mempool_tb

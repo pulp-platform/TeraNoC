@@ -373,11 +373,8 @@ module mempool_tile
   logic                    [NumBanksPerTile-1:0] bank_resp_wide;
   local_resp_interco_addr_t[NumBanksPerTile-1:0] bank_resp_ini_addr;
 
-  // gen_superbank_resp_ini_addr conditions bank_resp_ini_addr (the local
-  // input-port index stored in the bank's metadata) into the resp xbar's
-  // sel, handling NumRemoteReqPortsPerTile vs NumRemoteRespPortsPerTile
-  // asymmetry. The conditioned value feeds mempool_tcdm_bank_interco's
-  // mst_resp_ini_addr_i input.
+  // Condition bank_resp_ini_addr into the resp xbar's sel, handling
+  // req/resp port-count asymmetry; feeds i_tcdm_bank_interco.mst_resp_ini_addr_i.
   for (genvar b = 0; unsigned'(b) < NumBanksPerTile; b++) begin: gen_superbank_resp_ini_addr
     if(NumRemoteReqPortsPerTile > NumRemoteRespPortsPerTile ) begin: gen_superbank_resp_ini_addr_req_gt_resp
       always_comb begin
@@ -434,13 +431,16 @@ module mempool_tile
     end
   end
 
-  // (mempool_tcdm_bank_interco is instantiated further below, after the
-  // signal declarations for local_req_interco_payload / postreg_tcdm_slave_req
-  // / etc. that it connects to.)
+  // mempool_tcdm_bank_interco is instantiated further below, after its
+  // connected signal declarations.
 
   `ifndef TARGET_SYNTHESIS
   `ifndef TARGET_VERILATOR
+  // DISABLED (commented out): heavy per-word SPM profiler (profile_d) — its
+  // unbounded [bank][2^addr] cycle lists balloon VCS memory; superseded by the
+  // lightweight per-bank trace in tb/tb_spm_profiling.svh.
   `ifdef SPM_PROFILING
+    /*
     logic [63:0] cycle_q;
     profile_t profile_d [NumBanksPerTile-1:0][2**TCDMAddrMemWidth-1:0];
     // profile_t profile_q [NumBanksPerTile-1:0][2**TCDMAddrMemWidth-1:0];
@@ -453,6 +453,7 @@ module mempool_tile
         // profile_q <= profile_d;
       end
     end
+    */
   `endif
   `endif
   `endif
@@ -535,6 +536,8 @@ module mempool_tile
   `ifndef TARGET_SYNTHESIS
   `ifndef TARGET_VERILATOR
   `ifdef SPM_PROFILING
+    // DISABLED (commented out) with the profile_d decl above.
+    /*
     always_ff @(posedge clk_i or negedge rst_ni) begin
       // profile_d[b] = profile_q[b];
       if(~rst_ni) begin
@@ -568,6 +571,7 @@ module mempool_tile
         end
       end
     end
+    */
   `endif
   `endif
   `endif
@@ -744,9 +748,8 @@ module mempool_tile
   tcdm_slave_resp_t [NumCoresPerTile-1:0] local_resp_interco_payload;
   addr_t            [NumCoresPerTile-1:0] local_req_interco_addr_int;
 
-  // Bank-side TCDM interconnect: combines narrow-req routing, narrow-resp
-  // routing, wide-DMA superbank demux/mux, wide-narrow priority arbitration
-  // at each bank, and within-superbank bank-id remap.
+  // Bank-side TCDM interconnect: narrow req/resp routing, wide-DMA superbank
+  // demux/mux, per-bank wide-narrow arbitration, and within-superbank bank-id remap.
   mempool_tcdm_bank_interco #(
     .NumNarrowReq   (NumCoresPerTile + NumRemoteReqPortsPerTile),
     .NumNarrowResp  (NumCoresPerTile + NumRemoteRespPortsPerTile),
@@ -766,14 +769,12 @@ module mempool_tile
     .clk_i                  (clk_i),
     .rst_ni                 (rst_ni),
     .group_id_i             (group_id),
-    // Narrow request inputs: cores at [0..NumCoresPerTile-1], remote slaves
-    // at [NumCoresPerTile..NumCoresPerTile+NumRemoteReqPortsPerTile-1]
-    // (matches the legacy concat order in i_local_req_interco).
+    // Narrow req inputs: cores at low indices, remote slaves above; concat
+    // order must match the legacy i_local_req_interco order.
     .slv_narrow_req_i       ({postreg_tcdm_slave_req,       local_req_interco_payload}),
     .slv_narrow_req_valid_i ({postreg_tcdm_slave_req_valid, local_req_interco_valid  }),
     .slv_narrow_req_ready_o ({postreg_tcdm_slave_req_ready, local_req_interco_ready  }),
-    // Narrow response outputs: cores at [0..NumCoresPerTile-1], remote resp
-    // ports at [NumCoresPerTile..NumCoresPerTile+NumRemoteRespPortsPerTile-1].
+    // Narrow resp outputs: cores at low indices, remote resp ports above.
     .slv_narrow_resp_o      ({prereg_tcdm_slave_resp,       local_resp_interco_payload}),
     .slv_narrow_resp_valid_o({prereg_tcdm_slave_resp_valid, local_resp_interco_valid  }),
     .slv_narrow_resp_ready_i({prereg_tcdm_slave_resp_ready, local_resp_interco_ready  }),
@@ -794,8 +795,7 @@ module mempool_tile
     .mst_resp_valid_i       (bank_resp_valid     ),
     .mst_resp_ready_o       (bank_resp_ready     ),
     .mst_resp_wide_i        (bank_resp_wide      ),
-    // gen_superbank_resp_ini_addr conditions bank_resp_ini_addr into the
-    // resp xbar's sel (handles req/resp port count asymmetry).
+    // Conditioned resp xbar sel (see gen_superbank_resp_ini_addr above).
     .mst_resp_ini_addr_i    (superbank_resp_ini_addr)
   );
 
