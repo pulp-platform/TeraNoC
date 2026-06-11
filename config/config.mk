@@ -88,3 +88,6 @@ spm_profiling ?= 0
 
 # Enable the interconnect access pattern profiling
 noc_profiling ?= 0
+
+# Number of RedMulE tensor-core tiles in the cluster
+num_redmule_tiles ?= 0
