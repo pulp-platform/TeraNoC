@@ -59,7 +59,7 @@ module tcdm_id_remapper
     meta_id_t [RobDepth-1:0] remapped_id_q, remapped_id_d;
     logic [RobDepth-1:0] remapped_id_valid_q, remapped_id_valid_d;
     id_t [RobDepth-1:0] id_q, id_d;
-    logic [snitch_pkg::BurstLenWidth-1:0] burst_left_q, burst_left_d;
+    logic [RobDepth-1:0][snitch_pkg::BurstLenWidth-1:0] burst_left_q, burst_left_d;
 
     `FF(remapped_id_q, remapped_id_d, '0)
     `FF(remapped_id_valid_q, remapped_id_valid_d, '0)
