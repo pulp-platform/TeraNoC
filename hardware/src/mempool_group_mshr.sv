@@ -1595,9 +1595,16 @@ module mempool_group_mshr
         resp_head_beat_pending[mshr_i] = |mshr_d[mshr_i].beat_pending;
         if (!resp_head_beat_pending[mshr_i]) begin
           if ((mshr_d[mshr_i].beats_left == BurstLenWidth'(1)) &&
-              EnableRespCache &&
+              EnableRespCache && !amo_invalidate &&
               (mshr_d[mshr_i].burst_len == BurstLenWidth'(1))) begin
             // Keep final drained head response as cache data (do not pop).
+            // Guarded by !amo_invalidate: a single-word load finalizing in the
+            // same cycle as an AMO must NOT cache its (now stale, pre-AMO) value.
+            // The AMO-invalidate sweep above runs earlier in this always_comb and
+            // only clears entries that are already MSHR_CACHED, so without this
+            // guard a freshly-cached entry would escape it and serve stale data to
+            // a later load. The else branch instead pops+deallocates this entry
+            // (the response was already delivered to the requester this cycle).
             for (int s = 0; s < MshrMergeReqs; s++) begin
               mshr_d[mshr_i].sub_reqs[s].valid = 1'b0;
             end
