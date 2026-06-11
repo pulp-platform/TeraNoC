@@ -607,6 +607,23 @@ module mempool_group_mshr
         else $fatal(1, "MSHR resp_valid mismatch with resp_buf_cnt: mshr=%0d valid=%0d cnt=%0d",
                     mshr_i, mshr_q[mshr_i].resp_valid, mshr_q[mshr_i].resp_buf_cnt);
 
+      // Load-bearing invariant for EnableMshrSingleReq + EnableRespCache: a live
+      // CACHED entry must always hold its buffered response (resp_buf_cnt > 0, so
+      // resp_valid == 1). This is what makes a single-word load to a cached
+      // address ALWAYS take the merge/hit path (req_hit_mshr) and never
+      // duplicate-allocate a second MSHR entry for the same address. The
+      // finalize-to-CACHED branch keeps the data (does not pop); nothing
+      // decrements resp_buf_cnt while CACHED. If a future change ever breaks this
+      // (e.g. an LRU/flush pop), the duplicate-allocation hazard could reopen --
+      // this assertion catches it.
+      cached_entry_holds_data: assert property(
+        @(posedge clk_i) disable iff (!rst_ni)
+          !mshr_q_valid[mshr_i] ||
+          (mshr_q[mshr_i].state != MSHR_CACHED) ||
+          (mshr_q[mshr_i].resp_buf_cnt != '0))
+        else $fatal(1, "MSHR CACHED entry without buffered data (resp_buf_cnt==0): mshr=%0d",
+                    mshr_i);
+
       beat_done_subset_seen: assert property(
         @(posedge clk_i) disable iff (!rst_ni)
           !mshr_q_valid[mshr_i] ||
@@ -666,6 +683,19 @@ module mempool_group_mshr
   endgenerate
   `endif
   // pragma translate_on
+
+  // NOTE: two valid MSHR entries CAN legitimately share an address and that is
+  // NOT a duplicate-allocation bug: when a later same-address request cannot
+  // merge into an already-draining entry (the no_late_join_burst rule), it
+  // allocates a second entry with a DIFFERENT meta_id range, and responses are
+  // routed by (tile_id, core_id, meta_id range), not by address -- so each entry
+  // captures its own response correctly. (An address-only no-duplicate assertion
+  // was tried and fired on this benign case in P1, so it was removed.) The
+  // deadlock the config comment referred to (a CACHED entry plus a fresh
+  // same-address single-word allocation) is instead prevented by the invariant
+  // asserted above (cached_entry_holds_data): a CACHED entry always holds its
+  // data, so a single-word load to it always hits the merge path and never
+  // allocates a second entry.
 
   // Detect whether any response beat on input already targets each MSHR entry.
   // This blocks late-join on burst entries as soon as first beat appears,

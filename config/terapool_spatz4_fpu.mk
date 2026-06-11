@@ -53,7 +53,7 @@ noc_routing_algorithm ?= 0
 
 # NoC remapping configuration
 # 0: no remapping, 1: req remapping, 2: resp remapping 3: req+resp remapping
-noc_router_remapping ?= 1
+noc_router_remapping ?= 0
 
 # Hash-based port spreading at tile level (bitmask)
 #   bit0 (1): req port hash     — spread req across remote req ports
@@ -123,14 +123,19 @@ group_mshr_num           ?= 64
 # Max sub-requests coalesced into one MSHR entry.
 group_mshr_merge_reqs    ?= 8
 # Admit single-word reqs into MSHR merge pool (1) or let them bypass (0).
-# NOTE: currently set to 0 as a workaround. With =1, a residual orphan race
-# in the single-word admission path (likely duplicate-entry allocation when
-# a CACHED entry exists for the same address) causes sporadic deadlocks on
-# sp-fmatmul-opt-burst-merge. Tested fixes (beat_pending init for mid-drain
-# merges; removing CACHED-merge) were each insufficient. Until the root
-# cause is fully characterized, keep this at 0 — single-word loads bypass
-# the MSHR. See bottleneck_analysis/ for details.
-group_mshr_enable_single ?= 0
+# Set to 1 (design intent: single-word loads coalesce + multicast via the MSHR).
+# The earlier sporadic sp-fmatmul deadlocks attributed here to a "duplicate-entry
+# allocation when a CACHED entry exists for the same address" were investigated
+# and that hypothesis was ruled out: a CACHED entry always retains its buffered
+# response (resp_buf_cnt>0/resp_valid=1), so a single-word load to a cached
+# address ALWAYS takes the merge/hit path and can never allocate a second entry
+# (verified by the cached_entry_holds_data assertion in mempool_group_mshr.sv).
+# (Same-address entries with different meta_ids are legitimate and not a dup.)
+# The real causes were the VLSU force_send single-beat
+# wedge, the burst-tail->store counter corruption, and the AMO/response-cache
+# race -- all now fixed (spatz_vlsu.sv, mempool_group_mshr.sv). See
+# bottleneck_analysis/ for the audit/investigation.
+group_mshr_enable_single ?= 1
 # Emit MSHR internal [MSHR stats] via $display (sim-only).
 group_mshr_enable_stats  ?= 1
 # Stats print period (cycles) while csr_trace is active (0 = final dump only).
