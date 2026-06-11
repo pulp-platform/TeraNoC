@@ -505,50 +505,6 @@ package mempool_pkg;
     int unsigned write_cycles[$];      // dynamic array to store cycles of write accesses
   } profile_t;
 
-  // tile level profiling
-  typedef struct {
-    // tile remote ports profile
-    int unsigned req_vld_cyc_num[NumRemoteReqPortsPerTile-1];
-    int unsigned req_hsk_cyc_num[NumRemoteReqPortsPerTile-1];
-  } tile_level_profile_t;
-
-  // group level profiling
-  typedef struct {
-    // group xbar ports profile
-    int unsigned req_vld_cyc_num                            [NumRemoteReqPortsPerTile-1];
-    int unsigned req_hsk_cyc_num                            [NumRemoteReqPortsPerTile-1];
-    int unsigned req_vld_cyc_more_than_one_hit_same_bank_num;
-  } group_level_profile_t;
-
-  // router level profile
-  typedef struct {
-    // noc router ports profile
-    int unsigned in_vld_cyc_num [4]; // 4: 4 directions
-    int unsigned in_hsk_cyc_num [4]; // 4: 4 directions
-    int unsigned out_vld_cyc_num[4]; // 4: 4 directions
-    int unsigned out_hsk_cyc_num[4]; // 4: 4 directions
-  } router_level_profile_t;
-
-  // router local ports profile
-    // noc router local req ports profile
-  typedef struct {
-    int unsigned read_req_num;
-    int unsigned write_req_num;
-  } router_local_req_port_profile_t;
-    // noc router local resp ports profile
-  typedef struct {
-    int unsigned req_num;
-  } router_local_resp_port_profile_t;
-
-  typedef struct {
-    // noc router ports profile
-    int unsigned in_vld_cyc_num [5];
-    int unsigned in_hsk_cyc_num [5];
-    int unsigned hol_stall_cyc_num [5];
-    int unsigned out_congst_cyc_num [5][5];
-    int unsigned cur_stall_cyc_num [5];
-    int unsigned max_stall_cyc_num [5];
-  } router_input_profile_t;
   `endif
 `endif
 
