@@ -183,6 +183,7 @@ if __name__ == '__main__':
         "cmatmul_q16": {"func": datalib.generate_qcmatmul},
         "dotp_f16": {"func": datalib.generate_fdotp},
         "dotp_f32": {"func": datalib.generate_fdotp},
+        "redmule_f16": {"func": datalib.generate_fgemm},
         "dotp_i32": {"func": datalib.generate_idotp},
         "conv2d_f16": {"func": datalib.generate_fconv2d},
         "conv2d_f32": {"func": datalib.generate_fconv2d},
