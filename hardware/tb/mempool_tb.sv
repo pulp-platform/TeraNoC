@@ -204,6 +204,60 @@ module mempool_tb;
     end: gen_wfi_tiles
   end: gen_wfi_groups
 
+  // Helper debug signals: per-core Snitch pipeline stall (mirrors `wfi` above).
+  // The stall judgement EXCLUDES WFI idling: core_stall[i] = i_snitch.stall & ~wfi[i], so a core
+  // parked in WFI (e.g. waiting on a barrier wakeup) is NOT counted as stalled — only cores stuck
+  // for a real reason (load response, fence, accelerator backpressure) show up.
+  //   core_stall[i]      : 1 when core i is stalled this cycle AND not in WFI
+  //                        (stall = ~valid_instr|lsu_stall|acc_stall|fence_stall).
+  //   core_stall_long[i] : 1 when core i has been *continuously* stalled (non-WFI) for more than
+  //                        StallLongThreshold cycles (clears the cycle the stall drops).
+  //   core_stall_cnt[i]  : current continuous-stall length (saturating) — read it to see
+  //                        *how long* a flagged core has been stuck.
+  localparam int unsigned StallLongThreshold = 100;
+  localparam int unsigned StallCntWidth      = 32;
+  logic [NumCores-1:0]                    core_stall;
+  logic [NumCores-1:0]                    core_stall_long;
+  logic [NumCores-1:0][StallCntWidth-1:0] core_stall_cnt;
+  int unsigned core_stall_count, core_stall_long_count;
+
+  for (genvar g = 0; g < NumGroups; g++) begin: gen_stall_groups
+    for (genvar t = 0; t < NumTilesPerGroup; t++) begin: gen_stall_tiles
+      for (genvar c = 0; c < NumCoresPerTile; c++) begin: gen_stall_cores
+        assign core_stall[g*NumTilesPerGroup*NumCoresPerTile + t*NumCoresPerTile + c] =
+            dut.i_mempool_cluster.gen_groups_x[g/NumY].gen_groups_y[g%NumY].gen_rtl_group
+                .i_group.i_mempool_group.gen_tiles[t].i_tile.gen_cores[c].gen_mempool_cc
+                .riscv_core.i_snitch.stall
+            & ~wfi[g*NumTilesPerGroup*NumCoresPerTile + t*NumCoresPerTile + c];
+      end: gen_stall_cores
+    end: gen_stall_tiles
+  end: gen_stall_groups
+
+  // Per-core continuous-stall counter (saturating) + long-stall flag.
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      core_stall_cnt <= '0;
+    end else begin
+      for (int unsigned i = 0; i < NumCores; i++) begin
+        if (core_stall[i]) begin
+          if (core_stall_cnt[i] != '1)
+            core_stall_cnt[i] <= core_stall_cnt[i] + 1'b1;
+        end else begin
+          core_stall_cnt[i] <= '0;
+        end
+      end
+    end
+  end
+
+  always_comb begin
+    for (int unsigned i = 0; i < NumCores; i++) begin
+      core_stall_long[i] = (core_stall_cnt[i] > StallLongThreshold);
+    end
+  end
+
+  assign core_stall_count      = $countones(core_stall);
+  assign core_stall_long_count = $countones(core_stall_long);
+
   // CSR trace OR across all groups (for MSHR stats gating).
   logic [NumGroups-1:0][NumTilesPerGroup-1:0][NumCoresPerTile-1:0] csr_trace_q;
   logic csr_trace_any_global;
@@ -657,6 +711,13 @@ module mempool_tb;
  * Per-Stage Bottleneck Profiling    *
  *************************************/
 `include "tb_noc_bottleneck_profiling.svh"
+
+/****************************************************
+ * Per-flit NoC Request/Response Event Tracer       *
+ * Emits noc_trace/events.csv; analyze with          *
+ * hardware/scripts/analyze_noc_trace.py.            *
+ ****************************************************/
+`include "tb_noc_req_resp_tracer.svh"
 
 /*****************************************************
  * Core Memory Scoreboard VIP (inflight req tracker) *
