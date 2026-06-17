@@ -408,6 +408,7 @@ module mempool_tile
     tile_core_id_t core_id;
     logic wide;
     logic write;
+    logic [MshrTagWidth-1:0] mshr_tag; // Tier-b: requester MSHR id, echoed via tcdm_adapter metadata spill
   } bank_metadata_t;
 
   // Memory interfaces
@@ -674,7 +675,8 @@ module mempool_tile
       tile_id   : bank_req_payload[b].ini_addr,
       group_id  : bank_req_payload[b].src_group_id,
       wide      : bank_req_wide[b],
-      write     : bank_req_payload[b].wen
+      write     : bank_req_payload[b].wen,
+      mshr_tag  : bank_req_payload[b].mshr_tag
     };
     always_comb begin
       int unsigned remote_idx;
@@ -697,6 +699,7 @@ module mempool_tile
     assign bank_resp_payload[b].src_group_id  = meta_out.group_id;
     assign bank_resp_payload[b].rdata.amo     = '0; // Don't care
     assign bank_resp_payload[b].wen           = meta_out.write;
+    assign bank_resp_payload[b].mshr_tag      = meta_out.mshr_tag; // Tier-b: echo MSHR id back to the requester
     assign bank_resp_wide[b]                  = meta_out.wide;
 
     tcdm_adapter #(
@@ -1169,10 +1172,13 @@ module mempool_tile
       assign local_req_interco_payload_raw[idx].wdata.core_id = '0;
       assign local_req_interco_payload_raw[idx].ini_addr      = '0;
       assign local_req_interco_payload_raw[idx].src_group_id  = '0;
+      assign local_req_interco_payload_raw[idx].mshr_tag      = '0; // Tier-b: local path unused
       assign soc_data_q[idx].id                           = '0;
 
       // Constant value
       assign remote_req_interco_raw[idx].wdata.core_id = idx[idx_width(NumCoresPerTile*NumDataPortsPerCore)-1:0];
+      // Tier-b: the tile does not set the MSHR tag; the group MSHR stamps it at allocation.
+      assign remote_req_interco_raw[idx].mshr_tag = '0;
 
       // The wen of the req
       assign remote_req_interco_wen   [idx] = remote_req_interco[idx].wen;

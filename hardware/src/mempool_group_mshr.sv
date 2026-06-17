@@ -23,6 +23,12 @@ module mempool_group_mshr
   parameter int MshrNum        = `ifdef GROUP_MSHR_NUM `GROUP_MSHR_NUM `else NumTilesPerGroup `endif,
   parameter int MshrMergeWords = 1,
   parameter int MshrMergeReqs  = `ifdef GROUP_MSHR_MERGE_REQS `GROUP_MSHR_MERGE_REQS `else 8 `endif,
+  // Address-banking (Increment 3): the MSHR table is partitioned into MshrNum/MshrWaysPerBank banks,
+  // each request maps to bank_of({tgt_group,addr}); allocation and the hit search are confined to that
+  // bank's ways, so a request compares against only MshrWaysPerBank entries (not all MshrNum) while
+  // same-(group,addr) requests from any tile still land in the same bank (cross-tile merge preserved).
+  // MshrWaysPerBank must divide MshrNum.
+  parameter int MshrWaysPerBank = `ifdef GROUP_MSHR_WAYS_PER_BANK `GROUP_MSHR_WAYS_PER_BANK `else 4 `endif,
   // MSHR admission policy by effective load length:
   // - single      : req_len == 1
   // - non-full    : 1 < req_len < MshrFullBurstWords
@@ -39,6 +45,14 @@ module mempool_group_mshr
   // 0: drain one sub-request per MSHR per cycle (original behavior)
   // 1: drain as many sub-requests as ports allow per cycle
   parameter bit DrainMultiPort = 1'b1,
+  // Round-robin fairness on the contended arbitration scans (audit M2'/M3/L3):
+  // the per-bank allocation admit, the drain entry scan, and the drain sub_req
+  // scan all rotate their priority start point by a free-running base instead of
+  // always favoring the lowest index. 1 = RR on; 0 = legacy fixed lowest-index
+  // priority (start=0), bit-identical to the pre-RR baseline. See the RR-base
+  // declarations and always_ff below. (M4 bypass-vs-MSHR is intentionally not a
+  // fairness point -- bypass is non-backpressurable -- so it is never rotated.)
+  parameter bit EnableRrFairness = `ifdef GROUP_MSHR_ENABLE_RR `GROUP_MSHR_ENABLE_RR `else 1'b1 `endif,
   // Keep responded entries as a small read-response cache.
   parameter bit EnableRespCache = 1'b1,
   // Simulation-only statistics/prints (translate_off).
@@ -93,7 +107,23 @@ module mempool_group_mshr
   localparam int unsigned TileIdBits       = idx_width(NumTilesPerGroup);
   localparam int unsigned TcdmAddrNoTileW  = $bits(tcdm_addr_t) - TileIdBits;
   localparam int unsigned SpatzNumOutstandingLoads = snitch_pkg::NumIntOutstandingLoads;
+  // Address-banking geometry (Increment 3): MshrBankNum banks of MshrWaysPerBank entries each.
+  localparam int unsigned MshrBankNum = (MshrWaysPerBank > 0) ? (MshrNum / MshrWaysPerBank) : 1;
+  localparam int unsigned BankIdW     = idx_width(MshrBankNum);
   // Current coalescer merges only exact 32-bit words (MshrMergeWords should be 1).
+
+  // Map a (target group, merge address key) to its MSHR bank: XOR-fold address bits ABOVE the
+  // burst-alignment boundary together with the target group. Pure function of {group,addr} (no
+  // requester dependence) so all same-(group,line) requests hash to the same bank (cross-tile merge
+  // preserved); folding above BurstAlignBits keeps a burst's beats within one bank.
+  function automatic logic [BankIdW-1:0] mshr_bank_of(input tcdm_addr_t addr_key, input group_id_t grp);
+    logic [BankIdW-1:0] b;
+    b = BankIdW'(grp);
+    for (int i = BurstAlignBits; i < $bits(tcdm_addr_t); i++) begin
+      b[(i - BurstAlignBits) % BankIdW] = b[(i - BurstAlignBits) % BankIdW] ^ addr_key[i];
+    end
+    return b;
+  endfunction
 
   // Per-entry MSHR lifecycle:
   // - IDLE       : entry is free/unused (typically valid=0).
@@ -209,32 +239,35 @@ module mempool_group_mshr
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]
              [BurstLenWidth-1:0]                                              req_len_raw;
   tcdm_addr_t[NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_addr_key;
+  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][BankIdW-1:0] req_bank;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]
              [TileIdBits-1:0]                                                 req_tile_id;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]
              [TcdmAddrNoTileW-1:0]                                            req_tile_addr;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]
              [TcdmAddrNoTileW-1:0]                                            req_tile_addr_key;
-  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrNum-1:0] req_addr_hit_map;
-  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrNum-1:0] req_addr_hit_drain_map;
-  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrNum-1:0] req_hit_mshr_map;
-  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrNum-1:0] req_meta_ovlp_mshr_map;
+  // Bank-scoped hit detection (Increment 3b): each request compares its address against only the
+  // MshrWaysPerBank entries of its own bank (req_bank), not all MshrNum. This is behavior-preserving:
+  // an entry is only ever allocated through bank_free_id[req_bank], so an entry's address always maps
+  // (via mshr_bank_of) back to its own bank -- hence any entry that could address-match a request must
+  // live in that request's bank. The per-request maps are therefore MshrWaysPerBank wide; the absolute
+  // entry id is reconstructed as req_bank*MshrWaysPerBank + way where one is needed.
+  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrWaysPerBank-1:0] req_addr_hit_way;
+  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrWaysPerBank-1:0] req_addr_hit_drain_way;
+  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrWaysPerBank-1:0] req_hit_way;
+  // Meta-overlap is a CROSS-address check (same tile+core, different address, overlapping meta_id
+  // range) that protects core-side (core,meta_id) response uniqueness. A conflicting entry can live in
+  // ANY bank, so this stays full-table (MshrNum wide). It carries no 32-bit address comparator: the
+  // only address-dependent term is the same-address exclusion, and a same-address entry is provably in
+  // the request's own bank, so that term reuses the bank-scoped req_addr_hit_way bit (see below).
+  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrNum-1:0]         req_meta_ovlp_map;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_hit_mshr;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_addr_hit_drain;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_meta_conflict;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_hit_mshr_sel_valid;
   mshr_id_t  [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_hit_mshr_sel_id;
-  logic      [MshrNum-1:0][NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] mshr_hit_req_map;
   logic      [MshrNum-1:0]                                                     mshr_hit_req;
 
-  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][NumTilesPerGroup-1:0]
-             [NumRemoteReqPortsPerTile-1:1]                                                       req_hit_req_map; // only compare smaller idx
-  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                                 req_hit_req;
-  tile_group_id_t[NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                             req_leader_tile;
-  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][ReqPortIdW-1:0]                 req_leader_port;
-  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                                 req_leader_alloc_valid;
-  mshr_id_t  [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                                 req_leader_alloc_id;
-  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                                 req_leader_alloc_ready;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                                 req_merge_valid;
   mshr_id_t  [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                                 req_merge_mshr_id;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                                 req_merge_ready;
@@ -243,7 +276,13 @@ module mempool_group_mshr
   // Request allocation (banked allocator bookkeeping).
   logic    [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                req_alloc_found;
   mshr_id_t[NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                req_alloc_found_mshr_id;
-  logic    [MshrNum-1:0]                                                       mshr_alloc_found;
+  // Per-bank single-allocation-per-cycle scheme (Increment 3): req_alloc_cand marks a request that
+  // wants a new entry (mergeable load that missed, no drain/meta hazard); bank_free_id/bank_has_free
+  // give each bank its lowest free (or reclaimable-CACHED) way; only one candidate per bank is granted
+  // an allocation per cycle, the rest stall and merge once the entry becomes resident next cycle.
+  logic    [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                req_alloc_cand;
+  logic    [MshrBankNum-1:0]                                                   bank_has_free;
+  mshr_id_t[MshrBankNum-1:0]                                                   bank_free_id;
 
   // Response drain scheduling (per response port).
   logic      [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]             resp_sel_valid;
@@ -266,6 +305,39 @@ module mempool_group_mshr
   logic      [RespPortIdW-1:0]                                                 drain_dst_port [MshrNum-1:0];
   logic      [MshrNum-1:0]                                                     drain_port_found;
   logic      [MshrNum-1:0][MshrMergeReqs-1:0]                                  subreq_claimed;
+
+  // ---------------------------------------------------------------------------
+  // Round-robin fairness bases (audit M2'/M3/L3). Each is a registered counter
+  // advanced +1 mod-N every cycle (free-running, NO grant feedback), read only by
+  // the combinational arbitration scans below -> no new combinational loop. Free-
+  // running (vs advance-on-grant) is the smallest, most deadlock-safe diff to this
+  // module; it removes the deterministic lowest-index bias. The drain axes get a
+  // true bounded wait (a pending entry/sub_req is a CONTINUOUS candidate held in
+  // DRAIN_RESP until fully drained, so the marching pointer reaches it within N).
+  // The allocator axis gets starvation-FREEDOM (an alloc loser whose bank is full
+  // bypasses to the NoC and completes) plus best-effort rotation -- not a hard
+  // bounded-wait under adversarial periodic bank occupancy (that would need a
+  // per-grant/per-bank pointer at higher timing cost). All scoped by
+  // EnableRrFairness: 0 forces base=0 -> legacy fixed lowest-index order.
+  // rr_arb_tree is deliberately not used: the allocator's contenders map to banks
+  // via the data-dependent req_bank[t][p] (would need a 16x32 candidate gather),
+  // and the drain scan has cross-port subreq_claimed coupling + a per-(tile,port)
+  // tile_id/port_id filter over 64x8 pairs -- neither fits a fixed-input arbiter.
+  // ---------------------------------------------------------------------------
+  // (A) M2' allocator: rotate the requester (tile,port) priority axis. Active req
+  //     ports are indices 1..NumRemoteReqPortsPerTile-1, flattened to one index.
+  localparam int unsigned NumReqPortsActive = (NumRemoteReqPortsPerTile > 1) ?
+                                              (NumRemoteReqPortsPerTile - 1) : 1;
+  localparam int unsigned NumAllocSlots     = NumTilesPerGroup * NumReqPortsActive;
+  localparam int unsigned AllocRrW          = idx_width(NumAllocSlots);
+  logic [AllocRrW-1:0]      alloc_rr_q, alloc_rr_d;
+  // (B) M3 drain: rotate the MSHR-entry scan axis (MshrNum entries).
+  localparam int unsigned DrainMshrRrW = idx_width(MshrNum);
+  logic [DrainMshrRrW-1:0]  drain_mshr_rr_q, drain_mshr_rr_d;
+  // (C) L3 drain: rotate the sub_req scan axis (MshrMergeReqs sub-requests). A
+  //     separate base from (B) so the two axes do not rotate in lockstep.
+  localparam int unsigned SubReqRrW = idx_width(MshrMergeReqs);
+  logic [SubReqRrW-1:0]     subreq_rr_q, subreq_rr_d;
 
   // Performance counters (simulation only).
   // pragma translate_off
@@ -434,6 +506,12 @@ module mempool_group_mshr
           .data_o  (resp_in[tile_i][port_i]             )
         );
 
+        // NOTE: the depth-1 output spill is the ORIGINAL, pre-deadlock-fix staging element. It ties
+        // resp_out_ready to the downstream consumer's ready, so on the bypass path
+        // mshr_noc_resp_ready_o depends on the (possibly stalled) core -> this RE-EXPOSES the
+        // message-dependent head-of-line deadlock on the shared NoC response channel (see
+        // bottleneck_analysis/2026-06-16_resp_sink_fifo_bug_rationale_and_overhead.md). The depth-32
+        // response sink FIFO that made NoC-accept unconditional was reverted here on request.
         spill_register #(
           .T(tcdm_master_resp_t),
           .Bypass(!SpillRespOut)
@@ -506,9 +584,17 @@ module mempool_group_mshr
               (req_len[tile_i][port_i] == BurstLenWidth'(MshrFullBurstWords));
           req_is_non_full_burst[tile_i][port_i] =
               !req_is_single[tile_i][port_i] && !req_is_full_burst[tile_i][port_i];
+          // H1 fix: a MISALIGNED burst is clamped to req_len=1 (so req_is_single=1), but the
+          // requesting VLSU still expects req_len_raw beats from the NoC. It must NOT be admitted
+          // on the single-merge arm: a non-owner merging into a burst_len=1 entry would only ever
+          // receive beat-0 and hang on beats 1..N-1 (the rest bypass to the owner only). Restrict
+          // the single arm to a GENUINE single (req_len_raw==1); a misaligned burst then has
+          // req_can_merge=0 and bypasses to the NoC with its original burst_len intact, so the
+          // owner still receives all N beats and no non-owner can merge in.
           req_can_merge[tile_i][port_i] =
               req_is_load[tile_i][port_i] &&
-              ((EnableMshrSingleReq       && req_is_single[tile_i][port_i]) ||
+              ((EnableMshrSingleReq       && req_is_single[tile_i][port_i] &&
+                (req_len_raw[tile_i][port_i] == BurstLenWidth'(1))) ||
                (EnableMshrNonFullBurstReq && req_is_non_full_burst[tile_i][port_i]) ||
                (EnableMshrFullBurstReq    && req_is_full_burst[tile_i][port_i]));
         end else begin
@@ -723,65 +809,65 @@ module mempool_group_mshr
     end
   end
 
-  // Request-to-request hit lookup (parallel compare).
+  // Increment 3: address-banking replaces the O(ports^2) same-cycle leader/follower coalescing.
+  // Each request maps to bank_of({tgt_group, merge addr}); allocation and the hit search are confined
+  // to that bank's ways. Same-cycle same-address misses now allocate two entries in the same bank
+  // (each with its own Tier-b tag and response) instead of one coalesced entry; staggered same-address
+  // requests still coalesce via the normal MSHR-hit path on the following cycle. This also removes
+  // audit bug H2 (a follower could merge into an entry a meta-conflicted leader never allocated).
   generate
-    for (genvar tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin : gen_req_hit_req_tile
-      for (genvar port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin : gen_req_hit_req_port
-        for (genvar oth_tile_i = 0; oth_tile_i < NumTilesPerGroup; oth_tile_i++) begin : gen_req_hit_req_oth_tile
-          for (genvar oth_port_i = 1; oth_port_i < NumRemoteReqPortsPerTile; oth_port_i++) begin : gen_req_hit_req_oth_port
-            // only compare the requests with smaller idx than itself
-            if (tile_i * (NumRemoteReqPortsPerTile - 1) + (port_i - 1) <=
-                oth_tile_i * (NumRemoteReqPortsPerTile - 1) + (oth_port_i - 1)) begin
-              assign req_hit_req_map[tile_i][port_i][oth_tile_i][oth_port_i] = 1'b0;
-            end else begin
-              assign req_hit_req_map[tile_i][port_i][oth_tile_i][oth_port_i] =
-                  req_can_merge[tile_i][port_i] &&
-                  req_can_merge[oth_tile_i][oth_port_i] &&
-                  (req_len[tile_i][port_i] == req_len[oth_tile_i][oth_port_i]) &&
-                  (req_addr_key[tile_i][port_i] == req_addr_key[oth_tile_i][oth_port_i]) &&
-                  (req_in[tile_i][port_i].tgt_group_id ==
-                   req_in[oth_tile_i][oth_port_i].tgt_group_id);
-            end
-          end
-        end
-        assign req_hit_req[tile_i][port_i] = |req_hit_req_map[tile_i][port_i];
+    for (genvar tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin : gen_req_bank_tile
+      for (genvar port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin : gen_req_bank_port
+        assign req_bank[tile_i][port_i] =
+            mshr_bank_of(req_addr_key[tile_i][port_i], req_in[tile_i][port_i].tgt_group_id);
       end
     end
   endgenerate
 
-  // Select the first matching request (smallest index) as leader.
-  generate
-    for (genvar tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin : gen_req_leader_tile
-      for (genvar port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin : gen_req_leader_port
-        always_comb begin
-          req_leader_tile[tile_i][port_i] = tile_group_id_t'(tile_i);
-          req_leader_port[tile_i][port_i] = port_i[ReqPortIdW-1:0];
-          for (int oth_tile_i = 0; oth_tile_i < NumTilesPerGroup; oth_tile_i++) begin
-            for (int oth_port_i = 1; oth_port_i < NumRemoteReqPortsPerTile; oth_port_i++) begin
-              if ((req_leader_tile[tile_i][port_i] == tile_group_id_t'(tile_i)) &&
-                  (req_leader_port[tile_i][port_i] == port_i[ReqPortIdW-1:0]) &&
-                  req_hit_req_map[tile_i][port_i][oth_tile_i][oth_port_i]) begin
-                req_leader_tile[tile_i][port_i] = tile_group_id_t'(oth_tile_i);
-                req_leader_port[tile_i][port_i] = oth_port_i[ReqPortIdW-1:0];
-              end
-            end
-          end
-        end
-      end
-    end
-  endgenerate
-
-  // MSHR hit lookup (parallel compare).
+  // MSHR hit lookup (parallel compare), bank-scoped to this request's MshrWaysPerBank ways. For a fixed
+  // way_i, the absolute entry id e_abs = req_bank*MshrWaysPerBank + way_i selects one entry per bank, so
+  // mshr_q[e_abs] is a MshrBankNum:1 mux feeding a single comparator (vs one comparator per MshrNum entry).
   generate
     for (genvar tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin : gen_req_mshr_lookup_tile
       for (genvar port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin : gen_req_mshr_lookup_port
-        for (genvar mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin : gen_req_mshr_lookup_entry
-          assign req_addr_hit_map[tile_i][port_i][mshr_i] =
+        for (genvar way_i = 0; way_i < MshrWaysPerBank; way_i++) begin : gen_req_mshr_lookup_way
+          // Absolute entry id of this request's bank way (dynamic mux on req_bank).
+          mshr_id_t e_abs;
+          assign e_abs =
+              mshr_id_t'(int'(req_bank[tile_i][port_i]) * MshrWaysPerBank + way_i);
+          assign req_addr_hit_way[tile_i][port_i][way_i] =
               req_in_valid[tile_i][port_i] &&
-              mshr_q_valid[mshr_i] &&
-              (mshr_q[mshr_i].base_addr == req_addr_key[tile_i][port_i]) &&
-              (mshr_q[mshr_i].tgt_group_id == req_in[tile_i][port_i].tgt_group_id);
-          assign req_meta_ovlp_mshr_map[tile_i][port_i][mshr_i] =
+              mshr_q_valid[e_abs] &&
+              (mshr_q[e_abs].base_addr == req_addr_key[tile_i][port_i]) &&
+              (mshr_q[e_abs].tgt_group_id == req_in[tile_i][port_i].tgt_group_id);
+          assign req_addr_hit_drain_way[tile_i][port_i][way_i] =
+              req_addr_hit_way[tile_i][port_i][way_i] &&
+              (mshr_q[e_abs].state == MSHR_DRAIN_RESP);
+
+          assign req_hit_way[tile_i][port_i][way_i] =
+              req_can_merge[tile_i][port_i] &&
+              req_addr_hit_way[tile_i][port_i][way_i] &&
+              (mshr_q[e_abs].burst_len == req_len[tile_i][port_i]) &&
+              (((mshr_q[e_abs].state == MSHR_WAIT_RESP) &&
+                (mshr_q[e_abs].beats_left == mshr_q[e_abs].burst_len)) ||
+               (EnableRespCache && !amo_invalidate &&
+                (mshr_q[e_abs].state == MSHR_CACHED) &&
+                mshr_q[e_abs].resp_valid &&
+                (req_len[tile_i][port_i] == BurstLenWidth'(1)))) &&
+              !mshr_resp_seen_now[e_abs] &&
+              !mshr_resp_inflight[e_abs] &&
+              ((mshr_q[e_abs].sub_reqs_num + SubReqCountW'(1)) <= MshrMergeReqs);
+        end
+        // Full-table meta-overlap (cross-bank): same tile+core, overlapping meta_id, different address.
+        // The same-address exclusion (!addr_hit) is bank-local -- a same-address entry must be in this
+        // request's bank -- so it reuses req_addr_hit_way[way] (no extra address comparator). For an
+        // out-of-bank entry the bank-equality term is false, leaving the original !addr_hit == 1.
+        for (genvar mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin : gen_req_meta_ovlp
+          logic same_addr_excl;
+          assign same_addr_excl =
+              (req_bank[tile_i][port_i] == BankIdW'(mshr_i / MshrWaysPerBank)) &&
+              req_addr_hit_way[tile_i][port_i][mshr_i % MshrWaysPerBank];
+          assign req_meta_ovlp_map[tile_i][port_i][mshr_i] =
               req_can_merge[tile_i][port_i] &&
               mshr_q_valid[mshr_i] &&
               ((mshr_q[mshr_i].state == MSHR_WAIT_RESP) ||
@@ -789,163 +875,136 @@ module mempool_group_mshr
               (mshr_q[mshr_i].sub_reqs[0].tile_id == tile_group_id_t'(tile_i)) &&
               (mshr_q[mshr_i].sub_reqs[0].core_id == req_in[tile_i][port_i].wdata.core_id) &&
               // Keep same-entry hits legal; block only cross-entry overlaps.
-              !req_addr_hit_map[tile_i][port_i][mshr_i] &&
+              !same_addr_excl &&
               meta_range_overlap(req_in[tile_i][port_i].wdata.meta_id,
                                  req_len[tile_i][port_i],
                                  mshr_q[mshr_i].sub_reqs[0].meta_id_base,
                                  mshr_q[mshr_i].burst_len);
-          assign req_addr_hit_drain_map[tile_i][port_i][mshr_i] =
-              req_addr_hit_map[tile_i][port_i][mshr_i] &&
-              (mshr_q[mshr_i].state == MSHR_DRAIN_RESP);
-
-          assign req_hit_mshr_map[tile_i][port_i][mshr_i] =
-              req_can_merge[tile_i][port_i] &&
-              req_addr_hit_map[tile_i][port_i][mshr_i] &&
-              (mshr_q[mshr_i].burst_len == req_len[tile_i][port_i]) &&
-              (((mshr_q[mshr_i].state == MSHR_WAIT_RESP) &&
-                (mshr_q[mshr_i].beats_left == mshr_q[mshr_i].burst_len)) ||
-               (EnableRespCache && !amo_invalidate &&
-                (mshr_q[mshr_i].state == MSHR_CACHED) &&
-                mshr_q[mshr_i].resp_valid &&
-                (req_len[tile_i][port_i] == BurstLenWidth'(1)))) &&
-              !mshr_resp_seen_now[mshr_i] &&
-              !mshr_resp_inflight[mshr_i] &&
-              ((mshr_q[mshr_i].sub_reqs_num + SubReqCountW'(1)) <= MshrMergeReqs);
-          assign mshr_hit_req_map[mshr_i][tile_i][port_i] = req_hit_mshr_map[tile_i][port_i][mshr_i];
         end
-        assign req_hit_mshr[tile_i][port_i] = |req_hit_mshr_map[tile_i][port_i];
-        assign req_addr_hit_drain[tile_i][port_i] = |req_addr_hit_drain_map[tile_i][port_i];
-        assign req_meta_conflict[tile_i][port_i] = |req_meta_ovlp_mshr_map[tile_i][port_i];
+        assign req_hit_mshr[tile_i][port_i] = |req_hit_way[tile_i][port_i];
+        assign req_addr_hit_drain[tile_i][port_i] = |req_addr_hit_drain_way[tile_i][port_i];
+        assign req_meta_conflict[tile_i][port_i] = |req_meta_ovlp_map[tile_i][port_i];
       end
-    end
-
-    for (genvar mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin : gen_mshr_hit_req
-      assign mshr_hit_req[mshr_i] = |mshr_hit_req_map[mshr_i];
     end
   endgenerate
 
-  // Select the first matching MSHR per request to avoid multi-merge.
+  // mshr_hit_req[e]: is entry e address-hit by some request this cycle? Used by the per-bank free-way
+  // reclaim guard to avoid evicting a CACHED entry that a request is about to merge into. Scatter the
+  // bank-scoped per-request way hits to absolute entry ids (decoder + OR, no address comparators).
+  always_comb begin
+    mshr_hit_req = '0;
+    for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
+      for (int port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin
+        for (int way_i = 0; way_i < MshrWaysPerBank; way_i++) begin
+          if (req_hit_way[tile_i][port_i][way_i]) begin
+            mshr_hit_req[int'(req_bank[tile_i][port_i]) * MshrWaysPerBank + way_i] = 1'b1;
+          end
+        end
+      end
+    end
+  end
+
+  // Select the first matching way per request to avoid multi-merge; absolute id = req_bank*ways + way.
   always_comb begin
     for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
       for (int port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin
         req_hit_mshr_sel_valid[tile_i][port_i] = 1'b0;
         req_hit_mshr_sel_id[tile_i][port_i] = '0;
-        for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
+        for (int way_i = 0; way_i < MshrWaysPerBank; way_i++) begin
           if (!req_hit_mshr_sel_valid[tile_i][port_i] &&
-              req_hit_mshr_map[tile_i][port_i][mshr_i]) begin
+              req_hit_way[tile_i][port_i][way_i]) begin
             req_hit_mshr_sel_valid[tile_i][port_i] = 1'b1;
-            req_hit_mshr_sel_id[tile_i][port_i] = mshr_id_t'(mshr_i);
+            req_hit_mshr_sel_id[tile_i][port_i] =
+                mshr_id_t'(int'(req_bank[tile_i][port_i]) * MshrWaysPerBank + way_i);
           end
         end
       end
     end
   end
 
-  localparam int unsigned ReqPortsTotal =
-      NumTilesPerGroup * (NumRemoteReqPortsPerTile - 1);
-  localparam int unsigned ReqsPerMshr =
-      (ReqPortsTotal == 0) ? 0 : (ReqPortsTotal / MshrNum);
-  localparam int unsigned MshrsPerReq =
-      (ReqPortsTotal == 0) ? 0 : (MshrNum / ReqPortsTotal);
+  // Allocation candidacy: a mergeable load that missed every resident entry and has no drain/meta
+  // hazard wants a new entry.
+  for (genvar tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin : gen_req_alloc_cand_tile
+    for (genvar port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin : gen_req_alloc_cand_port
+      assign req_alloc_cand[tile_i][port_i] =
+          req_can_merge[tile_i][port_i]      &&
+          !req_hit_mshr[tile_i][port_i]      &&
+          !req_addr_hit_drain[tile_i][port_i] &&
+          !req_meta_conflict[tile_i][port_i];
+    end
+  end
 
-  // Banked MSHR allocation (single combinational process).
+  // Per-bank free-way lookup: lowest free (or reclaimable CACHED) way in each bank.
   always_comb begin
-    int tile_i;
-    int port_i;
-    int req_i;
-    int mshr_i;
-    int mshr_start;
-    int mshr_end;
+    int e;
+    for (int b = 0; b < MshrBankNum; b++) begin
+      bank_has_free[b] = 1'b0;
+      bank_free_id[b]  = mshr_id_t'(b * MshrWaysPerBank);
+      for (int w = 0; w < MshrWaysPerBank; w++) begin
+        e = b * MshrWaysPerBank + w;
+        if (!bank_has_free[b] &&
+            (!mshr_q_valid[e] ||
+             (EnableRespCache &&
+              mshr_q_valid[e] &&
+              (mshr_q[e].state == MSHR_CACHED) &&
+              (mshr_q[e].sub_reqs_num == '0) &&
+              !mshr_hit_req[e]))) begin
+          bank_has_free[b] = 1'b1;
+          bank_free_id[b]  = mshr_id_t'(e);
+        end
+      end
+    end
+  end
 
-    for (tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
-      for (port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin
-        req_alloc_found[tile_i][port_i] = 1'b0;
+  // Per-bank single allocation per cycle: at most one candidate per bank is granted a new entry (taking
+  // that bank's free way). Other same-bank candidates get req_alloc_found=0 and STALL (req_in_ready=0),
+  // then either win on a later cycle or HIT-and-merge once the granted entry is resident -> preserves
+  // full coalescing (over <=2 cycles) without the O(ports^2) leader/follower compare.
+  // RR fairness (audit M2'): when EnableRrFairness, the requester (tile,port) priority axis is rotated
+  // by the free-running alloc_rr base so a high-index tile is no longer perpetually beaten to a contended
+  // bank by a low-index one. This gives starvation-FREEDOM (a loser whose bank is full bypasses to the
+  // NoC and completes, 1260-ish) plus best-effort fair rotation -- NOT a hard bounded-wait under
+  // adversarial periodic bank occupancy. Exactly-one-grant-per-bank is unchanged (bank_alloc_taken[b]).
+  always_comb begin
+    int b;
+    int alloc_base;
+    logic [MshrBankNum-1:0] bank_alloc_taken;
+    for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
+      for (int port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin
+        req_alloc_found[tile_i][port_i]         = 1'b0;
         req_alloc_found_mshr_id[tile_i][port_i] = '0;
       end
     end
-    for (mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
-      mshr_alloc_found[mshr_i] = 1'b0;
-    end
-
-    if (MshrNum < ReqPortsTotal) begin
-      for (mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
-        for (req_i = 0; req_i < ReqsPerMshr; req_i++) begin
-          tile_i = (mshr_i * ReqsPerMshr + req_i) / (NumRemoteReqPortsPerTile - 1);
-          port_i = (mshr_i * ReqsPerMshr + req_i) % (NumRemoteReqPortsPerTile - 1) + 1;
-          if ((!mshr_q_valid[mshr_i] ||
-               (EnableRespCache &&
-                mshr_q_valid[mshr_i] &&
-                (mshr_q[mshr_i].state == MSHR_CACHED) &&
-                (mshr_q[mshr_i].sub_reqs_num == '0) &&
-                !mshr_hit_req[mshr_i])) &&
-              !mshr_alloc_found[mshr_i] &&
-              req_can_merge[tile_i][port_i] &&
-              !req_hit_req[tile_i][port_i] &&
-              !req_hit_mshr[tile_i][port_i] &&
-              !req_addr_hit_drain[tile_i][port_i] &&
-              !req_alloc_found[tile_i][port_i]) begin
-            req_alloc_found[tile_i][port_i] = 1'b1;
-            req_alloc_found_mshr_id[tile_i][port_i] = mshr_id_t'(mshr_i);
-            mshr_alloc_found[mshr_i] = 1'b1;
-          end
-        end
-      end
-    end else begin
-      for (tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
-        for (port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin
-          mshr_start = (tile_i * (NumRemoteReqPortsPerTile - 1) + (port_i - 1)) * MshrsPerReq;
-          mshr_end = (tile_i * (NumRemoteReqPortsPerTile - 1) + (port_i - 1) + 1) * MshrsPerReq;
-          for (mshr_i = mshr_start; mshr_i < mshr_end; mshr_i++) begin
-            if ((!mshr_q_valid[mshr_i] ||
-                 (EnableRespCache &&
-                  mshr_q_valid[mshr_i] &&
-                  (mshr_q[mshr_i].state == MSHR_CACHED) &&
-                  (mshr_q[mshr_i].sub_reqs_num == '0) &&
-                  !mshr_hit_req[mshr_i])) &&
-                !mshr_alloc_found[mshr_i] &&
-                req_can_merge[tile_i][port_i] &&
-                !req_hit_req[tile_i][port_i] &&
-                !req_hit_mshr[tile_i][port_i] &&
-                !req_addr_hit_drain[tile_i][port_i] &&
-                !req_alloc_found[tile_i][port_i]) begin
-              req_alloc_found[tile_i][port_i] = 1'b1;
-              req_alloc_found_mshr_id[tile_i][port_i] = mshr_id_t'(mshr_i);
-              mshr_alloc_found[mshr_i] = 1'b1;
-            end
-          end
-        end
+    bank_alloc_taken = '0;
+    // Visit the NumAllocSlots flattened (tile,port) requester slots starting at the RR base, so the
+    // first candidate for each bank in ROTATED order wins it. slot = tile*NumReqPortsActive+(port-1)
+    // is a bijection over the active req ports (1..NumRemoteReqPortsPerTile-1); the /,% by
+    // NumReqPortsActive is a shift/bit-select for the power-of-two port count here, not a divider.
+    alloc_base = EnableRrFairness ? int'(alloc_rr_q) : 0;
+    for (int k = 0; k < NumAllocSlots; k++) begin
+      automatic int slot   = (alloc_base + k) % NumAllocSlots;
+      automatic int tile_i = slot / NumReqPortsActive;
+      automatic int port_i = (slot % NumReqPortsActive) + 1;
+      b = int'(req_bank[tile_i][port_i]);
+      if (req_alloc_cand[tile_i][port_i] && !bank_alloc_taken[b] && bank_has_free[b]) begin
+        req_alloc_found[tile_i][port_i]         = 1'b1;
+        req_alloc_found_mshr_id[tile_i][port_i] = bank_free_id[b];
+        bank_alloc_taken[b]                     = 1'b1;
       end
     end
   end
 
-  // Track leader allocation status per request.
-  always_comb begin
-    for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
-      for (int port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin
-        req_leader_alloc_valid[tile_i][port_i] =
-            req_alloc_found[req_leader_tile[tile_i][port_i]][req_leader_port[tile_i][port_i]];
-        req_leader_alloc_id[tile_i][port_i] =
-            req_alloc_found_mshr_id[req_leader_tile[tile_i][port_i]][req_leader_port[tile_i][port_i]];
-        req_leader_alloc_ready[tile_i][port_i] =
-            req_out_ready[req_leader_tile[tile_i][port_i]][req_leader_port[tile_i][port_i]];
-      end
-    end
-  end
-
-  // Select the merge target per request (existing MSHR or leader's new allocation).
+  // Select the merge target per request. With address-banking the only merge path is hitting an
+  // already-resident entry (req_hit_mshr_sel); the same-cycle leader/follower path is removed (a 2nd
+  // same-address requester in the same cycle allocates its own entry, and the next cycle's request to
+  // that address hits and merges normally).
   always_comb begin
     for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
       for (int port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin
         req_merge_valid[tile_i][port_i] =
-            req_can_merge[tile_i][port_i] &&
-            (req_hit_mshr_sel_valid[tile_i][port_i] ||
-             (req_hit_req[tile_i][port_i] && req_leader_alloc_valid[tile_i][port_i]));
-        req_merge_mshr_id[tile_i][port_i] =
-            req_hit_mshr_sel_valid[tile_i][port_i]
-                ? req_hit_mshr_sel_id[tile_i][port_i]
-                : req_leader_alloc_id[tile_i][port_i];
-        req_merge_ready[tile_i][port_i] =
-            req_hit_mshr_sel_valid[tile_i][port_i] ? 1'b1 : req_leader_alloc_ready[tile_i][port_i];
+            req_can_merge[tile_i][port_i] && req_hit_mshr_sel_valid[tile_i][port_i];
+        req_merge_mshr_id[tile_i][port_i] = req_hit_mshr_sel_id[tile_i][port_i];
+        req_merge_ready[tile_i][port_i]   = 1'b1; // an existing entry is always ready to accept a merge
       end
     end
   end
@@ -953,6 +1012,22 @@ module mempool_group_mshr
   // Sequential state update
   `FF(mshr_q_valid, mshr_d_valid, '0)
   `FF(mshr_q, mshr_d, '0)
+
+  // Round-robin fairness bases: free-running +1 mod-N every cycle, reset '0.
+  // Each _d depends ONLY on its own _q (pure mod-N increment), never on any
+  // arbitration/grant output -> no combinational loop. Reset '0 makes cycle-0
+  // order match the legacy lowest-index order; rotation diverges from cycle 1.
+  // The unconditional advance is exactly why an adversary cannot freeze priority
+  // by withholding grants (the leader pointer marches every clock regardless).
+  assign alloc_rr_d      = (alloc_rr_q      == AllocRrW'(NumAllocSlots - 1)) ?
+                           '0 : alloc_rr_q      + AllocRrW'(1);
+  assign drain_mshr_rr_d = (drain_mshr_rr_q == DrainMshrRrW'(MshrNum - 1)) ?
+                           '0 : drain_mshr_rr_q + DrainMshrRrW'(1);
+  assign subreq_rr_d     = (subreq_rr_q     == SubReqRrW'(MshrMergeReqs - 1)) ?
+                           '0 : subreq_rr_q     + SubReqRrW'(1);
+  `FF(alloc_rr_q,      alloc_rr_d,      '0)
+  `FF(drain_mshr_rr_q, drain_mshr_rr_d, '0)
+  `FF(subreq_rr_q,     subreq_rr_d,     '0)
 
   // Debug-only view of cached/uncached valid entries.
   // pragma translate_off
@@ -1196,6 +1271,8 @@ module mempool_group_mshr
     for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
       for (int port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin
         if (req_in_valid[tile_i][port_i]) begin
+          // Tier-b: default tag 0 (= no MSHR entry / bypass); overwritten with (entry id + 1) on alloc.
+          req_out[tile_i][port_i].mshr_tag = '0;
           if (req_in[tile_i][port_i].wdata.amo != '0) begin
             req_out[tile_i][port_i].burst_len = BurstLenWidth'(1);
           end
@@ -1239,26 +1316,35 @@ module mempool_group_mshr
               end
             end
           end else begin
-            // Need to send to NoC (store, miss, or merge list full).
-            req_in_ready[tile_i][port_i] = req_out_ready[tile_i][port_i];
-            req_out_valid[tile_i][port_i] = 1'b1;
-
-            // Do not bypass while same address is draining or metadata conflicts.
-            // If no MSHR can be allocated, allow bypass to avoid permanent backpressure.
-            // (Merge opportunity is lost, but forward progress is preserved.)
+            // Not a merge into a resident entry: decide STALL / ALLOCATE / BYPASS.
             if (req_can_merge[tile_i][port_i] &&
-                (req_addr_hit_drain[tile_i][port_i] ||
-                 req_meta_conflict[tile_i][port_i])) begin
-              req_in_ready[tile_i][port_i] = 1'b0;
+                (req_addr_hit_drain[tile_i][port_i] || req_meta_conflict[tile_i][port_i])) begin
+              // A same-address entry is draining, or a meta-id range conflict exists: wait for it.
+              req_in_ready[tile_i][port_i]  = 1'b0;
               req_out_valid[tile_i][port_i] = 1'b0;
-            end
-
-            if (req_can_merge[tile_i][port_i]) begin
-              // Allocate a new MSHR entry for load miss if space exists.
-              if (req_alloc_found[tile_i][port_i] &&
-                  !req_meta_conflict[tile_i][port_i] &&
-                  req_in_ready[tile_i][port_i]) begin
+            end else if (req_can_merge[tile_i][port_i] && !req_alloc_found[tile_i][port_i] &&
+                         bank_has_free[req_bank[tile_i][port_i]]) begin
+              // Mergeable miss that lost this bank's single allocation slot this cycle, but a free way
+              // exists: STALL and retry. Next cycle it either wins the slot or HIT-merges the entry the
+              // winner just created (same address) -> full coalescing preserved, no extra entry, no
+              // bypass. This is the stall-and-merge half of the per-bank single-alloc scheme.
+              req_in_ready[tile_i][port_i]  = 1'b0;
+              req_out_valid[tile_i][port_i] = 1'b0;
+            end else begin
+              // ALLOCATE (won the per-bank slot) or BYPASS (non-mergeable store/AMO, or a mergeable
+              // miss whose bank is full): forward this request to the NoC.
+              req_in_ready[tile_i][port_i]  = req_out_ready[tile_i][port_i];
+              req_out_valid[tile_i][port_i] = 1'b1;
+              if (req_can_merge[tile_i][port_i]) begin
+                // Allocate a new MSHR entry (only the bank's slot winner has req_alloc_found set;
+                // bank-full mergeable misses fall through here as a plain bypass).
+                if (req_alloc_found[tile_i][port_i] &&
+                    req_in_ready[tile_i][port_i]) begin
                 mshr_d_valid[req_alloc_found_mshr_id[tile_i][port_i]] = 1'b1;
+                // Tier-b: stamp the egress NoC request with (allocated entry id + 1) so the returning
+                // response routes back to this entry by direct index (tag 0 stays the bypass sentinel).
+                req_out[tile_i][port_i].mshr_tag =
+                    MshrTagWidth'(req_alloc_found_mshr_id[tile_i][port_i]) + MshrTagWidth'(1);
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]] = '0;
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].base_addr =
                     req_addr_key[tile_i][port_i];
@@ -1288,24 +1374,37 @@ module mempool_group_mshr
 `endif
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].sub_reqs_num =
                     SubReqCountW'(1);
+                end
               end
             end
             if (EnableRespCache && !amo_invalidate &&
                 req_is_store[tile_i][port_i] &&
                 (req_len[tile_i][port_i] == BurstLenWidth'(1)) &&
                 req_in_ready[tile_i][port_i]) begin
-              for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
-                if (mshr_d_valid[mshr_i] &&
-                    (mshr_d[mshr_i].state == MSHR_CACHED) &&
-                    req_addr_hit_map[tile_i][port_i][mshr_i]) begin
-                  mshr_d[mshr_i].resp_buf[mshr_d[mshr_i].resp_buf_rd_ptr].rdata.data =
-                      req_in[tile_i][port_i].wdata.data;
-                  mshr_d[mshr_i].resp_buf[mshr_d[mshr_i].resp_buf_rd_ptr].wen = 1'b0;
-                  mshr_d[mshr_i].resp_buf_valid[mshr_d[mshr_i].resp_buf_rd_ptr] = 1'b1;
-                  if (mshr_d[mshr_i].resp_buf_cnt == '0) begin
-                    mshr_d[mshr_i].resp_buf_cnt = RespBufCountW'(1);
+              // Bank-scoped (3b): a store can only hit a CACHED entry in its own bank, so scan only
+              // this request's MshrWaysPerBank ways; hit_e reconstructs the absolute entry id.
+              for (int way_i = 0; way_i < MshrWaysPerBank; way_i++) begin
+                automatic int hit_e =
+                    int'(req_bank[tile_i][port_i]) * MshrWaysPerBank + way_i;
+                if (mshr_d_valid[hit_e] &&
+                    (mshr_d[hit_e].state == MSHR_CACHED) &&
+                    req_addr_hit_way[tile_i][port_i][way_i]) begin
+                  // H3 fix: merge under byte-enables — a sub-word store must update only the
+                  // enabled byte lanes and keep the existing cached bytes (writing the full word
+                  // would corrupt the non-written bytes that a later cache-hit load would read).
+                  for (int b = 0; b < $bits(req_in[tile_i][port_i].be); b++) begin
+                    if (req_in[tile_i][port_i].be[b]) begin
+                      mshr_d[hit_e].resp_buf[mshr_d[hit_e].resp_buf_rd_ptr]
+                            .rdata.data[b*8 +: 8] =
+                          req_in[tile_i][port_i].wdata.data[b*8 +: 8];
+                    end
                   end
-                  mshr_d[mshr_i].resp_valid = 1'b1;
+                  mshr_d[hit_e].resp_buf[mshr_d[hit_e].resp_buf_rd_ptr].wen = 1'b0;
+                  mshr_d[hit_e].resp_buf_valid[mshr_d[hit_e].resp_buf_rd_ptr] = 1'b1;
+                  if (mshr_d[hit_e].resp_buf_cnt == '0) begin
+                    mshr_d[hit_e].resp_buf_cnt = RespBufCountW'(1);
+                  end
+                  mshr_d[hit_e].resp_valid = 1'b1;
                 end
               end
             end
@@ -1347,20 +1446,24 @@ module mempool_group_mshr
         if (resp_in_valid[tile_i][port_i] &&
             (resp_in[tile_i][port_i].wen == 1'b0) &&
             (resp_in[tile_i][port_i].rdata.amo == '0)) begin
-          for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
-            if (mshr_q_valid[mshr_i] &&
-                ((mshr_q[mshr_i].state == MSHR_WAIT_RESP) ||
-                 (mshr_q[mshr_i].state == MSHR_DRAIN_RESP)) &&
-                (mshr_q[mshr_i].sub_reqs[0].tile_id == tile_group_id_t'(tile_i)) &&
-                (mshr_q[mshr_i].sub_reqs[0].core_id == resp_in[tile_i][port_i].rdata.core_id) &&
-                // Wrap-safe range check for burst meta IDs:
-                // A response beat belongs to this entry iff its distance from the owner
-                // base meta_id is smaller than burst_len (modulo meta_id width).
+          // Tier-b: route the response by its round-tripped tag instead of scanning all entries.
+          // A real entry id e was stamped as (e+1); tag 0 is the bypass sentinel. Index the candidate
+          // entry directly, then RE-VALIDATE (state / owner tile+core / wrap-safe burst beat range) as
+          // a guard against a stale or corrupted tag — on any mismatch resp_is_mshr stays 0 and the
+          // response falls through to the bypass path. This replaces the O(resp-ports x MshrNum) scan
+          // with an O(1) index + single-entry check.
+          if (resp_in[tile_i][port_i].mshr_tag != '0) begin
+            automatic mshr_id_t cand =
+                mshr_id_t'(resp_in[tile_i][port_i].mshr_tag - MshrTagWidth'(1));
+            if (mshr_q_valid[cand] &&
+                ((mshr_q[cand].state == MSHR_WAIT_RESP) ||
+                 (mshr_q[cand].state == MSHR_DRAIN_RESP)) &&
+                (mshr_q[cand].sub_reqs[0].tile_id == tile_group_id_t'(tile_i)) &&
+                (mshr_q[cand].sub_reqs[0].core_id == resp_in[tile_i][port_i].rdata.core_id) &&
                 ((resp_in[tile_i][port_i].rdata.meta_id -
-                  mshr_q[mshr_i].sub_reqs[0].meta_id_base) < mshr_q[mshr_i].burst_len)) begin
+                  mshr_q[cand].sub_reqs[0].meta_id_base) < mshr_q[cand].burst_len)) begin
               resp_is_mshr[tile_i][port_i] = 1'b1;
-              resp_mshr_id[tile_i][port_i] = mshr_id_t'(mshr_i);
-              break;
+              resp_mshr_id[tile_i][port_i] = cand;
             end
           end
         end
@@ -1460,8 +1563,13 @@ module mempool_group_mshr
       // Use all available response ports per cycle.
       for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
         for (int port_i = 1; port_i < NumRemoteRespPortsPerTile; port_i++) begin
-          // Reserve output ports only for bypassed responses.
-          // MSHR-targeted responses are buffered and can be backpressured.
+          // M4 (audit): bypass MUST take the port -- bypass responses are non-backpressurable by
+          // contract, while MSHR-targeted responses are buffered (resp_buf) and CAN be backpressured
+          // (resp_in_ready). Making bypass "wait its turn" would drop a response with nowhere to go, so
+          // this is a strict-priority MUST, not an arbitration tie to rotate. Drain-behind-bypass is
+          // BOUNDED, not starved: bypass arrivals on a port are finite (bounded by outstanding non-MSHR
+          // responses), so a bypass-free cycle recurs and the persistently re-offered (RR-rotated) drain
+          // beat then wins the freed port. RR fairness applies to the entry/sub_req axes, not bypass.
           port_taken[tile_i][port_i] = resp_in_valid[tile_i][port_i] &&
                                        !resp_is_mshr[tile_i][port_i];
           resp_sel_valid[tile_i][port_i] = 1'b0;
@@ -1480,10 +1588,20 @@ module mempool_group_mshr
       for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
         for (int port_i = 1; port_i < NumRemoteRespPortsPerTile; port_i++) begin
           if (!port_taken[tile_i][port_i]) begin
-            for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
+            // RR fairness (audit M3/L3): rotate the entry visit by drain_mshr_rr and the sub_req visit
+            // by subreq_rr (separate bases) so high-index entries/sub_reqs are not starved. Bounded
+            // wait: a pending (entry,sub_req) is a CONTINUOUS candidate (held in DRAIN_RESP until fully
+            // drained), so the marching base reaches it within N. The eligibility predicate, the
+            // per-PHYSICAL-index subreq_claimed cross-port guard, and resp_sel_* are byte-identical;
+            // only the visit order rotates.
+            automatic int drain_base = EnableRrFairness ? int'(drain_mshr_rr_q) : 0;
+            for (int kk = 0; kk < MshrNum; kk++) begin
+              automatic int mshr_i = (drain_base + kk) % MshrNum;
               if (mshr_d_valid[mshr_i] && mshr_d[mshr_i].resp_valid &&
                   mshr_d[mshr_i].state == MSHR_DRAIN_RESP) begin
-                for (int s = 0; s < MshrMergeReqs; s++) begin
+                automatic int subreq_base = EnableRrFairness ? int'(subreq_rr_q) : 0;
+                for (int ks = 0; ks < MshrMergeReqs; ks++) begin
+                  automatic int s = (subreq_base + ks) % MshrMergeReqs;
                   if (!resp_sel_valid[tile_i][port_i] &&
                       mshr_d[mshr_i].sub_reqs[s].valid &&
                       mshr_d[mshr_i].beat_pending[s] &&
@@ -1555,14 +1673,19 @@ module mempool_group_mshr
       // Original behavior: one sub-request per MSHR per cycle.
       for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
         for (int port_i = 1; port_i < NumRemoteRespPortsPerTile; port_i++) begin
-          // Reserve output ports only for bypassed responses.
-          // MSHR-targeted responses are buffered and can be backpressured.
+          // M4 (audit): bypass MUST take the port (non-backpressurable); MSHR drain is buffered and
+          // bounded by finite bypass arrivals -- strict priority, not rotated. See the DrainMultiPort=1
+          // path above for the full rationale. (This =0 path is inactive when DrainMultiPort=1.)
           port_taken[tile_i][port_i] = resp_in_valid[tile_i][port_i] &&
                                        !resp_is_mshr[tile_i][port_i];
         end
       end
 
-      for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
+      // RR fairness (audit M3): rotate the entry visit (mirror of the DrainMultiPort=1 path; inactive
+      // when DrainMultiPort=1, kept aligned so the two paths do not silently diverge).
+      for (int kk = 0; kk < MshrNum; kk++) begin
+        automatic int drain_base = EnableRrFairness ? int'(drain_mshr_rr_q) : 0;
+        automatic int mshr_i = (drain_base + kk) % MshrNum;
         drain_subreq_found[mshr_i] = 1'b0;
         drain_subreq_idx[mshr_i] = '0;
         drain_dst_tile[mshr_i] = '0;
@@ -1570,7 +1693,10 @@ module mempool_group_mshr
         drain_port_found[mshr_i] = 1'b0;
         if (mshr_d_valid[mshr_i] && mshr_d[mshr_i].resp_valid &&
             mshr_d[mshr_i].state == MSHR_DRAIN_RESP) begin
-          for (int s = 0; s < MshrMergeReqs; s++) begin
+          // RR fairness (audit L3): rotate the sub_req visit, keep the first-match break.
+          for (int ks = 0; ks < MshrMergeReqs; ks++) begin
+            automatic int subreq_base = EnableRrFairness ? int'(subreq_rr_q) : 0;
+            automatic int s = (subreq_base + ks) % MshrMergeReqs;
             if (mshr_d[mshr_i].sub_reqs[s].valid &&
                 mshr_d[mshr_i].beat_pending[s]) begin
               drain_subreq_found[mshr_i] = 1'b1;
@@ -1919,10 +2045,12 @@ module mempool_group_mshr
                   req_in_ready[tile_i][port_i] &&
                   req_is_store[tile_i][port_i] &&
                   (req_len[tile_i][port_i] == BurstLenWidth'(1))) begin
-                for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
-                  if (mshr_q_valid[mshr_i] &&
-                      (mshr_q[mshr_i].state == MSHR_CACHED) &&
-                      req_addr_hit_map[tile_i][port_i][mshr_i]) begin
+                for (int way_i = 0; way_i < MshrWaysPerBank; way_i++) begin
+                  automatic int hit_e =
+                      int'(req_bank[tile_i][port_i]) * MshrWaysPerBank + way_i;
+                  if (mshr_q_valid[hit_e] &&
+                      (mshr_q[hit_e].state == MSHR_CACHED) &&
+                      req_addr_hit_way[tile_i][port_i][way_i]) begin
                     stat_cache_store_update_cycle = stat_cache_store_update_cycle + 1'b1;
                     break;
                   end
@@ -2167,6 +2295,27 @@ module mempool_group_mshr
           !(resp_from_mshr[tile_i][port_i] && resp_from_bypass[tile_i][port_i]))
           else $fatal(1, "MSHR resp source conflict: tile=%0d port=%0d", tile_i, port_i);
       end
+    end
+  endgenerate
+  `endif
+  // pragma translate_on
+
+  // pragma translate_off
+  `ifndef VERILATOR
+  // Bank-scoped hit detection (3b) relies on: a valid entry's (address,group) always hashes to its own
+  // bank. Allocation enforces this (bank_free_id[req_bank] only returns ways of that bank), so if this
+  // ever fails a request could miss a real hit and allocate a duplicate. Catch any violation early.
+  generate
+    for (genvar mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin : gen_mshr_bank_invariant
+      mshr_entry_in_its_bank: assert property(
+        @(posedge clk_i) disable iff (!rst_ni)
+        mshr_q_valid[mshr_i] |->
+          (mshr_bank_of(mshr_q[mshr_i].base_addr, mshr_q[mshr_i].tgt_group_id) ==
+           BankIdW'(mshr_i / MshrWaysPerBank)))
+        else $fatal(1, "MSHR entry %0d not in its address bank (got %0d, expected %0d)",
+                    mshr_i,
+                    mshr_bank_of(mshr_q[mshr_i].base_addr, mshr_q[mshr_i].tgt_group_id),
+                    mshr_i / MshrWaysPerBank);
     end
   endgenerate
   `endif

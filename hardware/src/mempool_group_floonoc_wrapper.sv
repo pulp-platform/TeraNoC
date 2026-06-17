@@ -285,7 +285,8 @@ if (NocRouterRemapping == 1 || NocRouterRemapping == 3) begin: gen_req_remapping
             dst_id: group_xy_id_t'({tcdm_master_req[i][j+(1)].tgt_group_id, 1'b0}), // For NoC Router when request send
             tgt_addr: tcdm_master_req[i][j+(1)].tgt_addr,                           // For Crossbar when request send (bank rows per Group)
             last : 1'b1,                                                            // Non Burst Request
-            burst_len: tcdm_master_req[i][j+(1)].burst_len
+            burst_len: tcdm_master_req[i][j+(1)].burst_len,
+            mshr_tag: tcdm_master_req[i][j+(1)].mshr_tag                             // Tier-b: MSHR entry id round-trip
           }
         };
         assign floo_tcdm_rd_req_to_remapper_valid[i][j] = tcdm_master_req_valid[i][j+(1)];
@@ -309,7 +310,8 @@ if (NocRouterRemapping == 1 || NocRouterRemapping == 3) begin: gen_req_remapping
           dst_id: group_xy_id_t'({tcdm_master_req[i][j].tgt_group_id, 1'b0}), // For NoC Router when request send
           tgt_addr: tcdm_master_req[i][j].tgt_addr,                           // For Crossbar when request send (bank rows per Group)
           last : 1'b1,                                                        // Non Burst Request
-          burst_len: tcdm_master_req[i][j].burst_len
+          burst_len: tcdm_master_req[i][j].burst_len,
+          mshr_tag: tcdm_master_req[i][j].mshr_tag                            // Tier-b: MSHR entry id round-trip
         }
       };
       assign floo_tcdm_rdwr_req_to_remapper_valid[i][j-(1 + NumNarrowRemoteReqPortsPerTile)] = tcdm_master_req_valid[i][j];
@@ -366,7 +368,8 @@ end else begin: gen_req_remapping_bypass
             dst_id: group_xy_id_t'({tcdm_master_req[i][j+(1)].tgt_group_id, 1'b0}), // For NoC Router when request send
             tgt_addr: tcdm_master_req[i][j+(1)].tgt_addr,                           // For Crossbar when request send (bank rows per Group)
             last : 1'b1,                                                            // Non Burst Request
-            burst_len: tcdm_master_req[i][j+(1)].burst_len
+            burst_len: tcdm_master_req[i][j+(1)].burst_len,
+            mshr_tag: tcdm_master_req[i][j+(1)].mshr_tag                             // Tier-b: MSHR entry id round-trip
           }
         };
         assign floo_tcdm_rd_req_to_router_valid[i][j] = tcdm_master_req_valid[i][j+(1)];
@@ -390,7 +393,8 @@ end else begin: gen_req_remapping_bypass
           dst_id: group_xy_id_t'({tcdm_master_req[i][j].tgt_group_id, 1'b0}), // For NoC Router when request send
           tgt_addr: tcdm_master_req[i][j].tgt_addr,                           // For Crossbar when request send (bank rows per Group)
           last : 1'b1,                                                        // Non Burst Request
-          burst_len: tcdm_master_req[i][j].burst_len
+          burst_len: tcdm_master_req[i][j].burst_len,
+          mshr_tag: tcdm_master_req[i][j].mshr_tag                            // Tier-b: MSHR entry id round-trip
         }
       };
       assign floo_tcdm_rdwr_req_to_router_valid[i][j-(1 + NumNarrowRemoteReqPortsPerTile)] = tcdm_master_req_valid[i][j];
@@ -559,7 +563,8 @@ for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_router_req_to_slave_re
                         floo_tcdm_req_from_router_after_xbar[i][j].hdr.src_id.x,
                         floo_tcdm_req_from_router_after_xbar[i][j].hdr.src_id.y
                       }), // For NoC Router when response back
-      burst_len    : floo_tcdm_req_from_router_after_xbar[i][j].hdr.burst_len
+      burst_len    : floo_tcdm_req_from_router_after_xbar[i][j].hdr.burst_len,
+      mshr_tag     : floo_tcdm_req_from_router_after_xbar[i][j].hdr.mshr_tag // Tier-b: carry requester MSHR id to the slave echo
     };
     assign tcdm_slave_req_valid[i][j]                    = floo_tcdm_req_from_router_after_xbar_valid[i][j];
     assign floo_tcdm_req_from_router_after_xbar_ready[i][j] = tcdm_slave_req_ready[i][j];
@@ -586,7 +591,8 @@ if (NocRouterRemapping == 2 || NocRouterRemapping == 3) begin: gen_resp_remappin
           tile_id : tcdm_slave_resp[i][j].ini_addr,                               // Sender's Tile ID
           src_id  : group_xy_id_t'({ group_id_i, 1'b0 }),                         // For NoC Router
           dst_id  : group_xy_id_t'({ tcdm_slave_resp[i][j].src_group_id, 1'b0 }), // Sender's Group ID
-          last    : 1'b1                                                          // Non Burst Request
+          last    : 1'b1,                                                         // Non Burst Request
+          mshr_tag: tcdm_slave_resp[i][j].mshr_tag                                // Tier-b: echo MSHR entry id
         }
       };
     end : gen_slave_resp_to_remapper_resp_j
@@ -624,7 +630,8 @@ end else begin: gen_resp_remapping_bypass
           tile_id : tcdm_slave_resp[i][j].ini_addr,                           // For Crossbar when response back (Sender's Tile ID, propagated from request)
           src_id: group_xy_id_t'({group_id_i, 1'b0}),                         // For NoC Router when response back
           dst_id: group_xy_id_t'({tcdm_slave_resp[i][j].src_group_id, 1'b0}), // For NoC Router when response back (Sender's Group ID, propagated from request)
-          last : 1'b1                                                         // Non Burst Request
+          last : 1'b1,                                                        // Non Burst Request
+          mshr_tag: tcdm_slave_resp[i][j].mshr_tag                            // Tier-b: echo MSHR entry id
         }
       };
     end : gen_slave_resp_to_router_resp_j
@@ -723,7 +730,8 @@ for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_router_resp_to_master_
         amo     : floo_tcdm_resp_from_router_after_xbar[i][j].payload.amo,
         data    : floo_tcdm_resp_from_router_after_xbar[i][j].payload.data
       },
-      wen  : floo_tcdm_resp_from_router_after_xbar[i][j].payload.wen
+      wen  : floo_tcdm_resp_from_router_after_xbar[i][j].payload.wen,
+      mshr_tag: floo_tcdm_resp_from_router_after_xbar[i][j].hdr.mshr_tag // Tier-b: deliver echoed MSHR id to MSHR resp ingress
     };
     assign tcdm_master_resp_valid[i][j] = floo_tcdm_resp_from_router_after_xbar_valid[i][j];
     assign floo_tcdm_resp_from_router_after_xbar_ready[i][j] = tcdm_master_resp_ready[i][j];
