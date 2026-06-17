@@ -281,6 +281,15 @@ package mempool_pkg;
   localparam int unsigned MaxBurstWords = 16;
   localparam int unsigned BurstLenWidth = $clog2(MaxBurstWords + 1);
 
+  // Group-MSHR response tag (Tier-b response routing): the group MSHR stamps each remote request
+  // with its allocated entry id so the returning response can index the entry directly (O(1))
+  // instead of scanning all entries. Width must match mempool_group_mshr's MshrNum (driven by the
+  // same GROUP_MSHR_NUM macro, defaulting to NumTilesPerGroup).
+  localparam int unsigned MshrTagNum   = `ifdef GROUP_MSHR_NUM `GROUP_MSHR_NUM `else NumTilesPerGroup `endif;
+  // +1 so tag value 0 is a reserved "no MSHR entry" sentinel (bypass / store / non-mergeable); a real
+  // entry id e is carried as (e+1). The response path uses this to tell MSHR-routed beats from bypass.
+  localparam int unsigned MshrTagWidth = idx_width(MshrTagNum + 1);
+
   typedef struct packed {
     meta_id_t meta_id;
     tile_core_id_t core_id;
@@ -295,11 +304,13 @@ package mempool_pkg;
     group_id_t tgt_group_id; // FlooNoC Added
     tcdm_addr_t tgt_addr;
     logic [BurstLenWidth-1:0] burst_len;
+    logic [MshrTagWidth-1:0] mshr_tag; // Tier-b: MSHR entry id stamped at allocation
   } tcdm_master_req_t;
 
   typedef struct packed {
     tcdm_payload_t rdata;
     logic wen;               // Spatz Added
+    logic [MshrTagWidth-1:0] mshr_tag; // Tier-b: echoed MSHR entry id for direct response routing
   } tcdm_master_resp_t;
 
   typedef struct packed {
@@ -310,6 +321,7 @@ package mempool_pkg;
     tile_group_id_t ini_addr;
     group_id_t src_group_id; // FlooNoC Added
     logic [BurstLenWidth-1:0] burst_len;
+    logic [MshrTagWidth-1:0] mshr_tag; // Tier-b: requester MSHR entry id, echoed by the slave
   } tcdm_slave_req_t;
 
   typedef struct packed {
@@ -317,6 +329,7 @@ package mempool_pkg;
     tile_group_id_t ini_addr;
     group_id_t src_group_id; // FlooNoC Added
     logic wen;               // Spatz Added
+    logic [MshrTagWidth-1:0] mshr_tag; // Tier-b: echoed MSHR entry id
   } tcdm_slave_resp_t;
 
   /********************
@@ -394,6 +407,7 @@ package mempool_pkg;
     tcdm_addr_t         tgt_addr;
     logic               last;
     logic [BurstLenWidth-1:0] burst_len;
+    logic [MshrTagWidth-1:0]  mshr_tag; // Tier-b: requester MSHR entry id (NoC req header)
   } floo_tcdm_req_meta_t;
 
   typedef struct packed {
@@ -456,6 +470,7 @@ package mempool_pkg;
     group_xy_id_t       src_id;
     group_xy_id_t       dst_id;
     logic               last;
+    logic [MshrTagWidth-1:0]  mshr_tag; // Tier-b: echoed MSHR entry id (NoC resp header)
   } floo_tcdm_resp_meta_t;
 
   typedef struct packed {

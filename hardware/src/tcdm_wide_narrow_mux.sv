@@ -94,7 +94,8 @@ module tcdm_wide_narrow_mux #(
           tgt_addr: slv_wide_req_i.tgt_addr,
           ini_addr: '0,
           src_group_id: group_id_i, // FlooNoC Added
-          burst_len: '0
+          burst_len: '0,
+          mshr_tag: '0 // Tier-b: DMA/wide path does not use the MSHR tag
         };
         // Block access from narrow ports.
         slv_narrow_req_ready_o[i] = 1'b0;
