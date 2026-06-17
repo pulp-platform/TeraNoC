@@ -8,6 +8,21 @@ quietly WaveActivateNextPane {} 0
 # Add a vector of the core's utilization signals to quickly get an overview of the systems activity
 set num_cores [examine -radix dec mempool_pkg::NumCores]
 
+# Per-core Snitch stall overview (defined in hardware/tb/mempool_tb.sv).
+# Stall judgement excludes WFI: core_stall = i_snitch.stall & ~wfi (WFI-idle cores not counted).
+#   core_stall_count      : # cores stalled (non-WFI) this cycle (analog overview).
+#   core_stall            : 1 bit/core, high while that core is stalled and not in WFI.
+#   core_stall_long_count : # cores stalled (non-WFI) continuously > StallLongThreshold cycles.
+#   core_stall_long       : 1 bit/core, the sticky long-stall flag (the "stuck a while" view).
+#   core_stall_cnt        : per-core continuous-stall length (saturating) — how long it's stuck.
+#   wfi                   : raw WFI vector, kept for reference.
+add wave -noupdate -group Core_Stall -color {Orange Red} -format Analog-Step -height 84 -max $num_cores -radix unsigned /mempool_tb/core_stall_count
+add wave -noupdate -group Core_Stall /mempool_tb/core_stall
+add wave -noupdate -group Core_Stall -color {Orange Red} -format Analog-Step -height 84 -max $num_cores -radix unsigned /mempool_tb/core_stall_long_count
+add wave -noupdate -group Core_Stall /mempool_tb/core_stall_long
+add wave -noupdate -group Core_Stall -radix unsigned /mempool_tb/core_stall_cnt
+add wave -noupdate -group Core_Stall /mempool_tb/wfi
+
 add wave -noupdate -group Utilization -color {Cornflower Blue} -format Analog-Step -height 84 -max $num_cores -radix unsigned /mempool_tb/snitch_utilization
 add wave -noupdate -group Utilization /mempool_tb/instruction_handshake
 add wave -noupdate -group Utilization -color {Cornflower Blue} -format Analog-Step -height 84 -max $num_cores -radix unsigned /mempool_tb/lsu_utilization
@@ -62,6 +77,136 @@ if {![catch {examine -radix dec /mempool_tb/noc_req_utilization}]} {
   add wave -noupdate -group NoC_Utilization -color {Cornflower Blue} -format Analog-Step -height 84 -max $noc_total_channels -radix unsigned /mempool_tb/noc_total_utilization
 }
 
+# ========================================================================
+# Per-group NoC link utilization (valid, ready, handshake per direction)
+# Shows traffic on each group's mesh router ports: N/S/E/W × req/resp
+# ========================================================================
+set NumGroups_noc [examine -radix dec mempool_pkg::NumGroups]
+set NumTiles_noc [examine -radix dec mempool_pkg::NumTilesPerGroup]
+set NumX_noc ""
+set NumY_noc ""
+if {[catch {set NumX_noc [examine -radix dec mempool_pkg::NumX]}]} {
+  catch {set NumX_noc [examine -radix dec /mempool_pkg::NumX]}
+}
+if {[catch {set NumY_noc [examine -radix dec mempool_pkg::NumY]}]} {
+  catch {set NumY_noc [examine -radix dec /mempool_pkg::NumY]}
+}
+if {[catch {expr {$NumX_noc + 0}}] || [catch {expr {$NumY_noc + 0}}]} {
+  set NumX_noc 1
+  set NumY_noc 1
+}
+
+for {set g 0} {$g < $NumGroups_noc} {incr g} {
+  set gx [expr {$g / $NumX_noc}]
+  set gy [expr {$g % $NumY_noc}]
+  set base "sim:/mempool_tb/dut/i_mempool_cluster/gen_groups_x\[${gx}\]/gen_groups_y\[${gy}\]/gen_rtl_group/i_group"
+  set grp_label "NoC_Links_G${g}_X${gx}Y${gy}"
+
+  # Wide Req (RDWR) router valid/ready per direction — from the FlooNoC wrapper
+  if {![catch {examine ${base}/floo_tcdm_wide_req_valid_out}]} {
+    add wave -noupdate -group $grp_label -group WideReq_Valid ${base}/floo_tcdm_wide_req_valid_out
+    add wave -noupdate -group $grp_label -group WideReq_Valid ${base}/floo_tcdm_wide_req_valid_in
+  }
+
+  # Wide Resp router valid/ready per direction
+  if {![catch {examine ${base}/floo_tcdm_resp_valid_out}]} {
+    add wave -noupdate -group $grp_label -group Resp_Valid ${base}/floo_tcdm_resp_valid_out
+    add wave -noupdate -group $grp_label -group Resp_Valid ${base}/floo_tcdm_resp_valid_in
+  }
+
+  # Narrow Req router valid (if narrow channels exist)
+  if {![catch {examine ${base}/floo_tcdm_narrow_req_valid_out}]} {
+    add wave -noupdate -group $grp_label -group NarrowReq_Valid ${base}/floo_tcdm_narrow_req_valid_out
+    add wave -noupdate -group $grp_label -group NarrowReq_Valid ${base}/floo_tcdm_narrow_req_valid_in
+  }
+
+  # Master req/resp at MSHR boundary (tile → MSHR → NoC)
+  # These are the output ports of the group module
+  add wave -noupdate -group $grp_label -group MSHR_Req ${base}/tcdm_master_req_valid
+  add wave -noupdate -group $grp_label -group MSHR_Resp ${base}/tcdm_master_resp_valid
+
+  # Slave req/resp (incoming from NoC → tile banks)
+  add wave -noupdate -group $grp_label -group Slave_Req ${base}/tcdm_slave_req_valid
+  add wave -noupdate -group $grp_label -group Slave_Resp ${base}/tcdm_slave_resp_valid
+
+  # Resp remapper output (after hash spreading)
+  if {![catch {examine ${base}/floo_tcdm_resp_to_router_valid}]} {
+    add wave -noupdate -group $grp_label -group Resp_Remapped ${base}/floo_tcdm_resp_to_router_valid
+  }
+}
+
+
+# ========================================================================
+# Per-group Group-MSHR signals (mempool_group_mshr.sv)
+# Entry table + the 4 boundary handshakes + the internal response path that
+# carries the message-dependent deadlock (resp_in_*/resp_out_* /
+# mshr_noc_resp_ready_o wedging when a stalled core won't accept a response).
+# See bottleneck_analysis/2026-06-12_noc_deadlock_fix_report.md.
+# Every add is catch-wrapped: configs without a group MSHR, or signals
+# optimized away, are skipped rather than aborting the script.
+# ========================================================================
+proc add_group_mshr_wave {g NumX NumY} {
+    set gx [expr {$g / $NumX}]
+    set gy [expr {$g % $NumY}]
+    set m "sim:/mempool_tb/dut/i_mempool_cluster/gen_groups_x\[${gx}\]/gen_groups_y\[${gy}\]/gen_rtl_group/i_group/i_mempool_group/gen_group_mshr/i_group_mshr"
+    # Skip groups/configs without a group MSHR instance.
+    if {[catch {examine ${m}/mshr_q_valid}]} { return }
+    set L "MSHR_G${g}_X${gx}Y${gy}"
+
+    # --- Entry table (state / base_addr / resp_buf_cnt / sub_reqs / beat_pending ...) ---
+    catch {add wave -noupdate -group $L -group Entries ${m}/mshr_q_valid}
+    catch {add wave -noupdate -group $L -group Entries ${m}/mshr_q}
+    catch {add wave -noupdate -group $L -group Entries ${m}/mshr_resp_inflight}
+
+    # --- Boundary 1: tiles -> MSHR (request ingress) ---
+    catch {add wave -noupdate -group $L -group ReqIn  ${m}/group_mshr_req_valid_i}
+    catch {add wave -noupdate -group $L -group ReqIn  ${m}/group_mshr_req_ready_o}
+    catch {add wave -noupdate -group $L -group ReqIn  ${m}/group_mshr_req_i}
+    catch {add wave -noupdate -group $L -group ReqIn  ${m}/req_merge_valid}
+    catch {add wave -noupdate -group $L -group ReqIn  ${m}/req_alloc_found}
+
+    # --- Boundary 2: MSHR -> NoC (request egress) ---
+    catch {add wave -noupdate -group $L -group ReqOutNoC ${m}/mshr_noc_req_valid_o}
+    catch {add wave -noupdate -group $L -group ReqOutNoC ${m}/mshr_noc_req_ready_i}
+    catch {add wave -noupdate -group $L -group ReqOutNoC ${m}/mshr_noc_req_o}
+
+    # --- Boundary 3: NoC -> MSHR (response ingress) — DEADLOCK SOURCE ---
+    # mshr_noc_resp_ready_o wedges low when the matched entry's resp_buf is full
+    # or (bypass) the drain output is back-pressured by a stalled core.
+    catch {add wave -noupdate -group $L -group RespInNoC ${m}/mshr_noc_resp_valid_i}
+    catch {add wave -noupdate -group $L -group RespInNoC ${m}/mshr_noc_resp_ready_o}
+    catch {add wave -noupdate -group $L -group RespInNoC ${m}/mshr_noc_resp_i}
+
+    # --- Boundary 4: MSHR -> tiles (response egress / multicast drain) ---
+    catch {add wave -noupdate -group $L -group RespOut ${m}/group_mshr_resp_valid_o}
+    catch {add wave -noupdate -group $L -group RespOut ${m}/group_mshr_resp_ready_i}
+    catch {add wave -noupdate -group $L -group RespOut ${m}/group_mshr_resp_o}
+
+    # --- Internal response path (post-spill) — watch these for the wedge ---
+    catch {add wave -noupdate -group $L -group RespPath ${m}/resp_in_valid}
+    catch {add wave -noupdate -group $L -group RespPath ${m}/resp_in_ready}
+    catch {add wave -noupdate -group $L -group RespPath ${m}/resp_in}
+    catch {add wave -noupdate -group $L -group RespPath ${m}/resp_out_valid}
+    catch {add wave -noupdate -group $L -group RespPath ${m}/resp_out_ready}
+    catch {add wave -noupdate -group $L -group RespPath ${m}/resp_out}
+    catch {add wave -noupdate -group $L -group RespPath ${m}/mshr_resp_slots}
+    catch {add wave -noupdate -group $L -group RespPath ${m}/resp_capture_fire}
+
+    # --- Response classification (bypass vs MSHR-managed, drain selection) ---
+    catch {add wave -noupdate -group $L -group Classify ${m}/resp_is_mshr}
+    catch {add wave -noupdate -group $L -group Classify ${m}/resp_mshr_id}
+    catch {add wave -noupdate -group $L -group Classify ${m}/resp_from_mshr}
+    catch {add wave -noupdate -group $L -group Classify ${m}/resp_from_bypass}
+    catch {add wave -noupdate -group $L -group Classify ${m}/resp_mshr_id_dbg}
+    catch {add wave -noupdate -group $L -group Classify ${m}/resp_sel_valid}
+    catch {add wave -noupdate -group $L -group Classify ${m}/resp_sel_mshr_id}
+    catch {add wave -noupdate -group $L -group Classify ${m}/resp_sel_subreq_idx}
+}
+
+for {set g 0} {$g < $NumGroups_noc} {incr g} {
+    add_group_mshr_wave $g $NumX_noc $NumY_noc
+}
+
 
 # Add a vector of the core's wfi signal to quickly see which cores are active
 add wave /mempool_tb/wfi
@@ -87,10 +232,12 @@ for {set group 0} {$group < [examine -radix dec /mempool_pkg::NumGroups]} {incr 
 
 # Add all cores from group 0 tile 0
 for {set core 0}  {$core < [examine -radix dec mempool_pkg::NumCoresPerTile]} {incr core} {
-    if {![catch {examine -radix dec /mempool_tb/spatz_issue_utilization}]} {
-        do ../scripts/questa/wave_spatz_core.tcl 0 0 $core $NumY
-    } else {
-        do ../scripts/questa/wave_core.tcl 0 0 $core $NumY
+    for {set tile 0} {$tile < 2} {incr tile} {
+        if {![catch {examine -radix dec /mempool_tb/spatz_issue_utilization}]} {
+            do ../scripts/questa/wave_spatz_core.tcl 0 $tile $core $NumY
+        } else {
+            do ../scripts/questa/wave_core.tcl 0 $tile $core $NumY
+        }
     }
 }
 
@@ -98,26 +245,63 @@ for {set core 0}  {$core < [examine -radix dec mempool_pkg::NumCoresPerTile]} {i
 set NumGroups [examine -radix dec mempool_pkg::NumGroups]
 set NumTilesPerGroup [examine -radix dec mempool_pkg::NumTilesPerGroup]
 set NumCoresPerTile [examine -radix dec mempool_pkg::NumCoresPerTile]
+set HasSpatz [expr {![catch {examine -radix dec /mempool_tb/spatz_issue_utilization}]}]
+
+proc add_core_wave_by_global_id {global_core NumGroups NumTilesPerGroup NumCoresPerTile NumY HasSpatz} {
+    set cores_per_group [expr {$NumTilesPerGroup * $NumCoresPerTile}]
+    if {$cores_per_group <= 0} {
+        return
+    }
+
+    set group [expr {$global_core / $cores_per_group}]
+    set core_in_group [expr {$global_core % $cores_per_group}]
+    set tile [expr {$core_in_group / $NumCoresPerTile}]
+    set core [expr {$core_in_group % $NumCoresPerTile}]
+
+    if {$group < 0 || $group >= $NumGroups} {
+        return
+    }
+    if {$tile < 0 || $tile >= $NumTilesPerGroup} {
+        return
+    }
+    if {$core < 0 || $core >= $NumCoresPerTile} {
+        return
+    }
+
+    if {$HasSpatz} {
+        do ../scripts/questa/wave_spatz_core.tcl $group $tile $core $NumY
+    } else {
+        do ../scripts/questa/wave_core.tcl $group $tile $core $NumY
+    }
+}
+
 if {$NumGroups > 1} {
-    if {![catch {examine -radix dec /mempool_tb/spatz_issue_utilization}]} {
+    if {$HasSpatz} {
         do ../scripts/questa/wave_spatz_core.tcl 1 0 0 $NumY
     } else {
         do ../scripts/questa/wave_core.tcl 1 0 0 $NumY
     }
 }
 if {$NumGroups > 1 && $NumTilesPerGroup > 1 && $NumCoresPerTile > 1} {
-    if {![catch {examine -radix dec /mempool_tb/spatz_issue_utilization}]} {
+    if {$HasSpatz} {
         do ../scripts/questa/wave_spatz_core.tcl 1 1 1 $NumY
     } else {
         do ../scripts/questa/wave_core.tcl 1 1 1 $NumY
     }
 }
 if {$NumGroups > 0 && $NumTilesPerGroup > 0 && $NumCoresPerTile > 0} {
-    if {![catch {examine -radix dec /mempool_tb/spatz_issue_utilization}]} {
+    if {$HasSpatz} {
         do ../scripts/questa/wave_spatz_core.tcl [expr {$NumGroups-1}] [expr {$NumTilesPerGroup-1}] [expr {$NumCoresPerTile-1}] $NumY
     } else {
         do ../scripts/questa/wave_core.tcl [expr {$NumGroups-1}] [expr {$NumTilesPerGroup-1}] [expr {$NumCoresPerTile-1}] $NumY
     }
+}
+
+# Add selected cores by global core ID for targeted debug.
+# sp-fmatmul-opt-burst-merge stuck cores (build_2), wedge order; first 6 = Group 12
+# hard-frozen deadlock cluster (tiles 9-14). See bottleneck_analysis/2026-06-11_sp_fmatmul_stuck_cores.md
+foreach global_core {204 205 203 202 201 206 87 78 223 47 151 69 116 247 95 94 92 23 62 61 222 127 134 133 186} {
+    add_core_wave_by_global_id $global_core $NumGroups $NumTilesPerGroup $NumCoresPerTile $NumY $HasSpatz
 }
 
 # Add groups
@@ -226,3 +410,17 @@ for {set group 0} {$group < [examine -radix dec /mempool_pkg::NumGroups]} {incr 
 }
 
 do ../scripts/questa/wave_cache.tcl 0 0 0 $NumY
+
+# Core Memory Scoreboard VIP — aggregate counters and live status per (g,t,c,p).
+# Add cms_tbl entries manually for specific ports of interest (large array).
+if {![catch {examine /mempool_tb/u_cms/cms_cycle}]} {
+  add wave -noupdate -group "VIP CMS" /mempool_tb/u_cms/cms_cycle
+  add wave -noupdate -group "VIP CMS" /mempool_tb/u_cms/cms_benchmark_active
+  add wave -noupdate -group "VIP CMS" /mempool_tb/u_cms/cms_n_req
+  add wave -noupdate -group "VIP CMS" /mempool_tb/u_cms/cms_n_resp_done
+  add wave -noupdate -group "VIP CMS" /mempool_tb/u_cms/cms_n_inflight
+  add wave -noupdate -group "VIP CMS" /mempool_tb/u_cms/cms_n_inflight_hw
+  add wave -noupdate -group "VIP CMS" /mempool_tb/u_cms/cms_n_orphan
+  add wave -noupdate -group "VIP CMS" /mempool_tb/u_cms/cms_n_dup_alloc
+  add wave -noupdate -group "VIP CMS" /mempool_tb/u_cms/cms_lat_max
+}
