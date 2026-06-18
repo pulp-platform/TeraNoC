@@ -23,6 +23,13 @@ add wave -noupdate -group Core_Stall /mempool_tb/core_stall_long
 add wave -noupdate -group Core_Stall -radix unsigned /mempool_tb/core_stall_cnt
 add wave -noupdate -group Core_Stall /mempool_tb/wfi
 
+# Benchmark phase marker. A test that writes the phase number to the `trace` CSR
+# (0x7d0) -- e.g. sp-mshr-burst-test via phase_begin()/phase_end() -- shows here as
+# a 1..N staircase per core (0 = idle), so you can read which test phase the sim is
+# in straight off the waveform. csr_trace_any_global = profiling window active.
+add wave -noupdate -group Benchmark_Phase -color {Gold} -format Analog-Step -height 60 -max 16 -radix unsigned /mempool_tb/core_bench_phase
+add wave -noupdate -group Benchmark_Phase /mempool_tb/csr_trace_any_global
+
 add wave -noupdate -group Utilization -color {Cornflower Blue} -format Analog-Step -height 84 -max $num_cores -radix unsigned /mempool_tb/snitch_utilization
 add wave -noupdate -group Utilization /mempool_tb/instruction_handshake
 add wave -noupdate -group Utilization -color {Cornflower Blue} -format Analog-Step -height 84 -max $num_cores -radix unsigned /mempool_tb/lsu_utilization

@@ -264,13 +264,31 @@ module mempool_tb;
   for (genvar g = 0; g < NumGroups; g++) begin: gen_trace_groups
     for (genvar t = 0; t < NumTilesPerGroup; t++) begin: gen_trace_tiles
       for (genvar c = 0; c < NumCoresPerTile; c++) begin: gen_trace_cores
+        // Reduction-OR: trace is "active" for ANY non-zero csr_trace value, so a
+        // benchmark that writes a phase NUMBER (not just 1) still gates profiling.
         assign csr_trace_q[g][t][c] =
-            dut.i_mempool_cluster.gen_groups_x[g/NumY].gen_groups_y[g%NumY].gen_rtl_group
+            |dut.i_mempool_cluster.gen_groups_x[g/NumY].gen_groups_y[g%NumY].gen_rtl_group
                 .i_group.i_mempool_group.gen_tiles[t].i_tile.gen_cores[c].gen_mempool_cc
                 .riscv_core.i_snitch.csr_trace_q;
       end: gen_trace_cores
     end: gen_trace_tiles
   end: gen_trace_groups
+
+  // Per-core benchmark-phase value: the FULL `trace` CSR (0x7d0) of each core, for
+  // the waveform. A benchmark that writes the phase number (e.g. sp-mshr-burst-test
+  // via phase_begin/phase_end) shows up here as a 1..N staircase (0 = idle), so you
+  // can read which phase each core is running straight off the wave.
+  logic [NumCores-1:0][31:0] core_bench_phase;
+  for (genvar g = 0; g < NumGroups; g++) begin: gen_phase_groups
+    for (genvar t = 0; t < NumTilesPerGroup; t++) begin: gen_phase_tiles
+      for (genvar c = 0; c < NumCoresPerTile; c++) begin: gen_phase_cores
+        assign core_bench_phase[g*NumTilesPerGroup*NumCoresPerTile + t*NumCoresPerTile + c] =
+            dut.i_mempool_cluster.gen_groups_x[g/NumY].gen_groups_y[g%NumY].gen_rtl_group
+                .i_group.i_mempool_group.gen_tiles[t].i_tile.gen_cores[c].gen_mempool_cc
+                .riscv_core.i_snitch.csr_trace_q;
+      end: gen_phase_cores
+    end: gen_phase_tiles
+  end: gen_phase_groups
 
   always_comb begin
     csr_trace_any_global = 1'b0;
