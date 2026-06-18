@@ -25,16 +25,17 @@
 #include "synchronization.h"
 
 #ifndef ACTIVE_CORES
-#define ACTIVE_CORES 0   // 0 => use all cores
+#define ACTIVE_CORES 16   // 0 => use all cores
 #endif
 
 #define PC_WORDS    64   // per-core golden region (covers 3x16 wrap in P7)
 #define BUF_WORDS   32   // local result buffer; kept small so main's stack frame
                          // fits the 512B per-core stack (seq_mem_size). Caps the
                          // largest single vld at VL=32.
-#define N_SHARED_S  16   // shared words for the scalar-merge phase
-#define N_SHARED_B  32   // shared words for the burst-merge phase
 #define PRINT_CAP   24   // max detailed [FAIL] lines across all cores
+#define COALESCE_GROUP 1u  // group the P2/P3 shared target lives in. It is remote to
+                           // every OTHER group, so the merge phases coalesce even at
+                           // ACTIVE_CORES=16 (one group of 16 cores hits it remotely).
 #define VERDICT_PRINTF   // enable detailed per-phase verdict lines (stack-heavy; may overflow 512B stack)
 
 // ---- Geometry for guaranteed cross-group (remote) targeting [P8/P9] ----
@@ -47,8 +48,6 @@
 
 // ---- Shared data (L1, word-interleaved across all groups) ----
 static uint32_t percore [NUM_CORES * PC_WORDS] __attribute__((section(".l1_prio"), aligned(4096)));
-static uint32_t shared_s[N_SHARED_S]           __attribute__((section(".l1_prio"), aligned(4096)));
-static uint32_t shared_b[N_SHARED_B]           __attribute__((section(".l1_prio"), aligned(256)));
 static uint32_t amo_cnt                         __attribute__((section(".l1_prio"), aligned(64)));
 static uint32_t amo_mix                         __attribute__((section(".l1_prio"), aligned(64)));
 static volatile uint32_t g_fail                 __attribute__((section(".l1_prio"), aligned(64)));
@@ -56,8 +55,6 @@ static volatile uint32_t g_print                __attribute__((section(".l1_prio
 
 // Deterministic golden patterns (read-only after init).
 static inline uint32_t gold_pc(uint32_t cid, uint32_t i) { return 0xB0000000u + cid * 0x1000u + i; }
-static inline uint32_t gold_s(uint32_t k)                { return 0xA0000000u + k; }
-static inline uint32_t gold_b(uint32_t i)                { return 0xC0000000u + i; }
 // percore golden by absolute word index (line owner = w / PC_WORDS).
 static inline uint32_t gold_pc_w(uint32_t w)             { return gold_pc(w / PC_WORDS, w % PC_WORDS); }
 
@@ -89,6 +86,16 @@ static uint32_t remote_base(uint32_t mg, uint32_t slot) {
     o = (o + 1u) % no;
   }
   return o * PC_WORDS;
+}
+// First percore line (word index) that lives in group `g` -- a FIXED address (same
+// for all cores) so reads of it coalesce. With `g` != the active cores' group it is
+// remote (COALESCE_GROUP=1 is remote to the group-0 cores), so the P2/P3 merge
+// phases exercise the MSHR even when only one group of cores is active.
+static uint32_t line_in_group(uint32_t g) {
+  const uint32_t nl = (uint32_t)(NUM_CORES * PC_WORDS) / WORDS_PER_LINE;
+  for (uint32_t line = 0; line < nl; ++line)
+    if (l1_group_of(&percore[line * WORDS_PER_LINE]) == g) return line * WORDS_PER_LINE;
+  return 0;
 }
 
 // ---- Atomics ----
@@ -172,6 +179,11 @@ int main() {
   const uint32_t rb = on ? remote_base(my_group, cid)              : 0u; // P1/P6/P7 owner region
   const uint32_t w8 = on ? remote_line(my_group, cid,      nlines) : 0u; // P8 burst line
   const uint32_t w9 = on ? remote_line(my_group, cid + 1u, nlines) : 0u; // P9 single-word line
+  // P2/P3 coalesce target: a FIXED line in group COALESCE_GROUP that ALL cores read,
+  // so they merge in their source group's MSHR. Remote for any core outside that
+  // group (e.g. all 16 group-0 cores at ACTIVE_CORES=16), which is what makes the
+  // merge phases observable without spanning multiple groups.
+  const uint32_t cg = line_in_group(COALESCE_GROUP);
 
   uint32_t buf[BUF_WORDS];   // per-core local result buffer
 
@@ -186,8 +198,9 @@ int main() {
     for (uint32_t j = 0; j < WORDS_PER_LINE; ++j) percore[w9 + j] = gold_pc_w(w9 + j);
   }
   if (cid == 0) {
-    for (uint32_t k = 0; k < N_SHARED_S; ++k) shared_s[k] = gold_s(k);
-    for (uint32_t i = 0; i < N_SHARED_B; ++i) shared_b[i] = gold_b(i);
+    // P2/P3 shared coalesce-target line (group COALESCE_GROUP); 16 words covers
+    // P2's 8 single words and P3's 16-word burst.
+    for (uint32_t j = 0; j < WORDS_PER_LINE; ++j) percore[cg + j] = gold_pc_w(cg + j);
     amo_cnt = 0; amo_mix = 0; g_fail = 0; g_print = 0;
   }
   mempool_barrier(num_cores);
@@ -212,11 +225,11 @@ int main() {
   // overflow path is exercised too). EnableMshrSingleReq single-word merge.
   if (on) {
     for (uint32_t k = 0; k < 8; ++k) {
-      uint32_t v; asm volatile("lw %0, 0(%1)" : "=r"(v) : "r"(&shared_s[k]) : "memory");
+      uint32_t v; asm volatile("lw %0, 0(%1)" : "=r"(v) : "r"(&percore[cg + k]) : "memory");
       buf[k] = v;
     }
     asm volatile("fence" ::: "memory");
-    CHECK(2, buf, 8, gold_s(_i));
+    CHECK(2, buf, 8, gold_pc_w(cg + _i));
   }
   mempool_barrier(num_cores);
 
@@ -224,8 +237,8 @@ int main() {
   phase_begin(3);
   // ---- P3: burst merge (cores in a group read the SAME aligned region) ----
   if (on) {
-    vld_m1(&shared_b[0], buf, 16);
-    CHECK(3, buf, 16, gold_b(_i));
+    vld_m1(&percore[cg], buf, 16);
+    CHECK(3, buf, 16, gold_pc_w(cg + _i));
   }
   mempool_barrier(num_cores);
 
