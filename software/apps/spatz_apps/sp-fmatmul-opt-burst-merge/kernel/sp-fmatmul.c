@@ -43,6 +43,7 @@
 // Scalar floats: t0..t7 = A[m+0..7][n] elements
 //==========================================================
 
+KERNEL_ATTR
 void matmul_8xVL(float *c, const float *a, const float *b,
                  const unsigned int m_start, const unsigned int m_end,
                  const unsigned int N, const unsigned int P,
@@ -60,6 +61,7 @@ void matmul_8xVL(float *c, const float *a, const float *b,
     const float *b_ = b + p;
     float *c_ = c + p;
 
+    KERNEL_NO_UNROLL
     for (unsigned int m = m_start; m < m_end; m += 8) {
       // a_ = base of row m in A; a__ = shared walking pointer
       const float *a_ = a + m * N;
@@ -85,63 +87,93 @@ void matmul_8xVL(float *c, const float *a, const float *b,
 
       unsigned int n = 0;
 
-      while (n < N) {
-        // Reset a__ to column (n+1) of row m
-        a__ = a_ + ++n;
+      // ---- Peeled first iteration ----------------------------------------
+      // The first inner iteration is the ONLY one that *initializes* the
+      // accumulators (vfmul) instead of accumulating (vfmacc). Peeling it out
+      // of the loop removes the per-iteration (n == 1) test and keeps the 8
+      // vfmul OUT of the hot loop body (smaller, branch-free hot loop).
+      //
+      // First half: init column 0 with vfmul (v18 = B[0]); prefetch B[1]->v20
+      // and load A[..][1] for the second half.
+      ++n;  // n = 1
+      a__ = a_ + n;
+      asm volatile("vle32.v v20, (%0);" ::"r"(b__));
+      b__ += P;
+      asm volatile("vfmul.vf v0, v18, %0" ::"f"(t0));
+      t0 = *a__;  a__ += N;
+      asm volatile("vfmul.vf v2, v18, %0" ::"f"(t1));
+      t1 = *a__;  a__ += N;
+      asm volatile("vfmul.vf v4, v18, %0" ::"f"(t2));
+      t2 = *a__;  a__ += N;
+      asm volatile("vfmul.vf v6, v18, %0" ::"f"(t3));
+      t3 = *a__;  a__ += N;
+      asm volatile("vfmul.vf v8, v18, %0" ::"f"(t4));
+      t4 = *a__;  a__ += N;
+      asm volatile("vfmul.vf v10, v18, %0" ::"f"(t5));
+      t5 = *a__;  a__ += N;
+      asm volatile("vfmul.vf v12, v18, %0" ::"f"(t6));
+      t6 = *a__;  a__ += N;
+      asm volatile("vfmul.vf v14, v18, %0" ::"f"(t7));
+      t7 = *a__;
 
-        // Prefetch B[n] into alternate register
-        asm volatile("vle32.v v20, (%0);" ::"r"(b__));
-        b__ += P;
-
-        // Compute C[m+0..7] += A[m+0..7][n-1] * B[n-1]
-        // Simultaneously load A[m+0..7][n] for next iteration
-        if (n == 1) {
-          asm volatile("vfmul.vf v0, v18, %0" ::"f"(t0));
-          t0 = *a__;  a__ += N;
-          asm volatile("vfmul.vf v2, v18, %0" ::"f"(t1));
-          t1 = *a__;  a__ += N;
-          asm volatile("vfmul.vf v4, v18, %0" ::"f"(t2));
-          t2 = *a__;  a__ += N;
-          asm volatile("vfmul.vf v6, v18, %0" ::"f"(t3));
-          t3 = *a__;  a__ += N;
-          asm volatile("vfmul.vf v8, v18, %0" ::"f"(t4));
-          t4 = *a__;  a__ += N;
-          asm volatile("vfmul.vf v10, v18, %0" ::"f"(t5));
-          t5 = *a__;  a__ += N;
-          asm volatile("vfmul.vf v12, v18, %0" ::"f"(t6));
-          t6 = *a__;  a__ += N;
-          asm volatile("vfmul.vf v14, v18, %0" ::"f"(t7));
-          t7 = *a__;
-        } else {
-          asm volatile("vfmacc.vf v0, %0, v18" ::"f"(t0));
-          t0 = *a__;  a__ += N;
-          asm volatile("vfmacc.vf v2, %0, v18" ::"f"(t1));
-          t1 = *a__;  a__ += N;
-          asm volatile("vfmacc.vf v4, %0, v18" ::"f"(t2));
-          t2 = *a__;  a__ += N;
-          asm volatile("vfmacc.vf v6, %0, v18" ::"f"(t3));
-          t3 = *a__;  a__ += N;
-          asm volatile("vfmacc.vf v8, %0, v18" ::"f"(t4));
-          t4 = *a__;  a__ += N;
-          asm volatile("vfmacc.vf v10, %0, v18" ::"f"(t5));
-          t5 = *a__;  a__ += N;
-          asm volatile("vfmacc.vf v12, %0, v18" ::"f"(t6));
-          t6 = *a__;  a__ += N;
-          asm volatile("vfmacc.vf v14, %0, v18" ::"f"(t7));
-          t7 = *a__;
-        }
-
-        // Reset a__ to column (n+1) of row m
-        a__ = a_ + ++n;
-
-        if (n == N)
-          break;
-
-        // Prefetch B[n] into v18
+      // Second half: accumulate column 1 (v20 = B[1]); prefetch B[2]->v18 and
+      // load A[..][2]. Skipped when N == 2 so column 1 falls to the epilogue
+      // (exactly as the original loop's mid-iteration break did).
+      ++n;  // n = 2
+      a__ = a_ + n;
+      if (n != N) {
         asm volatile("vle32.v v18, (%0);" ::"r"(b__));
         b__ += P;
+        asm volatile("vfmacc.vf v0, %0, v20" ::"f"(t0));
+        t0 = *a__;  a__ += N;
+        asm volatile("vfmacc.vf v2, %0, v20" ::"f"(t1));
+        t1 = *a__;  a__ += N;
+        asm volatile("vfmacc.vf v4, %0, v20" ::"f"(t2));
+        t2 = *a__;  a__ += N;
+        asm volatile("vfmacc.vf v6, %0, v20" ::"f"(t3));
+        t3 = *a__;  a__ += N;
+        asm volatile("vfmacc.vf v8, %0, v20" ::"f"(t4));
+        t4 = *a__;  a__ += N;
+        asm volatile("vfmacc.vf v10, %0, v20" ::"f"(t5));
+        t5 = *a__;  a__ += N;
+        asm volatile("vfmacc.vf v12, %0, v20" ::"f"(t6));
+        t6 = *a__;  a__ += N;
+        asm volatile("vfmacc.vf v14, %0, v20" ::"f"(t7));
+        t7 = *a__;
+      }
 
-        // Compute C[m+0..7] += A[m+0..7][n-1] * B[n-1]
+      // ---- Steady state: vfmacc only, no (n == 1) test --------------------
+      KERNEL_NO_UNROLL
+      while (n < N) {
+        // First half: accumulate with v18 (B[even]); prefetch B[odd] -> v20.
+        ++n;
+        a__ = a_ + n;
+        asm volatile("vle32.v v20, (%0);" ::"r"(b__));
+        b__ += P;
+        asm volatile("vfmacc.vf v0, %0, v18" ::"f"(t0));
+        t0 = *a__;  a__ += N;
+        asm volatile("vfmacc.vf v2, %0, v18" ::"f"(t1));
+        t1 = *a__;  a__ += N;
+        asm volatile("vfmacc.vf v4, %0, v18" ::"f"(t2));
+        t2 = *a__;  a__ += N;
+        asm volatile("vfmacc.vf v6, %0, v18" ::"f"(t3));
+        t3 = *a__;  a__ += N;
+        asm volatile("vfmacc.vf v8, %0, v18" ::"f"(t4));
+        t4 = *a__;  a__ += N;
+        asm volatile("vfmacc.vf v10, %0, v18" ::"f"(t5));
+        t5 = *a__;  a__ += N;
+        asm volatile("vfmacc.vf v12, %0, v18" ::"f"(t6));
+        t6 = *a__;  a__ += N;
+        asm volatile("vfmacc.vf v14, %0, v18" ::"f"(t7));
+        t7 = *a__;
+
+        // Second half: accumulate with v20 (B[odd]); prefetch B[even] -> v18.
+        ++n;
+        a__ = a_ + n;
+        if (n == N)
+          break;
+        asm volatile("vle32.v v18, (%0);" ::"r"(b__));
+        b__ += P;
         asm volatile("vfmacc.vf v0, %0, v20" ::"f"(t0));
         t0 = *a__;  a__ += N;
         asm volatile("vfmacc.vf v2, %0, v20" ::"f"(t1));
@@ -193,6 +225,7 @@ void matmul_8xVL(float *c, const float *a, const float *b,
 //==========================================================
 // 4xVL: Process 4 output rows per iteration, LMUL=2
 //==========================================================
+KERNEL_ATTR
 void matmul_4xVL(float *c, const float *a, const float *b,
                  const unsigned int m_start, const unsigned int m_end,
                  const unsigned int N, const unsigned int P,
@@ -208,6 +241,7 @@ void matmul_4xVL(float *c, const float *a, const float *b,
     const float *b_ = b + p;
     float *c_ = c + p;
 
+    KERNEL_NO_UNROLL
     for (unsigned int m = m_start; m < m_end; m += 4) {
       const float *a_ = a + m * N;
       const float *a__ = a_;
@@ -226,33 +260,54 @@ void matmul_4xVL(float *c, const float *a, const float *b,
 
       unsigned int n = 0;
 
+      // ---- Peeled first iteration (init col 0 with vfmul; removes the per-
+      //      iteration (n == 1) test and keeps the vfmul out of the hot loop) ----
+      asm volatile("vle32.v v20, (%0);" ::"r"(b__));
+      b__ += P;
+      ++n;  // n = 1
+      a__ = a_ + n;
+      asm volatile("vfmul.vf v0, v16, %0" ::"f"(t0));
+      t0 = *a__;  a__ += N;
+      asm volatile("vfmul.vf v4, v16, %0" ::"f"(t1));
+      t1 = *a__;  a__ += N;
+      asm volatile("vfmul.vf v8, v16, %0" ::"f"(t2));
+      t2 = *a__;  a__ += N;
+      asm volatile("vfmul.vf v12, v16, %0" ::"f"(t3));
+      t3 = *a__;
+
+      ++n;  // n = 2
+      a__ = a_ + n;
+      if (n != N) {
+        asm volatile("vle32.v v16, (%0);" ::"r"(b__));
+        b__ += P;
+        asm volatile("vfmacc.vf v0, %0, v20" ::"f"(t0));
+        t0 = *a__;  a__ += N;
+        asm volatile("vfmacc.vf v4, %0, v20" ::"f"(t1));
+        t1 = *a__;  a__ += N;
+        asm volatile("vfmacc.vf v8, %0, v20" ::"f"(t2));
+        t2 = *a__;  a__ += N;
+        asm volatile("vfmacc.vf v12, %0, v20" ::"f"(t3));
+        t3 = *a__;
+      }
+
+      // ---- Steady state: vfmacc only, no (n == 1) test ----
+      KERNEL_NO_UNROLL
       while (n < N) {
         asm volatile("vle32.v v20, (%0);" ::"r"(b__));
         b__ += P;
+        ++n;
+        a__ = a_ + n;
+        asm volatile("vfmacc.vf v0, %0, v16" ::"f"(t0));
+        t0 = *a__;  a__ += N;
+        asm volatile("vfmacc.vf v4, %0, v16" ::"f"(t1));
+        t1 = *a__;  a__ += N;
+        asm volatile("vfmacc.vf v8, %0, v16" ::"f"(t2));
+        t2 = *a__;  a__ += N;
+        asm volatile("vfmacc.vf v12, %0, v16" ::"f"(t3));
+        t3 = *a__;
 
-        a__ = a_ + ++n;
-
-        if (n == 1) {
-          asm volatile("vfmul.vf v0, v16, %0" ::"f"(t0));
-          t0 = *a__;  a__ += N;
-          asm volatile("vfmul.vf v4, v16, %0" ::"f"(t1));
-          t1 = *a__;  a__ += N;
-          asm volatile("vfmul.vf v8, v16, %0" ::"f"(t2));
-          t2 = *a__;  a__ += N;
-          asm volatile("vfmul.vf v12, v16, %0" ::"f"(t3));
-          t3 = *a__;
-        } else {
-          asm volatile("vfmacc.vf v0, %0, v16" ::"f"(t0));
-          t0 = *a__;  a__ += N;
-          asm volatile("vfmacc.vf v4, %0, v16" ::"f"(t1));
-          t1 = *a__;  a__ += N;
-          asm volatile("vfmacc.vf v8, %0, v16" ::"f"(t2));
-          t2 = *a__;  a__ += N;
-          asm volatile("vfmacc.vf v12, %0, v16" ::"f"(t3));
-          t3 = *a__;
-        }
-
-        a__ = a_ + ++n;
+        ++n;
+        a__ = a_ + n;
 
         if (n == N)
           break;
@@ -290,6 +345,7 @@ void matmul_4xVL(float *c, const float *a, const float *b,
 //==========================================================
 // 2xVL: Process 2 output rows per iteration, LMUL=2
 //==========================================================
+KERNEL_ATTR
 void matmul_2xVL(float *c, const float *a, const float *b,
                  const unsigned int m_start, const unsigned int m_end,
                  const unsigned int N, const unsigned int P,
@@ -305,6 +361,7 @@ void matmul_2xVL(float *c, const float *a, const float *b,
     const float *b_ = b + p;
     float *c_ = c + p;
 
+    KERNEL_NO_UNROLL
     for (unsigned int m = m_start; m < m_end; m += 2) {
       const float *a_ = a + m * N;
       const float *a__ = a_;
@@ -322,27 +379,47 @@ void matmul_2xVL(float *c, const float *a, const float *b,
 
       unsigned int n = 0;
 
+      // ---- Peeled first iteration (init col 0 with vfmul; removes the per-
+      //      iteration (n == 1) test and keeps the vfmul out of the hot loop) ----
+      ++n;  // n = 1
+      a__ = a_ + n;
+      asm volatile("vle32.v v24, (%0);" ::"r"(b__));
+      b__ += P;
+      asm volatile("vfmul.vf v0, v16, %0" ::"f"(t0));
+      t0 = *a__;
+      a__ += N;
+      asm volatile("vfmul.vf v8, v16, %0" ::"f"(t1));
+      t1 = *a__;
+
+      ++n;  // n = 2
+      a__ = a_ + n;
+      if (n != N) {
+        asm volatile("vle32.v v16, (%0);" ::"r"(b__));
+        b__ += P;
+        asm volatile("vfmacc.vf v0, %0, v24" ::"f"(t0));
+        t0 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v8, %0, v24" ::"f"(t1));
+        t1 = *a__;
+      }
+
+      // ---- Steady state: vfmacc only, no (n == 1) test ----
+      KERNEL_NO_UNROLL
       while (n < N) {
-        a__ = a_ + ++n;
+        ++n;
+        a__ = a_ + n;
 
         asm volatile("vle32.v v24, (%0);" ::"r"(b__));
         b__ += P;
 
-        if (n == 1) {
-          asm volatile("vfmul.vf v0, v16, %0" ::"f"(t0));
-          t0 = *a__;
-          a__ += N;
-          asm volatile("vfmul.vf v8, v16, %0" ::"f"(t1));
-          t1 = *a__;
-        } else {
-          asm volatile("vfmacc.vf v0, %0, v16" ::"f"(t0));
-          t0 = *a__;
-          a__ += N;
-          asm volatile("vfmacc.vf v8, %0, v16" ::"f"(t1));
-          t1 = *a__;
-        }
+        asm volatile("vfmacc.vf v0, %0, v16" ::"f"(t0));
+        t0 = *a__;
+        a__ += N;
+        asm volatile("vfmacc.vf v8, %0, v16" ::"f"(t1));
+        t1 = *a__;
 
-        a__ = a_ + ++n;
+        ++n;
+        a__ = a_ + n;
 
         if (n == N)
           break;

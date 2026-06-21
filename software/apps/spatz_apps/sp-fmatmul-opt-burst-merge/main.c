@@ -95,8 +95,34 @@ void init_matrix(float *matrix, const float *src,
 //
 // Returns: 0 if all checksums match, otherwise returns the row index that failed
 //==========================================================
+// Reinterpret a float's bits as uint32 WITHOUT an fmv.x.w (FP->int register
+// move). On this core the FP-sequencer's writeback for an fmv.x.w comes back
+// with acc_pwrite=0, which the compiled Snitch arbiter never acknowledges --
+// so the destination integer register's scoreboard bit stays set and the next
+// instruction that reads it (e.g. the printf's `sw aN,off(sp)`) stalls forever.
+// Forcing the round-trip through a volatile memory slot lowers to fsw + lw
+// (an FP store has no writeback, an integer load needs no FP unit), sidestepping
+// that hang. Used only on the error/report path.
+static inline uint32_t f32_to_bits(float f) {
+  volatile uint32_t slot;
+  *(volatile float *)&slot = f;  // fsw: FP store, no acc writeback
+  return slot;                   // lw : integer load, no fmv.x.w
+}
+
+// Verify C against the precomputed row checksums and REPORT the failure pattern
+// (count + first/last failing row), not just the first mismatch. Whether the
+// failing rows are all-256 (systematic), a contiguous block (a specific group's
+// cores), or scattered (localized) is the key signal for diagnosing a device-side
+// wrong result. Returns the first failing row 1-based (0 == all match), and fills
+// the out-params for the report. A correct float32 A*B passes this with margin
+// (host replay: worst |row-sum - checksum| = 4.3e-4 << prec=1e-3), so a failure
+// here is a genuinely wrong device result, not float rounding.
 int verify_matrix(float *matrix, const float *checksum,
-                 const uint32_t num_rows, const uint32_t num_columns) {
+                 const uint32_t num_rows, const uint32_t num_columns,
+                 uint32_t *nfail_out, uint32_t *last_row_out,
+                 uint32_t *first_sum_bits, uint32_t *first_chk_bits) {
+  uint32_t nfail = 0, last = 0;
+  int first = 0;
   for (uint32_t i = 0; i < num_rows; ++i) {
     // Compute sum of all elements in row i
     float sum = 0;
@@ -110,14 +136,21 @@ int verify_matrix(float *matrix, const float *checksum,
     if (diff < 0)
       diff = -diff;
     if (diff > prec) {
-      // Checksum mismatch. Return the failing row as 1-based (0 == success)
-      // so the caller can index the checksum array safely. The previous
-      // "-1 for row 0" convention caused an r[-1] out-of-bounds read in the
-      // error path.
-      return (int)(i) + 1;
+      // Checksum mismatch. Record the row (1-based so 0 == success and the
+      // caller can index the checksum array safely) but DO NOT early-return:
+      // keep scanning so we can report how many / which rows are wrong.
+      if (first == 0) {
+        first = (int)(i) + 1;
+        *first_sum_bits = f32_to_bits(sum);                  // fsw+lw, no fmv
+        *first_chk_bits = *(volatile uint32_t *)&checksum[i];// plain lw, no flw
+      }
+      last = i;
+      nfail++;
     }
   }
-  return 0;  // All checksums matched
+  *nfail_out = nfail;
+  *last_row_out = last;
+  return first;  // 0 == all checksums matched
 }
 
 //==========================================================
@@ -332,46 +365,42 @@ int main() {
   }
 
   //========================================================--
-  // STEP 6: VERIFICATION
+  // STEP 6: VERIFICATION  (same self-test as sp-fmatmul-opt)
   //========================================================--
-  // Verify correctness using row-sum checksums
+  // Core 0 runs verify_matrix(): for each of the M rows it sums c[i][0..P-1] and
+  // compares to the precomputed row checksum r[i] (= gemm_checksum, host-verified)
+  // with an absolute tolerance of 0.001 -- exactly the sp-fmatmul-opt self-test.
+  // Why this avoids the earlier stack overflow: verify_matrix uses only scalar
+  // locals (sum/diff/prec); it does NOT recompute the product into a per-row
+  // buffer, so nothing large lands on the 512 B per-core stack. It also performs
+  // no fp DIVISION (this config is nofdiv / XDIVSQRT=0 -- fdiv.s traps as illegal).
+  // (Note: result = alpha*C + A*B with alpha=0, so the true result is plain A*B
+  // and gemm_checksum holds the true row sums; gemm_C_dram is the random
+  // accumulate-INIT matrix, NOT a golden -- do not compare against it.)
+  // verify_matrix returns 0 on success or (failing_row + 1) on the first bad row.
   int error = 0;
   if (cid == 0) {
-    error = verify_matrix((float *)c, (const float *)r, gemm_l.M, gemm_l.P);
-
-#ifdef STRICT_VERIFY
-    // Optional exhaustive element-wise check against the golden result.
-    // Off by default: it reads the full MxP reference from DRAM (slow in RTL
-    // simulation), but unlike the row-sum checksum it catches errors that
-    // preserve row sums (e.g. a column-block swap or a wrong p_start).
-    if (error == 0) {
-      for (uint32_t i = 0; i < gemm_l.M && error == 0; ++i) {
-        for (uint32_t j = 0; j < gemm_l.P; ++j) {
-          float d = c[i * gemm_l.P + j] - gemm_C_dram[i * gemm_l.P + j];
-          if (d < 0) d = -d;
-          if (d > (float)0.01) {  // 1-based row index, matches verify_matrix
-            error = (int)(i) + 1;
-            break;
-          }
-        }
-      }
-      if (error == 0) printf("strict verify: success!\n");
-    }
-#endif
-
+    uint32_t nfail = 0, last_row = 0, sum_bits = 0, chk_bits = 0;
+    error = verify_matrix((float *)c, (const float *)r, gemm_l.M, gemm_l.P,
+                          &nfail, &last_row, &sum_bits, &chk_bits);
     if (error != 0) {
-      // error is 1-based; index the checksum array with (error - 1).
-      uint32_t bad_row = (uint32_t)error - 1u;
-      printf("Error core %d: row=%u checksum[%u]=%u\n", cid, bad_row, bad_row,
-             (uint32_t)r[bad_row]);
+      // Integer-only args (the bit patterns came back via fsw+lw, never an
+      // fmv.x.w) so this report path cannot deadlock the way the old
+      // `0x%08x` of a float did. The first/last/count triple classifies the
+      // failure: nfail==M => systematic; last-first+1==nfail => one contiguous
+      // block (a specific group's rows); otherwise scattered.
+      printf("FAIL: %u/%u rows mismatch; first row %d, last row %u\n",
+             nfail, gemm_l.M, error - 1, last_row);
+      printf("      row %d: device sum=0x%08x  expected checksum=0x%08x\n",
+             error - 1, sum_bits, chk_bits);
     } else {
       printf("success!\n");
     }
   }
 
-  // All cores must reach this barrier so the simulation can exit cleanly.
-  // Previously, 'return error' in the error path caused core 0 to skip the
-  // barrier, leaving 63 cores stuck in WFI and the simulation hanging.
+  // ALL cores must reach this barrier so the simulation exits cleanly. Do NOT
+  // 'return error' on core 0 before this point: a core-0-only early return skips
+  // the barrier and leaves the other cores asleep in WFI, hanging the run.
   mempool_barrier(num_cores);
 
   return error;
