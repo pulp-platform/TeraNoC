@@ -96,6 +96,9 @@ module snitch
   input  acc_issue_rsp_t      acc_qdata_rsp_i,
   input  logic [1:0]    acc_mem_finished_i,
   input  logic [1:0]    acc_mem_str_finished_i,
+  // Request-side: per-lane pulse when all of a mem op's requests are issued to the
+  // interconnect (bit[1]=VLSU, bit[0]=FP-LSU); responses may still be in flight.
+  input  logic [1:0]    acc_mem_req_sent_i,
   /// TCDM Data Interface
   /// Write transactions do not return data on the `P Channel`
   /// Transactions need to be handled strictly in-order.
@@ -158,8 +161,13 @@ module snitch
   // Driven by the FFAR in the TARGET_SPATZ block; tied to 0 for non-Spatz flavors so
   // FENCE/SFENCE_VMA simply never wait on a (nonexistent) accelerator.
   logic [2:0] acc_mem_cnt_q;
+  // Outstanding Spatz mem ops whose requests are not yet all issued -- the request-sent
+  // fence (HFENCE_GVMA) waits on this. Decrements at request-issue, not at response, so
+  // memory-transaction overlap is preserved. Hoisted for the same forward-ref reason.
+  logic [2:0] acc_mem_req_cnt_q;
 `ifndef TARGET_SPATZ
-  assign acc_mem_cnt_q = '0;
+  assign acc_mem_cnt_q     = '0;
+  assign acc_mem_req_cnt_q = '0;
 `endif
   // Register connections
   logic [RegNrReadPorts-1:0][RegWidth-1:0]  gpr_raddr;
@@ -869,7 +877,7 @@ module snitch
       // this bare-metal platform) provide fine-grained fences:
       //   FENCE      -> wait for BOTH the integer LSU AND Spatz accelerator mem ops
       //   FENCE_I    -> integer LSU only (snitch-only fence)
-      //   SFENCE_VMA -> Spatz accelerator mem only (spatz-only fence)
+      //   SFENCE_VMA -> Spatz request-sent: wait until vector requests are ISSUED (not drained)
       riscv_instr::FENCE: begin
         write_rd = 1'b0;
         // Stall until BOTH the integer LSU is empty and Spatz has no outstanding mem ops
@@ -882,8 +890,11 @@ module snitch
       end
       riscv_instr::SFENCE_VMA: begin
         write_rd = 1'b0;
-        // Spatz-only: stall until Spatz accelerator memory ops have drained
-        fence_stall = (|acc_mem_cnt_q);
+        // Spatz request-sent fence: stall until all prior vector mem requests have been
+        // issued to the interconnect (responses may still be in flight -> overlap kept).
+        // Repurposed from a full drain -- request-sent is the semantics we use, and
+        // sfence.vma assembles cleanly (HFENCE_GVMA would need a raw-encoded .word).
+        fence_stall = (|acc_mem_req_cnt_q);
       end
       riscv_instr::WFI: begin
         if (valid_instr) begin
@@ -2805,6 +2816,10 @@ module snitch
   logic [2:0] acc_mem_cnt_d;
   `FFAR(acc_mem_cnt_q, acc_mem_cnt_d, '0, clk_i, rst_i)
 
+  // Outstanding-but-requests-not-all-sent count (acc_mem_req_cnt_q declared at top)
+  logic [2:0] acc_mem_req_cnt_d;
+  `FFAR(acc_mem_req_cnt_q, acc_mem_req_cnt_d, '0, clk_i, rst_i)
+
   // Number of store operations in the accelerator
   logic [2:0] acc_mem_str_cnt_q, acc_mem_str_cnt_d;
   `FFAR(acc_mem_str_cnt_q, acc_mem_str_cnt_d, '0, clk_i, rst_i)
@@ -2814,6 +2829,7 @@ module snitch
   always_comb begin
     acc_mem_cnt_d = acc_mem_cnt_q;
     acc_mem_str_cnt_d = acc_mem_str_cnt_q;
+    acc_mem_req_cnt_d = acc_mem_req_cnt_q;
 
     if (acc_qdata_rsp_i.loadstore && acc_qready_i && acc_qvalid_o)
       acc_mem_cnt_d += 1;
@@ -2821,6 +2837,15 @@ module snitch
       acc_mem_cnt_d -= 1;
     if (acc_mem_finished_i[1])
       acc_mem_cnt_d -= 1;
+
+    // Request-sent count: same offload increment, decremented when an op's requests
+    // are all issued (acc_mem_req_sent_i), NOT at response -> preserves overlap.
+    if (acc_qdata_rsp_i.loadstore && acc_qready_i && acc_qvalid_o)
+      acc_mem_req_cnt_d += 1;
+    if (acc_mem_req_sent_i[0])
+      acc_mem_req_cnt_d -= 1;
+    if (acc_mem_req_sent_i[1])
+      acc_mem_req_cnt_d -= 1;
 
     if (acc_qdata_rsp_i.loadstore && acc_qready_i && acc_qvalid_o && acc_mem_store)
       acc_mem_str_cnt_d += 1;

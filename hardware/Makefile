@@ -129,6 +129,11 @@ vlog_defs += -D$(config)
 ifeq ($(terapool), 1)
 	vlog_defs += -DTERAPOOL
 endif
+# Group-level fine-grained barrier (held-response TCDM slave). Default ON in
+# mempool_group; group_barrier=0 disables it (-DGROUP_BARRIER_OFF) for A/B.
+ifeq ($(group_barrier), 0)
+	vlog_defs += -DGROUP_BARRIER_OFF
+endif
 # --------------------------
 # Cluster Configuration
 # --------------------------
