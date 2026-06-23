@@ -58,6 +58,16 @@
 
 #define USE_DMA
 
+// ---- Phase-0 experiment knob (B-burst coalescing) --------------------------
+// 1 = insert a one-time intra-group barrier right before the matmul so all
+// cores in a group enter the n-loop aligned, landing their first shared-B
+// vector bursts inside the MSHR's ~68-cycle no-late-join merge window (so they
+// can coalesce). 0 = unaligned baseline. Flip to 0 and rebuild for the A/B
+// comparison. See WORKLOG 2026-06-20 / memory project_mshr_bcoalesce_sync_plan.
+#ifndef COLDSTART_GROUP_SYNC
+#define COLDSTART_GROUP_SYNC 0  // Phase-0 BASELINE run (unaligned); set 1 for aligned
+#endif
+
 #ifdef USE_DMA
 #include "dma.h"
 #endif
@@ -306,6 +316,19 @@ int main() {
   //   gemm_l.P   : output columns
   //   p_start/p_end: my column range
   //========================================================--
+#if GROUP_BARRIER
+  // Configure the per-pair barrier structs ONCE (Mode B: target+mask persist and
+  // auto-reuse every iteration). Pair p = within-group cores {p, p+8} uses struct p;
+  // the lower core configures it (target=2, resp_mask={p,p+8}). The barrier then
+  // ensures all config writes are acked before any core arrives.
+  if (is_core_active) {
+    uint32_t wg   = cid % cores_per_group;            // within-group tile
+    uint32_t half = cores_per_group / 2;
+    if (wg < half)
+      gbar_setup(wg, 2u, (1u << wg) | (1u << (wg + half)));
+  }
+  mempool_barrier(num_cores);
+#endif
   for (uint32_t i = 0; i < measure_iterations; ++i) {
     if (is_core_active) {
       // Start timer
@@ -314,6 +337,18 @@ int main() {
       // Start benchmark instrumentation
       if (cid == 0)
         mempool_start_benchmark();
+
+#if COLDSTART_GROUP_SYNC
+      // Cold-start intra-group alignment (Phase-0 experiment). Re-align all
+      // cores_per_group cores so their first (n=0) shared-B bursts issue within
+      // the MSHR merge window. num_cores_barrier = cores_per_group => the
+      // barrier wakes via wake_up_group (correct for all 16 groups; avoids the
+      // wake_up_tile groups-8..15 bug). Assumes the whole group is active
+      // (active_cores == num_cores here), else inactive cores would never
+      // arrive. Placed after start_benchmark so the alignment + first bursts are
+      // captured by the NoC tracer / [GroupMerge] stats.
+      mempool_log_partial_barrier(2, cid, cores_per_group);
+#endif
 
       // Dispatch to appropriate kernel based on kernel_size
       if (kernel_size == 2) {
@@ -379,6 +414,13 @@ int main() {
   // accumulate-INIT matrix, NOT a golden -- do not compare against it.)
   // verify_matrix returns 0 on success or (failing_row + 1) on the first bad row.
   int error = 0;
+  // MATMUL_VERIFY=0 skips the serial all-row checksum scan (core-0 only, runs
+  // AFTER mempool_stop_benchmark so it never affects the measured matmul cycles).
+  // Turned off for fast perf/coalescing A/B runs; set to 1 to confirm correctness.
+#ifndef MATMUL_VERIFY
+#define MATMUL_VERIFY 1   // ON for xbar-rewrite correctness check; set 0 for fast perf A/B
+#endif
+#if MATMUL_VERIFY
   if (cid == 0) {
     uint32_t nfail = 0, last_row = 0, sum_bits = 0, chk_bits = 0;
     error = verify_matrix((float *)c, (const float *)r, gemm_l.M, gemm_l.P,
@@ -397,6 +439,7 @@ int main() {
       printf("success!\n");
     }
   }
+#endif
 
   // ALL cores must reach this barrier so the simulation exits cleanly. Do NOT
   // 'return error' on core 0 before this point: a core-0-only early return skips
