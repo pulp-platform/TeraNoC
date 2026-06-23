@@ -31,6 +31,64 @@
 
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 
+// ---- Group barrier (memory-mapped, general-purpose structs) ----------------
+// The HW barrier (group LIC output port = NumTilesPerGroup) owns L1 words
+// [GBAR_BASE_WORD, +NumBarriers); struct s = word - GBAR_BASE_WORD. Per struct,
+// SW writes target+mask ONCE (gbar_setup, persists/auto-reused); then each
+// participant does gbar_arrive(struct) (a held load) + gbar_wait (fence). When the
+// struct's arrival count hits target, the HW fires the held responses to the
+// resp_mask cores, releasing them aligned.  The access MUST target a different tile
+// in the same group ((own_tile+1)%16) so it is TCDM_EXTERNAL and reaches the xbar
+// barrier port (a same-tile address is TCDM_LOCAL -> served tile-internally). The
+// struct is selected by the word (shared across the group); the tile field is only
+// routing. bank field = op: 0=arrive(load), 1=set target, 2=set mask.
+// Gated by GROUP_BARRIER; must match the RTL EnableGroupBarrier.
+#ifndef GROUP_BARRIER
+#define GROUP_BARRIER 1   // per-step pairwise barrier; 0 = unaligned baseline
+#endif
+#if GROUP_BARRIER
+#define GBAR_BASE_WORD 200u
+static inline uint32_t gbar_tgt_tile(void) {                 // a same-group tile != own
+  uint32_t hid; asm volatile("csrr %0, mhartid" : "=r"(hid));
+  return (hid & 0xF0u) | (((hid & 0xFu) + 1u) & 0xFu);
+}
+static inline uint32_t gbar_base(uint32_t s) {               // byte addr: word=base+s, tile, bank0
+  return ((GBAR_BASE_WORD + s) << 14) | (gbar_tgt_tile() << 6);
+}
+static inline void gbar_setup(uint32_t s, uint32_t target, uint32_t mask) {
+  uint32_t b = gbar_base(s);
+  *(volatile uint32_t *)(b + 4u) = target;                   // bank 1 -> WR_TARGET
+  *(volatile uint32_t *)(b + 8u) = mask;                     // bank 2 -> WR_MASK
+}
+static inline void gbar_arrive(uint32_t a) {                 // a = gbar_base(s); held load
+  uint32_t v; asm volatile("lw %0, 0(%1)" : "=r"(v) : "r"(a) : "memory"); (void)v;
+}
+// Full fence (both): wait for the held barrier lw (integer LSU) AND the Spatz VLSU
+// to drain (plain `fence` = both; see hardware/deps/snitch/src/snitch.sv). So the
+// pair rendezvouses AND each core's outstanding vector mem ops are drained before
+// the next aligned B prefetch issues.
+static inline void gbar_wait_both(void) { asm volatile("fence" ::: "memory"); }
+static inline void gbar_wait_snitch(void) { asm volatile("fence.i" ::: "memory"); }
+static inline void gbar_wait_spatz(void) { asm volatile("sfence.vma" ::: "memory"); }
+// One-call rendezvous. First drain THIS core's Spatz VLSU (so its previous B load is
+// complete), then arrive (held lw), then wait for the pair to release. Both cores meet
+// with their vector loads drained, so the next B vle issues aligned and coalesces.
+static inline void gbar_sync(uint32_t a) {
+  gbar_wait_spatz();   // wait until my VLSU has drained (previous vector load done)
+  gbar_arrive(a);      // arrive: held load to the barrier struct
+  gbar_wait_snitch();  // wait for the held lw to return (the pair has rendezvoused)
+}
+#define GBAR_SETUP(s,t,m) gbar_setup((s),(t),(m))
+#define GBAR_ARRIVE(a)    gbar_arrive(a)
+#define GBAR_WAIT()       gbar_wait_both()
+#define GBAR_SYNC(a)      gbar_sync(a)
+#else
+#define GBAR_SETUP(s,t,m) ((void)0)
+#define GBAR_ARRIVE(a)    ((void)0)
+#define GBAR_WAIT()       ((void)0)
+#define GBAR_SYNC(a)      ((void)0)
+#endif
+
 //==========================================================
 // 8xVL: Process 8 output rows per iteration, LMUL=2
 //
@@ -48,7 +106,11 @@ void matmul_8xVL(float *c, const float *a, const float *b,
                  const unsigned int m_start, const unsigned int m_end,
                  const unsigned int N, const unsigned int P,
                  const unsigned int p_start, const unsigned int p_end) {
-
+#if GROUP_BARRIER
+  // This core's pair-struct = (within-group tile) % 8; arrive address precomputed.
+  uint32_t bhid; asm volatile("csrr %0, mhartid" : "=r"(bhid));
+  const uint32_t gbar = gbar_base(bhid & 7u);
+#endif
   unsigned int p = p_start;
   while (p < p_end) {
     // LMUL=2: each vector holds up to 32 float32 elements (VLEN=512, m2).
@@ -97,6 +159,7 @@ void matmul_8xVL(float *c, const float *a, const float *b,
       // and load A[..][1] for the second half.
       ++n;  // n = 1
       a__ = a_ + n;
+      GBAR_SYNC(gbar);  // arrive + wait: rendezvous the pair; next vle issues aligned
       asm volatile("vle32.v v20, (%0);" ::"r"(b__));
       b__ += P;
       asm volatile("vfmul.vf v0, v18, %0" ::"f"(t0));
@@ -122,6 +185,7 @@ void matmul_8xVL(float *c, const float *a, const float *b,
       ++n;  // n = 2
       a__ = a_ + n;
       if (n != N) {
+        GBAR_SYNC(gbar);  // arrive + wait: rendezvous the pair; next vle issues aligned
         asm volatile("vle32.v v18, (%0);" ::"r"(b__));
         b__ += P;
         asm volatile("vfmacc.vf v0, %0, v20" ::"f"(t0));
@@ -148,6 +212,7 @@ void matmul_8xVL(float *c, const float *a, const float *b,
         // First half: accumulate with v18 (B[even]); prefetch B[odd] -> v20.
         ++n;
         a__ = a_ + n;
+        GBAR_SYNC(gbar);  // arrive + wait: rendezvous the pair; next vle issues aligned
         asm volatile("vle32.v v20, (%0);" ::"r"(b__));
         b__ += P;
         asm volatile("vfmacc.vf v0, %0, v18" ::"f"(t0));
@@ -172,6 +237,7 @@ void matmul_8xVL(float *c, const float *a, const float *b,
         a__ = a_ + n;
         if (n == N)
           break;
+        GBAR_SYNC(gbar);  // arrive + wait: rendezvous the pair; next vle issues aligned
         asm volatile("vle32.v v18, (%0);" ::"r"(b__));
         b__ += P;
         asm volatile("vfmacc.vf v0, %0, v20" ::"f"(t0));

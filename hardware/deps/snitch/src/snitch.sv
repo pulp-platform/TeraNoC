@@ -153,6 +153,14 @@ module snitch
 
   logic [RegWidth-1:0] rd, rs1, rs2;
   logic stall, lsu_stall, fence_stall;
+  // Outstanding Spatz accelerator memory ops -- hoisted here so the fence decode can
+  // reference it (Questa rejects the forward ref to the in-`ifdef declaration below).
+  // Driven by the FFAR in the TARGET_SPATZ block; tied to 0 for non-Spatz flavors so
+  // FENCE/SFENCE_VMA simply never wait on a (nonexistent) accelerator.
+  logic [2:0] acc_mem_cnt_q;
+`ifndef TARGET_SPATZ
+  assign acc_mem_cnt_q = '0;
+`endif
   // Register connections
   logic [RegNrReadPorts-1:0][RegWidth-1:0]  gpr_raddr;
   logic [RegNrReadPorts-1:0][31:0]          gpr_rdata;
@@ -857,11 +865,25 @@ module snitch
         // TODO(zarubaf): Trap to precise address
         write_rd = 1'b0;
       end
-      // NOP Instructions
+      // Fence instructions. Borrowed opcodes (fence.i / sfence.vma are unused on
+      // this bare-metal platform) provide fine-grained fences:
+      //   FENCE      -> wait for BOTH the integer LSU AND Spatz accelerator mem ops
+      //   FENCE_I    -> integer LSU only (snitch-only fence)
+      //   SFENCE_VMA -> Spatz accelerator mem only (spatz-only fence)
       riscv_instr::FENCE: begin
         write_rd = 1'b0;
-        // Stall until the LSU is empty
+        // Stall until BOTH the integer LSU is empty and Spatz has no outstanding mem ops
+        fence_stall = !lsu_empty || (|acc_mem_cnt_q);
+      end
+      riscv_instr::FENCE_I: begin
+        write_rd = 1'b0;
+        // Snitch-only: stall until the integer LSU is empty
         fence_stall = !lsu_empty;
+      end
+      riscv_instr::SFENCE_VMA: begin
+        write_rd = 1'b0;
+        // Spatz-only: stall until Spatz accelerator memory ops have drained
+        fence_stall = (|acc_mem_cnt_q);
       end
       riscv_instr::WFI: begin
         if (valid_instr) begin
@@ -2779,8 +2801,8 @@ module snitch
   end
 
 `ifdef TARGET_SPATZ
-  // Number of memory operations in the accelerator
-  logic [2:0] acc_mem_cnt_q, acc_mem_cnt_d;
+  // Number of memory operations in the accelerator (acc_mem_cnt_q declared at top)
+  logic [2:0] acc_mem_cnt_d;
   `FFAR(acc_mem_cnt_q, acc_mem_cnt_d, '0, clk_i, rst_i)
 
   // Number of store operations in the accelerator
