@@ -17,7 +17,34 @@ module mempool_group
   // For post-synthesis
   parameter int unsigned GroupId      = 32'd0,
   // Enable the group-level MSHR in the remote request path.
-  parameter bit          EnableGroupMshr = 1'b1
+  parameter bit          EnableGroupMshr = 1'b1,
+  // Group-level fine-grained barrier (held-response TCDM slave). Integrated as a
+  // DEDICATED extra output port of the group local interconnect (i_local_interco
+  // NumOut = NumTilesPerGroup+1; see below). Default ON; disable with
+  // -DGROUP_BARRIER_OFF (Makefile: group_barrier=0). A core ARRIVES+WAITS with a
+  // local integer load to a same-group, DIFFERENT-tile address whose word field
+  // == GroupBarrierWord + a fence; the load is routed (by the re-encoded tgt_sel)
+  // to the barrier port, its response withheld until the core's pair rendezvous,
+  // then driven back via the LIC (routed by ini_addr). The barrier must target a
+  // different tile (a same-tile access is TCDM_LOCAL and never enters this xbar).
+  // GroupBarrierWord is the reserved within-tile word (the master-port tgt_addr
+  // word field = tgt_addr[TCDMAddrMemWidth +: ...]); with the barrier ON for ALL
+  // apps the SW/linker MUST reserve this word group-wide so no data load aliases
+  // it. Only sp-fmatmul is known clear of word 200.
+`ifdef GROUP_BARRIER_OFF
+  parameter bit          EnableGroupBarrier   = 1'b0,
+`else
+  parameter bit          EnableGroupBarrier   = 1'b1,
+`endif
+  parameter int unsigned NumGroupBarriers     = NumCoresPerGroup,
+  parameter int unsigned GroupBarrierWdLimit  = 1024,
+  // Reserved within-tile word base (master-port tgt_addr word field). The barrier
+  // owns words [GroupBarrierWord, GroupBarrierWord+NumGroupBarriers); struct =
+  // word - GroupBarrierWord. SW forms a load at byte addr (word<<14)|(target_tile<<6),
+  // target_tile = a same-group tile != own (word 200 = 0x320000>>14). The bank
+  // field (byte[5:2]) selects the op: 0=arrive(load), 1=set target, 2=set mask.
+  // Aliases (any tile, these words) -- reserve them.
+  parameter int unsigned GroupBarrierWord     = 200
 ) (
   // Clock and reset
   input  logic                                                                                   clk_i,
@@ -210,6 +237,28 @@ module mempool_group
   tcdm_payload_t  [NumTilesPerGroup-1:0] slave_local_resp_rdata;
   logic           [NumTilesPerGroup-1:0] slave_local_resp_wen;
 
+  // Group barrier = a dedicated extra OUTPUT PORT of i_local_interco at index
+  // NumTilesPerGroup (the 16 tiles keep ports 0..15). Each master's 16-bit tgt_addr
+  // is re-encoded to a (TCDMAddrWidth+1)-bit LIC address: a 0 is inserted just above
+  // the tile-select field, so tiles keep tgt_sel={1'b0,tile} + mem-addr unchanged;
+  // a barrier request (word field == GroupBarrierWord) instead forces tgt_sel =
+  // NumTilesPerGroup -> the barrier port. The held response returns via the LIC's
+  // normal resp routing (by ini_addr) -- no master-side injection needed.
+  localparam int unsigned LicNumOut    = NumTilesPerGroup + 1;
+  localparam int unsigned LicAddrWidth = TCDMAddrWidth + 1;
+  localparam int unsigned TileSelW     = idx_width(NumTilesPerGroup);
+  logic [NumTilesPerGroup-1:0]                   bar_sel;
+  logic [NumTilesPerGroup-1:0][LicAddrWidth-1:0] req_tgt_addr_lic;
+  // barrier output-port (index NumTilesPerGroup) request/response signals
+  logic           bar_req_valid, bar_req_ready, bar_req_wen;
+  tile_group_id_t bar_req_ini;
+  tile_addr_t     bar_req_tgt_addr;
+  tcdm_payload_t  bar_req_wdata;
+  strb_t          bar_req_be;
+  logic           bar_resp_valid, bar_resp_ready, bar_resp_wen;
+  tile_group_id_t bar_resp_ini;
+  tcdm_payload_t  bar_resp_rdata;
+
   for (genvar t = 0; t < NumTilesPerGroup; t++) begin: gen_local_connections
     assign master_local_req_valid[t]          = tcdm_master_req_valid[0][t];
     assign master_local_req_tgt_addr[t]       = tcdm_master_req[0][t].tgt_addr;
@@ -242,10 +291,27 @@ module mempool_group
     assign slave_local_req_ready[t]           = tcdm_slave_req_ready[0][t];
   end
 
+  // Re-encode each master's target address for the widened (NumOut+1) LIC: insert a
+  // 0 just above the tile-select so the 16 tiles keep tgt_sel={1'b0,tile} + mem-addr
+  // unchanged; a barrier word forces tgt_sel = NumTilesPerGroup (the barrier port).
+  for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_bar_addr_remap
+    // barrier window = words [GroupBarrierWord, GroupBarrierWord+NumGroupBarriers)
+    assign bar_sel[t] = EnableGroupBarrier &&
+      (master_local_req_tgt_addr[t][TCDMAddrWidth-1 -: TCDMAddrMemWidth] >= TCDMAddrMemWidth'(GroupBarrierWord)) &&
+      (master_local_req_tgt_addr[t][TCDMAddrWidth-1 -: TCDMAddrMemWidth] <  TCDMAddrMemWidth'(GroupBarrierWord + NumGroupBarriers));
+    assign req_tgt_addr_lic[t] = bar_sel[t]
+      // barrier: tgt_sel = NumTilesPerGroup (port 16); pass {word,bank} as the mem-addr
+      // so the adapter can decode struct (word-base) + op (bank).
+      ? { master_local_req_tgt_addr[t][TCDMAddrWidth-1 : TileSelW], (TileSelW+1)'(NumTilesPerGroup) }
+      : { master_local_req_tgt_addr[t][TCDMAddrWidth-1 : TileSelW],   // {word,bank} = mem-addr
+          1'b0,                                                        // inserted barrier-select bit
+          master_local_req_tgt_addr[t][TileSelW-1 : 0] };             // tile = LIC output select
+  end
+
   variable_latency_interconnect #(
     .NumIn            (NumTilesPerGroup                             ),
-    .NumOut           (NumTilesPerGroup                             ),
-    .AddrWidth        (TCDMAddrWidth                                ),
+    .NumOut           (LicNumOut                                    ),  // +1 = barrier slave port
+    .AddrWidth        (LicAddrWidth                                 ),  // +1 select bit
     .DataWidth        ($bits(tcdm_payload_t)                        ),
     .BeWidth          (DataWidth/8                                  ),
     .ByteOffWidth     (0                                            ),
@@ -260,7 +326,7 @@ module mempool_group
     .rst_ni         (rst_ni                   ),
     .req_valid_i    (master_local_req_valid   ),
     .req_ready_o    (master_local_req_ready   ),
-    .req_tgt_addr_i (master_local_req_tgt_addr),
+    .req_tgt_addr_i (req_tgt_addr_lic         ),
     .req_wen_i      (master_local_req_wen     ),
     .req_wdata_i    (master_local_req_wdata   ),
     .req_be_i       (master_local_req_be      ),
@@ -268,21 +334,99 @@ module mempool_group
     .resp_ready_i   (master_local_resp_ready  ),
     .resp_rdata_o   (master_local_resp_rdata  ),
   `ifdef TARGET_SPATZ
-    .resp_write_o   (master_local_resp_wen    ),
-    .resp_write_i   (slave_local_resp_wen     ),
+    .resp_write_o   (master_local_resp_wen          ),
+    .resp_write_i   ({bar_resp_wen,   slave_local_resp_wen}     ),
   `endif
-    .resp_ini_addr_i(slave_local_resp_ini_addr),
-    .resp_rdata_i   (slave_local_resp_rdata   ),
-    .resp_valid_i   (slave_local_resp_valid   ),
-    .resp_ready_o   (slave_local_resp_ready   ),
-    .req_valid_o    (slave_local_req_valid    ),
-    .req_ready_i    (slave_local_req_ready    ),
-    .req_be_o       (slave_local_req_be       ),
-    .req_wdata_o    (slave_local_req_wdata    ),
-    .req_wen_o      (slave_local_req_wen      ),
-    .req_ini_addr_o (slave_local_req_ini_addr ),
-    .req_tgt_addr_o (slave_local_req_tgt_addr )
+    // Barrier is output port index NumTilesPerGroup (MSB of each {bar,tiles} concat).
+    .resp_ini_addr_i({bar_resp_ini,   slave_local_resp_ini_addr}),
+    .resp_rdata_i   ({bar_resp_rdata, slave_local_resp_rdata}   ),
+    .resp_valid_i   ({bar_resp_valid, slave_local_resp_valid}   ),
+    .resp_ready_o   ({bar_resp_ready, slave_local_resp_ready}   ),
+    .req_valid_o    ({bar_req_valid,  slave_local_req_valid}    ),
+    .req_ready_i    ({bar_req_ready,  slave_local_req_ready}    ),
+    .req_be_o       ({bar_req_be,     slave_local_req_be}       ),
+    .req_wdata_o    ({bar_req_wdata,  slave_local_req_wdata}    ),
+    .req_wen_o      ({bar_req_wen,    slave_local_req_wen}      ),
+    .req_ini_addr_o ({bar_req_ini,    slave_local_req_ini_addr} ),
+    .req_tgt_addr_o ({bar_req_tgt_addr, slave_local_req_tgt_addr})
   );
+
+  /*****************************************
+   *  Group-level fine-grained barrier     *
+   *  (held-response slave on LIC port N)  *
+   *****************************************/
+  // The barrier is i_local_interco output port index NumTilesPerGroup. The LIC
+  // already arbitrates <=1 arrive/cycle to it (its per-output rr_arb_tree) and
+  // routes the held response back to the requesting master by ini_addr -- so no
+  // external arbiter and no response injection are needed. The adapter only:
+  // accepts immediately (req_ready=1, defer just the response), captures each
+  // arrive's payload to echo meta_id/core_id on release (so the requesting core's
+  // integer LSU matches the response to its held lw), and drives the rendezvous
+  // unit's release onto the barrier port's response channel.
+  if (EnableGroupBarrier) begin : gen_group_barrier
+    localparam int unsigned BarStructW = (NumGroupBarriers > 1) ? $clog2(NumGroupBarriers) : 1;
+    localparam int unsigned BankW      = idx_width(NumBanksPerTile);
+    tcdm_payload_t  [NumTilesPerGroup-1:0] meta_store_q;
+    logic           [NumGroupBarriers-1:0] bar_wd_fire;
+    logic                                  bar_core_resp_valid, bar_core_resp_wen;
+    tile_group_id_t                        bar_core_resp_ini;
+    // decode struct + op from the barrier-port mem-addr ({word,bank}) and wen.
+    logic [TCDMAddrMemWidth-1:0] bar_word;
+    logic [BankW-1:0]            bar_bank;
+    logic [BarStructW-1:0]       bar_struct;
+    logic [1:0]                  bar_op;  // 0=ARRIVE(load), 1=WR_TARGET, 2=WR_MASK
+    assign bar_word   = bar_req_tgt_addr[TCDMAddrMemWidth + BankW - 1 : BankW];  // word field
+    assign bar_bank   = bar_req_tgt_addr[BankW-1 : 0];                           // bank field = op
+    assign bar_struct = BarStructW'(bar_word - TCDMAddrMemWidth'(GroupBarrierWord));
+    assign bar_op     = (!bar_req_wen)      ? 2'd0
+                      : (bar_bank == BankW'(1)) ? 2'd1
+                      : 2'd2;
+
+    // capture each accepted request's payload, to echo meta_id/core_id on the
+    // response (release OR config-write ack). Gated by req_ready (= !ack_pending),
+    // so a 2nd config write can't overwrite a pending ack's meta.
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni)                             meta_store_q              <= '0;
+      else if (bar_req_valid && bar_req_ready) meta_store_q[bar_req_ini] <= bar_req_wdata;
+    end
+
+    // general-purpose, memory-mapped rendezvous unit (NumGroupBarriers structs).
+    mempool_group_barrier #(
+      .NumCoresPerGroup(NumTilesPerGroup   ),
+      .NumBarriers     (NumGroupBarriers   ),
+      .WatchdogLimit   (GroupBarrierWdLimit)
+    ) i_group_barrier (
+      .clk_i, .rst_ni,
+      .req_valid_i    (bar_req_valid      ),
+      .req_ini_addr_i (bar_req_ini        ),
+      .req_op_i       (bar_op             ),
+      .req_struct_i   (bar_struct         ),
+      .req_cfg_data_i (bar_req_wdata.data[NumTilesPerGroup-1:0]),
+      .req_ready_o    (bar_req_ready      ),
+      .resp_valid_o   (bar_core_resp_valid),
+      .resp_ini_addr_o(bar_core_resp_ini  ),
+      .resp_wen_o     (bar_core_resp_wen  ),
+      .resp_ready_i   (bar_resp_ready     ),
+      .wd_fire_o      (bar_wd_fire        )
+    );
+
+    // drive the held response / config-write ack onto the barrier port; the LIC
+    // routes it to the requesting master by ini_addr. resp_wen=1 (config ack) frees
+    // the store id (no writeback); resp_wen=0 (release) writes back the dummy load.
+    assign bar_resp_valid = bar_core_resp_valid;
+    assign bar_resp_ini   = bar_core_resp_ini;
+    assign bar_resp_wen   = bar_core_resp_wen;
+    assign bar_resp_rdata = '{meta_id: meta_store_q[bar_core_resp_ini].meta_id,
+                              core_id: meta_store_q[bar_core_resp_ini].core_id,
+                              amo: '0, data: '0};
+  end else begin : gen_no_group_barrier
+    // Barrier port present but never selected (bar_sel forced 0); tie it off.
+    assign bar_req_ready  = 1'b1;
+    assign bar_resp_valid = 1'b0;
+    assign bar_resp_ini   = '0;
+    assign bar_resp_wen   = 1'b0;
+    assign bar_resp_rdata = '0;
+  end
 
   /**************************
    *  Remote Interconnects  *

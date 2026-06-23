@@ -69,14 +69,18 @@ static inline void gbar_arrive(uint32_t a) {                 // a = gbar_base(s)
 // the next aligned B prefetch issues.
 static inline void gbar_wait_both(void) { asm volatile("fence" ::: "memory"); }
 static inline void gbar_wait_snitch(void) { asm volatile("fence.i" ::: "memory"); }
-static inline void gbar_wait_spatz(void) { asm volatile("sfence.vma" ::: "memory"); }
-// One-call rendezvous. First drain THIS core's Spatz VLSU (so its previous B load is
-// complete), then arrive (held lw), then wait for the pair to release. Both cores meet
-// with their vector loads drained, so the next B vle issues aligned and coalesces.
+// Request-sent fence: sfence.vma is repurposed in snitch.sv to block until all THIS
+// core's prior vector-LSU requests are ISSUED to the interconnect (NOT drained --
+// responses stay in flight, so in-flight bursts remain coalescable and overlap is kept).
+static inline void gbar_wait_vlsu_sent(void) { asm volatile("sfence.vma" ::: "memory"); }
+// One-call rendezvous. First ensure THIS core's prior vector-LSU requests are all SENT
+// to the interconnect (NOT drained -- they stay in flight, overlap preserved), then
+// arrive (held lw), then wait for the pair to release. Both cores meet with their B
+// requests issued, so the next B vle's bursts land in the MSHR merge window together.
 static inline void gbar_sync(uint32_t a) {
-  gbar_wait_spatz();   // wait until my VLSU has drained (previous vector load done)
-  gbar_arrive(a);      // arrive: held load to the barrier struct
-  gbar_wait_snitch();  // wait for the held lw to return (the pair has rendezvoused)
+  gbar_wait_vlsu_sent();  // wait until my VLSU requests are issued (not drained)
+  gbar_arrive(a);         // arrive: held load to the barrier struct
+  gbar_wait_snitch();     // wait for the held lw to return (the pair has rendezvoused)
 }
 #define GBAR_SETUP(s,t,m) gbar_setup((s),(t),(m))
 #define GBAR_ARRIVE(a)    gbar_arrive(a)

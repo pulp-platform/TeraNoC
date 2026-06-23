@@ -53,6 +53,7 @@ sources:
   - hardware/src/floo_remapper.sv
   - hardware/src/routing_table_pkg.sv
   - hardware/src/mempool_group_mshr.sv
+  - hardware/src/mempool_group_barrier.sv
   - hardware/src/mempool_group.sv
   - hardware/generated/floo_terapool_noc_pkg.sv
   - hardware/src/mempool_group_floonoc_wrapper.sv
