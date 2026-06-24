@@ -105,6 +105,11 @@ DEFINES += -DLOG2_SEQ_MEM_SIZE=$(shell awk 'BEGIN{print log($(seq_mem_size))/log
 DEFINES += -DSTACK_SIZE=$(stack_size)
 DEFINES += -DLOG2_STACK_SIZE=$(shell awk 'BEGIN{print log($(stack_size))/log(2)}')
 DEFINES += -DXQUEUE_SIZE=$(xqueue_size)
+# CI builds reuse software artifacts in Verilator, where the testbench-side DPI
+# checker is not available.
+ifeq ($(CI),true)
+DEFINES += -DMEMPOOL_DPI_CHECK_CI_BUILD
+endif
 
 # Specify cross compilation target. This can be omitted if LLVM is built with riscv as default target
 RISCV_LLVM_TARGET  ?= --target=$(RISCV_TARGET) --sysroot=$(GCC_INSTALL_DIR)/$(RISCV_TARGET) --gcc-toolchain=$(GCC_INSTALL_DIR)
@@ -152,6 +157,7 @@ LINKER_SCRIPT ?= $(ROOT_DIR)/arch.ld
 
 RUNTIME += $(ROOT_DIR)/alloc.c.o
 RUNTIME += $(ROOT_DIR)/crt0.S.o
+RUNTIME += $(ROOT_DIR)/mempool_checks.c.o
 RUNTIME += $(ROOT_DIR)/printf.c.o
 RUNTIME += $(ROOT_DIR)/serial.c.o
 RUNTIME += $(ROOT_DIR)/string.c.o
