@@ -47,9 +47,9 @@ by groups of cores.
 #endif
 
 #include "baremetal/mempool_cfft_q16_bitreversal.h"
-#include "baremetal/mempool_checks.h"
 #include "baremetal/mempool_radix4_cfft_butterfly_f16.h"
 #include "baremetal/mempool_radix4_cfft_f16p.h"
+#include "mempool_checks.h"
 
 #if (defined(SINGLE) || defined(PARALLEL))
 __fp16 l1_pSrc[2 * N_CSAMPLES]
@@ -76,6 +76,9 @@ __fp16 l1_twiddleCoef_f16_dst[8 * NUM_BANKS]
 uint16_t l1_BitRevIndexTable[BITREVINDEXTABLE_LENGTH]
     __attribute__((aligned(4 * NUM_BANKS), section(".l1_prio")));
 #endif
+
+__fp16 l2_pRes_check[2 * N_CSAMPLES]
+    __attribute__((aligned(4 * NUM_BANKS), section(".l2")));
 
 int main() {
   uint32_t core_id = mempool_get_core_id();
@@ -184,7 +187,11 @@ int main() {
     printf("02: END COMPUTATION\n");
   }
 
-  mempool_check_f16(pRes, l2_pRes, 2 * N_CSAMPLES, (float)TOLERANCE, 0);
+  if (core_id == 0) {
+    dma_memcpy_blocking(l2_pRes_check, pRes, 2 * N_CSAMPLES * sizeof(int16_t));
+  }
+  mempool_check_dpi_f16(l2_pRes_check, l2_pRes, 2 * N_CSAMPLES,
+                        (float)TOLERANCE, 0);
   mempool_barrier(num_cores);
   return 0;
 }

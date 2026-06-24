@@ -14,10 +14,10 @@
 
 #include "data_mimo_mmse_f16.h"
 
-#include "baremetal/mempool_checks.h"
 #include "baremetal/mempool_cholesky_f16s.h"
 #include "baremetal/mempool_linearsolver_f16s.h"
 #include "baremetal/mempool_mimo_mmse_f16s.h"
+#include "mempool_checks.h"
 
 /*
 ======================
@@ -86,6 +86,9 @@ __fp16 l1_x[2 * N_TX * N_ITR]
     __attribute__((aligned(sizeof(int32_t)), section(".l1")));
 
 // Driver program
+__fp16 l2_x_check[2 * N_RX * N_TX]
+    __attribute__((aligned(4 * NUM_BANKS), section(".l2")));
+
 int main() {
 
   uint32_t core_id = mempool_get_core_id();
@@ -181,7 +184,10 @@ int main() {
   if (core_id == 0) {
     printf("Runtime: %d\n", time_end - time_init);
   }
-  mempool_check_f16(l1_x, l2_x, 2 * N_RX * N_TX, 0.01f, 0);
+  if (core_id == 0) {
+    dma_memcpy_blocking(l2_x_check, l1_x, 2 * N_RX * N_TX * sizeof(int16_t));
+  }
+  mempool_check_dpi_f16(l2_x_check, l2_x, 2 * N_RX * N_TX, 0.01f, 0);
   mempool_barrier(num_cores);
 
   return 0;

@@ -12,9 +12,9 @@
 
 #include "data_mimo_mmse_f32.h"
 
-#include "baremetal/mempool_checks.h"
 #include "baremetal/mempool_mimo_mmse_f32p.h"
 #include "baremetal/mempool_mimo_mmse_f32s.h"
+#include "mempool_checks.h"
 
 #if defined(__XDIVSQRT)
 #include "baremetal/mempool_cholesky_f32s.h"
@@ -57,6 +57,9 @@ float l1_x[2 * N_TX * N_ITR]
     __attribute__((aligned(sizeof(int32_t)), section(".l1")));
 
 // Driver program
+float l2_x_check[2 * N_TX]
+    __attribute__((aligned(4 * NUM_BANKS), section(".l2")));
+
 int main() {
 
   uint32_t core_id = mempool_get_core_id();
@@ -168,7 +171,10 @@ int main() {
 #endif
 
   // Check the result
-  mempool_check_f32(l1_x, l2_x, 2 * N_TX, 0.01f, 0);
+  if (core_id == 0) {
+    dma_memcpy_blocking(l2_x_check, l1_x, 2 * N_TX * sizeof(int32_t));
+  }
+  mempool_check_dpi_f32(l2_x_check, l2_x, 2 * N_TX, 0.01f, 0);
   mempool_barrier(num_cores);
   return 0;
 }

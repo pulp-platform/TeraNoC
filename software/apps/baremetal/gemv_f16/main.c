@@ -20,8 +20,8 @@ uint32_t red_barrier[NUM_BANKS]
 __fp16 sum[2 * NUM_BANKS]
     __attribute__((aligned(4 * NUM_BANKS), section(".l1_prio")));
 
-#include "baremetal/mempool_checks.h"
 #include "baremetal/mempool_gemv_f16.h"
+#include "mempool_checks.h"
 
 __fp16 l1_A[matrix_N * matrix_P]
     __attribute__((aligned(4 * NUM_BANKS), section(".l1_prio")));
@@ -29,6 +29,9 @@ __fp16 l1_X[matrix_N]
     __attribute__((aligned(4 * NUM_BANKS), section(".l1_prio")));
 __fp16 l1_Y[matrix_P]
     __attribute__((aligned(4 * NUM_BANKS), section(".l1_prio")));
+
+__fp16 l2_Y_check[matrix_P]
+    __attribute__((aligned(4 * NUM_BANKS), section(".l2")));
 
 int main() {
 
@@ -58,7 +61,10 @@ int main() {
     printf("\nKernel execution takes %d clock cycles\n", clock_cycles);
   }
   // Check results
-  mempool_check_f16(l1_Y, l2_Y, matrix_P, 0.01f, 0);
+  if (core_id == 0) {
+    dma_memcpy_blocking(l2_Y_check, l1_Y, matrix_P * sizeof(int16_t));
+  }
+  mempool_check_dpi_f16(l2_Y_check, l2_Y, matrix_P, 0.01f, 0);
   mempool_barrier(num_cores);
 
   return 0;

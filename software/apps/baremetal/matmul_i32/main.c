@@ -15,8 +15,8 @@
 
 #include "data_matmul_i32.h"
 
-#include "baremetal/mempool_checks.h"
 #include "baremetal/mempool_matmul_i32p.h"
+#include "mempool_checks.h"
 
 #define NOC_OPT
 
@@ -26,6 +26,9 @@ int32_t matrix_b[matrix_N * matrix_P]
     __attribute__((aligned(NUM_BANKS * 4), section(".l1_prio")));
 int32_t matrix_c[matrix_M * matrix_P]
     __attribute__((aligned(NUM_BANKS * 4), section(".l1_prio")));
+
+int32_t l2_C_check[matrix_M * matrix_P]
+    __attribute__((aligned(4 * NUM_BANKS), section(".l2")));
 
 int main() {
   uint32_t core_id = mempool_get_core_id();
@@ -85,7 +88,11 @@ int main() {
   }
 
   // Verify results
-  mempool_check_i32(matrix_c, l2_C, matrix_M * matrix_P, 0, 0);
+  if (core_id == 0) {
+    dma_memcpy_blocking(l2_C_check, matrix_c,
+                        matrix_M * matrix_P * sizeof(int32_t));
+  }
+  mempool_check_dpi_i32(l2_C_check, l2_C, matrix_M * matrix_P, 0, 0);
   mempool_barrier(num_cores);
   return 0;
 }

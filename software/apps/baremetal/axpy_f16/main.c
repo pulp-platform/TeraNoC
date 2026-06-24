@@ -17,12 +17,15 @@
 #include "data_axpy_f16.h"
 
 #include "baremetal/mempool_axpy_f16.h"
-#include "baremetal/mempool_checks.h"
+#include "mempool_checks.h"
 
 __fp16 l1_X[array_N]
     __attribute__((aligned(4 * NUM_BANKS), section(".l1_prio")));
 __fp16 l1_Y[array_N]
     __attribute__((aligned(4 * NUM_BANKS), section(".l1_prio")));
+
+__fp16 l2_Z_check[array_N]
+    __attribute__((aligned(4 * NUM_BANKS), section(".l2")));
 
 int main() {
 
@@ -53,7 +56,10 @@ int main() {
     uint32_t clock_cycles = (time_end - time_init);
     printf("\nKernel execution takes %d clock cycles\n", clock_cycles);
   }
-  mempool_check_f16(l1_Y, l2_Z, array_N, 0.1f, 0);
+  if (core_id == 0) {
+    dma_memcpy_blocking(l2_Z_check, l1_Y, array_N * sizeof(int16_t));
+  }
+  mempool_check_dpi_f16(l2_Z_check, l2_Z, array_N, 0.1f, 0);
   mempool_barrier(num_cores);
 
   return 0;

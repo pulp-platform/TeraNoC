@@ -30,8 +30,8 @@ PARALLEL: When defined runs parallel CFFT.
 #define PARALLEL
 
 #include "baremetal/mempool_cfft_q16_bitreversal.h"
-#include "baremetal/mempool_checks.h"
 #include "baremetal/mempool_radix2_cfft_q16.h"
+#include "mempool_checks.h"
 
 /* CFFT mempool data */
 int16_t l1_pSrc[2 * N_CSAMPLES]
@@ -40,6 +40,9 @@ int16_t l1_twiddleCoef_q16[2 * (3 * N_CSAMPLES / 4)]
     __attribute__((aligned(sizeof(int32_t)), section(".l1_prio")));
 uint16_t l1_BitRevIndexTable[BITREVINDEXTABLE_LENGTH]
     __attribute__((aligned(sizeof(int32_t)), section(".l1_prio")));
+
+int16_t l2_pRes_check[2 * N_CSAMPLES]
+    __attribute__((aligned(4 * NUM_BANKS), section(".l2")));
 
 int main() {
 
@@ -75,7 +78,11 @@ int main() {
   mempool_stop_benchmark();
 #endif
 
-  mempool_check_i16(l1_pSrc, l2_pRes, 2 * N_CSAMPLES, TOLERANCE, 0);
+  if (core_id == 0) {
+    dma_memcpy_blocking(l2_pRes_check, l1_pSrc,
+                        2 * N_CSAMPLES * sizeof(int16_t));
+  }
+  mempool_check_dpi_i16(l2_pRes_check, l2_pRes, 2 * N_CSAMPLES, TOLERANCE, 0);
   mempool_barrier(num_cores);
   return 0;
 }
