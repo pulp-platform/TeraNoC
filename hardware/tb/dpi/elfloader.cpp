@@ -174,6 +174,7 @@ extern "C" {
   char get_section(long long* address, long long* len);
   char read_section(long long address, const svOpenArrayHandle buffer);
   void read_elf(const char* filename);
+  long long get_symbol_addr(const char* name);
 }
 
 // Communicate the section address and len
@@ -205,6 +206,14 @@ extern "C" char read_section(long long address, const svOpenArrayHandle buffer) 
   return 0;
 }
 
+extern "C" long long get_symbol_addr(const char* name) {
+  auto symbol = symbols.find(name);
+  if (symbol == symbols.end()) {
+    return 0;
+  }
+  return symbol->second;
+}
+
 extern "C" void read_elf(const char* filename) {
   int fd = open(filename, O_RDONLY);
   struct stat s;
@@ -221,10 +230,7 @@ extern "C" void read_elf(const char* filename) {
   const Elf64_Ehdr* eh64 = (const Elf64_Ehdr*)buf;
   assert(IS_ELF32(*eh64) || IS_ELF64(*eh64));
 
-
-
   std::vector<uint8_t> zeros;
-  std::map<std::string, uint64_t> symbols;
 
   #define LOAD_ELF(ehdr_t, phdr_t, shdr_t, sym_t) do { \
   ehdr_t* eh = (ehdr_t*)buf; \
@@ -249,9 +255,9 @@ extern "C" void read_elf(const char* filename) {
   unsigned strtabidx = 0, symtabidx = 0; \
   for (unsigned i = 0; i < eh->e_shnum; i++) { \
     unsigned max_len = sh[eh->e_shstrndx].sh_size - sh[i].sh_name; \
-    if ((sh[i].sh_type & SHT_GROUP) && strcmp(shstrtab + sh[i].sh_name, ".strtab") != 0 && strcmp(shstrtab + sh[i].sh_name, ".shstrtab") != 0) \
+    if ((sh[i].sh_type == SHT_GROUP) && strcmp(shstrtab + sh[i].sh_name, ".strtab") != 0 && strcmp(shstrtab + sh[i].sh_name, ".shstrtab") != 0) \
     assert(strnlen(shstrtab + sh[i].sh_name, max_len) < max_len); \
-    if (sh[i].sh_type & SHT_PROGBITS) continue; \
+    if (sh[i].sh_type == SHT_PROGBITS) continue; \
     if (strcmp(shstrtab + sh[i].sh_name, ".strtab") == 0) \
       strtabidx = i; \
     if (strcmp(shstrtab + sh[i].sh_name, ".symtab") == 0) \
