@@ -14,12 +14,15 @@
 #include "data_batchnorm_f8.h"
 
 #include "baremetal/mempool_batchnorm_f8.h"
-#include "baremetal/mempool_checks.h"
+#include "mempool_checks.h"
 
 __fp8 matrix_a[matrix_M * matrix_N]
     __attribute__((aligned(4 * NUM_BANKS), section(".l1_prio")));
 __fp8 matrix_b[matrix_M * matrix_N]
     __attribute__((aligned(4 * NUM_BANKS), section(".l1_prio")));
+
+__fp8 l2_B_check[matrix_M * matrix_N]
+    __attribute__((aligned(4 * NUM_BANKS), section(".l2")));
 
 int main() {
   uint32_t core_id = mempool_get_core_id();
@@ -48,7 +51,11 @@ int main() {
     printf("\nKernel execution takes %d clock cycles\n", clock_cycles);
   }
   // tolerance: tol = 0.25 = 0x34 (__fp8)
-  mempool_check_f8(matrix_b, l2_B, matrix_M * matrix_N, 0x34, 0);
+  if (core_id == 0) {
+    dma_memcpy_blocking(l2_B_check, matrix_b,
+                        matrix_M * matrix_N * sizeof(int8_t));
+  }
+  mempool_check_dpi_f8(l2_B_check, l2_B, matrix_M * matrix_N, 0x34, 0);
   mempool_barrier(num_cores);
   return 0;
 }

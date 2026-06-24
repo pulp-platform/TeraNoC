@@ -14,8 +14,8 @@
 
 #include "data_cholesky_f16.h"
 
-#include "baremetal/mempool_checks.h"
 #include "baremetal/mempool_cholesky_f16s.h"
+#include "mempool_checks.h"
 
 /*
 ======================
@@ -33,6 +33,9 @@ __fp16 l1_GIn[2 * matrix_N * matrix_N * N_SAMPLES]
     __attribute__((section(".l1_prio")));
 __fp16 l1_LOut[2 * matrix_N * matrix_N * N_SAMPLES]
     __attribute__((section(".l1_prio")));
+
+__fp16 l2_LOut_check[2 * matrix_N * matrix_N]
+    __attribute__((aligned(4 * NUM_BANKS), section(".l2")));
 
 int main() {
   uint32_t core_id = mempool_get_core_id();
@@ -70,7 +73,12 @@ int main() {
   mempool_stop_benchmark();
 #endif
 
-  mempool_check_f16(l1_LOut, l2_LOut, 2 * matrix_N * matrix_N, 0.01f, 0);
+  if (core_id == 0) {
+    dma_memcpy_blocking(l2_LOut_check, l1_LOut,
+                        2 * matrix_N * matrix_N * sizeof(int16_t));
+  }
+  mempool_check_dpi_f16(l2_LOut_check, l2_LOut, 2 * matrix_N * matrix_N, 0.01f,
+                        0);
   mempool_barrier(num_cores);
   return 0;
 }

@@ -17,8 +17,8 @@
 #define dim_N (matrix_N)
 #define dim_P (matrix_P)
 
-#include "baremetal/mempool_checks.h"
 #include "baremetal/mempool_cmatmul_f16.h"
+#include "mempool_checks.h"
 
 /*
 ======================
@@ -47,6 +47,8 @@ __fp16 matrix_b[2 * dim_N * dim_P]
 __fp16 matrix_c[2 * dim_M * dim_P]
     __attribute__((aligned(BANKING_FACTOR * NUM_CORES * sizeof(int32_t)),
                    section(".l1_prio")));
+
+__fp16 l2_C_check[10] __attribute__((aligned(4 * NUM_BANKS), section(".l2")));
 
 int main() {
   uint32_t core_id = mempool_get_core_id();
@@ -117,7 +119,10 @@ int main() {
   mempool_stop_benchmark();
 #endif
 
-  mempool_check_f16(matrix_c, l2_C, 10, 0.1f, 0);
+  if (core_id == 0) {
+    dma_memcpy_blocking(l2_C_check, matrix_c, 10 * sizeof(int16_t));
+  }
+  mempool_check_dpi_f16(l2_C_check, l2_C, 10, 0.1f, 0);
   mempool_barrier(num_cores);
   return 0;
 }

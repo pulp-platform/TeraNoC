@@ -13,8 +13,8 @@
 
 #include "data_matmul_f8.h"
 
-#include "baremetal/mempool_checks.h"
 #include "baremetal/mempool_matmul_f8.h"
+#include "mempool_checks.h"
 
 /*
 ======================
@@ -31,6 +31,9 @@ __fp8 matrix_b[matrix_N * matrix_P]
     __attribute__((aligned(4 * NUM_BANKS), section(".l1_prio")));
 __fp8 matrix_c[matrix_M * matrix_P]
     __attribute__((aligned(4 * NUM_BANKS), section(".l1_prio")));
+
+__fp8 l2_C_check[matrix_M * matrix_P]
+    __attribute__((aligned(4 * NUM_BANKS), section(".l2")));
 
 int main() {
   uint32_t core_id = mempool_get_core_id();
@@ -71,8 +74,12 @@ int main() {
     uint32_t clock_cycles = (time_end - time_init);
     printf("\nKernel execution takes %d clock cycles\n", clock_cycles);
   }
-  mempool_check_f8(matrix_c, l2_C, matrix_M * matrix_P, 0x34,
-                   0); // tol = 0.25 = 0x34 (__fp8)
+  if (core_id == 0) {
+    dma_memcpy_blocking(l2_C_check, matrix_c,
+                        matrix_M * matrix_P * sizeof(int8_t));
+  }
+  mempool_check_dpi_f8(l2_C_check, l2_C, matrix_M * matrix_P, 0x34,
+                       0); // tol = 0.25 = 0x34 (__fp8)
   mempool_barrier(num_cores);
   return 0;
 }

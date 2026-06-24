@@ -16,10 +16,10 @@
 
 #include "data_mimo_mmse_f8.h"
 
-#include "baremetal/mempool_checks.h"
 #include "baremetal/mempool_cholesky_f16s.h"
 #include "baremetal/mempool_linearsolver_f16s.h"
 #include "baremetal/mempool_mimo_mmse_f8s.h"
+#include "mempool_checks.h"
 
 /*
 ======================

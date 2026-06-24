@@ -15,13 +15,16 @@
 
 #include "data_gaussjordan_q32.h"
 
-#include "baremetal/mempool_checks.h"
 #include "baremetal/mempool_gaussjordan_q32.h"
+#include "mempool_checks.h"
 
 int32_t l1_Src[matrix_N * matrix_N] __attribute__((section(".l1_prio")));
 int32_t l1_Dst[matrix_N * matrix_N] __attribute__((section(".l1_prio")));
 
 #define PARALLEL
+
+int32_t l2_Dst_check[matrix_N * matrix_N]
+    __attribute__((aligned(4 * NUM_BANKS), section(".l2")));
 
 int main() {
 
@@ -50,8 +53,12 @@ int main() {
   mempool_barrier(num_cores);
 #endif
 
-  mempool_check_i32(l1_Dst, l2_Dst, matrix_N * matrix_N, 1 << (FIXED_POINT - 1),
-                    0);
+  if (core_id == 0) {
+    dma_memcpy_blocking(l2_Dst_check, l1_Dst,
+                        matrix_N * matrix_N * sizeof(int32_t));
+  }
+  mempool_check_dpi_i32(l2_Dst_check, l2_Dst, matrix_N * matrix_N,
+                        1 << (FIXED_POINT - 1), 0);
   mempool_barrier(num_cores);
 
   return 0;

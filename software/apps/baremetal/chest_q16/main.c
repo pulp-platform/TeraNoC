@@ -16,8 +16,8 @@
 
 #include "data_chest_q16.h"
 
-#include "baremetal/mempool_checks.h"
 #include "baremetal/mempool_chest_q16.h"
+#include "mempool_checks.h"
 
 /*
 ======================
@@ -35,6 +35,9 @@ int16_t l1_PilotRX[2 * N_RX * N_SAMPLES]
     __attribute__((aligned(sizeof(int32_t)), section(".l1")));
 int16_t l1_HEST[2 * N_RX * N_TX * N_SAMPLES]
     __attribute__((aligned(sizeof(int32_t)), section(".l1")));
+
+int16_t l2_HEST_check[2 * N_TX * N_RX]
+    __attribute__((aligned(4 * NUM_BANKS), section(".l2")));
 
 int main() {
 
@@ -70,7 +73,11 @@ int main() {
 #endif
 
   /* Check */
-  mempool_check_i16(l1_HEST, l2_HEST, 2 * N_TX * N_RX, 0, 0);
+  if (core_id == 0) {
+    dma_memcpy_blocking(l2_HEST_check, l1_HEST,
+                        2 * N_TX * N_RX * sizeof(int16_t));
+  }
+  mempool_check_dpi_i16(l2_HEST_check, l2_HEST, 2 * N_TX * N_RX, 0, 0);
   mempool_barrier(num_cores);
   return 0;
 }
