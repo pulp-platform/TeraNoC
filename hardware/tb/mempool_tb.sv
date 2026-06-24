@@ -5,6 +5,15 @@
 import "DPI-C" function void read_elf (input string filename);
 import "DPI-C" function byte get_section (output longint address, output longint len);
 import "DPI-C" context function byte read_section(input longint address, inout byte buffer[]);
+import "DPI-C" function longint get_symbol_addr(input string name);
+import "DPI-C" context function int mempool_dpi_check(
+  input int check_type,
+  input int count,
+  input int tolerance,
+  input int verbose,
+  inout byte result_buffer[],
+  inout byte golden_buffer[]
+);
 
 `define wait_for(signal) \
   do \
@@ -37,6 +46,8 @@ module mempool_tb;
   localparam TT          = 0.8ns;
 
   localparam PollEoc     = 0;
+  localparam int unsigned DpiCheckMax      = 32;
+  localparam int unsigned DpiCheckDescSize = 24;
 
  /********************************
    *  Clock and Reset Generation  *
@@ -252,6 +263,198 @@ module mempool_tb;
 
   axi_pkg::resp_t resp;
 
+`ifndef DRAM
+  logic [L2BankAddrWidth-1:0] dpi_l2_sram_addr [NumL2Banks];
+  logic [L2BankWidth-1:0] dpi_l2_sram_rdata [NumL2Banks];
+
+  // VCS reports XMRE on dut.gen_l2_banks[bank_id] with a runtime index.
+  for (genvar bank = 0; bank < NumL2Banks; bank++) begin : gen_dpi_l2_sram_read
+    assign dpi_l2_sram_rdata[bank] =
+        dut.gen_l2_banks[bank].l2_mem.sram[dpi_l2_sram_addr[bank]];
+  end
+`else
+  logic [AddrWidth-1:0] dpi_l2_dram_addr [NumDrams];
+  logic [7:0] dpi_l2_dram_rdata [NumDrams];
+
+  // VCS reports XMRE on dut.gen_drams[bank_id] with a runtime index.
+  for (genvar bank = 0; bank < NumDrams; bank++) begin : gen_dpi_l2_dram_read
+    always_comb begin
+      dut.gen_drams[bank].i_axi_dram_sim.i_sim_dram.check_a_byte_in_dram(
+          longint'(dpi_l2_dram_addr[bank]), dpi_l2_dram_rdata[bank]);
+    end
+  end
+`endif
+
+  function automatic int unsigned dpi_check_load_u32(input byte buffer[],
+                                                     input int unsigned offset);
+    return {buffer[offset + 3], buffer[offset + 2], buffer[offset + 1], buffer[offset]};
+  endfunction
+
+  function automatic int unsigned dpi_check_elem_size(input int unsigned check_type);
+    case (check_type)
+      1, 4: return 1;
+      2, 5: return 2;
+      3, 6: return 4;
+      default: return 0;
+    endcase
+  endfunction
+
+  task automatic read_dpi_check_l2_bytes(input addr_t addr, input int unsigned length,
+                                         ref byte buffer[]);
+    addr_t byte_addr;
+    addr_t end_addr;
+    addr_t rel_addr;
+`ifndef DRAM
+    int cached_bank;
+    logic [L2BankAddrWidth-1:0] cached_addr;
+    logic [L2BankWidth-1:0] cached_row;
+    bit have_row;
+`endif
+
+    if (length == 0) begin
+      return;
+    end
+    end_addr = addr + addr_t'(length);
+    if ((addr < dut.L2MemoryBaseAddr) || (end_addr < addr) ||
+        (end_addr > dut.L2MemoryEndAddr)) begin
+      $fatal(1, "[DPI_CHECK] L2 read range %08x..%08x is outside L2",
+             addr, end_addr);
+    end
+
+`ifndef DRAM
+    have_row = 1'b0;
+    cached_bank = -1;
+    for (int unsigned i = 0; i < length; i++) begin
+      automatic int bank_id;
+      automatic int byte_offset;
+      automatic sram_ctrl_interleave_t sram_ctrl_info;
+
+      byte_addr = addr + addr_t'(i);
+      rel_addr = byte_addr - dut.L2MemoryBaseAddr;
+      sram_ctrl_info = getSramCTRLInfo(rel_addr);
+      bank_id = sram_ctrl_info.sram_ctrl_id;
+      if ((bank_id < 0) || (bank_id >= NumL2Banks)) begin
+        $fatal(1, "[DPI_CHECK] SRAM bank index %0d is out of range for address %08x",
+               bank_id, byte_addr);
+      end
+
+      if (!have_row || (bank_id != cached_bank) ||
+          (sram_ctrl_info.sram_ctrl_addr[L2BankAddrWidth-1:0] != cached_addr)) begin
+        cached_bank = bank_id;
+        cached_addr = sram_ctrl_info.sram_ctrl_addr[L2BankAddrWidth-1:0];
+        dpi_l2_sram_addr[bank_id] = cached_addr;
+        #0;
+        cached_row = dpi_l2_sram_rdata[bank_id];
+        have_row = 1'b1;
+      end
+
+      byte_offset = rel_addr[L2BankByteOffset-1:0];
+      buffer[i] = cached_row[8 * byte_offset +: 8];
+    end
+`else
+    for (int unsigned i = 0; i < length; i++) begin
+      automatic int bank_id;
+      automatic dram_ctrl_interleave_t dram_ctrl_info;
+
+      byte_addr = addr + addr_t'(i);
+      rel_addr = byte_addr - dut.L2MemoryBaseAddr;
+      dram_ctrl_info = getDramCTRLInfo(rel_addr);
+      bank_id = dram_ctrl_info.dram_ctrl_id;
+      if ((bank_id < 0) || (bank_id >= NumDrams)) begin
+        $fatal(1, "[DPI_CHECK] DRAM bank index %0d is out of range for address %08x",
+               bank_id, byte_addr);
+      end
+      dpi_l2_dram_addr[bank_id] = dram_ctrl_info.dram_ctrl_addr;
+      #0;
+      buffer[i] = byte'(dpi_l2_dram_rdata[bank_id]);
+    end
+`endif
+  endtask
+
+  task automatic run_dpi_checks();
+    longint count_addr_long;
+    longint table_addr_long;
+    addr_t count_addr;
+    addr_t table_addr;
+    byte count_buffer[];
+    byte desc_buffer[];
+    int unsigned check_count;
+    int unsigned total_checks;
+    int unsigned total_errors;
+
+    count_addr_long = get_symbol_addr("mempool_dpi_check_count");
+    table_addr_long = get_symbol_addr("mempool_dpi_checks");
+    if ((count_addr_long == 0) || (table_addr_long == 0)) begin
+      return;
+    end
+
+    count_addr = addr_t'(count_addr_long);
+    table_addr = addr_t'(table_addr_long);
+    count_buffer = new[4];
+    read_dpi_check_l2_bytes(count_addr, 4, count_buffer);
+    check_count = dpi_check_load_u32(count_buffer, 0);
+
+    if (check_count == 0) begin
+      return;
+    end
+    if (check_count > DpiCheckMax) begin
+      $fatal(1, "[DPI_CHECK] Descriptor count %0d exceeds max %0d", check_count, DpiCheckMax);
+    end
+
+    desc_buffer = new[DpiCheckDescSize];
+    total_checks = 0;
+    total_errors = 0;
+    for (int unsigned i = 0; i < check_count; i++) begin
+      int unsigned check_type;
+      int unsigned elem_size;
+      int unsigned elements;
+      int unsigned tolerance;
+      int unsigned verbose;
+      int unsigned nbytes;
+      addr_t result_addr;
+      addr_t golden_addr;
+      byte result_buffer[];
+      byte golden_buffer[];
+      int errors;
+
+      read_dpi_check_l2_bytes(table_addr + i * DpiCheckDescSize, DpiCheckDescSize,
+                              desc_buffer);
+      check_type = dpi_check_load_u32(desc_buffer, 0);
+      elements = dpi_check_load_u32(desc_buffer, 4);
+      tolerance = dpi_check_load_u32(desc_buffer, 8);
+      result_addr = addr_t'(dpi_check_load_u32(desc_buffer, 12));
+      golden_addr = addr_t'(dpi_check_load_u32(desc_buffer, 16));
+      verbose = dpi_check_load_u32(desc_buffer, 20);
+
+      elem_size = dpi_check_elem_size(check_type);
+      if (elem_size == 0) begin
+        $fatal(1, "[DPI_CHECK] Descriptor %0d has unsupported type %0d",
+               i, check_type);
+      end
+
+      nbytes = elements * elem_size;
+      result_buffer = new[nbytes];
+      golden_buffer = new[nbytes];
+      read_dpi_check_l2_bytes(result_addr, nbytes, result_buffer);
+      read_dpi_check_l2_bytes(golden_addr, nbytes, golden_buffer);
+
+      errors = mempool_dpi_check(int'(check_type), int'(elements), int'(tolerance),
+                                 int'(verbose), result_buffer, golden_buffer);
+      if (errors < 0) begin
+        $fatal(1, "[DPI_CHECK] Comparator returned negative error count %0d", errors);
+      end
+      $display("[DPI_CHECK] Check %0d: %0d ERRORS out of %0d CHECKS",
+               i, errors, elements);
+      total_errors += errors;
+      total_checks += elements;
+    end
+
+    $display("[DPI_CHECK] %0d ERRORS out of %0d CHECKS", total_errors, total_checks);
+    if (total_errors != 0) begin
+      $fatal(1, "[DPI_CHECK] Result verification failed");
+    end
+  endtask
+
   // Simulation control
   initial begin
     localparam ctrl_phys_addr = 32'h4000_0000;
@@ -294,6 +497,7 @@ module mempool_tb;
       read_from_mempool(ctrl_virt_addr, rdata, resp);
       assert(resp == axi_pkg::RESP_OKAY);
     end
+    run_dpi_checks();
     $timeformat(-9, 2, " ns", 0);
     $display("[EOC] Simulation ended at %t (retval = %0d).", $time, rdata >> 1);
     $finish(0);
