@@ -58,6 +58,128 @@
     ]
   },
 
+  "sp_axpy_f32": {
+    "type": "float32",
+    "defines": [
+      ("array_N", 65536)
+    ]
+    "arrays": [
+      ("float", "l2_A")
+      ("float", "l2_X")
+      ("float", "l2_Y")
+      ("float", "l2_Z")
+    ]
+  },
+
+  "sp_dotp_f32": {
+    "type": "float32",
+    "defines": [
+      ("array_N", 65536)
+    ]
+    "arrays": [
+      ("float", "l2_X")
+      ("float", "l2_Y")
+      ("float", "l2_Z")
+    ]
+  },
+
+  "sp_matmul_f32": {
+    "type": "float32",
+    "defines": [
+      ("matrix_M", 128)
+      ("matrix_N", 128)
+      ("matrix_P", 128)
+    ]
+    "arrays": [
+      ("float", "l2_A")
+      ("float", "l2_B")
+      ("float", "l2_C")
+    ]
+  },
+
+  "sp_matmul_i32": {
+    "type": "int32",
+    "defines": [
+      ("matrix_M", 128)
+      ("matrix_N", 128)
+      ("matrix_P", 128)
+    ]
+    "arrays": [
+      ("int32_t", "l2_A")
+      ("int32_t", "l2_B")
+      ("int32_t", "l2_C")
+    ]
+  },
+
+  "sp_gemv_f32": {
+    "type": "float32",
+    "defines": [
+      ("matrix_M", 2048)
+      ("matrix_N", 128)
+      ("transpose_a", 1)
+    ]
+    "arrays": [
+      ("float", "l2_A")
+      ("float", "l2_X")
+      ("float", "l2_Y")
+    ]
+  },
+
+  "sp_gemv_f16": {
+    "type": "float16",
+    "defines": [
+      ("matrix_M", 2048)
+      ("matrix_N", 128)
+      ("transpose_a", 1)
+    ]
+    "arrays": [
+      ("__fp16", "l2_A")
+      ("__fp16", "l2_X")
+      ("__fp16", "l2_Y")
+    ]
+  },
+
+  "sp_fconv2d_f32": {
+    "type": "float32",
+    "defines": [
+      ("CH", 1)
+      ("R", 256)
+      ("C", 256)
+      ("F", 7)
+    ]
+    "arrays": [
+      ("float", "fconv2d_I_dram")
+      ("float", "fconv2d_F_dram")
+      ("float", "fconv2d_R_dram")
+      ("float", "fconv2d_GR_dram")
+    ]
+  },
+
+  "sp_fft_f32": {
+    "type": "float32",
+    "defines": [
+      ("npoints", 4096)
+    ]
+    "arrays": [
+      ("float", "samples_dram")
+      ("float", "buffer_dram")
+      ("float", "fft_twiddle_re_dram")
+      ("float", "fft_twiddle_im_dram")
+      ("uint16_t", "store_idx_dram")
+      ("float", "gold_out_dram")
+    ]
+  },
+
+  "sp_bandwidth_test_i32": {
+    "type": "int32",
+    "defines": [
+      ("M", 128)
+    ]
+    "arrays": [
+      ("int32_t", "data_dram")
+    ]
+  },
+
   "dotp_f16": {
     "type": "float16",
     "defines": [
@@ -282,6 +404,7 @@
     ]
   },
 
+
   "matmul_f16": {
     "type": "float16",
     "defines": [
@@ -355,8 +478,8 @@
   "gemv_f32": {
     "type": "float32",
     "defines": [
+      ("matrix_M", 32)
       ("matrix_N", 128)
-      ("matrix_P", 32)
     ]
     "arrays": [
       ("float", "l2_A")
@@ -368,8 +491,8 @@
   "gemv_f16": {
     "type": "float16",
     "defines": [
+      ("matrix_M", 32)
       ("matrix_N", 256)
-      ("matrix_P", 32)
     ]
     "arrays": [
       ("__fp16", "l2_A")

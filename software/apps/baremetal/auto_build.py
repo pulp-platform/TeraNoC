@@ -70,6 +70,45 @@ def extra_args_for_kernel(
     return shlex.split(s)
 
 
+def parse_app_entry(app_entry):
+    """An app entry is either a list of task-param dicts, or a dict with
+    "tasks" (list) and optional "variants".
+
+    Variants can use the original compact form:
+      {"_opt": "-DSP_FOO_OPT"}
+
+    or the expanded form, which lets a merged app use variant-specific data:
+      {"_bk": {"defines": "-DSP_GEMV_ROWMAJ", "tasks": [{"transpose_a": 0}]}}
+
+    Returns (tasks, variants). Use parse_variant_entry() to resolve each
+    variant against the app's default tasks.
+    """
+    if isinstance(app_entry, dict):
+        tasks = app_entry.get("tasks", [])
+        variants = app_entry.get("variants", {"": ""})
+    else:
+        tasks = app_entry
+        variants = {"": ""}
+    return tasks, variants
+
+
+def parse_variant_entry(variant_entry, default_tasks):
+    """Return (defines, tasks) for one variant entry."""
+    if isinstance(variant_entry, dict):
+        defines = variant_entry.get("defines", "")
+        tasks = variant_entry.get("tasks", default_tasks)
+    else:
+        defines = variant_entry
+        tasks = default_tasks
+
+    if defines is None:
+        defines = ""
+    if tasks is None:
+        tasks = []
+
+    return str(defines).strip(), tasks
+
+
 def run_make_with_log(cmd: List[str], cwd: Path,
                       make_log: Path, logger: Logger):
     """
@@ -183,7 +222,8 @@ def resolve_pack_dir(config_name: str, pack_dir: str |
 
 
 def move_and_rename(
-    app: str, pack_dir: str, size_tag: str, out_dir: Path, logger: Logger
+    app: str, pack_dir: str, size_tag: str, out_dir: Path, logger: Logger,
+    variant: str = ""
 ) -> Path:
     """
     Inputs produced by make in out_dir root:
@@ -207,8 +247,8 @@ def move_and_rename(
     dst_dir = out_dir / pack_dir
     ensure_dir(dst_dir)
 
-    dst_bin = dst_dir / f"{app}_{size_tag}"
-    dst_dump = dst_dir / f"{app}_{size_tag}.dump"
+    dst_bin = dst_dir / f"{app}{variant}_{size_tag}"
+    dst_dump = dst_dir / f"{app}{variant}_{size_tag}.dump"
 
     # overwrite to avoid confusion
     if dst_bin.exists():
@@ -291,19 +331,27 @@ def print_dry_run_summary(
         print(f"        logs    ={log_dir}")
         print(f"        filelist={filelist}")
 
-        for app, tasks in cfg["apps"].items():
+        for app, app_entry in cfg["apps"].items():
+            tasks, variants = parse_app_entry(app_entry)
             extra = extra_args_for_kernel(app, extra_args)
             extra_str = " ".join(extra) if extra else "(none)"
-            print(f"  [KERNEL] {app}  tasks={len(tasks)}  extra={extra_str}")
+            print(f"  [KERNEL] {app}  tasks={len(tasks)}  "
+                  f"variants={list(variants)}  extra={extra_str}")
 
-            for i, params in enumerate(tasks, 1):
-                tag = make_size_tag(app, params, rename_rules)
-                cmd = ["make", app, f"config={cfg_name}"] + extra
-                total += 1
-                print(f"    - TASK {i}/{len(tasks)} tag={tag}")
-                print(f"      params={params}")
-                print(f"      make: (cwd={make_cwd}) {' '.join(cmd)}")
-                print(f"      pack: {pack_root / (app + '_' + tag)}")
+            for vsuffix, variant_entry in variants.items():
+                vdef, variant_tasks = parse_variant_entry(
+                    variant_entry, tasks)
+                vextra = extra + ([f"APP_DEFINES={vdef}"] if vdef else [])
+                for i, params in enumerate(variant_tasks, 1):
+                    tag = make_size_tag(app, params, rename_rules)
+                    cmd = ["make", app, f"config={cfg_name}"] + vextra
+                    total += 1
+                    print(f"    - TASK {i}/{len(variant_tasks)} "
+                          f"app={app}{vsuffix} tag={tag}")
+                    print(f"      params={params}")
+                    print(f"      make: (cwd={make_cwd}) {' '.join(cmd)}")
+                    print(f"      pack: "
+                          f"{pack_root / (app + vsuffix + '_' + tag)}")
 
     print("\n" + "=" * 100)
     print(f"[DRY-RUN] Total tasks: {total}")
@@ -395,41 +443,50 @@ def main():
             logger.log(f"         log_dir={log_dir}")
             logger.sep("#", 92)
 
-            for app, tasks in apps.items():
+            for app, app_entry in apps.items():
+                tasks, variants = parse_app_entry(app_entry)
                 extra = extra_args_for_kernel(app, extra_args)
                 extra_str = " ".join(extra) if extra else "(none)"
 
                 # KERNEL group header (EXTRA ARGS goes here)
                 logger.sep("=", 92)
                 logger.log(
-                    f"[KERNEL] {app}  tasks={len(tasks)}  extra={extra_str}")
+                    f"[KERNEL] {app}  tasks={len(tasks)}  "
+                    f"variants={list(variants)}  extra={extra_str}")
                 logger.sep("=", 92)
 
-                for idx, params in enumerate(tasks, 1):
-                    tag = make_size_tag(app, params, rename_rules)
+                for vsuffix, variant_entry in variants.items():
+                    vdef, variant_tasks = parse_variant_entry(
+                        variant_entry, tasks)
+                    vextra = extra + (
+                        [f"APP_DEFINES={vdef}"] if vdef else [])
+                    for idx, params in enumerate(variant_tasks, 1):
+                        tag = make_size_tag(app, params, rename_rules)
 
-                    logger.sep("-", 92)
-                    logger.log(
-                        f"[TASK {idx}/{len(tasks)}] app={app}  tag={tag}")
-                    logger.log(f"          params={params}")
+                        logger.sep("-", 92)
+                        logger.log(
+                            f"[TASK {idx}/{len(variant_tasks)}] "
+                            f"app={app}{vsuffix}  tag={tag}")
+                        logger.log(f"          params={params}")
 
-                    # patch gendata
-                    patched = patch_workload_block(original, app, params)
-                    gendata_params.write_text(patched, encoding="utf-8")
-                    logger.log("STEP: patched gendata_params.hjson")
+                        # patch gendata
+                        patched = patch_workload_block(original, app, params)
+                        gendata_params.write_text(patched, encoding="utf-8")
+                        logger.log("STEP: patched gendata_params.hjson")
 
-                    # make + per-task make log (also under pack_dir)
-                    cmd = ["make", app, f"config={cfg_name}"] + extra
-                    make_log = (
-                        log_dir /
-                        f"make_{cfg_name}_{app}_task{idx:03d}_{tag}.log"
-                    )
-                    run_make_with_log(cmd, make_cwd, make_log, logger)
+                        # make + per-task make log (also under pack_dir)
+                        cmd = (["make", app, f"config={cfg_name}"] + vextra)
+                        make_log = (
+                            log_dir /
+                            f"make_{cfg_name}_{app}{vsuffix}"
+                            f"_task{idx:03d}_{tag}.log"
+                        )
+                        run_make_with_log(cmd, make_cwd, make_log, logger)
 
-                    # pack outputs
-                    exe_path = move_and_rename(
-                        app, pack_dir, tag, out_dir, logger)
-                    packed_execs.append(exe_path)
+                        # pack outputs
+                        exe_path = move_and_rename(
+                            app, pack_dir, tag, out_dir, logger, vsuffix)
+                        packed_execs.append(exe_path)
 
             # write per-pack_dir filelist under pack_dir root
             write_filelist(pack_root, packed_execs, logger)

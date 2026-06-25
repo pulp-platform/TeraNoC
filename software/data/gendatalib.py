@@ -14,6 +14,7 @@
 import pyflexfloat as ff
 import numpy as np
 import math
+import copy
 import qmath
 
 from scipy import signal
@@ -268,6 +269,25 @@ def generate_fcmatmul(my_type=np.float32, defines={}):
     return [A, B, C], defines
 
 
+def generate_fgemm(my_type=np.float32, defines={}):
+
+    # Create matrix
+    matrix_M = defines['matrix_M']
+    matrix_N = defines['matrix_N']
+    matrix_P = defines['matrix_P']
+    X = (np.random.rand(matrix_M, matrix_N) - 0.5).astype(my_type)
+    W = (np.random.rand(matrix_N, matrix_P) - 0.5).astype(my_type)
+    Y = (np.random.rand(matrix_M, matrix_P) - 0.5).astype(my_type)
+    Z = np.matmul(X, W) + Y
+
+    X = np.reshape(X, (matrix_M * matrix_N), order='C').astype(my_type)
+    W = np.reshape(W, (matrix_N * matrix_P), order='C').astype(my_type)
+    Y = np.reshape(Y, (matrix_M * matrix_P), order='C').astype(my_type)
+    Z = np.reshape(Z, (matrix_M * matrix_P), order='C').astype(my_type)
+
+    return [X, W, Y, Z], defines
+
+
 def generate_fmatmul(my_type=np.float32, defines={}):
 
     # f8: Cast correct type
@@ -315,16 +335,20 @@ def generate_fmatmul(my_type=np.float32, defines={}):
 
 
 def generate_fgemv(my_type=np.float32, defines={}):
-    # Create matrix
-    matrix_N = defines['matrix_N']
-    matrix_P = defines['matrix_P']
-    A = (np.random.rand(matrix_P, matrix_N) - 0.5).astype(my_type)
-    X = (np.random.rand(matrix_N) - 0.5).astype(my_type)
-    Y = np.matmul(A, X)
 
-    A = np.reshape(A, (matrix_P * matrix_N), order='C').astype(my_type)
+    matrix_M = defines['matrix_M']
+    matrix_N = defines['matrix_N']
+    transpose_a = int(defines.get('transpose_a', 0))
+    A = (np.random.rand(matrix_M, matrix_N) - 0.5).astype(my_type)
+    X = (np.random.rand(matrix_N) - 0.5).astype(my_type)
+    Y = np.matmul(A, X).astype(my_type)
+
+    if transpose_a:
+        A = A.T
+
+    A = np.reshape(A, (matrix_M * matrix_N), order='C').astype(my_type)
     X = np.reshape(X, (matrix_N), order='C').astype(my_type)
-    Y = np.reshape(Y, (matrix_P), order='C').astype(my_type)
+    Y = np.reshape(Y, (matrix_M), order='C').astype(my_type)
 
     return [A, X, Y], defines
 
@@ -914,3 +938,219 @@ def generate_fsoftmax(my_type=np.float32, defines={}):
         B = np.reshape(B, (matrix_M * matrix_N), order='C')
 
     return [A, B], defines
+
+
+def generate_fconv2d_padded(defines={}, my_type=np.float32):
+    """Padded 2D FP convolution data, CH x FxF.
+
+    Faithful port of the padded fconv2d data script. The (R+F-1, C+F-1) padded
+    input I is filled with random data, its (F-1)/2 border rows/cols are zeroed
+    (zero_pad), the FxF filter is transposed on its (1,2) axes, and the golden
+    output is sum_ch correlate2d(I[ch], F_T[ch], 'valid') -> (R, C).
+
+    Only the mathematical input/filter/output data is generated here. Row
+    partitioning and active-core selection are handled by the app.
+    """
+    CH = int(defines['CH'])
+    R = int(defines['R'])
+    C = int(defines['C'])
+    F = int(defines['F'])
+
+    np.random.seed(42)
+
+    # Padded input feature map: (CH, R+F-1, C+F-1)
+    ih = R + F - 1
+    iw = C + F - 1
+    vec_I = np.random.randn(CH, ih, iw).astype(my_type)
+    # Filter: (CH, F, F)
+    vec_F = np.random.randn(CH, F, F).astype(my_type)
+
+    # zero_pad: zero the (F-1)/2 border columns/rows of the padded input
+    pad = (F - 1) // 2
+    for ch in range(CH):
+        for j in range(pad):
+            vec_I[ch][:, j] = 0
+            vec_I[ch][:, iw - 1 - j] = 0
+        for r in range(pad):
+            vec_I[ch][r, :] = 0
+            vec_I[ch][ih - 1 - r, :] = 0
+
+    # Transpose the filter on its (1, 2) axes (matches gen_data.py
+    # vec_F.transpose(1,2))
+    vec_F_T = np.transpose(vec_F, (0, 2, 1))
+
+    # Golden: sum over channels of valid 2D correlation -> (R, C)
+    vec_GR = np.zeros((R, C), dtype=my_type)
+    for ch in range(CH):
+        vec_GR = vec_GR + signal.correlate2d(vec_I[ch], vec_F_T[ch],
+                                             mode='valid')
+    vec_GR = vec_GR.astype(my_type)
+
+    # Reset output buffer (DMA'd into omtx by main.c): all zeros (R, C)
+    vec_R = np.zeros((R, C), dtype=my_type)
+
+    return [
+        vec_I.reshape(CH * ih * iw),
+        vec_F_T.reshape(CH * F * F),
+        vec_R.reshape(R * C),
+        vec_GR.reshape(R * C)
+    ], defines
+
+
+def _fft_serialize_cmplx(vector, NFFT, dtype):
+    serial_vec = np.empty(2 * NFFT, dtype=dtype)
+    serial_vec[0::2] = np.real(vector)
+    serial_vec[1::2] = np.imag(vector)
+    return serial_vec
+
+
+def _fft_setup_input(samples):
+    with np.nditer(samples, op_flags=['readwrite']) as it:
+        for samp in it:
+            samp[...]['re'] = np.random.randn(1)
+            samp[...]['im'] = np.random.randn(1)
+
+
+def _fft_setup_twiddles_lut(twiddles_vec, nfft):
+    theta = (2 * np.pi) / nfft
+    with np.nditer(twiddles_vec, op_flags=['readwrite']) as it:
+        for idx, twi in enumerate(it):
+            phi = 2 * np.pi - theta * (idx)
+            twi[...]['re'] = np.cos(phi)
+            twi[...]['im'] = np.sin(phi)
+
+
+def _fft_setup_twiddles_lut_dif_vec(twiddles_vec, nfft):
+    stages = int(np.log2(nfft))
+    theta = (2 * np.pi) / nfft
+    twi = [[np.cos((2 * np.pi) - i * theta), np.sin((2 * np.pi) - i * theta)]
+           for i in range(int(nfft / 2))]
+    for s in range(stages):
+        for t in range(int(nfft / 2)):
+            twiddles_vec[int(s * nfft / 2 + t)
+                         ]['re'] = twi[int((2**(s) * t) % int(nfft / 2))][0]
+            twiddles_vec[int(s * nfft / 2 + t)
+                         ]['im'] = twi[int((2**(s) * t) % int(nfft / 2))][1]
+    return twiddles_vec
+
+
+def _fft_gen_bitrev_idx(nfft):
+    fmt = '{:0' + str(int(np.log2(nfft))) + 'b}'
+    bitrev = np.zeros(nfft)
+    for n in np.arange(nfft):
+        bitrev[n] = int(fmt.format(n)[::-1], 2)
+    return bitrev
+
+
+def _fft_gen_core_offset(ncore):
+    max_cid = ncore - 1
+    num_bits = max_cid.bit_length()
+    return [int(format(cid, f'0{num_bits}b')[::-1], 2) for cid in range(ncore)]
+
+
+def _fft_gen_store_idx(nfft):
+    ibuf = []
+    dbuf = []
+    a = [*range(nfft)]
+    b = np.zeros(nfft)
+    old_b = a
+    nffth = nfft >> 1
+    for bf in range(int(np.log2(nffth))):
+        stride = nffth >> (bf + 1)
+        for h in range(2):
+            for i in range(int(nffth / (stride << 1))):
+                for j in range(stride):
+                    b[h * (nffth >> 1) + i * stride + j] = \
+                        old_b[h * nffth + j + 2 * i * stride]
+                    b[h * (nffth >> 1) + i * stride + j + nffth] = \
+                        old_b[h * nffth + j + 2 * i * stride + stride]
+        delta = [[i for i in b].index(n) for n in old_b]
+        ibuf += [[i for i in b]]
+        dbuf += [delta]
+        old_b = [n for n in copy.deepcopy(b)]
+        b = np.zeros(nfft)
+    idx_list = sum(ibuf, [])
+    delta_list = sum(dbuf, [])
+    return [idx_list, delta_list]
+
+
+def _fft_twiddle_reim(nfft, dtype=np.float32):
+    count = int(np.log2(nfft) * nfft / 2)
+    dtype_cplx = np.dtype([('re', dtype), ('im', dtype)])
+    twiddle_v = np.empty(count, dtype=dtype_cplx)
+    twiddle_v = _fft_setup_twiddles_lut_dif_vec(twiddle_v, nfft)
+    twiddle_s = _fft_serialize_cmplx(
+        twiddle_v['re'] + 1j * twiddle_v['im'], count, dtype)
+    return twiddle_s[0::2].astype(dtype), twiddle_s[1::2].astype(dtype)
+
+
+def _fft_store_delta(nfft):
+    if nfft <= 2:
+        return np.zeros(0, dtype=np.uint16)
+
+    _, store_delta = _fft_gen_store_idx(nfft)
+    store_delta = [n * np.dtype(np.uint32).itemsize for n in store_delta]
+    compact = []
+    for i in range(len(store_delta) // nfft):
+        compact += store_delta[i * nfft:i * nfft + nfft // 2]
+    return np.array(compact, dtype=np.uint16)
+
+
+def generate_fft(defines={}, my_type=np.float32):
+    """FFT data independent of the execution core split."""
+    NFFT = int(defines['npoints'])
+    dtype = np.float32
+    dtype_cplx = np.dtype([('re', dtype), ('im', dtype)])
+
+    np.random.seed(42)
+    samples = np.empty(NFFT, dtype=dtype_cplx)
+    _fft_setup_input(samples)
+    gold_out = np.fft.fft(samples['re'] + 1j * samples['im'])
+
+    samples_s = _fft_serialize_cmplx(
+        samples['re'] + 1j * samples['im'], NFFT, dtype)
+    gold_out_s = _fft_serialize_cmplx(gold_out, NFFT, dtype)
+
+    samples_reim = np.empty(2 * NFFT, dtype=dtype)
+    samples_reim[0:NFFT] = samples_s[0::2]
+    samples_reim[NFFT:2 * NFFT] = samples_s[1::2]
+
+    twiddle_re_parts = []
+    twiddle_im_parts = []
+    store_idx_parts = []
+    for sub_nfft in (1 << p for p in range(1, int(np.log2(NFFT)) + 1)):
+        re, im = _fft_twiddle_reim(sub_nfft, dtype)
+        twiddle_re_parts.append(re)
+        twiddle_im_parts.append(im)
+        store_idx_parts.append(_fft_store_delta(sub_nfft))
+
+    twiddle_re = np.concatenate(twiddle_re_parts).astype(dtype)
+    twiddle_im = np.concatenate(twiddle_im_parts).astype(dtype)
+    store_idx = np.concatenate(store_idx_parts).astype(np.uint16)
+    buffer_dram = np.zeros(2 * NFFT, dtype=dtype)
+
+    defines['NFFT'] = NFFT
+    defines['FFT_LOG2_NFFT'] = int(np.log2(NFFT))
+    defines['FFT_TWIDDLE_TABLE_SIZE'] = int(twiddle_re.size)
+    defines['FFT_STORE_IDX_TABLE_SIZE'] = int(store_idx.size)
+
+    return [
+        samples_reim.astype(dtype),
+        buffer_dram,
+        twiddle_re,
+        twiddle_im,
+        store_idx,
+        gold_out_s.astype(dtype)
+    ], defines
+
+
+def generate_bandwidth(defines={}, my_type=np.int32):
+    """Bandwidth-test data payload.
+
+    Faithful port of the bandwidth-test payload generator.
+    Offset/round/step traffic scheduling is an execution choice, so it is
+    generated by the app instead of this data generator.
+    """
+    M = int(defines['M'])
+    np.random.seed(42)
+    return np.random.randint(-100, 100, size=M).astype(my_type), defines
