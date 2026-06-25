@@ -311,7 +311,7 @@ gen_selector: scripts/gen_xbar.py
 	$< -in ${num_cores_per_tile} -on $$(($(num_remote_ports_per_tile) - 1)) -o src/selector.sv
 
 .PHONY: compile
-compile: update-floogen dpi lib $(buildpath) $(buildpath)/compile.tcl update_opcodes
+compile: update-floogen dpi lib $(buildpath) $(buildpath)/compile.tcl
 $(buildpath)/compile.tcl: $(bender) $(config_mk) Makefile $(MEMPOOL_DIR)/Bender.yml $(shell find {src,tb,deps} -type f)
 	$(bender) script vsim --vlog-arg="$(vlog_args)" $(vlog_defs) -t rtl -t mempool_vsim > $(buildpath)/compile.tcl
 	echo "exit" >> $(buildpath)/compile.tcl
@@ -348,7 +348,7 @@ $(buildpath)/$(dpi_library)/mempool_dpi.so: $(dpi)
 ################
 # Elaboration
 .PHONY: elabvcs
-elabvcs: dpivcs $(buildpath) $(buildpath)/compilevcs.sh update_opcodes
+elabvcs: dpivcs $(buildpath) $(buildpath)/compilevcs.sh
 $(buildpath)/compilevcs.sh: $(bender) $(config_mk) Makefile $(MEMPOOL_DIR)/Bender.yml $(shell find {src,tb,deps} -type f)
 	$(bender) script vcs --vlogan-bin="$(vcs_cmd) vlogan" --vlog-arg="$(vlogan_args)" $(vlog_defs) -t rtl -t mempool_vsim > $(buildpath)/compilevcs.sh
 	echo "exit" >> $(buildpath)/compilevcs.sh
