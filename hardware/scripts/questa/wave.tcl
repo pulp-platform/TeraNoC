@@ -14,12 +14,6 @@ add wave -noupdate -group Utilization -color {Cornflower Blue} -format Analog-St
 add wave -noupdate -group Utilization /mempool_tb/lsu_handshake
 add wave -noupdate -group Utilization -color {Cornflower Blue} -format Analog-Step -height 84 -max $num_cores -radix unsigned /mempool_tb/lsu_pressure
 add wave -noupdate -group Utilization /mempool_tb/lsu_request
-if {[examine -radix dec /snitch_pkg::XPULPIMG]} {
-  add wave -noupdate -group Utilization -color {Cornflower Blue} -format Analog-Step -height 84 -max $num_cores -radix unsigned /mempool_tb/gen_utilization/dspu_utilization
-  add wave -noupdate -group Utilization /mempool_tb/gen_utilization/dspu_handshake
-  add wave -noupdate -group Utilization -color {Cornflower Blue} -format Analog-Step -height 84 -max $num_cores -radix unsigned /mempool_tb/gen_utilization/mac_utilization
-  add wave -noupdate -group Utilization /mempool_tb/gen_utilization/dspu_mac
-}
 set axi_channels [expr [examine -radix dec mempool_pkg::NumGroups] * [examine -radix dec mempool_pkg::NumAXIMastersPerGroup]]
 add wave -noupdate -group Utilization -color {Cornflower Blue} -format Analog-Step -height 84 -max $axi_channels -radix unsigned /mempool_tb/axi_w_utilization
 add wave -noupdate -group Utilization -color {Cornflower Blue} -format Analog-Step -height 84 -max $axi_channels -radix unsigned /mempool_tb/axi_r_utilization
