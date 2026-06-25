@@ -11,6 +11,9 @@
 # Global Control
 terapool ?= 1
 
+# FlooNoC configuration file
+floo_noc_cfg ?= floo_noc_terapool.yml
+
 # Number of cores
 num_cores ?= 64
 

@@ -298,9 +298,12 @@ $(buildpath)/$(library):
 	cd $(buildpath) && $(questa_cmd) vlib $(library) && chmod +w modelsim.ini; $(questa_cmd) vmap $(library) $(library)
 
 # FlooGen Update
+# Defaults to floo_noc_<config>.yml; a flavor .mk can set floo_noc_cfg to reuse
+# another config's (identical) FlooNoC yml instead of duplicating the file.
+floo_noc_cfg ?= floo_noc_$(config).yml
 .PHONY: update-floogen
 update-floogen:
-	$(MAKE) -C .. FLOO_CFG=./config/floo_noc_$(config).yml update-floonoc config=$(config)
+	$(MAKE) -C .. FLOO_CFG=./config/$(floo_noc_cfg) update-floonoc config=$(config)
 
 # Compilation
 .PHONY: gen_selector
