@@ -643,4 +643,11 @@ module mempool_tb;
 `include "tb_noc_profiling.svh"
 `include "tb_spm_profiling.svh"
 
+/*******************
+ * Spatz Profiling *
+ ******************/
+// Always-on vector-engine trace (gated only by Spatz presence, mempool_pkg::RVV);
+// must follow tb_noc_profiling.svh, which declares the shared cycle_q counter.
+`include "tb_spatz_profiling.svh"
+
 endmodule : mempool_tb
