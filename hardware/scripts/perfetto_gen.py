@@ -1519,6 +1519,251 @@ def process_spm_banks(spm_dir, builder, uu, args, flows=None):
     return nb
 
 
+# ===========================================================================
+# Spatz vector-ENGINE trace (spatz_profiling/spatz_g<g>_t<t>_c<c>.log).
+# Mirrors the RedMulE engine path, but Spatz is per-CORE so the engine node
+# nests under each Core node (Core > Group > Tile > Core > Spatz).
+# ===========================================================================
+SPATZ_LOG_RE = re.compile(r"spatz_g(\d+)_t(\d+)_c(\d+)\.log$")
+
+# Spatz sub-FSM state names (index = the integer state code in the trace).
+SPATZ_VFU_STATES = ["IPU", "FPU"]            # spatz_vfu.sv state_q
+SPATZ_VLSU_STATES = ["LOAD", "STORE"]        # spatz_vlsu.sv state_q
+# Occupancy/CPI stack (per active cycle, mutually exclusive, sums to 1 over a
+# window once idle is added). compute = VFU busy; mem = VLSU/VSLDU busy (no
+# VFU); stall = controller issue stall; drain = in-flight but no unit active
+# this cycle; idle = the row-less gaps (handled by the caller).
+SPATZ_CPI = ["compute", "mem", "stall", "drain", "idle"]
+
+
+def load_spatz_logs(sp_dir):
+    """Parse the always-on engine logs spatz_g<g>_t<t>_c<c>.log into
+    {(g,t,c): (dims=(VLEN,N_FU,NrMemPorts), rows, end_cyc)}: each row (one
+    ACTIVE cycle) is (cyc, occ, stall, issue, vfu_busy, vfu_st, vlsu_busy,
+    vlsu_st, vsldu_busy, vfu_rsp, vlsu_rsp, vsldu_rsp, memact); end_cyc is the
+    E footer (last sim cycle) so the exporter renders every row-less cycle as
+    the engine sitting IDLE out to the end. Cores that never ran a vector
+    instruction (only D+E, no C rows) are kept so they show as fully idle."""
+    out = {}
+    for path in sorted(glob.glob(os.path.join(sp_dir, "spatz_g*_t*_c*.log"))):
+        m = SPATZ_LOG_RE.search(os.path.basename(path))
+        if not m:
+            continue
+        g, t, c = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        dims, rows, end_cyc = (0, 0, 0), [], 0
+        with open(path) as f:
+            for line in f:
+                x = line.split()
+                if not x:
+                    continue
+                if x[0] == "D" and len(x) == 4:
+                    dims = (int(x[1]), int(x[2]), int(x[3]))
+                elif x[0] == "C" and len(x) == 14:
+                    try:
+                        if not (WIN_CYC_LO <= int(x[1]) < WIN_CYC_HI):
+                            continue
+                        rows.append(tuple(int(v) for v in x[1:]))
+                    except ValueError:
+                        continue
+                elif x[0] == "E" and len(x) == 2:
+                    try:
+                        end_cyc = int(x[1])
+                    except ValueError:
+                        pass
+        # clamp the idle tail to the export window
+        end_cyc = min(end_cyc, WIN_CYC_HI)
+        # safety: E must cover the last active row
+        if rows and end_cyc < rows[-1][0]:
+            end_cyc = rows[-1][0]
+        if rows or end_cyc:
+            out[(g, t, c)] = (dims, rows, end_cyc)
+    return out
+
+
+def _spatz_bucket(occ, stall, issue, vfu_busy, vlsu_busy, vsldu_busy):
+    """Map one active engine cycle to an occupancy/CPI bucket (priority order,
+    mutually exclusive). VFU compute dominates; otherwise memory (VLSU/VSLDU)
+    activity; otherwise an issue stall; otherwise an in-flight-but-idle drain
+    cycle. (idle = the row-less gaps, handled by the caller.)"""
+    if vfu_busy:
+        return "compute"
+    if vlsu_busy or vsldu_busy:
+        return "mem"
+    if stall:
+        return "stall"
+    return "drain"
+
+
+def _spatz_unit_rows(rows, busy_idx, st_idx, names):
+    """Project the Spatz C rows onto a per-unit FSM stream: (cyc, state) for
+    every cycle the unit is busy, so _emit_fsm_slices renders the unit's
+    sub-state runs and leaves the not-busy cycles as IDLE gaps. `state` is the
+    sub-state code (e.g. VFU IPU/FPU) when busy."""
+    out = []
+    for r in rows:
+        if r[busy_idx]:
+            st = r[st_idx] if st_idx is not None else 0
+            out.append((r[0], st))
+    return out
+
+
+def _emit_spatz_fsm(builder, leaf, urows, names, end_cyc):
+    """Render a per-unit busy timeline as colored sub-state slices; every
+    cycle the unit is NOT busy (lead-in, gaps, tail to end_cyc) is an IDLE
+    slice. Each urow is (cyc, state). Returns #slices."""
+    n = 0
+
+    def slc(s, e, nm):
+        nonlocal n
+        if e <= s:
+            return
+        emit_slice_begin(builder, s * TICK, leaf, nm)
+        emit_slice_end(builder, e * TICK, leaf)
+        n += 1
+
+    def sname(st):
+        return names[st] if 0 <= st < len(names) else str(st)
+
+    cur = start = prev = None
+    for cyc, state in urows:
+        if cur is None:
+            slc(WIN_CYC_LO, cyc, "IDLE")
+            cur, start = state, cyc
+        elif cyc != prev + 1:  # gap -> close + idle fill
+            slc(start, prev + 1, sname(cur))
+            slc(prev + 1, cyc, "IDLE")
+            cur, start = state, cyc
+        elif state != cur:  # contiguous state change
+            slc(start, cyc, sname(cur))
+            cur, start = state, cyc
+        prev = cyc
+    if cur is None:  # never busy -> fully idle
+        slc(WIN_CYC_LO, end_cyc + 1, "IDLE")
+    else:
+        slc(start, prev + 1, sname(cur))
+        slc(prev + 1, end_cyc + 1, "IDLE")
+    return n
+
+
+def _emit_spatz_counters(builder, ctr, mem_ctr, rows, nr_mem, win,
+                         args, end_cyc):
+    """Windowed occupancy/CPI stack (change-detected, pinned [0,1]): the 4
+    active buckets as per-cycle fractions (cycles-in-bucket / window) plus idle
+    = the row-less window cycles, computed across [0, end_cyc] so the engine's
+    idle time shows; the five series sum to 1 over every full window.
+    mem_ctr is the separate memory-port utilization series (mean active
+    ports / NrMemPorts, NOT part of the CPI sum)."""
+    bcyc = collections.defaultdict(lambda: collections.defaultdict(int))
+    memsum = collections.defaultdict(int)
+    act = collections.defaultdict(int)
+    for (cyc, occ, stall, issue, vfu_busy, vfu_st, vlsu_busy, vlsu_st,
+         vsldu_busy, vfu_rsp, vlsu_rsp, vsldu_rsp, memact) in rows:
+        w = cyc // win
+        bcyc[w][_spatz_bucket(occ, stall, issue, vfu_busy,
+                              vlsu_busy, vsldu_busy)] += 1
+        memsum[w] += memact
+        act[w] += 1
+    maxw = end_cyc // win
+    nrm = max(1, nr_mem)
+    last = {}
+    for w in range(WIN_CYC_LO // win, maxw + 1):
+        ts = w * win * TICK
+        a = act.get(w, 0)
+        vals = {b: (max(0.0, (win - a) / win) if b == "idle"
+                    else bcyc[w].get(b, 0) / win) for b in SPATZ_CPI}
+        for m, u in ctr.items():
+            if last.get(m) != vals[m]:
+                emit_counter(builder, ts, u, vals[m])
+                last[m] = vals[m]
+        mv = memsum.get(w, 0) / (win * nrm)
+        if last.get("__mem__") != mv:
+            emit_counter(builder, ts, mem_ctr, mv)
+            last["__mem__"] = mv
+    ts_end = (maxw + 1) * win * TICK
+    for m, u in ctr.items():
+        if last.get(m):
+            emit_counter(builder, ts_end, u, 0.0)
+    if last.get("__mem__"):
+        emit_counter(builder, ts_end, mem_ctr, 0.0)
+    pin_counter_range(builder, list(ctr.values()) + [mem_ctr],
+                      ts_end + 2 * TICK, TICK)
+
+
+def _ensure_spatz_engine(builder, uu, g, t, c, args):
+    """Idempotently ensure the Core > Group > Tile > Core > Spatz container
+    chain and return the Spatz engine node's uuid. The Core node is shared with
+    process_dasm (same ('c', hart) key + label) so the Spatz timeline nests
+    beside the core's IPC/stall counters."""
+    cpt = args.cores_per_tile
+    hart = (g * args.tiles_per_group + t) * cpt + c
+    _ensure(builder, uu, ("core_root",), "1 Core")
+    _ensure(builder, uu, ("g", g), _gname(g), ("core_root",))
+    _ensure(builder, uu, ("t", g, t), _tname(t), ("g", g))
+    if ("c", hart) not in uu._seen:
+        add_track(builder, uu.get(("c", hart)),
+                  f"Core {hart:0{PAD_H}d} (G{g}T{t}C{c})",
+                  parent=uu.get(("t", g, t)),
+                  child_order=CHILD_ORDER_EXPLICIT)
+        uu._seen.add(("c", hart))
+    if ("sp_engine", g, t, c) not in uu._seen:
+        add_track(builder, uu.get(("sp_engine", g, t, c)), "Spatz",
+                  parent=uu.get(("c", hart)),
+                  child_order=CHILD_ORDER_EXPLICIT)
+        uu._seen.add(("sp_engine", g, t, c))
+    return uu.get(("sp_engine", g, t, c))
+
+
+def process_spatz(sp_dir, builder, uu, args):
+    """Always-on Spatz vector-ENGINE trace: a Spatz node under each Core node
+    carrying the VFU busy/sub-state FSM as its slice timeline, with the
+    VLSU FSM (child slice line) and the occupancy/CPI stack (compute / mem
+    / stall / drain / idle) plus a memory-port utilization series as
+    expandable counter children. Returns #engine nodes."""
+    data = load_spatz_logs(sp_dir)
+    if not data:
+        print(f"  Spatz engine: no spatz_g*_t*_c*.log in {sp_dir}; skipping",
+              file=sys.stderr)
+        return 0
+    win = max(1, int(round(args.window_ns / args.clk_ns)))
+    neng = nsl = 0
+    # row layout: 0=cyc 1=occ 2=stall 3=issue 4=vfu_busy 5=vfu_st 6=vlsu_busy
+    #             7=vlsu_st 8=vsldu_busy 9=vfu_rsp 10=vlsu_rsp 11=vsldu_rsp
+    #             12=memact
+    for (g, t, c), (dims, rows, end_cyc) in sorted(data.items()):
+        nr_mem = dims[2]
+        eng = _ensure_spatz_engine(builder, uu, g, t, c, args)
+        # VFU busy/sub-state ON the engine line.
+        nsl += _emit_spatz_fsm(
+            builder, eng,
+            _spatz_unit_rows(rows, 4, 5, SPATZ_VFU_STATES),
+            SPATZ_VFU_STATES, end_cyc)
+        # VLSU load/store sub-state on a child line.
+        vlsu_leaf = add_track(builder, uu.get(("sp_vlsu", g, t, c)),
+                              "VLSU", parent=eng)
+        nsl += _emit_spatz_fsm(
+            builder, vlsu_leaf,
+            _spatz_unit_rows(rows, 6, 7, SPATZ_VLSU_STATES),
+            SPATZ_VLSU_STATES, end_cyc)
+        # VSLDU busy (no sub-state) on a child line.
+        vsldu_leaf = add_track(builder, uu.get(("sp_vsldu", g, t, c)),
+                               "VSLDU", parent=eng)
+        nsl += _emit_spatz_fsm(
+            builder, vsldu_leaf,
+            _spatz_unit_rows(rows, 8, None, ["BUSY"]),
+            ["BUSY"], end_cyc)
+        ctr = {b: add_track(builder, uu.get(("sp_cpi", g, t, c, b)), b,
+                            parent=eng, counter=True) for b in SPATZ_CPI}
+        mem_ctr = add_track(builder, uu.get(("sp_mem", g, t, c)),
+                            "mem_ports", parent=eng, counter=True)
+        _emit_spatz_counters(builder, ctr, mem_ctr, rows, nr_mem, win,
+                             args, end_cyc)
+        neng += 1
+    print(f"  Spatz engine: {neng} engine nodes "
+          f"(VFU+VLSU+VSLDU FSM + 5-way occupancy/CPI incl. idle + "
+          f"mem-port util), {nsl} state slices")
+    return neng
+
+
 def main():
     ap = argparse.ArgumentParser("perfetto_gen")
     ap.add_argument("traces", nargs="+", help="trace_hart_*.dasm files")
@@ -1574,6 +1819,11 @@ def main():
     ap.add_argument(
         "--spm", help="spm_profiling/ dir (bank_g*_t*.log); adds per-SPM-bank "
         "access tracks under each Tile node (needs --noc for the tiles)")
+    ap.add_argument(
+        "--spatz",
+        help="spatz_profiling/ dir (spatz_g*_t*_c*.log); adds the always-on "
+        "Spatz vector-engine node (VFU/VLSU/VSLDU FSM, occupancy/CPI stack, "
+        "mem-port util) under each Spatz core")
     ap.add_argument(
         "--cycle-start",
         type=int,
@@ -1684,6 +1934,9 @@ def main():
         print(
             f"  PE ports: attached {len(pe_data)} core port "
             "traces under Core nodes")
+    # always-on Spatz vector-engine node (under each Core node)
+    if args.spatz:
+        process_spatz(args.spatz, builder, uu, args)
     if args.noc:
         # Tiles BEFORE routers so the root order is Core / NoC tiles / NoC
         # routers: a memory access enters/exits the mesh at the tile, so
