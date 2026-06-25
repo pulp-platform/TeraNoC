@@ -4,7 +4,6 @@
 
 package mempool_pkg;
 
-  import snitch_pkg::MetaIdWidth;
   import cf_math_pkg::idx_width;
 
   /*********************
@@ -29,6 +28,32 @@ package mempool_pkg;
   localparam integer unsigned AxiDataWidth            = `ifdef AXI_DATA_WIDTH `AXI_DATA_WIDTH `else 0 `endif;
   localparam integer unsigned AxiLiteDataWidth        = 32;
 
+  /************************
+   *  EXTENSION SUPPORT   *
+   ************************/
+  // Spatz (RVV) vector + FP-format support. All default to 0/1 for non-Spatz
+  // builds so the derived sizes below degrade to the scalar case
+  // (NumFUsPerCore = 1, NumDataPortsPerCore = 1).
+  localparam bit RVV      = `ifdef RVV `RVV `else 0 `endif;
+  localparam bit RVF      = `ifdef RVF `RVF `else 0 `endif;
+  localparam bit RVD      = 0;  // not supported for the MemPool family
+  localparam bit XFVEC    = 0;
+  localparam bit XFDOTP   = RVF ? 1 : 0;
+  localparam bit XFAUX    = 0;
+  localparam bit XF16     = RVF ? 1 : 0;
+  localparam bit XF16ALT  = 0;
+  localparam bit XF8      = RVF ? 1 : 0;
+  localparam bit XF8ALT   = 0;
+  localparam bit XDivSqrt = 0;
+
+  localparam integer unsigned NumIPUsPerCore      = `ifdef N_IPU `N_IPU `else 1 `endif;
+  localparam integer unsigned NumFPUsPerCore      = `ifdef N_FPU `N_FPU `else 1 `endif;
+  localparam integer unsigned NumFUsPerCore       = NumIPUsPerCore > NumFPUsPerCore ? NumIPUsPerCore : NumFPUsPerCore;
+  localparam integer unsigned NumFUsPerTile       = NumFUsPerCore * NumCoresPerTile;
+  localparam integer unsigned NumMemPortsPerSpatz = NumFUsPerCore;
+  // Per-core TCDM master ports: 1 scalar/FP port + RVV vector-LSU ports.
+  localparam integer unsigned NumDataPortsPerCore = 1 + RVV * NumMemPortsPerSpatz;
+
   /***********************
    *  MEMORY PARAMETERS  *
    ***********************/
@@ -40,7 +65,7 @@ package mempool_pkg;
   localparam integer unsigned BankingFactor    = `ifdef BANKING_FACTOR `BANKING_FACTOR `else 0 `endif;
   localparam bit              LrScEnable       = 1'b1;
   localparam integer unsigned TCDMSizePerBank  = `ifdef L1_BANK_SIZE `L1_BANK_SIZE `else 0 `endif;
-  localparam integer unsigned NumBanks         = NumCores * BankingFactor;
+  localparam integer unsigned NumBanks         = NumCores * NumFUsPerCore * BankingFactor;
   localparam integer unsigned NumBanksPerTile  = NumBanks / NumTiles;
   localparam integer unsigned NumBanksPerGroup = NumBanks / NumGroups;
   localparam integer unsigned TCDMAddrMemWidth = $clog2(TCDMSizePerBank / mempool_pkg::BeWidth);
@@ -250,6 +275,12 @@ package mempool_pkg;
     logic trans_complete;
   } dma_meta_t;
 
+  // Per-tile local TCDM master ports: the (Spatz-scaled) core data ports.
+  // Degrades to NumCoresPerTile for the scalar case (NumDataPortsPerCore = 1).
+  localparam integer unsigned MaxLocalPortsPerTile = NumCoresPerTile * NumDataPortsPerCore;
+
+  localparam integer unsigned MetaIdWidth = snitch_pkg::MetaIdWidth;
+
   /**********************************
    *  TCDM INTERCONNECT PARAMETERS  *
    **********************************/
@@ -258,7 +289,7 @@ package mempool_pkg;
   typedef logic [TCDMAddrMemWidth-1:0] bank_addr_t;
   typedef logic [TCDMAddrMemWidth+idx_width(NumBanksPerTile)-1:0] tile_addr_t;
   typedef logic [MetaIdWidth-1:0] meta_id_t;
-  typedef logic [idx_width(NumCoresPerTile)-1:0] tile_core_id_t;
+  typedef logic [idx_width(MaxLocalPortsPerTile)-1:0] tile_core_id_t;
   typedef logic [idx_width(NumTilesPerGroup)-1:0] tile_group_id_t;
   typedef logic [idx_width(NumGroups)-1:0] group_id_t;
   typedef logic [3:0] amo_t;

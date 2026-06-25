@@ -10,24 +10,31 @@ dependencies:
   axi:          { git: "https://github.com/pulp-platform/axi.git",          version: 0.36.0 }
   common_cells: { git: "https://github.com/pulp-platform/common_cells.git", version: 1.19.0 }
 
+# The snitch core and its support modules are one unified source for both builds;
+# the only `spatz` target split left is the scalar FP subsystem (snitch_fp_*.sv).
 sources:
   - defines:
       SNITCH_ENABLE_PERF: 1
       SNITCH_ENABLE_STALL_COUNTER: 1
     files:
-    # packages
     - src/riscv_instr.sv
+    # snitch_pkg must precede snitch_axi_pkg, which imports it
     - src/snitch_pkg.sv
     - src/snitch_axi_pkg.sv
-    # rest of RTL
+    # Unified core: one parameterized snitch.sv (scalar / FPU / XpulpIMG / Spatz)
     - src/snitch.sv
+    # Unified support modules (snitch_lsu is also used by spatz_fpu_sequencer)
     - src/snitch_regfile_ff.sv
     # - src/snitch_regfile_latch.sv
     - src/snitch_lsu.sv
     - src/snitch_ipu.sv
-    - src/snitch_fp_ss.sv
-    - src/snitch_fp_divsqrt.sv
-    - src/snitch_fpu.sv
     - src/snitch_shared_muldiv.sv
+    # Scalar FP subsystem (the Spatz build handles FP in the vector unit)
+    - target: not(spatz)
+      files:
+      - src/snitch_fp_ss.sv
+      - src/snitch_fp_divsqrt.sv
+      - src/snitch_fpu.sv
+    # common RTL
     - src/snitch_demux.sv
     - src/snitch_axi_adapter.sv

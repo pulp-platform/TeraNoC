@@ -88,3 +88,13 @@ spm_profiling ?= 0
 
 # Enable the interconnect access pattern profiling
 noc_profiling ?= 0
+
+# Enable the Spatz vector unit (RVV)
+spatz ?= 0
+
+# Spatz vector-unit parameters
+n_fpu ?= 1
+n_ipu ?= 1
+vlen  ?= 0
+rvf   ?= 0
+rvd   ?= 0
