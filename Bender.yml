@@ -39,7 +39,7 @@ sources:
   - hardware/src/axi_L2_interleaver.sv
   - hardware/src/bootrom.sv
   - hardware/src/selector.sv
-  - hardware/src/mempool_tile_rw_demux.sv
+  - hardware/src/mempool_tile_remote_req_router.sv
   - hardware/src/control_registers/control_registers_reg_pkg.sv
   - hardware/src/control_registers/control_registers_reg_top.sv
   # Level 1
