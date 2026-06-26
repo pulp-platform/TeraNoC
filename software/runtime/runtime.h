@@ -155,15 +155,16 @@ static inline void mempool_wait(uint32_t cycles) {
 static inline void mempool_wfi() { asm volatile("wfi"); }
 
 // Fence primitives (repurposed opcodes; see hardware/deps/snitch/src/snitch.sv):
-//   full_fence : wait for BOTH the integer LSU AND the Spatz accelerator mem ops to
-//                DRAIN (responses received).
-//   core_fence : integer LSU only (snitch-only; Spatz VLSU keeps running).
-//   vlsu_fence : Spatz request-sent -- block until all prior vector-LSU requests are
-//                ISSUED to the interconnect (NOT drained; responses may stay in flight,
-//                so memory-transaction overlap is preserved).
-static inline void full_fence(void) { asm volatile("fence"      ::: "memory"); }
-static inline void core_fence(void) { asm volatile("fence.i"    ::: "memory"); }
-static inline void vlsu_fence(void) { asm volatile("sfence.vma" ::: "memory"); }
+//   full_fence         : wait for BOTH the integer LSU AND the Spatz accelerator mem
+//                        ops to DRAIN (responses received).
+//   core_fence         : integer LSU only (snitch-only; Spatz VLSU keeps running).
+//   mem_req_sent_fence : Spatz request-sent -- block until all prior Spatz mem requests
+//                        (BOTH vector VLSU and scalar FP-LSU, load+store) are ISSUED to
+//                        the interconnect (NOT drained; responses may stay in flight, so
+//                        memory-transaction overlap is preserved).
+static inline void full_fence(void)         { asm volatile("fence"      ::: "memory"); }
+static inline void core_fence(void)         { asm volatile("fence.i"    ::: "memory"); }
+static inline void mem_req_sent_fence(void) { asm volatile("sfence.vma" ::: "memory"); }
 
 // Wake up core with given core_id by writing in the wake up control register.
 // If core_id equals -1, wake up all cores.
