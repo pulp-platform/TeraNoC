@@ -99,6 +99,9 @@ module snitch
   // Request-side: per-lane pulse when all of a mem op's requests are issued to the
   // interconnect (bit[1]=VLSU, bit[0]=FP-LSU); responses may still be in flight.
   input  logic [1:0]    acc_mem_req_sent_i,
+  // Vector mem op accepted (offloaded to the VLSU) -- increments the vector-only
+  // request-sent fence counter (the offload loadstore flag can't tell vector from FP).
+  input  logic          acc_mem_vec_accepted_i,
   /// TCDM Data Interface
   /// Write transactions do not return data on the `P Channel`
   /// Transactions need to be handled strictly in-order.
@@ -890,10 +893,11 @@ module snitch
       end
       riscv_instr::SFENCE_VMA: begin
         write_rd = 1'b0;
-        // Spatz request-sent fence: stall until all prior vector mem requests have been
-        // issued to the interconnect (responses may still be in flight -> overlap kept).
-        // Repurposed from a full drain -- request-sent is the semantics we use, and
-        // sfence.vma assembles cleanly (HFENCE_GVMA would need a raw-encoded .word).
+        // Request-sent fence: stall until all prior mem requests -- BOTH vector VLSU and
+        // scalar FP-LSU -- have been issued to the interconnect (responses may still be in
+        // flight -> memory overlap kept). Repurposed from a full drain; request-sent is the
+        // semantics we use, and sfence.vma assembles cleanly (HFENCE_GVMA would need a
+        // raw-encoded .word).
         fence_stall = (|acc_mem_req_cnt_q);
       end
       riscv_instr::WFI: begin
@@ -2838,8 +2842,15 @@ module snitch
     if (acc_mem_finished_i[1])
       acc_mem_cnt_d -= 1;
 
-    // Request-sent count: same offload increment, decremented when an op's requests
-    // are all issued (acc_mem_req_sent_i), NOT at response -> preserves overlap.
+    // Request-sent count: BOTH vector VLSU and scalar FP-LSU. Increment on any FP/vector
+    // mem-op offload accept (same condition as acc_mem_cnt above; the offload `loadstore`
+    // flag covers vector loads/stores AND scalar flw/fsw), and decrement on EITHER
+    // request-sent lane -- VLSU (acc_mem_req_sent_i[1]) for vector ops, FP-LSU
+    // (acc_mem_req_sent_i[0]) for scalar-FP ops. Each offload (+1) is balanced by exactly
+    // one request-sent (-1) on its own lane, so the SFENCE_VMA fence (|acc_mem_req_cnt_q)
+    // stalls until every prior mem request -- vector AND scalar-FP -- has been issued to
+    // the interconnect (responses may still be in flight, so memory overlap is kept).
+    // NOTE: acc_mem_vec_accepted_i (the old vector-only increment) is no longer used here.
     if (acc_qdata_rsp_i.loadstore && acc_qready_i && acc_qvalid_o)
       acc_mem_req_cnt_d += 1;
     if (acc_mem_req_sent_i[0])
