@@ -9,14 +9,20 @@
 ##  MemPool flavor  ##
 ######################
 
-# Choose a MemPool flavor, either "minpool" or "mempool".
-# Check the README for more details
+# Choose a MemPool flavor (see config/*.mk and the README). When none is selected
+# explicitly the build falls back to `mempool` and warns once, so a forgotten
+# `config=` is visible while flavor-independent targets (toolchains, bender, the
+# boot ROM, opcode tables) keep working. Pass `config=<flavor>` or set the
+# MEMPOOL_CONFIGURATION env var to select another flavor.
 ifndef config
   ifdef MEMPOOL_CONFIGURATION
     config := $(MEMPOOL_CONFIGURATION)
   else
-    # Default configuration, if neither `config` nor `MEMPOOL_CONFIGURATION` was found
     config := mempool
+    # Warn only at the top-level invocation so recursive sub-makes stay quiet.
+    ifeq ($(MAKELEVEL),0)
+      $(warning No MemPool `config` selected; defaulting to `mempool`. Pass `config=<flavor>` (e.g. minpool, terapool, minpool_spatz4_fpu) to choose another; run `ls config/*.mk` for the list.)
+    endif
   endif
 endif
 include $(MEMPOOL_DIR)/config/$(config).mk
@@ -88,3 +94,13 @@ spm_profiling ?= 0
 
 # Enable the interconnect access pattern profiling
 noc_profiling ?= 0
+
+# Enable the Spatz vector unit (RVV)
+spatz ?= 0
+
+# Spatz vector-unit parameters
+n_fpu ?= 1
+n_ipu ?= 1
+vlen  ?= 0
+rvf   ?= 0
+rvd   ?= 0

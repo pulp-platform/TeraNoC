@@ -131,6 +131,17 @@ packages:
     dependencies:
     - axi
     - common_cells
+  spatz:
+    revision: null
+    version: null
+    source:
+      Path: hardware/deps/spatz
+    dependencies:
+    - common_cells
+    - fpnew
+    - reqrsp_interface
+    - snitch
+    - tech_cells_generic
   tech_cells_generic:
     revision: 7968dd6e6180df2c644636bc6d2908a49f2190cf
     version: 0.2.13

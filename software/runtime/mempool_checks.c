@@ -36,6 +36,50 @@ static void mempool_dpi_check_record(uint32_t type, const void *pRes,
 }
 #endif
 
+#ifdef __clang__
+static inline float mempool_check_f32_diff(float res, float exp) {
+#if defined(__riscv_zfinx)
+  float diff;
+  asm volatile("fsub.s %[diff], %[res], %[exp];"
+               : [diff] "+&r"(diff)
+               : [res] "r"(res), [exp] "r"(exp)
+               :);
+  return diff;
+#else
+  return res - exp;
+#endif
+}
+
+static inline float mempool_check_f16_diff(const __fp16 *pRes,
+                                           const __fp16 *pExp) {
+  __fp16 res = *pRes;
+  __fp16 exp = *pExp;
+#if defined(__riscv_zfinx)
+  float diff;
+  asm volatile("fsub.h %[diff], %[res], %[exp];"
+               "fcvt.s.h %[diff], %[diff];"
+               : [diff] "+&r"(diff)
+               : [res] "r"(res), [exp] "r"(exp)
+               :);
+  return diff;
+#else
+  return (float)res - (float)exp;
+#endif
+}
+
+static inline int16_t mempool_check_f8_diff(__fp8 res, __fp8 exp) {
+#if defined(__riscv_zquarterinx)
+  __fp8 diff;
+  asm volatile("fsub.b %[diff], %[res], %[exp];"
+               : [diff] "+&r"(diff)
+               : [res] "r"(res), [exp] "r"(exp));
+  return (int16_t)diff;
+#else
+  return (int16_t)((int8_t)res - (int8_t)exp);
+#endif
+}
+#endif
+
 /**
   @brief         Check for q32 kernels.
   @param[in]     pRes points to the result
@@ -182,11 +226,7 @@ void mempool_check_f32(float *__restrict__ pRes, float *__restrict__ pExp,
     for (uint32_t i = 0; i < NEL; i++) {
       float exp = pExp[i];
       float res = pRes[i];
-      float diff;
-      asm volatile("fsub.s %[diff], %[res], %[exp];"
-                   : [diff] "+&r"(diff)
-                   : [res] "r"(res), [exp] "r"(exp)
-                   :);
+      float diff = mempool_check_f32_diff(res, exp);
       uint32_t error = ((diff > TOL) || (diff < (-TOL))) ? 1 : 0;
       uint32_t print = error || verbose;
       ERRORS += error;
@@ -228,13 +268,7 @@ void mempool_check_f16(__fp16 *__restrict__ pRes, __fp16 *__restrict__ pExp,
     for (uint32_t i = 0; i < NEL; i++) {
       __fp16 exp = pExp[i];
       __fp16 res = pRes[i];
-      float diff;
-      asm volatile("fsub.h %[diff], %[res], %[exp];"
-                   "fcvt.s.h %[diff], %[diff];"
-                   : [diff] "+&r"(diff)
-                   : [res] "r"(res), [exp] "r"(exp)
-                   :);
-
+      float diff = mempool_check_f16_diff(&res, &exp);
       uint32_t error = ((diff > TOL) || (diff < (-TOL))) ? 1 : 0;
       uint32_t print = error || verbose;
       ERRORS += error;
@@ -276,17 +310,13 @@ void mempool_check_f8(__fp8 *__restrict__ pRes, __fp8 *__restrict__ pExp,
     for (uint32_t i = 0; i < NEL; i++) {
       __fp8 exp = pExp[i];
       __fp8 res = pRes[i];
-      __fp8 diff;
-      asm volatile("fsub.b %[diff], %[res], %[exp];"
-                   : [diff] "+&r"(diff)
-                   : [res] "r"(res), [exp] "r"(exp));
-
+      int16_t diff = mempool_check_f8_diff(res, exp);
       uint32_t error = ((diff > TOL) || (diff < (-TOL))) ? 1 : 0;
       uint32_t print = error || verbose;
       ERRORS += error;
       if (print) {
         printf("CHECK(%d): EXP = %02X - RESP = %02X - DIFF = %04X\n", i,
-               *(int32_t *)&exp, *(int32_t *)&res, *(int32_t *)&diff);
+               *(int32_t *)&exp, *(int32_t *)&res, diff);
       }
     }
     printf("%d ERRORS out of %d CHECKS\n", ERRORS, NEL);

@@ -13,6 +13,7 @@ dependencies:
   register_interface:   { git: "https://github.com/pulp-platform/register_interface.git",   version: 0.4.7   }
   reqrsp_interface:     { path: "hardware/deps/reqrsp_interface"                                             }
   snitch:               { path: "hardware/deps/snitch"                                                       }
+  spatz:                { path: "hardware/deps/spatz"                                                         }
   cluster_icache:       { git: "https://github.com/pulp-platform/cluster_icache.git",       version: 0.3.1   }
   tech_cells_generic:   { git: "https://github.com/pulp-platform/tech_cells_generic.git",   version: 0.2.13  }
   fpnew:                { git: "https://github.com/pulp-platform/cvfpu.git",                rev: feature/cfmadd }
@@ -29,6 +30,9 @@ export_include_dirs:
 sources:
   # Level 0
   - hardware/src/mempool_pkg.sv
+  - target: spatz
+    files:
+    - hardware/src/tcdm_id_remapper.sv
   - hardware/src/axi_hier_interco.sv
   - hardware/src/mempool_cc.sv
   - hardware/src/snitch_addr_demux.sv
@@ -39,7 +43,7 @@ sources:
   - hardware/src/axi_L2_interleaver.sv
   - hardware/src/bootrom.sv
   - hardware/src/selector.sv
-  - hardware/src/mempool_tile_rw_demux.sv
+  - hardware/src/mempool_tile_remote_req_router.sv
   - hardware/src/control_registers/control_registers_reg_pkg.sv
   - hardware/src/control_registers/control_registers_reg_top.sv
   # Level 1

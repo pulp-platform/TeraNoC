@@ -159,7 +159,9 @@ if __name__ == '__main__':
         my_type = get_type(data_args.get("type"))
         defnes = dict([ast.literal_eval(defne)
                       for defne in data_args.get("defines")])
-        arrays = [ast.literal_eval(array) for array in data_args.get("arrays")]
+        raw_arrays = data_args.get("arrays")
+        arrays = ([ast.literal_eval(array) for array in raw_arrays]
+                  if raw_arrays is not None else [])
 
     # Determine output file name
     filename = os.path.dirname(os.path.abspath(__file__))
@@ -167,6 +169,15 @@ if __name__ == '__main__':
 
     # Define function mappings for each app_name
     function_map = {
+        "sp_matmul_f32": {"func": datalib.generate_fmatmul},
+        "sp_matmul_i32": {"func": datalib.generate_imatmul},
+        "sp_axpy_f32": {"func": datalib.generate_faxpy},
+        "sp_dotp_f32": {"func": datalib.generate_fdotp},
+        "sp_gemv_f32": {"func": datalib.generate_fgemv},
+        "sp_gemv_f16": {"func": datalib.generate_fgemv},
+        "sp_fconv2d_f32": {"func": datalib.generate_fconv2d_padded},
+        "sp_fft_f32": {"func": datalib.generate_fft},
+        "sp_bandwidth_test_i32": {"func": datalib.generate_bandwidth},
         "axpy_i32": {"func": datalib.generate_iaxpy},
         "axpy_f8": {"func": datalib.generate_faxpy},
         "axpy_f16": {"func": datalib.generate_faxpy},
