@@ -263,7 +263,6 @@ jobs:
         sudo apt install libelf-dev
         ln -s $GITHUB_WORKSPACE/install/verilator/share/verilator/include $GITHUB_WORKSPACE/install/verilator/include
         ln -s $GITHUB_WORKSPACE/install/verilator/share/verilator/bin/verilator_includer $GITHUB_WORKSPACE/install/verilator/bin/verilator_includer
-        make bender
         make update-deps
         make -C hardware $GITHUB_WORKSPACE/hardware/verilator_build/Vmempool_tb_verilator
     - name: Tar Verilator Model
@@ -355,7 +354,7 @@ jobs:
 
   build-apps-llvm:
     runs-on: ubuntu-22.04
-    needs: [tc-gcc, tc-llvm]
+    needs: [tc-gcc, tc-llvm, bender]
     strategy:
       matrix:
         mempool_config: [minpool, test_4x4noc_64core, mempool]
@@ -373,8 +372,18 @@ jobs:
         name: llvm-project
     - name: Untar llvm-project
       run: tar --use-compress-program zstd -xf llvm-project.tzst
+    - name: Get bender artifacts
+      uses: actions/download-artifact@v8
+      with:
+        name: bender
+    - name: Untar bender
+      run: tar --use-compress-program zstd -xf bender.tzst
     - name: Install Python requirements
       run: pip install -r python-requirements.txt
+    - name: Update Dependencies
+      env:
+        CI: true
+      run: make update-deps
     - name: Build Apps
       env:
         config: ${{ matrix.mempool_config }}
