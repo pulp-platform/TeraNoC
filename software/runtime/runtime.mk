@@ -56,7 +56,18 @@ else
 
 	# Use LLVM by default
 	# LLVM compiler -march
-	RISCV_ARCH ?= rv$(RISCV_XLEN)ima
+	ifeq ($(spatz), 1)
+		# Spatz/RVV: F (when an FPU is present) + V + Zfh. XpulpIMG and Zfinx are
+		# mutually exclusive with RVV and disabled in the Spatz flavors, so their
+		# blocks below are skipped.
+		RISCV_ARCH ?= rv$(RISCV_XLEN)ima
+		ifneq ($(n_fpu), 0)
+			RISCV_ARCH := $(addsuffix f, $(RISCV_ARCH))
+		endif
+		RISCV_ARCH := $(addsuffix vzfh, $(RISCV_ARCH))
+	else
+		RISCV_ARCH ?= rv$(RISCV_XLEN)ima
+	endif
 	ifeq ($(ZFINX), 1)
 		RISCV_ARCH := $(RISCV_ARCH)_zfinx
 		RISCV_ARCH := $(RISCV_ARCH)_zhinx
@@ -88,11 +99,13 @@ RISCV_STRIP   ?= $(RISCV_PREFIX)strip
 
 # Defines
 DEFINES += -DPRINTF_DISABLE_SUPPORT_FLOAT -DPRINTF_DISABLE_SUPPORT_LONG_LONG -DPRINTF_DISABLE_SUPPORT_PTRDIFF_T
+# Per-app compile defines (e.g. variant selectors passed by auto_build.py).
+DEFINES += $(APP_DEFINES)
 DEFINES += -DNUM_CORES=$(num_cores)
 DEFINES += -DNUM_GROUPS=$(num_groups)
 DEFINES += -DNUM_CORES_PER_TILE=$(num_cores_per_tile)
 DEFINES += -DBANKING_FACTOR=$(banking_factor)
-DEFINES += -DNUM_BANKS=$(shell awk 'BEGIN{print $(banking_factor)*$(num_cores)}')
+DEFINES += -DNUM_BANKS=$(shell awk 'BEGIN{print $(banking_factor)*$(n_fpu)*$(num_cores)}')
 DEFINES += -DNUM_CORES_PER_GROUP=$(shell awk 'BEGIN{print $(num_cores)/$(num_groups)}')
 DEFINES += -DNUM_TILES_PER_GROUP=$(shell awk 'BEGIN{print ($(num_cores)/$(num_groups))/$(num_cores_per_tile)}')
 DEFINES += -DLOG2_NUM_CORES_PER_TILE=$(shell awk 'BEGIN{print log($(num_cores_per_tile))/log(2)}')
@@ -105,10 +118,29 @@ DEFINES += -DLOG2_SEQ_MEM_SIZE=$(shell awk 'BEGIN{print log($(seq_mem_size))/log
 DEFINES += -DSTACK_SIZE=$(stack_size)
 DEFINES += -DLOG2_STACK_SIZE=$(shell awk 'BEGIN{print log($(stack_size))/log(2)}')
 DEFINES += -DXQUEUE_SIZE=$(xqueue_size)
+# Identify the MemPool platform to the C sources. Several apps (notably the
+# Spatz apps sp_gemv_f32/sp_gemv_bk_f32/sp_gemv_opt_f32/sp_matmul_i32
 # CI builds reuse software artifacts in Verilator, where the testbench-side DPI
 # checker is not available.
 ifeq ($(CI),true)
 DEFINES += -DMEMPOOL_DPI_CHECK_CI_BUILD
+endif
+# Spatz vector parameters. N_FU (functional units per core) scales the per-core
+# L1 / stack stride in crt0.S, arch.ld.c and runtime.h; it is always defined and
+# reduces to 1 (LOG2_N_FU=0) for scalar builds so those files stay identical.
+ifeq ($(spatz), 1)
+DEFINES += -DRVV -DRVF=$(rvf) -DRVD=$(rvd)
+DEFINES += -DVLEN=$(vlen) -DN_IPU=$(n_ipu) -DN_FPU=$(n_fpu)
+DEFINES += -DN_FU=$(shell awk 'BEGIN{print ($(n_ipu) > $(n_fpu)) ? $(n_ipu) : $(n_fpu)}')
+DEFINES += -DLOG2_N_FU=$(shell awk 'BEGIN{print ($(n_ipu) > $(n_fpu)) ? log($(n_ipu))/log(2) : log($(n_fpu))/log(2)}')
+ifeq ($(rvd), 1)
+DEFINES += -DELEN=64
+else
+DEFINES += -DELEN=32
+endif
+else
+DEFINES += -DN_FU=1
+DEFINES += -DLOG2_N_FU=0
 endif
 
 # Specify cross compilation target. This can be omitted if LLVM is built with riscv as default target
@@ -144,7 +176,9 @@ else
 	RISCV_CCFLAGS       += $(RISCV_LLVM_TARGET) $(RISCV_FLAGS_LLVM) $(RISCV_FLAGS_COMMON)
 	RISCV_CXXFLAGS      += $(RISCV_CCFLAGS)
 	RISCV_LDFLAGS       += -static -nostartfiles -lm -lgcc -mcmodel=small $(RISCV_LLVM_TARGET) $(RISCV_FLAGS_COMMON) -L$(ROOT_DIR)
-	ifeq ($(XDIVSQRT), 0)
+	ifeq ($(spatz), 1)
+		RISCV_OBJDUMP_FLAGS += --mcpu=mempool-rv32 --mattr=+m,+a,+f,+v,+zfh
+	else ifeq ($(XDIVSQRT), 0)
 		RISCV_OBJDUMP_FLAGS += --mcpu=mempool-rv32 --mattr=+m,+a,+xpulpmacsi,+xpulppostmod,+xpulpvect,+xpulpvectshufflepack,+zfinx,+nofdiv
 	else
 		RISCV_OBJDUMP_FLAGS += --mcpu=mempool-rv32 --mattr=+m,+a,+xpulpmacsi,+xpulppostmod,+xpulpvect,+xpulpvectshufflepack,+zfinx

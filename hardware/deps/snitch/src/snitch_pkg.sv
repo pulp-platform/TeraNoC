@@ -12,7 +12,19 @@ package snitch_pkg;
   localparam int NumFPOutstandingLoads  = 4;
   // Use a high number of outstanding loads, if running a latency-throughput analysis
   localparam int NumIntOutstandingLoads = `ifdef TRAFFIC_GEN 2048 `else 8 `endif;
-  localparam MetaIdWidth                = idx_width(NumIntOutstandingLoads);
+  // Spatz (RVV vector core) mode -- a BUILD-level capability flag set by the bender
+  // `spatz` target. The per-core RVV/XPulp/FPEn parameters select what each core IS;
+  // SpatzMode only sizes the shared, build-uniform widths below.
+  localparam bit SpatzMode              = `ifdef TARGET_SPATZ 1'b1 `else 1'b0 `endif;
+  // Spatz reorder-buffer depth -> max outstanding TCDM loads in vector mode.
+  localparam int RobDepth               = 32;
+  // Accelerator-offload id (acc_req_t.id) = destination register + writeback
+  // target. The scalar core's single Zfinx regfile needs only rd (5b); Spatz adds
+  // a use_fd bit (id[5]) to pick its separate FP regfile vs the integer GPRs -> 6b.
+  localparam int AccIdWidth             = SpatzMode ? 6 : 5;
+  // Shared core<->L1 NoC meta-id = max outstanding transactions over the build's PEs.
+  localparam MetaIdWidth                = SpatzMode ? idx_width(RobDepth)
+                                                   : idx_width(NumIntOutstandingLoads);
   // Xpulpimg extension enabled?
   localparam bit XPULPIMG = `ifdef XPULPIMG `XPULPIMG `else 1'bX `endif;
   // ZFINX extension enabled?
@@ -55,8 +67,8 @@ package snitch_pkg;
   } acc_addr_e;
 
   typedef struct packed {
-    acc_addr_e addr;
-    logic [4:0] id;
+    addr_t addr;
+    logic [AccIdWidth-1:0] id;
     logic [31:0] data_op;
     data_t data_arga;
     data_t data_argb;
@@ -64,8 +76,8 @@ package snitch_pkg;
   } acc_req_t;
 
   typedef struct packed {
-    acc_addr_e addr;
-    logic [4:0] id;
+    addr_t addr;
+    logic [AccIdWidth-1:0] id;
     logic [5:0] hart_id;
     logic [31:0] data_op;
     data_t data_arga;
@@ -74,13 +86,14 @@ package snitch_pkg;
   } sh_acc_req_t;
 
   typedef struct packed {
-    logic [4:0] id;
+    logic [AccIdWidth-1:0] id;
+    logic write;
     logic error;
     data_t data;
   } acc_resp_t;
 
   typedef struct packed {
-    logic [4:0] id;
+    logic [AccIdWidth-1:0] id;
     logic [5:0] hart_id;
     logic error;
     data_t data;

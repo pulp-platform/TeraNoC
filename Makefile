@@ -288,17 +288,30 @@ $(FLOO_NOC): $(FLOO_CFG)
 apps:
 	make -C $(SOFTWARE_DIR) apps
 
+# XpulpIMG (default) and RVV share the OP-V encoding space, so the two opcode
+# tables are generated separately (RVV=1 selects the RVV set in riscv-opcodes/
+# config.mk) and unioned by merge_opcode_tables.py into one superset.
+MERGE_OPCODES := $(MEMPOOL_DIR)/scripts/merge_opcode_tables.py
+
 update_opcodes: software/runtime/encoding.h hardware/deps/snitch/src/riscv_instr.sv
 
-software/runtime/encoding.h: toolchain/riscv-opcodes/*
-	make -C toolchain/riscv-opcodes encoding_out.h
-	mv toolchain/riscv-opcodes/encoding_out.h $@
+software/runtime/encoding.h: toolchain/riscv-opcodes/* $(MERGE_OPCODES)
+	make -C toolchain/riscv-opcodes -B encoding_out.h
+	mv toolchain/riscv-opcodes/encoding_out.h $(MEMPOOL_DIR)/.enc_xpulp.h
+	RVV=1 make -C toolchain/riscv-opcodes -B encoding_out.h
+	mv toolchain/riscv-opcodes/encoding_out.h $(MEMPOOL_DIR)/.enc_rvv.h
+	python3 $(MERGE_OPCODES) $(MEMPOOL_DIR)/.enc_xpulp.h $(MEMPOOL_DIR)/.enc_rvv.h > $@
+	rm -f $(MEMPOOL_DIR)/.enc_xpulp.h $(MEMPOOL_DIR)/.enc_rvv.h
 	ln -fsr $@ toolchain/riscv-isa-sim/riscv/encoding.h
 	ln -fsr $@ software/riscv-tests/env/encoding.h #this will change when riscv-tests is a submodule
 
-hardware/deps/snitch/src/riscv_instr.sv: toolchain/riscv-opcodes/*
-	make -C toolchain/riscv-opcodes inst.sverilog
-	mv toolchain/riscv-opcodes/inst.sverilog $@
+hardware/deps/snitch/src/riscv_instr.sv: toolchain/riscv-opcodes/* $(MERGE_OPCODES)
+	make -C toolchain/riscv-opcodes -B inst.sverilog
+	mv toolchain/riscv-opcodes/inst.sverilog $(MEMPOOL_DIR)/.instr_xpulp.sv
+	RVV=1 make -C toolchain/riscv-opcodes -B inst.sverilog
+	mv toolchain/riscv-opcodes/inst.sverilog $(MEMPOOL_DIR)/.instr_rvv.sv
+	python3 $(MERGE_OPCODES) $(MEMPOOL_DIR)/.instr_xpulp.sv $(MEMPOOL_DIR)/.instr_rvv.sv > $@
+	rm -f $(MEMPOOL_DIR)/.instr_xpulp.sv $(MEMPOOL_DIR)/.instr_rvv.sv
 
 toolchain/riscv-opcodes/*:
 	git submodule update --init --recursive -- toolchain/riscv-opcodes

@@ -8,6 +8,9 @@
 ## 1. Architecture Config
 ###########################
 
+# FlooNoC configuration file
+floo_noc_cfg ?= floo_noc_minpool.yml
+
 # Number of cores
 num_cores ?= 16
 

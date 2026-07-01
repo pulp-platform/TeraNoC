@@ -23,14 +23,14 @@ __fp16 sum[2 * NUM_BANKS]
 #include "baremetal/mempool_gemv_f16.h"
 #include "mempool_checks.h"
 
-__fp16 l1_A[matrix_N * matrix_P]
+__fp16 l1_A[matrix_N * matrix_M]
     __attribute__((aligned(4 * NUM_BANKS), section(".l1_prio")));
 __fp16 l1_X[matrix_N]
     __attribute__((aligned(4 * NUM_BANKS), section(".l1_prio")));
-__fp16 l1_Y[matrix_P]
+__fp16 l1_Y[matrix_M]
     __attribute__((aligned(4 * NUM_BANKS), section(".l1_prio")));
 
-__fp16 l2_Y_check[matrix_P]
+__fp16 l2_Y_check[matrix_M]
     __attribute__((aligned(4 * NUM_BANKS), section(".l2")));
 
 int main() {
@@ -41,7 +41,7 @@ int main() {
   mempool_barrier_init(core_id);
 
   if (core_id == 0) {
-    dma_memcpy_blocking(l1_A, l2_A, matrix_N * matrix_P * sizeof(int16_t));
+    dma_memcpy_blocking(l1_A, l2_A, matrix_N * matrix_M * sizeof(int16_t));
     dma_memcpy_blocking(l1_X, l2_X, matrix_N * sizeof(int16_t));
   }
   for (uint32_t k = core_id; k < NUM_BANKS; k += num_cores) {
@@ -52,7 +52,7 @@ int main() {
 
   time_init = mempool_get_timer();
   mempool_start_benchmark();
-  gemv_f16vecp_local_unrolled4(l1_A, l1_X, l1_Y, matrix_N, matrix_P);
+  gemv_f16vecp_local_unrolled4(l1_A, l1_X, l1_Y, matrix_N, matrix_M);
   mempool_stop_benchmark();
   time_end = mempool_get_timer();
 
@@ -62,9 +62,9 @@ int main() {
   }
   // Check results
   if (core_id == 0) {
-    dma_memcpy_blocking(l2_Y_check, l1_Y, matrix_P * sizeof(int16_t));
+    dma_memcpy_blocking(l2_Y_check, l1_Y, matrix_M * sizeof(int16_t));
   }
-  mempool_check_dpi_f16(l2_Y_check, l2_Y, matrix_P, 0.01f, 0);
+  mempool_check_dpi_f16(l2_Y_check, l2_Y, matrix_M, 0.01f, 0);
   mempool_barrier(num_cores);
 
   return 0;

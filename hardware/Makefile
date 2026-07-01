@@ -158,6 +158,25 @@ vlog_defs += -DZQUARTERINX=$(zquarterinx)
 vlog_defs += -DXDIVSQRT=$(xDivSqrt)
 vlog_defs += -DSNITCH_TRACE=$(snitch_trace)
 # --------------------------
+# Spatz Vector Unit
+# --------------------------
+# RVV (= spatz) and FP-format selection are always defined (0 when disabled).
+vlog_defs += -DRVV=$(spatz)
+vlog_defs += -DRVF=$(rvf) -DRVD=$(rvd)
+# spatz_pkg/rvv_pkg are referenced by mempool_cc in every build, so render
+# spatz_pkg.sv unconditionally; the full Spatz RTL stays spatz-only (-t spatz).
+SPATZ_DIR := $(shell $(bender) path spatz)
+SPATZ_PKG := $(SPATZ_DIR)/hw/ip/spatz/src/generated/spatz_pkg.sv
+$(SPATZ_PKG): $(SPATZ_DIR)/cfg/spatz_pkg.hjson $(SPATZ_DIR)/hw/ip/spatz/src/spatz_pkg.sv.tpl $(SPATZ_DIR)/util/render_spatz_pkg.py
+	$(python) $(SPATZ_DIR)/util/render_spatz_pkg.py -c $(SPATZ_DIR)/cfg/spatz_pkg.hjson -t $(SPATZ_DIR)/hw/ip/spatz/src/spatz_pkg.sv.tpl -o $@
+
+ifeq ($(spatz), 1)
+vlog_defs += -DVLEN=$(vlen) -DN_IPU=$(n_ipu) -DN_FPU=$(n_fpu)
+vlog_defs += -DN_FU=$(shell awk 'BEGIN{print ($(n_ipu) > $(n_fpu)) ? $(n_ipu) : $(n_fpu)}')
+# -t mempool defines TARGET_MEMPOOL, required by the vendored Spatz RTL.
+bender_defs += -t spatz -t mempool
+endif
+# --------------------------
 # AXI & DMA Configuration
 # --------------------------
 vlog_defs += -DAXI_DATA_WIDTH=$(axi_data_width)
@@ -298,9 +317,12 @@ $(buildpath)/$(library):
 	cd $(buildpath) && $(questa_cmd) vlib $(library) && chmod +w modelsim.ini; $(questa_cmd) vmap $(library) $(library)
 
 # FlooGen Update
+# Defaults to floo_noc_<config>.yml; a flavor .mk can set floo_noc_cfg to reuse
+# another config's (identical) FlooNoC yml instead of duplicating the file.
+floo_noc_cfg ?= floo_noc_$(config).yml
 .PHONY: update-floogen
 update-floogen:
-	$(MAKE) -C .. FLOO_CFG=./config/floo_noc_$(config).yml update-floonoc config=$(config)
+	$(MAKE) -C .. FLOO_CFG=./config/$(floo_noc_cfg) update-floonoc config=$(config)
 
 # Compilation
 .PHONY: gen_selector
@@ -308,9 +330,9 @@ gen_selector: scripts/gen_xbar.py
 	$< -in ${num_cores_per_tile} -on $$(($(num_remote_ports_per_tile) - 1)) -o src/selector.sv
 
 .PHONY: compile
-compile: update-floogen dpi lib $(buildpath) $(buildpath)/compile.tcl update_opcodes
-$(buildpath)/compile.tcl: $(bender) $(config_mk) Makefile $(MEMPOOL_DIR)/Bender.yml $(shell find {src,tb,deps} -type f)
-	$(bender) script vsim --vlog-arg="$(vlog_args)" $(vlog_defs) -t rtl -t mempool_vsim > $(buildpath)/compile.tcl
+compile: update-floogen dpi lib $(buildpath) $(buildpath)/compile.tcl
+$(buildpath)/compile.tcl: $(SPATZ_PKG) $(bender) $(config_mk) Makefile $(MEMPOOL_DIR)/Bender.yml $(shell find {src,tb,deps} -type f)
+	$(bender) script vsim --vlog-arg="$(vlog_args)" $(vlog_defs) -t rtl -t mempool_vsim $(bender_defs) > $(buildpath)/compile.tcl
 	echo "exit" >> $(buildpath)/compile.tcl
 	cd $(buildpath) && $(questa_cmd) vsim -work $(library) -c -do compile.tcl
 	echo $(questa_config) >> $(buildpath)/modelsim.ini
@@ -345,9 +367,9 @@ $(buildpath)/$(dpi_library)/mempool_dpi.so: $(dpi)
 ################
 # Elaboration
 .PHONY: elabvcs
-elabvcs: dpivcs $(buildpath) $(buildpath)/compilevcs.sh update_opcodes
-$(buildpath)/compilevcs.sh: $(bender) $(config_mk) Makefile $(MEMPOOL_DIR)/Bender.yml $(shell find {src,tb,deps} -type f)
-	$(bender) script vcs --vlogan-bin="$(vcs_cmd) vlogan" --vlog-arg="$(vlogan_args)" $(vlog_defs) -t rtl -t mempool_vsim > $(buildpath)/compilevcs.sh
+elabvcs: dpivcs $(buildpath) $(buildpath)/compilevcs.sh
+$(buildpath)/compilevcs.sh: $(SPATZ_PKG) $(bender) $(config_mk) Makefile $(MEMPOOL_DIR)/Bender.yml $(shell find {src,tb,deps} -type f)
+	$(bender) script vcs --vlogan-bin="$(vcs_cmd) vlogan" --vlog-arg="$(vlogan_args)" $(vlog_defs) -t rtl -t mempool_vsim $(bender_defs) > $(buildpath)/compilevcs.sh
 	echo "exit" >> $(buildpath)/compilevcs.sh
 	# Call VCS
 	cd $(buildpath) && \
@@ -429,13 +451,13 @@ endif
 ifeq ($(CI_REUSE_MODEL),true) # if ci already build the verilator model, don't rebuild again
 $(VERILATOR_MK): $(VERILATOR_CONF) $(VERILATOR_WAIVE) $(MEMPOOL_DIR)/Bender.yml $(shell find {src,tb,deps} -type f) $(bender) $(config_mk) Makefile
 else
-$(VERILATOR_MK): update-floogen $(VERILATOR_CONF) $(VERILATOR_WAIVE) $(MEMPOOL_DIR)/Bender.yml $(shell find {src,tb,deps} -type f) $(bender) $(config_mk) Makefile
+$(VERILATOR_MK): update-floogen $(VERILATOR_CONF) $(VERILATOR_WAIVE) $(MEMPOOL_DIR)/Bender.yml $(shell find {src,tb,deps} -type f) $(SPATZ_PKG) $(bender) $(config_mk) Makefile
 endif
 	rm -rf $(verilator_build); mkdir -p $(verilator_build)
 	# Overwrite Bootaddress to L2 base while we don't have a DPI to write a wake-up
 	$(eval boot_addr=$(l2_base))
 	# Create Bender script of all RTL files
-	$(bender) script verilator $(vlog_defs) -t rtl -t mempool_verilator -DASSERTS_OFF > $(verilator_files)
+	$(bender) script verilator $(vlog_defs) -t rtl -t mempool_verilator $(bender_defs) -DASSERTS_OFF > $(verilator_files)
 	# Append the verilator library files
 	@echo '' >> $(verilator_files)
 	# Append the verilator library files: Includes
@@ -472,7 +494,7 @@ lint: update-floogen $(SPYGLASS_WORK_DIR)/tmp/files $(SPYGLASS_WORK_DIR)/sdc/fun
 # Build file list, use subst to remove the "32'd" which spyglass can't handle
 $(SPYGLASS_WORK_DIR)/tmp/files%: $(bender)
 	mkdir -p $(SPYGLASS_WORK_DIR)/tmp
-	$(bender) script verilator $(subst 32\'d,,$(vlog_defs)) -t rtl -t mempool_verilator > $@
+	$(bender) script verilator $(subst 32\'d,,$(vlog_defs)) -t rtl -t mempool_verilator $(bender_defs) > $@
 
 ################
 # Tracing      #
@@ -546,6 +568,7 @@ perfetto-gen:
 		--slices $(slices) $(if $(preload),--elf $(preload),) \
 		$(if $(wildcard $(buildpath)/noc_profiling),--noc $(buildpath)/noc_profiling,) \
 		$(if $(wildcard $(buildpath)/spm_profiling),--spm $(buildpath)/spm_profiling,) \
+		$(if $(wildcard $(buildpath)/spatz_profiling),--spatz $(buildpath)/spatz_profiling,) \
 		--noc-slices $(noc_slices) $(if $(filter 1,$(free_range)),--free-range,) \
 		$(if $(filter 1,$(flows)),--flows,) \
 		$(if $(win_start),--cycle-start $(win_start),) $(if $(win_end),--cycle-end $(win_end),) \

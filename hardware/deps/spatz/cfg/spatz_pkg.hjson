@@ -1,0 +1,19 @@
+// Copyright 2023 ETH Zurich and University of Bologna.
+// Licensed under the Apache License, Version 2.0, see LICENSE for details.
+// SPDX-License-Identifier: Apache-2.0
+//
+// Config for rendering the vendored Spatz vector-IP package (spatz_pkg.sv).
+//
+// TeraNoC integrates Spatz in the "mempool" flavor: for that branch of
+// spatz_pkg.sv.tpl, N_FPU / N_IPU / VLEN / RVF / RVD are `ifdef-guarded and
+// driven by -D defines at vlog time (from the config/*.mk knobs n_fpu / n_ipu /
+// vlen / rvf / rvd). The n_fpu / n_ipu / vlen values below are therefore only
+// the non-mempool fallbacks and do not gate the MemPool build; "mempool: true"
+// is the field that actually selects the right package branch.
+{
+  "mempool": true,
+  "spatz_fpu": true,
+  "n_fpu": 4,
+  "n_ipu": 4,
+  "vlen": 512,
+}

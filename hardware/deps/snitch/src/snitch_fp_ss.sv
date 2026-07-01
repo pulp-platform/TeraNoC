@@ -59,7 +59,8 @@ module snitch_fp_ss
     None,
     AccBus_A,
     AccBus_B,
-    AccBus_C
+    AccBus_C,
+    RegBRep // operand-B lane-0 broadcast for the .R scalar-replicate SIMD variants
   } op_select_e;
   op_select_e [2:0] op_select;
 
@@ -582,6 +583,7 @@ module snitch_fp_ss
       riscv_instr::VFMV_H_X: begin
         fpu_op = fpnew_pkg::SGNJ;
         fpu_rnd_mode   = fpnew_pkg::RUP; // passthrough without checking nan-box
+        op_select[0]   = AccBus_A; // move the integer source (rs1) into the FP reg
         src_fmt        = fpnew_pkg::FP16;
         dst_fmt        = fpnew_pkg::FP16;
         vectorial_op   = 1'b1;
@@ -678,7 +680,8 @@ module snitch_fp_ss
       riscv_instr::VFNSUMEX_S_H: begin
         fpu_op = fpnew_pkg::EXVSUM;
         op_select[0] = AccBus_A;
-        op_select[1] = AccBus_B;
+        op_select[2] = AccBus_C; // rd accumulator: EXVSUM adds the lane-sum to operands_i[2]
+        if (acc_req.data_op inside {riscv_instr::VFNSUMEX_S_H}) op_mode = 1'b1; // negate (N-variant)
         src_fmt      = fpnew_pkg::FP16;
         dst_fmt      = fpnew_pkg::FP32;
         vectorial_op = 1'b1;
@@ -938,7 +941,7 @@ module snitch_fp_ss
         dst_fmt      = fpnew_pkg::FP8;
         vectorial_op = 1'b1;
       end
-      riscv_instr::VFCLASS_H: begin
+      riscv_instr::VFCLASS_B: begin // was mislabelled VFCLASS_H (dead dup of the real FP16 arm)
         fpu_op = fpnew_pkg::CLASSIFY;
         op_select[0]   = AccBus_A;
         fpu_rnd_mode   = fpnew_pkg::RNE;
@@ -1069,6 +1072,7 @@ module snitch_fp_ss
       riscv_instr::VFMV_B_X: begin
         fpu_op = fpnew_pkg::SGNJ;
         fpu_rnd_mode   = fpnew_pkg::RUP; // passthrough without checking nan-box
+        op_select[0]   = AccBus_A; // move the integer source (rs1) into the FP reg
         src_fmt        = fpnew_pkg::FP8;
         dst_fmt        = fpnew_pkg::FP8;
         vectorial_op   = 1'b1;
@@ -1176,7 +1180,8 @@ module snitch_fp_ss
       riscv_instr::VFNSUMEX_H_B: begin
         fpu_op = fpnew_pkg::EXVSUM;
         op_select[0] = AccBus_A;
-        op_select[1] = AccBus_B;
+        op_select[2] = AccBus_C; // rd accumulator: EXVSUM adds the lane-sum to operands_i[2]
+        if (acc_req.data_op inside {riscv_instr::VFNSUMEX_H_B}) op_mode = 1'b1; // negate (N-variant)
         src_fmt      = fpnew_pkg::FP8;
         dst_fmt      = fpnew_pkg::FP16;
         vectorial_op = 1'b1;
@@ -1208,6 +1213,24 @@ module snitch_fp_ss
 
       default: ;
     endcase
+    // .R scalar-replicate SIMD variants: the casez above set the per-lane AccBus_B base;
+    // broadcast operand B's lane 0 across the SIMD lanes instead. ADD/SUB carry operand B
+    // on slot 2 (the addend); all other binary .R ops carry it on slot 1.
+    if (acc_req.data_op inside {riscv_instr::VFADD_R_H, riscv_instr::VFADD_R_B,
+                                riscv_instr::VFSUB_R_H, riscv_instr::VFSUB_R_B}) begin
+      op_select[2] = RegBRep;
+    end else if (acc_req.data_op inside {
+        riscv_instr::VFMUL_R_H,   riscv_instr::VFMUL_R_B,   riscv_instr::VFMIN_R_H,   riscv_instr::VFMIN_R_B,
+        riscv_instr::VFMAX_R_H,   riscv_instr::VFMAX_R_B,   riscv_instr::VFMAC_R_H,   riscv_instr::VFMAC_R_B,
+        riscv_instr::VFMRE_R_H,   riscv_instr::VFMRE_R_B,   riscv_instr::VFSGNJ_R_H,  riscv_instr::VFSGNJ_R_B,
+        riscv_instr::VFSGNJN_R_H, riscv_instr::VFSGNJN_R_B, riscv_instr::VFSGNJX_R_H, riscv_instr::VFSGNJX_R_B,
+        riscv_instr::VFEQ_R_H,    riscv_instr::VFEQ_R_B,    riscv_instr::VFNE_R_H,    riscv_instr::VFNE_R_B,
+        riscv_instr::VFLT_R_H,    riscv_instr::VFLT_R_B,    riscv_instr::VFGE_R_H,    riscv_instr::VFGE_R_B,
+        riscv_instr::VFLE_R_H,    riscv_instr::VFLE_R_B,    riscv_instr::VFGT_R_H,    riscv_instr::VFGT_R_B,
+        riscv_instr::VFDOTPEX_S_R_H,  riscv_instr::VFDOTPEX_H_R_B,  riscv_instr::VFNDOTPEX_S_R_H,
+        riscv_instr::VFNDOTPEX_H_R_B, riscv_instr::VFDOTPEXA_S_R_B, riscv_instr::VFDOTPEXB_S_R_B}) begin
+      op_select[1] = RegBRep;
+    end
     // fix round mode for vectors and fp16alt
     if (set_dyn_rm) fpu_rnd_mode = fpu_rnd_mode_i;
   end
@@ -1235,6 +1258,16 @@ module snitch_fp_ss
         end
         AccBus_C: begin
           op[i] = acc_qdata[2];
+          op_ready[i] = acc_req_valid;
+        end
+        RegBRep: begin
+          // .R scalar-replicate: broadcast operand B's (acc_qdata[1]) lane 0 across the
+          // SIMD lanes, per the vector element width.
+          unique case (src_fmt)
+            fpnew_pkg::FP16, fpnew_pkg::FP16ALT: op[i] = {(FLEN/16){acc_qdata[1][15:0]}};
+            fpnew_pkg::FP8,  fpnew_pkg::FP8ALT:  op[i] = {(FLEN/8){acc_qdata[1][7:0]}};
+            default:                             op[i] = acc_qdata[1];
+          endcase
           op_ready[i] = acc_req_valid;
         end
         default: begin
