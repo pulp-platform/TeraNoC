@@ -1,15 +1,3 @@
-diff --git a/hardware/deps/cluster_icache/src/snitch_icache_lookup_serial.sv b/hardware/deps/cluster_icache/src/snitch_icache_lookup_serial.sv
-index 22748c8..3535341 100644
---- a/hardware/deps/cluster_icache/src/snitch_icache_lookup_serial.sv
-+++ b/hardware/deps/cluster_icache/src/snitch_icache_lookup_serial.sv
-@@ -163,7 +163,6 @@ module snitch_icache_lookup_serial
-         .WriteAddr  (tag_addr),
-         .WriteData  (tag_wdata)
-       );
--      assign sram_cfg_out_tag_o = '0;
- 
-     end
-   end else begin : gen_sram
 diff --git a/hardware/deps/cluster_icache/src/snitch_axi_to_cache.sv b/hardware/deps/cluster_icache/src/snitch_axi_to_cache.sv
 index b45cde3..a0ace6e 100644
 --- a/hardware/deps/cluster_icache/src/snitch_axi_to_cache.sv
@@ -25,3 +13,89 @@ index b45cde3..a0ace6e 100644
    );
    logic [8:0] read_len;
    assign idq_inp_req  = alloc_req_i & alloc_gnt_o;
+diff --git a/hardware/deps/cluster_icache/src/snitch_icache.sv b/hardware/deps/cluster_icache/src/snitch_icache.sv
+index 8a039aa..9e82dbf 100644
+--- a/hardware/deps/cluster_icache/src/snitch_icache.sv
++++ b/hardware/deps/cluster_icache/src/snitch_icache.sv
+@@ -469,8 +469,9 @@ module snitch_icache
+ 
+   if (MERGE_FETCHES) begin : gen_merge_fetches
+     for (genvar i = 0; i < NR_FETCH_PORTS; i++) begin : gen_prefetch_req_ready
+-      assign prefetch_req_ready[i] = prefetch_req_ready_tmp[i] |
+-          (prefetch_lookup_req_ready & prefetch_req[i].addr == prefetch_lookup_req.addr);
++      // Ready only when the accepted lookup request carries port i's address.
++      assign prefetch_req_ready[i] = prefetch_lookup_req_ready &
++          (prefetch_req[i].addr == prefetch_lookup_req.addr);
+     end
+ 
+     always_comb begin
+diff --git a/hardware/deps/cluster_icache/src/snitch_icache_lookup_serial.sv b/hardware/deps/cluster_icache/src/snitch_icache_lookup_serial.sv
+index 22748c8..4020730 100644
+--- a/hardware/deps/cluster_icache/src/snitch_icache_lookup_serial.sv
++++ b/hardware/deps/cluster_icache/src/snitch_icache_lookup_serial.sv
+@@ -163,9 +163,9 @@ module snitch_icache_lookup_serial
+         .WriteAddr  (tag_addr),
+         .WriteData  (tag_wdata)
+       );
+-      assign sram_cfg_out_tag_o = '0;
+ 
+     end
++    assign sram_cfg_out_tag_o = '0;
+   end else begin : gen_sram
+     logic [CFG.WAY_COUNT*(CFG.TAG_WIDTH+2)-1:0] tag_rdata_flat;
+     for (genvar i = 0; i < CFG.WAY_COUNT; i++) begin : g_ways_rdata
+@@ -324,23 +324,25 @@ module snitch_icache_lookup_serial
+   // Fall-through buffer the read data: Store the read data if the SRAM bank accepted a request in
+   // the previous cycle and if we actually have to buffer them because the receiver is not ready
+   `FFL(data_rsp_q, proper_rdata, tag_handshake && !data_ready, '0, clk_i, rst_ni)
+-  assign proper_rdata = refill_hit_q && !data_req_q.hit ? refill_wdata_q : data_rdata;
++  // Coincident refill write preempts the data read; serve refill data even on a tag hit.
++  assign proper_rdata = refill_hit_q ? refill_wdata_q : data_rdata;
+   assign out_data_o = tag_handshake ? proper_rdata : data_rsp_q;
+ 
+   // Check immediate refill for possible match
+   assign refill_hit_d = write_valid_i && write_tag_i == required_tag &&
+       write_addr_i == data_req_d.addr[CFG.LINE_ALIGN+:CFG.COUNT_ALIGN];
++  // Bind payload capture to the handshake so a later refill can't overwrite it during a stall.
+   `FFL(refill_hit_q, refill_hit_d, tag_valid && tag_ready, '0, clk_i, rst_ni)
+-  `FFL(refill_wdata_q, write_data_i, refill_hit_d, '0, clk_i, rst_ni)
+-  `FFL(write_way_q, write_way_i, refill_hit_d, '0, clk_i, rst_ni)
+-  `FFL(write_error_q, write_error_i, refill_hit_d, '0, clk_i, rst_ni)
++  `FFL(refill_wdata_q, write_data_i, refill_hit_d && tag_valid && tag_ready, '0, clk_i, rst_ni)
++  `FFL(write_way_q, write_way_i, refill_hit_d && tag_valid && tag_ready, '0, clk_i, rst_ni)
++  `FFL(write_error_q, write_error_i, refill_hit_d && tag_valid && tag_ready, '0, clk_i, rst_ni)
+ 
+   // Generate the remaining output signals.
+   assign out_addr_o  = data_req_q.addr;
+   assign out_id_o    = data_req_q.id;
+-  assign out_way_o   = refill_hit_q && !data_req_q.hit ? write_way_q : data_req_q.cway;
++  assign out_way_o   = refill_hit_q ? write_way_q : data_req_q.cway;
+   assign out_hit_o   = refill_hit_q || data_req_q.hit;
+-  assign out_error_o = refill_hit_q && !data_req_q.hit ? write_error_q : data_req_q.error;
++  assign out_error_o = refill_hit_q ? write_error_q : data_req_q.error;
+   assign out_valid_o = data_valid;
+   assign data_ready  = out_ready_i;
+ 
+diff --git a/hardware/deps/cluster_icache/src/snitch_read_only_cache.sv b/hardware/deps/cluster_icache/src/snitch_read_only_cache.sv
+index 8428719..d035599 100644
+--- a/hardware/deps/cluster_icache/src/snitch_read_only_cache.sv
++++ b/hardware/deps/cluster_icache/src/snitch_read_only_cache.sv
+@@ -60,7 +60,6 @@ module snitch_read_only_cache
+ 
+   `include "axi/typedef.svh"
+   `include "common_cells/registers.svh"
+-  import cf_math_pkg::idx_width;
+ 
+   // Check for supported parameters
+   if (AxiDataWidth < 32) $error("snitch_read_only_cache: AxiDataWidth must be larger than 32.");
+@@ -74,8 +73,9 @@ module snitch_read_only_cache
+   // AXI Demux
+   // --------------------------------------------------
+   localparam int unsigned NoMstPorts = 2;
++  localparam int unsigned NoMstPortsIdxWidth = (NoMstPorts > 1) ? $clog2(NoMstPorts) : 1;
+ 
+-  typedef logic [idx_width(NoMstPorts)-1:0] index_t;
++  typedef logic [NoMstPortsIdxWidth-1:0] index_t;
+   typedef enum index_t {
+     Cache  = 1,
+     Bypass = 0
