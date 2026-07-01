@@ -196,7 +196,7 @@ module mempool_tile
 
   for (genvar c = 0; unsigned'(c) < NumCoresPerTile; c++) begin: gen_cores
     logic [31:0] hart_id;
-    assign hart_id = {unsigned'(tile_id_i), c[idx_width(NumCoresPerTile)-1:0]};
+    assign hart_id = unsigned'(tile_id_i) * NumCoresPerTile + unsigned'(c);
 
     if (!TrafficGeneration) begin: gen_mempool_cc
       // Unified core complex selected by mempool_pkg::RVV; sh_acc ports are
@@ -1002,6 +1002,8 @@ module mempool_tile
         .address_map_i      (mask_map                                                                           )
       );
     end else begin: gen_traffic_generator
+      logic [31:0] core_id;
+      assign core_id = unsigned'(tile_id_i) * NumCoresPerTile + unsigned'(c);
       traffic_generator #(
         .NumRules           (3                                 ),
         .TCDMBaseAddr       (TCDMBaseAddr                      ),
@@ -1009,7 +1011,7 @@ module mempool_tile
       ) i_traffic_gen (
         .clk_i              (clk_i                                                        ),
         .rst_ni             (rst_ni                                                       ),
-        .core_id_i          ({tile_id_i, i[idx_width(NumCoresPerTile)-1:0]}               ),
+        .core_id_i          (core_id                                                      ),
         // Address map
         .address_map_i      (mask_map                                                     ),
         // To TCDM

@@ -213,7 +213,7 @@ package mempool_pkg;
    ***********************/
 
   localparam int unsigned ICacheSizeByte  = 512 * NumCoresPerCache;     // Total Size of instruction cache in bytes
-  localparam int unsigned ICacheWays      = (NumCoresPerCache == 1) ? 1 : ((NumCoresPerCache < 4) ? 2 : (NumCoresPerCache / 2));       // Number of ways
+  localparam int unsigned ICacheWays      = (NumCoresPerCache < 4) ? 2 : (NumCoresPerCache / 2);       // Number of ways (cluster_icache requires >= 2)
   localparam int unsigned ICacheLineWidth = 32 * 2 * NumCoresPerCache;  // Size of each cache line in bits
 
   /*********************
