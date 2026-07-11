@@ -102,7 +102,31 @@ module mempool_group_mshr
   localparam int unsigned SubReqCountW     = idx_width(MshrMergeReqs + 1);
   localparam int unsigned RespBufCountW    = idx_width(RespBufWords + 1);
   localparam int unsigned RespBufPtrW      = idx_width(RespBufWords);
+  // Option A build-time gate: beats of ONE single-core burst drained per cycle (= usable resp
+  // ports). Beat-spread is OPT-IN and defaults OFF: it disables MSHR coalescing for full bursts (a
+  // flagged burst never merges), so leaving it on by default would regress coalescing/multicast
+  // workloads (e.g. matmul shared-B). Enable with group_mshr_drain_beats=2 for single-requester
+  // streaming (~1.27x per-core resp BW). =1 (default) => feature off, all beat_spread logic
+  // constant-folds out (DCE) and the netlist is legacy. Cheap datapath is HARDWIRED for N<=2.
+  localparam int unsigned DrainBeatsPerEntry =
+    `ifdef GROUP_MSHR_DRAIN_BEATS `GROUP_MSHR_DRAIN_BEATS
+    `else 1 `endif;
   localparam int unsigned MergeWordOffset  = (MshrMergeWords <= 1) ? 0 : $clog2(MshrMergeWords);
+  // M6: beat_spread (DrainBeatsPerEntry>1) requires the MSHR to ADMIT full bursts; else a flagged burst
+  // can never win an entry and M5's stall-not-bypass would hang. EnableMshrFullBurstReq defaults to 1.
+  if ((DrainBeatsPerEntry > 1) && !EnableMshrFullBurstReq)
+    $error("[mempool_group_mshr] beat_spread (DrainBeatsPerEntry>1) requires EnableMshrFullBurstReq=1.");
+  // M8 (misconfig guards): the beat-spread datapath is hardwired for N=2 (aux_base carries exactly one
+  // extra ROB base; %/(/) reduce to bit ops), and beat b maps to resp port 1+(b%N), so N must not
+  // exceed the usable resp ports [NumRemoteRespPortsPerTile-1:1]. Without these, an illegal
+  // group_mshr_drain_beats elaborates cleanly, truncates the port index (RespPortIdW), and wedges the
+  // first odd beat in MSHR_DRAIN_RESP forever -- a silent runtime hang instead of a build error.
+  if ((DrainBeatsPerEntry != 1) && (DrainBeatsPerEntry != 2))
+    $error("[mempool_group_mshr] group_mshr_drain_beats must be 1 (off) or 2, got %0d.",
+           DrainBeatsPerEntry);
+  if (DrainBeatsPerEntry > (NumRemoteRespPortsPerTile - 1))
+    $error("[mempool_group_mshr] group_mshr_drain_beats (%0d) exceeds usable resp ports (%0d): needs noc_resp_channel_num>=%0d.",
+           DrainBeatsPerEntry, NumRemoteRespPortsPerTile - 1, DrainBeatsPerEntry);
   localparam int unsigned BurstAlignBits  = (MaxBurstWords > 1) ? $clog2(MaxBurstWords) : 1;
   localparam int unsigned TileIdBits       = idx_width(NumTilesPerGroup);
   localparam int unsigned TcdmAddrNoTileW  = $bits(tcdm_addr_t) - TileIdBits;
@@ -158,6 +182,15 @@ module mempool_group_mshr
     // Burst length for this merged entry (1..MaxBurstWords). All merged requesters
     // in this entry share the same burst_len.
     logic [BurstLenWidth-1:0] burst_len;
+    // Option A (2-wide burst receive): beat_spread=1 marks a single-core burst the VLSU
+    // pre-allocated across N=2 receive ROBs (kept NON-mergeable). The drain then emits beat b on
+    // resp port 1+(b%N) with core_id += (b%N); meta_id stays the legacy base+b -- the VLSU ROB
+    // re-maps it to the dense per-port slot, so the MSHR carries NO per-port base.
+    logic           beat_spread;
+    // Option A aux_base: port-1 receive-ROB base for this beat-spread burst, passed by the VLSU in
+    // wdata.data[5:1]. Drain emits beat b's meta_id = ((b%N)==0 ? meta_id_base : aux_base) + (b/N),
+    // giving each ROB a dense, non-overlapping per-burst id run that survives pipelined bursts.
+    meta_id_t       aux_base;
     // Requester records merged in this entry (one record per requester, not per beat).
     // sub_reqs[0] is reserved for the owner request used as match anchor.
     mempool_group_mshr_sub_req_t [MshrMergeReqs-1:0] sub_reqs;
@@ -234,6 +267,10 @@ module mempool_group_mshr
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_is_non_full_burst;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_is_full_burst;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_can_merge;
+  // Option A: this incoming request is a single-core beat-spread burst (flag in wdata.data[0],
+  // set by the VLSU only when BurstRecvPorts>1). Gated by DrainBeatsPerEntry>1 so it const-folds
+  // to 0 when the feature is off. Makes the request non-mergeable (allocates its own entry).
+  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_beat_spread;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]
              [BurstLenWidth-1:0]                                              req_len;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]
@@ -298,6 +335,16 @@ module mempool_group_mshr
              [BurstLenWidth-1:0]                                               resp_capture_beat_offset;
   logic      [MshrNum-1:0]                                                     resp_head_beat_pending;
   logic      [MshrNum-1:0][RespBufCountW-1:0]                                  resp_cnt_after_pop;
+  // Option A beat-spread drain (transient/combinational, NO new FF). A SEPARATE path from the
+  // legacy multicast scan/drive (which stays byte-identical). For each (tile,port) the pre-pass
+  // records which entry + resp_buf slot it drains, the retagged core_id, and the beat offset;
+  // bs_slot_done[entry][slot] marks delivered slots for the beat-spread finalize to pop.
+  logic        [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]               bs_sel_valid;
+  mshr_id_t    [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]               bs_sel_mshr_id;
+  logic        [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1][RespBufPtrW-1:0]   bs_sel_buf_ptr;
+  logic        [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1][BurstLenWidth-1:0] bs_sel_beat_off;
+  tile_core_id_t[NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]              bs_sel_core_id;
+  logic        [MshrNum-1:0][RespBufWords-1:0]                                    bs_slot_done;
   // Response drain scheduling (single-response per MSHR).
   logic      [MshrNum-1:0]                                                     drain_subreq_found;
   logic      [idx_width(MshrMergeReqs)-1:0]                                    drain_subreq_idx [MshrNum-1:0];
@@ -549,6 +596,7 @@ module mempool_group_mshr
         req_is_non_full_burst[tile_i][port_i] = 1'b0;
         req_is_full_burst[tile_i][port_i] = 1'b0;
         req_can_merge[tile_i][port_i] = 1'b0;
+        req_beat_spread[tile_i][port_i] = 1'b0;
         if (req_in_valid[tile_i][port_i] &&
             (req_in[tile_i][port_i].wdata.amo != '0)) begin
           amo_invalidate = 1'b1;
@@ -597,6 +645,13 @@ module mempool_group_mshr
                 (req_len_raw[tile_i][port_i] == BurstLenWidth'(1))) ||
                (EnableMshrNonFullBurstReq && req_is_non_full_burst[tile_i][port_i]) ||
                (EnableMshrFullBurstReq    && req_is_full_burst[tile_i][port_i]));
+          // Option A: a multi-beat single-core load the VLSU flagged (wdata.data[0]). Gated by the
+          // build-time DrainBeatsPerEntry>1 so it const-folds to 0 when the feature is off.
+          req_beat_spread[tile_i][port_i] =
+              (DrainBeatsPerEntry > 1) &&
+              req_is_load[tile_i][port_i] &&
+              !req_is_single[tile_i][port_i] &&
+              req_in[tile_i][port_i].wdata.data[0];
         end else begin
           req_addr_key[tile_i][port_i] = '0;
         end
@@ -732,6 +787,8 @@ module mempool_group_mshr
           (mshr_d[mshr_i].state != MSHR_DRAIN_RESP) ||
           (mshr_d[mshr_i].resp_buf_cnt == '0) ||
           (mshr_d[mshr_i].sub_reqs_num == '0) ||
+          // Option A: beat-spread entries deliver via bs_slot_done, not beat_pending.
+          mshr_d[mshr_i].beat_spread ||
           // Steady-state DRAIN_RESP is already covered by next-cycle checking.
           (mshr_q_valid[mshr_i] && mshr_q[mshr_i].state == MSHR_DRAIN_RESP) ||
           mshr_resp_inflight[mshr_i] ||
@@ -846,6 +903,11 @@ module mempool_group_mshr
 
           assign req_hit_way[tile_i][port_i][way_i] =
               req_can_merge[tile_i][port_i] &&
+              // Option A: a beat_spread request never merges (it allocates its own entry), and no
+              // request merges into a beat_spread entry -- it must stay single-requester so its
+              // owner keeps both pre-allocated receive ROBs. Both terms are 0 when the feature off.
+              !req_beat_spread[tile_i][port_i] &&
+              !mshr_q[e_abs].beat_spread &&
               req_addr_hit_way[tile_i][port_i][way_i] &&
               (mshr_q[e_abs].burst_len == req_len[tile_i][port_i]) &&
               (((mshr_q[e_abs].state == MSHR_WAIT_RESP) &&
@@ -869,6 +931,12 @@ module mempool_group_mshr
               req_addr_hit_way[tile_i][port_i][mshr_i % MshrWaysPerBank];
           assign req_meta_ovlp_map[tile_i][port_i][mshr_i] =
               req_can_merge[tile_i][port_i] &&
+              // M4: a beat_spread burst occupies two disjoint width-8 ROB ranges, but advertises one
+              // contiguous 16-wide NoC range whose base advances only 8/burst -> consecutive bursts
+              // falsely overlap and SERIALIZE. Safe to skip: responses route by mshr_tag, re-validated
+              // per entry, so overlapping meta ranges are never ambiguous.
+              !req_beat_spread[tile_i][port_i] &&
+              !mshr_q[mshr_i].beat_spread &&
               mshr_q_valid[mshr_i] &&
               ((mshr_q[mshr_i].state == MSHR_WAIT_RESP) ||
                (mshr_q[mshr_i].state == MSHR_DRAIN_RESP)) &&
@@ -1330,6 +1398,15 @@ module mempool_group_mshr
               // bypass. This is the stall-and-merge half of the per-bank single-alloc scheme.
               req_in_ready[tile_i][port_i]  = 1'b0;
               req_out_valid[tile_i][port_i] = 1'b0;
+            end else if (req_beat_spread[tile_i][port_i] && !req_alloc_found[tile_i][port_i]) begin
+              // M5: a beat_spread burst MUST allocate an MSHR entry -- its response needs the
+              // beat-spread drain's per-beat core_id/meta_id retag. A bypass returns ALL beats to ROB0
+              // (the VLSU split the pre-alloc across N ROBs) -> ROB>0 head never valid -> deadlock. So
+              // when it can't allocate (bank full) STALL until a way frees instead of bypassing.
+              // Deadlock-free: resident entries drain via the response path (independent of this
+              // stalled request) and free their banks. (req_beat_spread==0 => inert.)
+              req_in_ready[tile_i][port_i]  = 1'b0;
+              req_out_valid[tile_i][port_i] = 1'b0;
             end else begin
               // ALLOCATE (won the per-bank slot) or BYPASS (non-mergeable store/AMO, or a mergeable
               // miss whose bank is full): forward this request to the NoC.
@@ -1352,6 +1429,10 @@ module mempool_group_mshr
                     req_in[tile_i][port_i].tgt_group_id;
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].burst_len =
                     req_len[tile_i][port_i];
+                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].beat_spread =
+                    req_beat_spread[tile_i][port_i];
+                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].aux_base =
+                    meta_id_t'(req_in[tile_i][port_i].wdata.data[$bits(meta_id_t):1]);
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].state      = MSHR_WAIT_RESP;
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].resp_valid = 1'b0;
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].beats_left =
@@ -1549,6 +1630,7 @@ module mempool_group_mshr
           (mshr_d[mshr_i].state == MSHR_DRAIN_RESP) &&
           (mshr_d[mshr_i].resp_buf_cnt != '0) &&
           (mshr_d[mshr_i].beat_pending == '0) &&
+          !mshr_d[mshr_i].beat_spread &&
           (mshr_d[mshr_i].sub_reqs_num != '0)) begin
         for (int s = 0; s < MshrMergeReqs; s++) begin
           mshr_d[mshr_i].beat_pending[s] = mshr_d[mshr_i].sub_reqs[s].valid;
@@ -1575,12 +1657,53 @@ module mempool_group_mshr
           resp_sel_valid[tile_i][port_i] = 1'b0;
           resp_sel_mshr_id[tile_i][port_i] = '0;
           resp_sel_subreq_idx[tile_i][port_i] = '0;
+          bs_sel_valid[tile_i][port_i] = 1'b0;
+          bs_sel_mshr_id[tile_i][port_i] = '0;
+          bs_sel_buf_ptr[tile_i][port_i] = '0;
+          bs_sel_beat_off[tile_i][port_i] = '0;
+          bs_sel_core_id[tile_i][port_i] = '0;
         end
       end
       for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
         drain_count[mshr_i] = '0;
         for (int s = 0; s < MshrMergeReqs; s++) begin
           subreq_claimed[mshr_i][s] = 1'b0;
+        end
+        for (int k = 0; k < RespBufWords; k++) begin
+          bs_slot_done[mshr_i][k] = 1'b0;
+        end
+      end
+
+      // Option A beat-spread pre-pass (runs BEFORE the legacy scan): for each single-core burst,
+      // drain its up-to-N head beats this cycle onto resp ports 1+(b%N), retagging core_id by (b%N)
+      // so the tile xbar routes beat b to VLSU ROB (b%N). meta_id is retagged in the drive stage to
+      // the ABSOLUTE per-port ROB slot (base/aux_base + b/N). In-order from rd_ptr; stop on a
+      // taken/used port. Claimed ports are marked port_taken so the legacy scan skips them.
+      for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
+        automatic int bs_base = EnableRrFairness ? int'(drain_mshr_rr_q) : 0;
+        for (int kk = 0; kk < MshrNum; kk++) begin
+          automatic int mshr_i = (bs_base + kk) % MshrNum;
+          if ((DrainBeatsPerEntry > 1) && mshr_d_valid[mshr_i] && mshr_d[mshr_i].beat_spread &&
+              (mshr_d[mshr_i].state == MSHR_DRAIN_RESP) && (mshr_d[mshr_i].resp_buf_cnt != '0) &&
+              (mshr_d[mshr_i].sub_reqs[0].tile_id == tile_group_id_t'(tile_i))) begin
+            for (int k = 0; k < RespBufWords; k++) begin
+              automatic logic [RespBufPtrW-1:0]   r    =
+                  RespBufPtrW'((int'(mshr_d[mshr_i].resp_buf_rd_ptr) + k) % RespBufWords);
+              automatic logic [BurstLenWidth-1:0] boff = '0;
+              automatic logic [RespPortIdW-1:0]   p    = '0;
+              if (!mshr_d[mshr_i].resp_buf_valid[r]) break;        // no more buffered beats
+              boff = mshr_d[mshr_i].resp_buf[r].rdata.meta_id - mshr_d[mshr_i].sub_reqs[0].meta_id_base;
+              p    = RespPortIdW'((boff % BurstLenWidth'(DrainBeatsPerEntry)) + BurstLenWidth'(1));
+              if (port_taken[tile_i][p] || bs_sel_valid[tile_i][p]) break;       // in-order stop
+              bs_sel_valid[tile_i][p]    = 1'b1;
+              bs_sel_mshr_id[tile_i][p]  = mshr_id_t'(mshr_i);
+              bs_sel_buf_ptr[tile_i][p]  = r;
+              bs_sel_beat_off[tile_i][p] = boff;
+              bs_sel_core_id[tile_i][p]  = mshr_d[mshr_i].sub_reqs[0].core_id +
+                  tile_core_id_t'(boff % BurstLenWidth'(DrainBeatsPerEntry));
+              port_taken[tile_i][p]      = 1'b1;
+            end
+          end
         end
       end
 
@@ -1598,6 +1721,7 @@ module mempool_group_mshr
             for (int kk = 0; kk < MshrNum; kk++) begin
               automatic int mshr_i = (drain_base + kk) % MshrNum;
               if (mshr_d_valid[mshr_i] && mshr_d[mshr_i].resp_valid &&
+                  !mshr_d[mshr_i].beat_spread &&
                   mshr_d[mshr_i].state == MSHR_DRAIN_RESP) begin
                 automatic int subreq_base = EnableRrFairness ? int'(subreq_rr_q) : 0;
                 for (int ks = 0; ks < MshrMergeReqs; ks++) begin
@@ -1664,6 +1788,56 @@ module mempool_group_mshr
               end
               drain_count[resp_sel_mshr_id[tile_i][port_i]] =
                   drain_count[resp_sel_mshr_id[tile_i][port_i]] + 1'b1;
+            end
+          end
+        end
+      end
+
+      // Option A beat-spread drive: emit each claimed beat with the retagged core_id and the
+      // ABSOLUTE per-port ROB slot as meta_id (see the aux_base comment below). Separate from the
+      // legacy drive above; ports are disjoint (the pre-pass marked them port_taken).
+      // ATOMIC FIRE: an entry's selected beats this cycle either ALL handshake (and pop together in
+      // the finalize) or NONE assert valid. Without this, divergent per-port ready delivers a later
+      // beat while an earlier one stalls; the contiguous-prefix pop then cannot retire it, and the
+      // (stateless) pre-pass re-selects and RE-DELIVERS it next cycle -> duplicate response -> VLSU
+      // double ROB push / mem_pending underflow. valid-gated-on-partner-ready is deadlock- and
+      // livelock-free: the output spill registers' ready is state-only (fill level) and can only
+      // rise while we withhold valid, so both partners are eventually ready simultaneously.
+      for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
+        for (int port_i = 1; port_i < NumRemoteRespPortsPerTile; port_i++) begin
+          if (bs_sel_valid[tile_i][port_i]) begin
+            automatic mshr_id_t bsel = bs_sel_mshr_id[tile_i][port_i];
+            // All ports this entry selected this cycle (including this one) must be ready.
+            automatic logic bs_fire = 1'b1;
+            for (int q = 1; q < NumRemoteRespPortsPerTile; q++) begin
+              if (bs_sel_valid[tile_i][q] && (bs_sel_mshr_id[tile_i][q] == bsel) &&
+                  !resp_out_ready[tile_i][q]) begin
+                bs_fire = 1'b0;
+              end
+            end
+            if (bs_fire) begin
+              resp_out_valid[tile_i][port_i] = 1'b1;
+              resp_out[tile_i][port_i].wen =
+                  mshr_d[bsel].resp_buf[bs_sel_buf_ptr[tile_i][port_i]].wen;
+              resp_out[tile_i][port_i].rdata.data =
+                  mshr_d[bsel].resp_buf[bs_sel_buf_ptr[tile_i][port_i]].rdata.data;
+              resp_out[tile_i][port_i].rdata.core_id = bs_sel_core_id[tile_i][port_i];
+              // aux_base: emit the ABSOLUTE per-port ROB slot (not legacy base+b). boff = beat index
+              // b; (boff % N)==0 selects ROB0 base, else aux_base (ROB1); (boff / N) is the dense
+              // slot. N=DrainBeatsPerEntry (=2 power-of-two -> %=boff[0], /=boff>>1, cheap). VLSU
+              // writes rob_wid=rsp.id directly (no re-map), robust to pipelined bursts.
+              resp_out[tile_i][port_i].rdata.meta_id =
+                  (((bs_sel_beat_off[tile_i][port_i] % BurstLenWidth'(DrainBeatsPerEntry)) == '0)
+                       ? mshr_d[bsel].sub_reqs[0].meta_id_base
+                       : mshr_d[bsel].aux_base)
+                  + meta_id_t'(bs_sel_beat_off[tile_i][port_i] / BurstLenWidth'(DrainBeatsPerEntry));
+              resp_out[tile_i][port_i].rdata.amo = mshr_d[bsel].sub_reqs[0].amo;
+              resp_from_mshr[tile_i][port_i] = 1'b1;
+              resp_mshr_id_dbg[tile_i][port_i] = bsel;
+              // bs_fire implies this port's own ready (the partner loop includes q==port_i), so the
+              // handshake completes THIS cycle: mark delivered unconditionally.
+              bs_slot_done[bsel][bs_sel_buf_ptr[tile_i][port_i]] = 1'b1;
+              drain_count[bsel] = drain_count[bsel] + 1'b1;
             end
           end
         end
@@ -1742,11 +1916,44 @@ module mempool_group_mshr
       end
     end
 
+    // Option A beat-spread finalize: pop the contiguous run of delivered slots from rd_ptr (up to N
+    // beats/cyc). In-order: stop at the first not-yet-delivered slot (the rest pop next cycle).
+    for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
+      if ((DrainBeatsPerEntry > 1) && mshr_d_valid[mshr_i] && mshr_d[mshr_i].beat_spread &&
+          (mshr_d[mshr_i].state == MSHR_DRAIN_RESP) && (mshr_d[mshr_i].resp_buf_cnt != '0)) begin
+        automatic int popped = 0;
+        for (int k = 0; k < RespBufWords; k++) begin
+          automatic logic [RespBufPtrW-1:0] r =
+              RespBufPtrW'((int'(mshr_d[mshr_i].resp_buf_rd_ptr) + k) % RespBufWords);
+          if (!bs_slot_done[mshr_i][r]) break;                  // in-order: stop at first gap
+          mshr_d[mshr_i].beat_done[ mshr_d[mshr_i].resp_buf[r].rdata.meta_id
+                                  - mshr_d[mshr_i].sub_reqs[0].meta_id_base ] = 1'b1;
+          mshr_d[mshr_i].resp_buf_valid[r] = 1'b0;
+          popped++;
+        end
+        if (popped != 0) begin
+          mshr_d[mshr_i].resp_buf_rd_ptr =
+              RespBufPtrW'((int'(mshr_d[mshr_i].resp_buf_rd_ptr) + popped) % RespBufWords);
+          mshr_d[mshr_i].resp_buf_cnt = mshr_d[mshr_i].resp_buf_cnt - RespBufCountW'(popped);
+          if (mshr_d[mshr_i].beats_left <= BurstLenWidth'(popped)) begin
+            mshr_d_valid[mshr_i] = 1'b0;
+            mshr_d[mshr_i] = '0;                                // burst fully drained -> dealloc
+          end else begin
+            mshr_d[mshr_i].beats_left = mshr_d[mshr_i].beats_left - BurstLenWidth'(popped);
+            mshr_d[mshr_i].resp_valid = (mshr_d[mshr_i].resp_buf_cnt != '0);
+            mshr_d[mshr_i].state =
+                (mshr_d[mshr_i].resp_buf_cnt != '0) ? MSHR_DRAIN_RESP : MSHR_WAIT_RESP;
+          end
+        end
+      end
+    end
+
     // Finalize response draining per beat.
     for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
       resp_head_beat_pending[mshr_i] = 1'b0;
       resp_cnt_after_pop[mshr_i] = mshr_d[mshr_i].resp_buf_cnt;
       if (mshr_d_valid[mshr_i] && (mshr_d[mshr_i].resp_buf_cnt != '0) &&
+          !mshr_d[mshr_i].beat_spread &&
           (mshr_d[mshr_i].state == MSHR_DRAIN_RESP)) begin
         resp_head_beat_pending[mshr_i] = |mshr_d[mshr_i].beat_pending;
         if (!resp_head_beat_pending[mshr_i]) begin

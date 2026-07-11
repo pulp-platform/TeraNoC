@@ -171,11 +171,21 @@ group_mshr_enable_single ?= 0
 group_mshr_enable_stats  ?= 0
 group_mshr_stats_period  ?= 0
 group_merge_profiling    ?= 0
+# Per-entry MSHR response-drain width (beat-spread 2-wide burst receive). Empty/unset = 1 = OFF
+# (legacy single-beat drain; all beat-spread logic const-folds out). Set =2 to OPT IN (~1.27x
+# single-requester burst-load resp BW; disables MSHR coalescing for flagged bursts, so keep off for
+# coalescing workloads like matmul shared-B). Needs noc_resp_channel_num>=2; only 1 or 2 is legal
+# (elaboration $error otherwise). Single source of truth: also drives the tile->VLSU NumRespPorts
+# (mempool_tile MshrDrainBeats).
+group_mshr_drain_beats   ?=
 vlog_defs += -DGROUP_MSHR_NUM=$(group_mshr_num)
 vlog_defs += -DGROUP_MSHR_MERGE_REQS=$(group_mshr_merge_reqs)
 vlog_defs += -DGROUP_MSHR_ENABLE_SINGLE=$(group_mshr_enable_single)
 vlog_defs += -DGROUP_MSHR_ENABLE_STATS=$(group_mshr_enable_stats)
 vlog_defs += -DGROUP_MSHR_STATS_PERIOD=$(group_mshr_stats_period)
+ifneq ($(strip $(group_mshr_drain_beats)),)
+  vlog_defs += -DGROUP_MSHR_DRAIN_BEATS=$(group_mshr_drain_beats)
+endif
 ifeq ($(group_merge_profiling), 1)
   vlog_defs += -DGROUP_MERGE_PROFILING
 endif
