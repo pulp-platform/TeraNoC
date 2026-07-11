@@ -69,6 +69,13 @@ module mempool_tile
   import snitch_pkg::dresp_t;
 
   localparam int unsigned RemoteBurstIssueWidth    = NumRemoteRespPortsPerTile;
+  // Usable remote resp ports the burst RECEIVE spreads across (== the MSHR per-entry drain
+  // width). Single source of truth with the MSHR DrainBeatsPerEntry via GROUP_MSHR_DRAIN_BEATS.
+  // Beat-spread is OPT-IN: unset (default) => 1 = legacy single-port (feature off, A/B clamp);
+  // group_mshr_drain_beats=2 => 2-wide receive (opt-in, single-requester streaming ~1.27x).
+  localparam int unsigned MshrDrainBeats =
+    `ifdef GROUP_MSHR_DRAIN_BEATS `GROUP_MSHR_DRAIN_BEATS
+    `else 1 `endif;
   localparam int unsigned NumRemoteReqPortsExpanded =
       NumRemoteReqPortsPerTile * RemoteBurstIssueWidth;
   localparam int unsigned LocalInputs = NumCoresPerTile * NumDataPortsPerCore;
@@ -237,7 +244,8 @@ module mempool_tile
         .XF8                  ( XF8                 ),
         .XDivSqrt             ( XDivSqrt            ),
         .NumMemPortsPerSpatz  ( NumMemPortsPerSpatz ),
-        .TCDMPorts            ( NumDataPortsPerCore )
+        .TCDMPorts            ( NumDataPortsPerCore ),
+        .NumRespPorts         ( MshrDrainBeats      )
     `endif
       ) riscv_core (
         .clk_i         (clk_i                                                    ),
