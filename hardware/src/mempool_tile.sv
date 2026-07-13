@@ -69,13 +69,22 @@ module mempool_tile
   import snitch_pkg::dresp_t;
 
   localparam int unsigned RemoteBurstIssueWidth    = NumRemoteRespPortsPerTile;
-  // Usable remote resp ports the burst RECEIVE spreads across (== the MSHR per-entry drain
-  // width). Single source of truth with the MSHR DrainBeatsPerEntry via GROUP_MSHR_DRAIN_BEATS.
-  // Beat-spread is OPT-IN: unset (default) => 1 = legacy single-port (feature off, A/B clamp);
-  // group_mshr_drain_beats=2 => 2-wide receive (opt-in, single-requester streaming ~1.27x).
+  // Usable remote resp ports the burst RECEIVE uses (== the MSHR ParityDrain width). Single
+  // source of truth with the MSHR DrainBeatsPerEntry via GROUP_MSHR_DRAIN_BEATS. ParityDrain is
+  // OPT-IN: unset (default) => 1 = legacy single-beat receive (bit-identical netlist);
+  // group_mshr_drain_beats=2 => uniform 2-wide receive (beat b on resp port 1+(b&1) with
+  // core_id+(b&1); fully mergeable, coalescing untouched). Drives the core-complex NumRespPorts.
   localparam int unsigned MshrDrainBeats =
     `ifdef GROUP_MSHR_DRAIN_BEATS `GROUP_MSHR_DRAIN_BEATS
     `else 1 `endif;
+  // ParityDrain misconfig guards: the core_id+(b&1) retag assumes ONE core per tile whose data
+  // port 1 is the burst-issuing VLSU port 0 (flat +1 lands on VLSU port 1); it also needs a
+  // second core data port to retag into.
+  if ((MshrDrainBeats > 1) && (NumCoresPerTile != 1))
+    $error("[mempool_tile] group_mshr_drain_beats=2 requires NumCoresPerTile==1 (flat core_id retag).");
+  if ((MshrDrainBeats > 1) && (NumDataPortsPerCore < 3))
+    $error("[mempool_tile] group_mshr_drain_beats=2 needs core data ports {1,2} (got %0d ports).",
+           NumDataPortsPerCore);
   localparam int unsigned NumRemoteReqPortsExpanded =
       NumRemoteReqPortsPerTile * RemoteBurstIssueWidth;
   localparam int unsigned LocalInputs = NumCoresPerTile * NumDataPortsPerCore;
