@@ -60,6 +60,14 @@ module tb_core_mem_scoreboard (
   // Sizing
   // ---------------------------------------------------------------------------
   localparam int unsigned CMS_MaxId         = (1 << MetaIdWidth);
+  // ParityDrain awareness: with GROUP_MSHR_DRAIN_BEATS=2 the MSHR delivers beat b of a burst
+  // requested on core data port P to port P+(b&1) (same meta_id). The VIP then (a) does not
+  // orphan-warn a beat that belongs to the next-lower port's table and (b) consumes its own
+  // entries when their odd beats arrive one port up. Local/bypassed bursts still deliver every
+  // beat on P and match as before.
+  localparam int unsigned CmsDrainBeats =
+    `ifdef GROUP_MSHR_DRAIN_BEATS `GROUP_MSHR_DRAIN_BEATS `else 1 `endif;
+  localparam bit CmsPd2 = (CmsDrainBeats > 1);
   localparam int unsigned CMS_NumLatBuckets = 6;  // <=16,<=64,<=256,<=1024,<=4096,>
   localparam int unsigned CmsCntW           = 32;  // event/counter width
   localparam int unsigned CmsCycW           = 64;  // cycle/latency width
@@ -170,6 +178,19 @@ module tb_core_mem_scoreboard (
                                       .gen_rtl_group.i_group.i_mempool_group
                                       .gen_tiles[T].i_tile.snitch_data_pid[C][P];
 
+            // Neighbor-port response taps (ParityDrain odd-beat consumption; index clamped so
+            // the XMR is always legal, logic gated on CmsPd2 && P < NumDataPortsPerCore-1).
+            localparam int unsigned P2 = (P < NumDataPortsPerCore-1) ? P+1 : P;
+            wire        p2_vld  = mempool_tb.dut.i_mempool_cluster.gen_groups_x[G/NumY].gen_groups_y[G%NumY]
+                                      .gen_rtl_group.i_group.i_mempool_group
+                                      .gen_tiles[T].i_tile.snitch_data_pvalid[C][P2];
+            wire        p2_rdy  = mempool_tb.dut.i_mempool_cluster.gen_groups_x[G/NumY].gen_groups_y[G%NumY]
+                                      .gen_rtl_group.i_group.i_mempool_group
+                                      .gen_tiles[T].i_tile.snitch_data_pready[C][P2];
+            wire [MetaIdWidth-1:0] p2_id = mempool_tb.dut.i_mempool_cluster.gen_groups_x[G/NumY].gen_groups_y[G%NumY]
+                                      .gen_rtl_group.i_group.i_mempool_group
+                                      .gen_tiles[T].i_tile.snitch_data_pid[C][P2];
+
             // Per-port live status (waveform-friendly, derived from cms_tbl)
             logic [CmsCntW-1:0] cms_inflight_now;
             logic [CmsCycW-1:0] cms_oldest_age;
@@ -206,12 +227,16 @@ module tb_core_mem_scoreboard (
                 automatic logic q_hs      = q_vld && q_rdy;
                 automatic logic p_hs      = p_vld && p_rdy;
                 automatic logic resp_full = 1'b0;
+                automatic logic resp2_full = 1'b0;  // ParityDrain neighbor-consumption this cycle
                 automatic int   infl_delta = 0;  // signed: +alloc / -full-dealloc
 
                 // ---------------- Response ----------------
                 if (p_hs) begin
                   cms_n_resp_beats[G][T][C][P] <= cms_n_resp_beats[G][T][C][P] + 1'b1;
-                  if (!cms_tbl[G][T][C][P][p_id].valid && !(q_hs && q_id == p_id)) begin
+                  if (!cms_tbl[G][T][C][P][p_id].valid && !(q_hs && q_id == p_id) &&
+                      // ParityDrain: a beat that belongs to the next-lower port's burst table
+                      // is consumed by that port's own monitor -- not an orphan here.
+                      !(CmsPd2 && (P > 0) && cms_tbl[G][T][C][P-1][p_id].valid)) begin
                     cms_n_orphan[G][T][C][P] <= cms_n_orphan[G][T][C][P] + 1'b1;
                     $display("[CMS WARN] cyc=%0d g=%0d t=%0d c=%0d p=%0d hart=0x%0h ORPHAN_RESP id=%0d",
                              cms_cycle, G, T, C, P, cms_hart_id(G,T,C), p_id);
@@ -233,6 +258,25 @@ module tb_core_mem_scoreboard (
                 end
                 if (resp_full) infl_delta = infl_delta - 1;
 
+                // ---------------- ParityDrain odd-beat consumption ----------------
+                // A beat of THIS port's burst delivered one port up (same meta_id, port P+1)
+                // retires the entry here. Guarded against stealing P+1's own native beat.
+                if (CmsPd2 && (P < NumDataPortsPerCore-1)) begin
+                  if (p2_vld && p2_rdy &&
+                      cms_tbl[G][T][C][P][p2_id].valid &&
+                      !cms_tbl[G][T][C][P2][p2_id].valid) begin
+                    automatic logic [CmsCycW-1:0] lat2 = cms_cycle - cms_tbl[G][T][C][P][p2_id].cycle_issued;
+                    cms_tbl[G][T][C][P][p2_id].valid <= 1'b0;
+                    cms_n_resp_done[G][T][C][P] <= cms_n_resp_done[G][T][C][P] + 1'b1;
+                    cms_lat_sum[G][T][C][P]     <= cms_lat_sum[G][T][C][P] + lat2;
+                    if (lat2 > cms_lat_max[G][T][C][P]) cms_lat_max[G][T][C][P] <= lat2;
+                    cms_lat_hist[G][T][C][P][cms_lat_bucket(lat2)]
+                        <= cms_lat_hist[G][T][C][P][cms_lat_bucket(lat2)] + 1'b1;
+                    infl_delta = infl_delta - 1;
+                    resp2_full = 1'b1;
+                  end
+                end
+
                 // ---------------- Request -----------------
                 // A burst request (qburst_len = N) is expanded by the tile/MSHR
                 // into N word responses with pids q_id, q_id+1, ..., q_id+N-1
@@ -247,7 +291,8 @@ module tb_core_mem_scoreboard (
                       // Dup detection: suppress if the same beat-id is being
                       // fully responded to in this very cycle (resp_full + match)
                       if (cms_tbl[G][T][C][P][beat_id].valid
-                          && !(p_hs && p_id == beat_id && resp_full)) begin
+                          && !(p_hs && p_id == beat_id && resp_full)
+                          && !(resp2_full && beat_id == p2_id)) begin
                         cms_n_dup_alloc[G][T][C][P] <= cms_n_dup_alloc[G][T][C][P] + 1'b1;
                         $display("[CMS WARN] cyc=%0d g=%0d t=%0d c=%0d p=%0d hart=0x%0h DUP_ALLOC id=%0d (burst_base=%0d beat=%0d) prev_cyc=%0d prev_addr=0x%08x new_addr=0x%08x",
                                  cms_cycle, G, T, C, P, cms_hart_id(G,T,C),
