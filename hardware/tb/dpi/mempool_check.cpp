@@ -55,6 +55,19 @@ static float fp8_to_float(uint8_t value) {
   return sign * std::ldexp((float)(0x4 | mant), exp - 17);
 }
 
+static bool check_fp_error(float result, float expected,
+                           float tolerance) {
+  if (std::isnan(result) || std::isnan(expected) || std::isnan(tolerance)) {
+    return true;
+  }
+  if (std::isinf(result) || std::isinf(expected)) {
+    return result != expected;
+  }
+
+  float diff = result - expected;
+  return (diff > tolerance) || (diff < -tolerance);
+}
+
 static int compare_i8(const uint8_t *result, const uint8_t *golden, int count,
                       int tolerance, bool verbose) {
   int errors = 0;
@@ -114,8 +127,9 @@ static int compare_f8(const uint8_t *result, const uint8_t *golden, int count,
   int errors = 0;
   float tol = fp8_to_float(tolerance);
   for (int i = 0; i < count; i++) {
-    float diff = fp8_to_float(result[i]) - fp8_to_float(golden[i]);
-    bool error = (diff > tol) || (diff < -tol);
+    float res = fp8_to_float(result[i]);
+    float exp = fp8_to_float(golden[i]);
+    bool error = check_fp_error(res, exp, tol);
     if (error) {
       errors++;
     }
@@ -132,8 +146,9 @@ static int compare_f16(const uint8_t *result, const uint8_t *golden, int count,
   for (int i = 0; i < count; i++) {
     uint16_t exp_bits = load_u16(&golden[2 * i]);
     uint16_t res_bits = load_u16(&result[2 * i]);
-    float diff = fp16_to_float(res_bits) - fp16_to_float(exp_bits);
-    bool error = (diff > tolerance) || (diff < -tolerance);
+    float res = fp16_to_float(res_bits);
+    float exp = fp16_to_float(exp_bits);
+    bool error = check_fp_error(res, exp, tolerance);
     if (error) {
       errors++;
     }
@@ -150,8 +165,9 @@ static int compare_f32(const uint8_t *result, const uint8_t *golden, int count,
   for (int i = 0; i < count; i++) {
     uint32_t exp_bits = load_u32(&golden[4 * i]);
     uint32_t res_bits = load_u32(&result[4 * i]);
-    float diff = bits_to_f32(res_bits) - bits_to_f32(exp_bits);
-    bool error = (diff > tolerance) || (diff < -tolerance);
+    float res = bits_to_f32(res_bits);
+    float exp = bits_to_f32(exp_bits);
+    bool error = check_fp_error(res, exp, tolerance);
     if (error) {
       errors++;
     }
