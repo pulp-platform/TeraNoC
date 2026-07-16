@@ -1448,35 +1448,20 @@ module mempool_tile
       assign soc_mux_pready[c]  = soc_data_pready[c];
     end : gen_redmule_soc_bypass
 
-    // Bridge snitch dreq/dresp <-> hwpe_ctrl_intf_periph, one pipeline cycle.
-    always_ff @(posedge clk_i or negedge rst_ni) begin : redmule_cfg_reg
-      if (!rst_ni) begin
-        redmule_rmcfg.req   <= 1'b0;
-        redmule_rmcfg.add   <= '0;
-        redmule_rmcfg.wen   <= 1'b1;
-        redmule_rmcfg.be    <= '0;
-        redmule_rmcfg.data  <= '0;
-        redmule_rmcfg.id    <= '0;
-        snitch_rmcfg_qready <= 1'b0;
-        snitch_rmcfg_p.data <= '0;
-        snitch_rmcfg_pvalid <= 1'b0;
-      end else begin
-        redmule_rmcfg.req   <= snitch_rmcfg_qvalid;
-        redmule_rmcfg.add   <= snitch_rmcfg_q.addr;
-        redmule_rmcfg.wen   <= ~snitch_rmcfg_q.write;
-        redmule_rmcfg.be    <= snitch_rmcfg_q.strb;
-        redmule_rmcfg.data  <= snitch_rmcfg_q.data;
-        redmule_rmcfg.id    <= snitch_rmcfg_q.id;
-        snitch_rmcfg_qready <= redmule_rmcfg.gnt;
-        snitch_rmcfg_p.data <= redmule_rmcfg.r_data;
-        snitch_rmcfg_pvalid <= redmule_rmcfg.r_valid;
-      end
-    end : redmule_cfg_reg
-    // .write must mirror the request's write class (r/w resp FIFOs + snitch_lsu
-    // depend on it); registered redmule_rmcfg.wen holds it, so ~wen is the class.
-    assign snitch_rmcfg_p.error = 1'b0;
-    assign snitch_rmcfg_p.id    = snitch_rmcfg_q.id;
-    assign snitch_rmcfg_p.write = ~redmule_rmcfg.wen;
+    snitch_hwpe_cfg_adapter #(
+      .req_t  (snitch_pkg::dreq_t ),
+      .resp_t (snitch_pkg::dresp_t)
+    ) i_redmule_cfg_adapter (
+      .clk_i,
+      .rst_ni,
+      .req_i        (snitch_rmcfg_q     ),
+      .req_valid_i  (snitch_rmcfg_qvalid),
+      .req_ready_o  (snitch_rmcfg_qready),
+      .resp_o       (snitch_rmcfg_p     ),
+      .resp_valid_o (snitch_rmcfg_pvalid),
+      .resp_ready_i (snitch_rmcfg_pready),
+      .periph       (redmule_rmcfg      )
+    );
 
   end else begin: gen_redmule_tieoff
 

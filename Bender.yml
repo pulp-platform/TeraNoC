@@ -34,6 +34,7 @@ sources:
   - hardware/src/axi_hier_interco.sv
   - hardware/src/mempool_cc.sv
   - hardware/src/snitch_addr_demux.sv
+  - hardware/src/snitch_hwpe_cfg_adapter.sv
   - hardware/src/tcdm_adapter.sv
   - hardware/src/tcdm_shim.sv
   - hardware/src/mempool_addr_scrambler.sv
