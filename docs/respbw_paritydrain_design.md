@@ -110,6 +110,45 @@ The legacy `DrainMultiPort` else-branch is kept **verbatim** for `DrainBeatsPerE
 generalized per-slot drain elaborates only at N=2. This is what makes the "OFF = bit-identical legacy
 netlist" A/B property real rather than aspirational.
 
+### 4.6 Bypass-retag table (added 2026-07-16): 2-wide delivery for MSHR-bypassed bursts
+An MSHR-bypassed multi-beat load (bank full at allocation: forwarded with `mshr_tag=0`, no entry)
+is served by the slave under the legacy contract — every beat echoes the **original** `core_id`, so
+although the beats already *arrive* spread over both tile resp ports (slave-side RR channel hash),
+they collapse to one core data port at the tile xbar and drain 1 beat/cycle. Measured on matmul:
+**28% of burst requests** took this path (bank pressure spikes from barrier-synchronized launches
+colliding in the 16×4-way banks — CACHED ways are already reclaimable, `:987-1006`, so this is
+genuine in-flight pressure, not cache squatting).
+
+**Mechanism.** A per-tile **2-entry side table** `{meta_base, len, beats_left}`:
+- *Allocate* on a bypass request handshake (multi-beat load out with `!req_alloc_found`).
+- *Match* a tag-0 read response from the burst core port (`core_id==1`) whose `meta_id` falls in a
+  tracked range (mod-2^5 wrap-safe range compare; the ≤2 ranges are disjoint by construction).
+- *Retag* the passthrough response: `core_id += (meta − base) & 1` — port choice untouched (the
+  M4 non-backpressurable bypass contract is preserved; only the xbar destination changes).
+- *Retire* per forwarded-response handshake (both ports may retire two beats in one cycle); free
+  the way at zero.
+
+**Why depth 2 suffices (asserted):** the VLSU holds one memory instruction in flight until full
+retire, and one instruction issues at most two bursts with disjoint ROB0 id ranges — a third
+outstanding tracked burst per tile is impossible. If the invariant ever broke, an untracked burst
+degrades gracefully to 1-wide (correct, just slow); simulation asserts fatally.
+
+**Receive side: zero change.** The `burst_odd_expected` classifier accepts an expected-odd id on
+mem port 1 regardless of which service class delivered it — the single-contract property again.
+
+**Cost:** 16 tiles × 2 entries × 16 bits ≈ 512 FF per group plus two 5-bit subtract/compare pairs
+per resp port. No new wires, no protocol change, const-folds out at `DrainBeatsPerEntry=1`.
+
+**Verification (2026-07-16):** `sp-mshr-burst-test` PASS, zero CMS warnings, overflow assertion
+silent; matmul **3940 vs 4009 cycles (−1.75%; 1.13× cumulative vs legacy)** — the modest kernel
+delta matches the occupancy analysis (bypassed drain was largely compute-overlapped; the fix's
+full value appears on drain-bound workloads and compounds with 2-in-flight issue).
+
+**Scope:** restores *bandwidth* for bypasses, not *coalescing* — a bypassed burst still has no
+entry (no merge/multicast/cache); traffic dedup for repeat lines is Option D's burst-line cache.
+After this fix all three remote service classes (MSHR-drained, bypass, and — once D lands —
+cache-hit) deliver 2 beats/cycle; the group-local path remains the only deliberate 1-wide floor.
+
 ## 5. VLSU side: TwinROB0
 
 ### 5.1 reorder_buffer.sv (our fork) — two parameter-gated extensions, defaults legacy-identical
