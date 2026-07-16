@@ -323,6 +323,116 @@ module mempool_group_mshr
              [idx_width(MshrMergeReqs)-1:0]                                    resp_sel2_subreq_idx;
   logic      [MshrNum-1:0][BurstLenWidth-1:0]                                  resp_beat_offset2;
   logic      [MshrNum-1:0][RespBufPtrW-1:0]                                    resp_rd_ptr2;
+
+  // ------------------------------------------------------------------------------------------
+  // ParityDrain bypass-retag table (design doc §4.6). An MSHR-BYPASSED multi-beat load (bank
+  // full at allocation: forwarded to the NoC with mshr_tag=0, no entry) is served by the slave
+  // under the legacy contract: every beat echoes the ORIGINAL core_id, so all beats collapse to
+  // one core data port at the tile xbar and drain 1 beat/cycle -- even though they already
+  // ARRIVE spread across both tile resp ports (slave-side round-robin channel hash). This small
+  // side table gives bypassed bursts the same parity core_id retag as MSHR-drained beats, so the
+  // bypass service class also uses both tile resp ports AND both VLSU receive ports (2/cycle).
+  //
+  // Depth 2 per tile is PROVABLY sufficient: the VLSU holds one memory instruction in flight
+  // until full retire (op-queue serialization) and one instruction issues at most two bursts,
+  // with disjoint ROB0 id ranges -- so a tile can never have a third outstanding tracked burst
+  // (asserted below). The receive side needs NO change: the VLSU's burst_odd_expected classifier
+  // accepts an expected-odd id on mem port 1 regardless of who delivered it.
+  //
+  // NOTE: this restores BANDWIDTH for bypasses, not coalescing -- a bypassed burst still has no
+  // entry (no merge/multicast/cache). Everything const-folds out when PD2=0.
+  // ------------------------------------------------------------------------------------------
+  typedef struct packed {
+    logic                     valid;
+    meta_id_t                 meta_base;   // first beat's meta_id (== VLSU ROB0 burst base)
+    logic [BurstLenWidth-1:0] len;         // original burst length (range check)
+    logic [BurstLenWidth-1:0] beats_left;  // outstanding beats; free the way at 0
+  } bypass_track_t;
+  bypass_track_t [NumTilesPerGroup-1:0][1:0]                                   bypass_track_q, bypass_track_d;
+  logic          [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]         bypass_match;
+  logic          [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]         bypass_match_way;
+  logic          [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]         bypass_beat_parity;
+
+  if (PD2) begin : gen_bypass_retag
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) bypass_track_q <= '0;
+      else         bypass_track_q <= bypass_track_d;
+    end
+
+    // Response-side match: a tag-0 (bypass) READ response from the burst-issuing core port whose
+    // meta_id falls in a tracked range. meta arithmetic wraps mod 2**MetaIdWidth like the VLSU's
+    // ROB0 id space, so wrapped ranges (base near the top) match correctly. The <=2 tracked
+    // ranges of a tile are disjoint by construction (distinct ROB0 allocations).
+    always_comb begin
+      for (int t = 0; t < NumTilesPerGroup; t++) begin
+        for (int p = 1; p < NumRemoteRespPortsPerTile; p++) begin
+          automatic meta_id_t off;
+          bypass_match[t][p]       = 1'b0;
+          bypass_match_way[t][p]   = 1'b0;
+          bypass_beat_parity[t][p] = 1'b0;
+          if (resp_in_valid[t][p] &&
+              (resp_in[t][p].mshr_tag == '0) &&
+              (resp_in[t][p].wen == 1'b0) &&
+              (resp_in[t][p].rdata.amo == '0) &&
+              (resp_in[t][p].rdata.core_id == tile_core_id_t'(1))) begin
+            for (int w = 0; w < 2; w++) begin
+              off = resp_in[t][p].rdata.meta_id - bypass_track_q[t][w].meta_base;
+              if (!bypass_match[t][p] && bypass_track_q[t][w].valid &&
+                  (off < meta_id_t'(bypass_track_q[t][w].len))) begin
+                bypass_match[t][p]       = 1'b1;
+                bypass_match_way[t][p]   = w[0];
+                bypass_beat_parity[t][p] = off[0];
+              end
+            end
+          end
+        end
+      end
+    end
+
+    // Table lifecycle: allocate on a bypass request handshake (a multi-beat load forwarded to
+    // the NoC without an entry), retire beats on forwarded-response handshakes (both ports of a
+    // tile can retire two beats of one burst in the same cycle).
+    always_comb begin
+      bypass_track_d = bypass_track_q;
+      for (int t = 0; t < NumTilesPerGroup; t++) begin
+        // Beat retirement first (a freed way can be re-allocated in the same cycle below).
+        for (int p = 1; p < NumRemoteRespPortsPerTile; p++) begin
+          automatic int w = int'(bypass_match_way[t][p]);
+          if (bypass_match[t][p] && resp_from_bypass[t][p] &&
+              resp_out_valid[t][p] && resp_out_ready[t][p]) begin
+            if (bypass_track_d[t][w].beats_left <= BurstLenWidth'(1)) begin
+              bypass_track_d[t][w] = '0;
+            end else begin
+              bypass_track_d[t][w].beats_left = bypass_track_d[t][w].beats_left - 1'b1;
+            end
+          end
+        end
+        // Allocation: track every outgoing bypassed multi-beat load.
+        for (int p = 1; p < NumRemoteReqPortsPerTile; p++) begin
+          if (req_in_valid[t][p] && req_in_ready[t][p] && req_out_valid[t][p] &&
+              req_is_load[t][p] && (req_len[t][p] > BurstLenWidth'(1)) &&
+              !req_alloc_found[t][p]) begin
+            if (!bypass_track_d[t][0].valid) begin
+              bypass_track_d[t][0] = '{valid: 1'b1,
+                                       meta_base: req_in[t][p].wdata.meta_id,
+                                       len: req_len[t][p], beats_left: req_len[t][p]};
+            end else if (!bypass_track_d[t][1].valid) begin
+              bypass_track_d[t][1] = '{valid: 1'b1,
+                                       meta_base: req_in[t][p].wdata.meta_id,
+                                       len: req_len[t][p], beats_left: req_len[t][p]};
+            end
+            // else: untracked (cannot happen -- asserted); the burst degrades to 1-wide, correct.
+          end
+        end
+      end
+    end
+  end else begin : gen_no_bypass_retag
+    assign bypass_track_d     = '0;
+    assign bypass_track_q     = '0;
+    assign bypass_match       = '0;
+    assign bypass_match_way   = '0;
+    assign bypass_beat_parity = '0;
+  end
   logic      [MshrNum-1:0][RespBufCountW-1:0]                                  mshr_resp_slots;
   logic      [MshrNum-1:0][RespBufPtrW-1:0]                                    resp_push_ptr;
   logic      [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]             resp_capture_fire;
@@ -774,6 +884,24 @@ module mempool_group_mshr
                     mshr_d[mshr_i].sub_reqs[0].meta_id_base,
                     mshr_d[mshr_i].sub_reqs_num,
                     mshr_d[mshr_i].beat_pending);
+    end
+
+    // ParityDrain bypass-retag depth invariant (design §4.6): a tile can never have a third
+    // outstanding bypassed multi-beat burst (VLSU one-insn serialization x <=2 bursts/insn).
+    // An untracked burst is functionally safe (1-wide legacy delivery) but means the invariant
+    // or the retirement accounting broke -- fatal in sim.
+    if (PD2) begin : gen_bypass_depth_assert
+      for (genvar bt = 0; bt < NumTilesPerGroup; bt++) begin : gen_bypass_depth_tile
+        for (genvar bp = 1; bp < NumRemoteReqPortsPerTile; bp++) begin : gen_bypass_depth_port
+          bypass_track_overflow: assert property(
+            @(posedge clk_i) disable iff (!rst_ni)
+              (req_in_valid[bt][bp] && req_in_ready[bt][bp] && req_out_valid[bt][bp] &&
+               req_is_load[bt][bp] && (req_len[bt][bp] > BurstLenWidth'(1)) &&
+               !req_alloc_found[bt][bp])
+              |-> (!bypass_track_q[bt][0].valid || !bypass_track_q[bt][1].valid))
+            else $fatal(1, "ParityDrain: bypass-track overflow at tile %0d (3rd outstanding bypassed burst).", bt);
+        end
+      end
     end
 
     // ParityDrain retag-range invariant (design §6): every burst entry's subscribers must carry
@@ -1540,6 +1668,16 @@ module mempool_group_mshr
         if (resp_in_valid[tile_i][port_i] && !resp_is_mshr[tile_i][port_i]) begin
           resp_out_valid[tile_i][port_i] = 1'b1;
           resp_out[tile_i][port_i] = resp_in[tile_i][port_i];
+          // ParityDrain bypass retag (design doc §4.6): a beat of a tracked bypassed burst gets
+          // the same parity core_id retag as an MSHR-drained beat, so bypassed bursts also
+          // deliver 2 beats/cycle (both tile resp ports -> both VLSU receive ports). Port choice
+          // is untouched (bypass keeps the M4 non-backpressurable contract); only the xbar
+          // destination changes. PD2=0 const-folds the term away.
+          if (PD2 && bypass_match[tile_i][port_i]) begin
+            resp_out[tile_i][port_i].rdata.core_id =
+                resp_in[tile_i][port_i].rdata.core_id +
+                tile_core_id_t'(bypass_beat_parity[tile_i][port_i]);
+          end
           resp_from_bypass[tile_i][port_i] = 1'b1;
         end
       end
