@@ -179,3 +179,17 @@ requests bypass). A bypassed request can never merge at any skew.
   coalescing the barrier's alignment value -> 0 and only its 217-1111 cyc/core cost remains.
 - Options A+C (2-in-flight) additionally shrink the skew tail at its source (residual-drain
   variance disappears when acceptance decouples from retire).
+
+
+---
+
+## 7. Addendum (measured 2026-07-16): Option B ablation — the barrier is net-negative on both axes
+
+3-way ablation (ParityDrain + bypass-retag build): per-step barrier **3940** / cold-start-only
+**3900** / **no barrier 3836** cycles. Removing the barrier also RAISED the merge rate (10.8% ->
+11.6%) and REDUCED bypasses -- the rendezvous cannot fix the downstream emission skew (§6) while
+its synchronized launches create the MSHR bank-pressure spikes that cause bypasses. Option B is
+therefore not a trade-off but a strict win; GROUP_BARRIER now defaults to 0 in the kernel.
+Cumulative: legacy 4453 -> 3836 (1.161x, 53.4% FPU util). The remaining gap to the 2048 floor is
+steady per-vle exposure + cold-start + entry/exit drain -> Options A+C (2-in-flight) are next,
+with Option D (burst-line cache) as the traffic companion.
