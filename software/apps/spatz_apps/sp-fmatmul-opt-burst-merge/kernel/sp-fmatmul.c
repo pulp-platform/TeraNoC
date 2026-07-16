@@ -44,7 +44,19 @@
 // routing. bank field = op: 0=arrive(load), 1=set target, 2=set mask.
 // Gated by GROUP_BARRIER; must match the RTL EnableGroupBarrier.
 #ifndef GROUP_BARRIER
-#define GROUP_BARRIER 1   // per-step pairwise barrier; 0 = unaligned baseline
+// DEFAULT 0 since the 2026-07-16 ablation (docs/matmul_bottleneck_report.md §7): the per-step
+// barrier was measured NET-NEGATIVE on both axes -- kernel 3940 -> 3836 cycles without it, AND
+// the merge rate ROSE (10.8% -> 11.6%, bypasses down). The rendezvous cannot fix the downstream
+// emission skew (residual VLSU drain + ROB alloc walk diverge the pairs past the ~10-15 cyc
+// effective merge window), while its synchronized launches CREATE the MSHR bank-pressure spikes
+// that cause bypasses. Set =1 to restore the old per-step alignment for experiments.
+#define GROUP_BARRIER 0
+#endif
+// Ablation knob (bottleneck report Option B3): keep the two PEELED-iteration syncs (cold-start
+// pair alignment) but compile out the two STEADY-LOOP syncs -- pairs align once, then drift.
+// Default = GROUP_BARRIER (no behavior change).
+#ifndef GBAR_STEADY
+#define GBAR_STEADY GROUP_BARRIER
 #endif
 #if GROUP_BARRIER
 #define GBAR_BASE_WORD 200u
@@ -88,11 +100,17 @@ static inline void gbar_sync(uint32_t a) {
 #define GBAR_ARRIVE(a)    gbar_arrive(a)
 #define GBAR_WAIT()       gbar_wait_both()
 #define GBAR_SYNC(a)      gbar_sync(a)
+#if GBAR_STEADY
+#define GBAR_SYNC_STEADY(a) gbar_sync(a)
+#else
+#define GBAR_SYNC_STEADY(a) ((void)0)
+#endif
 #else
 #define GBAR_SETUP(s,t,m) ((void)0)
 #define GBAR_ARRIVE(a)    ((void)0)
 #define GBAR_WAIT()       ((void)0)
 #define GBAR_SYNC(a)      ((void)0)
+#define GBAR_SYNC_STEADY(a) ((void)0)
 #endif
 
 //==========================================================
@@ -218,7 +236,7 @@ void matmul_8xVL(float *c, const float *a, const float *b,
         // First half: accumulate with v18 (B[even]); prefetch B[odd] -> v20.
         ++n;
         a__ = a_ + n;
-        GBAR_SYNC(gbar);  // arrive + wait: rendezvous the pair; next vle issues aligned
+        GBAR_SYNC_STEADY(gbar);  // per-step rendezvous (compiled out when GBAR_STEADY=0)
         asm volatile("vle32.v v20, (%0);" ::"r"(b__));
         b__ += P;
         asm volatile("vfmacc.vf v0, %0, v18" ::"f"(t0));
@@ -243,7 +261,7 @@ void matmul_8xVL(float *c, const float *a, const float *b,
         a__ = a_ + n;
         if (n == N)
           break;
-        GBAR_SYNC(gbar);  // arrive + wait: rendezvous the pair; next vle issues aligned
+        GBAR_SYNC_STEADY(gbar);  // per-step rendezvous (compiled out when GBAR_STEADY=0)
         asm volatile("vle32.v v18, (%0);" ::"r"(b__));
         b__ += P;
         asm volatile("vfmacc.vf v0, %0, v20" ::"f"(t0));
