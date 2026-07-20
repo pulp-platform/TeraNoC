@@ -26,6 +26,24 @@ proc add_group_mshr_wave {g NumX NumY} {
     if {[catch {examine ${m}/mshr_q_valid}]} { return 0 }
     set L "MSHR_G${g}_X${gx}Y${gy}"
 
+    # Occupancy / utilization: mshr_q_valid counts response-cache ways too, so use
+    # mshr_inuse_* for real MSHR utilization. mshr_held_* is the subset whose fetch is
+    # still withheld by hold-the-fetch (0 unless group_mshr_hold_window > 0).
+    catch {add wave -noupdate -group $L -group Util -radix unsigned ${m}/mshr_inuse_cnt_dbg}
+    catch {add wave -noupdate -group $L -group Util -radix unsigned ${m}/mshr_cached_cnt_dbg}
+    catch {add wave -noupdate -group $L -group Util -radix unsigned ${m}/mshr_held_cnt_dbg}
+    catch {add wave -noupdate -group $L -group Util -radix unsigned ${m}/mshr_valid_cnt_dbg}
+    catch {add wave -noupdate -group $L -group Util ${m}/mshr_inuse_dbg}
+    catch {add wave -noupdate -group $L -group Util ${m}/mshr_cached_dbg}
+    catch {add wave -noupdate -group $L -group Util ${m}/mshr_held_dbg}
+    # Hold-the-fetch release reason: which entry issued its withheld fetch this cycle,
+    # and why (window expired vs early-release subscriber target met). Counters are
+    # free-running from reset -- take a cursor-to-cursor delta to scope a region.
+    catch {add wave -noupdate -group $L -group HoldRelease ${m}/mshr_issue_timeout_dbg}
+    catch {add wave -noupdate -group $L -group HoldRelease ${m}/mshr_issue_subs_dbg}
+    catch {add wave -noupdate -group $L -group HoldRelease -radix unsigned ${m}/mshr_issue_timeout_cnt_dbg}
+    catch {add wave -noupdate -group $L -group HoldRelease -radix unsigned ${m}/mshr_issue_subs_cnt_dbg}
+
     # Entry table (state / base_addr / resp_buf_cnt / sub_reqs / beat_pending ...)
     catch {add wave -noupdate -group $L -group Entries ${m}/mshr_q_valid}
     catch {add wave -noupdate -group $L -group Entries ${m}/mshr_q}

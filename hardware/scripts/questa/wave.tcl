@@ -160,6 +160,25 @@ proc add_group_mshr_wave {g NumX NumY} {
     if {[catch {examine ${m}/mshr_q_valid}]} { return }
     set L "MSHR_G${g}_X${gx}Y${gy}"
 
+    # --- Occupancy / utilization ---
+    # mshr_q_valid counts response-cache ways too, so use mshr_inuse_* for real MSHR
+    # utilization; mshr_held_* is the subset whose NoC fetch is still withheld by
+    # hold-the-fetch (0 unless group_mshr_hold_window > 0).
+    catch {add wave -noupdate -group $L -group Util -radix unsigned ${m}/mshr_inuse_cnt_dbg}
+    catch {add wave -noupdate -group $L -group Util -radix unsigned ${m}/mshr_cached_cnt_dbg}
+    catch {add wave -noupdate -group $L -group Util -radix unsigned ${m}/mshr_held_cnt_dbg}
+    catch {add wave -noupdate -group $L -group Util -radix unsigned ${m}/mshr_valid_cnt_dbg}
+    catch {add wave -noupdate -group $L -group Util ${m}/mshr_inuse_dbg}
+    catch {add wave -noupdate -group $L -group Util ${m}/mshr_cached_dbg}
+    catch {add wave -noupdate -group $L -group Util ${m}/mshr_held_dbg}
+    # Hold-the-fetch release reason: which entry issued its withheld fetch this cycle,
+    # and why (window expired vs early-release subscriber target met). Counters are
+    # free-running from reset -- take a cursor-to-cursor delta to scope a region.
+    catch {add wave -noupdate -group $L -group HoldRelease ${m}/mshr_issue_timeout_dbg}
+    catch {add wave -noupdate -group $L -group HoldRelease ${m}/mshr_issue_subs_dbg}
+    catch {add wave -noupdate -group $L -group HoldRelease -radix unsigned ${m}/mshr_issue_timeout_cnt_dbg}
+    catch {add wave -noupdate -group $L -group HoldRelease -radix unsigned ${m}/mshr_issue_subs_cnt_dbg}
+
     # --- Entry table (state / base_addr / resp_buf_cnt / sub_reqs / beat_pending ...) ---
     catch {add wave -noupdate -group $L -group Entries ${m}/mshr_q_valid}
     catch {add wave -noupdate -group $L -group Entries ${m}/mshr_q}
@@ -307,7 +326,7 @@ if {$NumGroups > 0 && $NumTilesPerGroup > 0 && $NumCoresPerTile > 0} {
 # Add selected cores by global core ID for targeted debug.
 # sp-fmatmul-opt-burst-merge stuck cores (build_2), wedge order; first 6 = Group 12
 # hard-frozen deadlock cluster (tiles 9-14). See bottleneck_analysis/2026-06-11_sp_fmatmul_stuck_cores.md
-foreach global_core {204 205 203 202 201 206 87 78 223 47 151 69 116 247 95 94 92 23 62 61 222 127 134 133 186} {
+foreach global_core {0 8 1 9 2 10 3 11 4 12 5 13 6 14 7 15} {
     add_core_wave_by_global_id $global_core $NumGroups $NumTilesPerGroup $NumCoresPerTile $NumY $HasSpatz
 }
 
