@@ -139,7 +139,47 @@ group_mshr_enable_single ?= 1
 # Emit MSHR internal [MSHR stats] via $display (sim-only).
 group_mshr_enable_stats  ?= 1
 # Stats print period (cycles) while csr_trace is active (0 = final dump only).
-group_mshr_stats_period  ?= 1000
+group_mshr_stats_period  ?= 2000
+
+# Response-drain width per MSHR entry (ParityDrain: 2-wide burst receive).
+# 1 = legacy single-beat drain (bit-identical netlist; all beat-parity logic const-folds
+# out). 2 = OPT IN to 2 beats/cycle: beat b is delivered on tile resp port 1+(b&1) with
+# core_id+(b&1). The wire contract is unchanged (meta_id = base+b, one contiguous range),
+# so entries stay FULLY MERGEABLE -- coalescing is untouched. Requires
+# noc_resp_channel_num >= 2; only 1 and 2 are legal (elaboration $error otherwise).
+# Single source of truth: also drives the tile->VLSU NumRespPorts (mempool_tile
+# MshrDrainBeats). Measured on sp-fmatmul-opt-burst-merge: 4453 -> 4009 cyc (1.11x), and
+# 3836 (1.16x) together with the bypass-retag table and no per-step barrier.
+# See docs/respbw_paritydrain_design.md.
+group_mshr_drain_beats   ?= 2
+
+# Hold-the-fetch request-hold merge window (docs/mshr_request_hold_design.md).
+# 0 = OFF: every allocation issues its NoC fetch the same cycle (all hold logic
+# const-folds out). Any W > 0 withholds a mergeable allocation's fetch for up to W
+# cycles, releasing early once the entry reaches its subscriber target -- extending the
+# MSHR merge window by exactly the held cycles. There is no upper bound: the hold
+# counter is sized from W ($clog2(W+1)). Large-W notes: way occupancy and door-conflict
+# stalls both scale with W, and W near the TB scoreboard's 1000-cycle stuck threshold
+# will produce [CMS WARN] noise.
+# KEEP 0 ON THIS WORKLOAD: measured net-negative at every W (3836 OFF -> 3986 / 4209 /
+# 4229 at W = 8 / 16 / 24). Measured root cause (design doc 5c): same-line partners are
+# iteration-scale apart (>60 cycles), so 70-85% of held entries time out and pay the full
+# W in latency for nothing, while the extra way occupancy crowds out allocations
+# (bank-full overflow 42% -> 51%). sp-fmatmul is latency-bound; coalescing saves NoC
+# traffic, which is not the scarce resource here.
+group_mshr_hold_window   ?= 100
+# Early-release subscriber target: a held entry issues its fetch as soon as this many
+# requesters have merged into it. Legal range [2, group_mshr_merge_reqs].
+group_mshr_hold_subs     ?= 2
+# Per-request-type overrides of group_mshr_hold_subs: _single applies to 1-word scalar
+# entries (A-line flw, natural sharing degree 8), _burst to multi-beat vector entries
+# (B-line, degree 2). Default: inherit the uniform target above.
+# single=8 / burst=2 measured 4167 (W=16) and 4354 (W=24, worst point of the sweep):
+# singles essentially never reach 8 subscribers in-window, so a higher target only
+# lengthens the timeout path.
+group_mshr_hold_subs_single ?= 8
+group_mshr_hold_subs_burst  ?= 2
+
 # Enable tb_group_merge.svh (TB-side merge-opportunity analysis).
 # Produces [GroupMerge] lines and `group_merge_profiling/*.log` per 10k cycles.
 group_merge_profiling    ?= 1
