@@ -171,13 +171,28 @@ group_mshr_enable_single ?= 0
 group_mshr_enable_stats  ?= 0
 group_mshr_stats_period  ?= 0
 group_merge_profiling    ?= 0
-# Per-entry MSHR response-drain width (beat-spread 2-wide burst receive). Empty/unset = 1 = OFF
-# (legacy single-beat drain; all beat-spread logic const-folds out). Set =2 to OPT IN (~1.27x
-# single-requester burst-load resp BW; disables MSHR coalescing for flagged bursts, so keep off for
-# coalescing workloads like matmul shared-B). Needs noc_resp_channel_num>=2; only 1 or 2 is legal
-# (elaboration $error otherwise). Single source of truth: also drives the tile->VLSU NumRespPorts
-# (mempool_tile MshrDrainBeats).
+# Fallbacks only: the Spatz flavors set these in config/<flavor>.mk (documented there with the
+# measured data). Empty here = feature off / RTL default, for flavors that do not define them.
+# Per-entry MSHR response-drain width (ParityDrain 2-wide burst receive). Empty/unset = 1 = OFF
+# (legacy single-beat drain; all beat-parity logic const-folds out). Set =2 to OPT IN to 2
+# beats/cycle: the wire contract is unchanged (meta_id = base+b), so entries stay FULLY MERGEABLE
+# and coalescing is untouched (measured 1.11-1.16x FASTER on sp-fmatmul). Needs
+# noc_resp_channel_num>=2; only 1 or 2 is legal (elaboration $error otherwise). Single source of
+# truth: also drives the tile->VLSU NumRespPorts (mempool_tile MshrDrainBeats).
 group_mshr_drain_beats   ?=
+# Hold-the-fetch request-hold merge window (docs/mshr_request_hold_design.md). Empty/unset/0 = OFF
+# (every alloc issues its NoC fetch same-cycle; all hold logic const-folds out). Set =W (any W>0;
+# the hold counter is sized from W, so there is no upper bound) to
+# withhold each mergeable allocation's NoC fetch up to W cycles, releasing early once the entry
+# reaches group_mshr_hold_subs subscribers -- extends the MSHR merge window by exactly the held
+# cycles. group_mshr_hold_subs (default 2) = early-release sharing degree, legal range [2, merge_reqs].
+group_mshr_hold_window   ?=
+group_mshr_hold_subs     ?=
+# Per-request-type early-release targets (override the uniform group_mshr_hold_subs): _single
+# applies to 1-word (scalar) entries, _burst to multi-beat (vector) entries. Empty = inherit
+# group_mshr_hold_subs. Legal range [2, group_mshr_merge_reqs].
+group_mshr_hold_subs_single ?=
+group_mshr_hold_subs_burst  ?=
 vlog_defs += -DGROUP_MSHR_NUM=$(group_mshr_num)
 vlog_defs += -DGROUP_MSHR_MERGE_REQS=$(group_mshr_merge_reqs)
 vlog_defs += -DGROUP_MSHR_ENABLE_SINGLE=$(group_mshr_enable_single)
@@ -185,6 +200,18 @@ vlog_defs += -DGROUP_MSHR_ENABLE_STATS=$(group_mshr_enable_stats)
 vlog_defs += -DGROUP_MSHR_STATS_PERIOD=$(group_mshr_stats_period)
 ifneq ($(strip $(group_mshr_drain_beats)),)
   vlog_defs += -DGROUP_MSHR_DRAIN_BEATS=$(group_mshr_drain_beats)
+endif
+ifneq ($(strip $(group_mshr_hold_window)),)
+  vlog_defs += -DGROUP_MSHR_HOLD_WINDOW=$(group_mshr_hold_window)
+endif
+ifneq ($(strip $(group_mshr_hold_subs)),)
+  vlog_defs += -DGROUP_MSHR_HOLD_SUBS=$(group_mshr_hold_subs)
+endif
+ifneq ($(strip $(group_mshr_hold_subs_single)),)
+  vlog_defs += -DGROUP_MSHR_HOLD_SUBS_SINGLE=$(group_mshr_hold_subs_single)
+endif
+ifneq ($(strip $(group_mshr_hold_subs_burst)),)
+  vlog_defs += -DGROUP_MSHR_HOLD_SUBS_BURST=$(group_mshr_hold_subs_burst)
 endif
 ifeq ($(group_merge_profiling), 1)
   vlog_defs += -DGROUP_MERGE_PROFILING

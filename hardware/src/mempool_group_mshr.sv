@@ -118,6 +118,41 @@ module mempool_group_mshr
            DrainBeatsPerEntry, NumRemoteRespPortsPerTile - 1, DrainBeatsPerEntry);
   if (PD2 && !DrainMultiPort)
     $error("[mempool_group_mshr] ParityDrain (group_mshr_drain_beats=2) requires DrainMultiPort=1.");
+  // Hold-the-fetch (request-hold merge window, docs/mshr_request_hold_design.md): a mergeable
+  // allocation is consumed locally and its NoC fetch is withheld for up to HoldWindow cycles,
+  // releasing EARLY the moment sub_reqs_num reaches HoldSubs. Since merging is legal until the
+  // entry's first beat arrives (= issue + round trip), every held cycle extends the merge window
+  // 1:1 -- temporal alignment applied at the door, no cross-core signaling, deadlock-free by
+  // construction (the countdown always expires). 0 = off, everything const-folds out.
+  localparam int unsigned HoldWindow =
+    `ifdef GROUP_MSHR_HOLD_WINDOW `GROUP_MSHR_HOLD_WINDOW `else 0 `endif;
+  localparam int unsigned HoldSubs =
+    `ifdef GROUP_MSHR_HOLD_SUBS `GROUP_MSHR_HOLD_SUBS `else 2 `endif;
+  // Per-request-type early-release targets (default: the uniform HoldSubs). Rationale: the two
+  // request classes have different natural sharing degrees -- in the matmul kernel a scalar
+  // single (A-line flw) is shared by 8 cores of an m-block, while a vector burst (B-line) is
+  // shared by a pair. The type bit (burst_len == 1) is already classified at the door, so the
+  // split costs one mux; an address-range discriminator would need programmable range registers
+  // for no extra separation power on this traffic.
+  localparam int unsigned HoldSubsSingle =
+    `ifdef GROUP_MSHR_HOLD_SUBS_SINGLE `GROUP_MSHR_HOLD_SUBS_SINGLE `else HoldSubs `endif;
+  localparam int unsigned HoldSubsBurst =
+    `ifdef GROUP_MSHR_HOLD_SUBS_BURST `GROUP_MSHR_HOLD_SUBS_BURST `else HoldSubs `endif;
+  // hold_cnt is sized from the window itself, so ANY window value is supported -- there is no
+  // width-imposed ceiling (an earlier > 31 guard wrongly claimed one; the counter had always been
+  // parameterized). Practical notes when experimenting with large W: a held entry keeps its MSHR
+  // way occupied for the full window, and door conflicts on its address / meta-id range stall for
+  // up to W cycles; once W approaches the TB scoreboard's 1000-cycle stuck-request threshold the
+  // held requests will start raising [CMS WARN] lines. Liveness is independent of W (the countdown
+  // is free-running, so the fetch always issues).
+  localparam int unsigned HoldCntW = (HoldWindow > 1) ? $clog2(HoldWindow + 1) : 1;
+  if ((HoldSubs < 2) || (HoldSubs > MshrMergeReqs))
+    $error("[mempool_group_mshr] group_mshr_hold_subs (%0d) must be in [2, MshrMergeReqs].",
+           HoldSubs);
+  if ((HoldSubsSingle < 2) || (HoldSubsSingle > MshrMergeReqs) ||
+      (HoldSubsBurst  < 2) || (HoldSubsBurst  > MshrMergeReqs))
+    $error("[mempool_group_mshr] group_mshr_hold_subs_single/burst (%0d/%0d) must be in [2, MshrMergeReqs].",
+           HoldSubsSingle, HoldSubsBurst);
   localparam int unsigned SubReqCountW     = idx_width(MshrMergeReqs + 1);
   localparam int unsigned RespBufCountW    = idx_width(RespBufWords + 1);
   localparam int unsigned RespBufPtrW      = idx_width(RespBufWords);
@@ -216,6 +251,11 @@ module mempool_group_mshr
     // Debug: number of cached hits before this entry is reallocated.
     logic [31:0] cache_hit_cnt;
 `endif
+    // Hold-the-fetch: remaining cycles the entry's NoC fetch is withheld (counts down while
+    // !issued; 0 = release now) and the fetch-sent one-shot. Const-folds when HoldWindow == 0
+    // (every alloc then sets issued = 1 and the replay walker is not generated).
+    logic [HoldCntW-1:0] hold_cnt;
+    logic                issued;
     // Entry lifecycle state (IDLE/WAIT_RESP/DRAIN_RESP/CACHED).
     mshr_state_t state;
   } mempool_group_mshr_t;
@@ -240,6 +280,9 @@ module mempool_group_mshr
   mempool_group_mshr_t [MshrNum-1:0]                                           mshr_q;
   logic                [MshrNum-1:0]                                           mshr_d_valid;
   logic                [MshrNum-1:0]                                           mshr_q_valid;
+  // Hold-the-fetch replay walk start pointer (rotates every cycle for fairness among held
+  // entries contending for the same outbound lane). Tied off when the feature is compiled out.
+  mshr_id_t                                                                    hold_replay_rr_q;
   logic                [MshrNum-1:0]                                           mshr_resp_inflight; // Block same-cycle merge.
   logic                [MshrNum-1:0]                                           mshr_resp_seen_now; // Any in-flight input beat matching this MSHR.
   logic                                                                        csr_trace_any_i;
@@ -407,9 +450,15 @@ module mempool_group_mshr
             end
           end
         end
-        // Allocation: track every outgoing bypassed multi-beat load.
+        // Allocation: track every outgoing bypassed multi-beat load. The mshr_tag=='0 qualifier
+        // identifies a genuine door passthrough: entry allocations and hold-the-fetch replay
+        // injections both stamp (entry+1). Without it, a replay injection claiming a lane in the
+        // same cycle the door locally accepts a merge/held-alloc on that lane would look like a
+        // bypass handshake and leak a ghost track way (its beats return tagged, never as tag-0
+        // bypass responses, so the way would never retire).
         for (int p = 1; p < NumRemoteReqPortsPerTile; p++) begin
           if (req_in_valid[t][p] && req_in_ready[t][p] && req_out_valid[t][p] &&
+              (req_out[t][p].mshr_tag == '0) &&
               req_is_load[t][p] && (req_len[t][p] > BurstLenWidth'(1)) &&
               !req_alloc_found[t][p]) begin
             if (!bypass_track_d[t][0].valid) begin
@@ -492,7 +541,11 @@ module mempool_group_mshr
   logic [63-1:0]                                                               stat_req_accept_single_cycle;
   logic [63-1:0]                                                               stat_req_accept_burst_cycle;
   logic [63-1:0]                                                               stat_req_merge_cycle;
+  logic [63-1:0]                                                               stat_req_merge_single_cycle;
+  logic [63-1:0]                                                               stat_req_merge_burst_cycle;
   logic [63-1:0]                                                               stat_req_alloc_cycle;
+  logic [63-1:0]                                                               stat_req_alloc_single_cycle;
+  logic [63-1:0]                                                               stat_req_alloc_burst_cycle;
   logic [63-1:0]                                                               stat_req_bypass_cycle;
   logic [63-1:0]                                                               stat_req_mshr_overflow_cycle;
   logic [63-1:0]                                                               stat_req_subreq_overflow_cycle;
@@ -518,7 +571,11 @@ module mempool_group_mshr
   logic [63-1:0]                                                               stat_req_accept_single;
   logic [63-1:0]                                                               stat_req_accept_burst;
   logic [63-1:0]                                                               stat_req_merge;
+  logic [63-1:0]                                                               stat_req_merge_single;
+  logic [63-1:0]                                                               stat_req_merge_burst;
   logic [63-1:0]                                                               stat_req_alloc;
+  logic [63-1:0]                                                               stat_req_alloc_single;
+  logic [63-1:0]                                                               stat_req_alloc_burst;
   logic [63-1:0]                                                               stat_req_bypass;
   logic [63-1:0]                                                               stat_req_mshr_overflow;
   logic [63-1:0]                                                               stat_req_subreq_overflow;
@@ -544,6 +601,10 @@ module mempool_group_mshr
   logic [63-1:0]                                                               stat_req_accept_single_next;
   logic [63-1:0]                                                               stat_req_accept_burst_next;
   logic [63-1:0]                                                               stat_req_merge_next;
+  logic [63-1:0]                                                               stat_req_merge_single_next;
+  logic [63-1:0]                                                               stat_req_merge_burst_next;
+  logic [63-1:0]                                                               stat_req_alloc_single_next;
+  logic [63-1:0]                                                               stat_req_alloc_burst_next;
   logic [63-1:0]                                                               stat_req_alloc_next;
   logic [63-1:0]                                                               stat_req_bypass_next;
   logic [63-1:0]                                                               stat_req_mshr_overflow_next;
@@ -896,6 +957,7 @@ module mempool_group_mshr
           bypass_track_overflow: assert property(
             @(posedge clk_i) disable iff (!rst_ni)
               (req_in_valid[bt][bp] && req_in_ready[bt][bp] && req_out_valid[bt][bp] &&
+               (req_out[bt][bp].mshr_tag == '0) &&
                req_is_load[bt][bp] && (req_len[bt][bp] > BurstLenWidth'(1)) &&
                !req_alloc_found[bt][bp])
               |-> (!bypass_track_q[bt][0].valid || !bypass_track_q[bt][1].valid))
@@ -919,6 +981,20 @@ module mempool_group_mshr
             else $fatal(1, "ParityDrain: burst entry %0d sub %0d core_id=%0d != 1 (retag would misroute).",
                         pd_e, s, mshr_d[pd_e].sub_reqs[s].core_id);
         end
+      end
+    end
+
+    // Hold-the-fetch invariant: an entry whose fetch has not been issued can have no response
+    // activity -- it must sit in WAIT_RESP with zero beats seen. A violation means a response
+    // was captured for a never-sent tag (tag aliasing / capture-guard bug).
+    if (HoldWindow != 0) begin : gen_hold_assert
+      for (genvar he = 0; he < MshrNum; he++) begin : gen_hold_assert_entry
+        hold_unissued_no_beats: assert property(
+          @(posedge clk_i) disable iff (!rst_ni)
+            !mshr_q_valid[he] || mshr_q[he].issued ||
+            ((mshr_q[he].state == MSHR_WAIT_RESP) && (mshr_q[he].beat_seen == '0)))
+          else $fatal(1, "hold-the-fetch: entry %0d has response activity before issue (state=%0d beat_seen=%0h).",
+                      he, mshr_q[he].state, mshr_q[he].beat_seen);
       end
     end
 
@@ -1207,6 +1283,118 @@ module mempool_group_mshr
   `FF(drain_mshr_rr_q, drain_mshr_rr_d, '0)
   `FF(subreq_rr_q,     subreq_rr_d,     '0)
 
+  // Hold-the-fetch replay base: same free-running pattern; compiled out with the feature.
+  if (HoldWindow != 0) begin : gen_hold_replay_rr
+    mshr_id_t hold_replay_rr_d;
+    assign hold_replay_rr_d = (hold_replay_rr_q == mshr_id_t'(MshrNum - 1)) ?
+                              '0 : hold_replay_rr_q + mshr_id_t'(1);
+    `FF(hold_replay_rr_q, hold_replay_rr_d, '0)
+  end else begin : gen_hold_replay_rr_off
+    assign hold_replay_rr_q = '0;
+  end
+
+  // ------------------------------------------------------------------------
+  // Entry-occupancy view for utilization analysis (simulation-only, zero hardware,
+  // always available -- no debug define needed).
+  //
+  // mshr_q_valid alone is NOT utilization: it also counts ways that merely hold a
+  // response-cache line (state == MSHR_CACHED), which are reclaimable on demand by
+  // an allocating request (see bank_has_free). Split into the two populations:
+  //   mshr_inuse_dbg  : entry tracks an OUTSTANDING remote miss (WAIT_RESP /
+  //                     DRAIN_RESP) -- the true MSHR occupancy, i.e. what competes
+  //                     for ways and what "mshr_overflow" is really about.
+  //   mshr_cached_dbg : entry is only a response-cache way (CACHED).
+  //   mshr_held_dbg   : subset of in-use whose NoC fetch is still WITHHELD by
+  //                     hold-the-fetch (WAIT_RESP && !issued) -- all-zero when
+  //                     group_mshr_hold_window = 0, so this directly measures the
+  //                     way-occupancy cost of a hold window.
+  // The *_cnt_dbg signals are the per-cycle populations (0..MshrNum);
+  // mshr_valid_cnt_dbg == mshr_inuse_cnt_dbg + mshr_cached_cnt_dbg.
+  // ------------------------------------------------------------------------
+  // pragma translate_off
+  localparam int unsigned MshrCntW = idx_width(MshrNum + 1);
+  logic [MshrNum-1:0]  mshr_inuse_dbg;
+  logic [MshrNum-1:0]  mshr_cached_dbg;
+  logic [MshrNum-1:0]  mshr_held_dbg;
+  logic [MshrCntW-1:0] mshr_inuse_cnt_dbg;
+  logic [MshrCntW-1:0] mshr_cached_cnt_dbg;
+  logic [MshrCntW-1:0] mshr_held_cnt_dbg;
+  logic [MshrCntW-1:0] mshr_valid_cnt_dbg;
+  always_comb begin
+    mshr_inuse_dbg  = '0;
+    mshr_cached_dbg = '0;
+    mshr_held_dbg   = '0;
+    for (int e = 0; e < MshrNum; e++) begin
+      if (mshr_q_valid[e]) begin
+        if (mshr_q[e].state == MSHR_CACHED) begin
+          mshr_cached_dbg[e] = 1'b1;
+        end else begin
+          mshr_inuse_dbg[e] = 1'b1;
+          if ((mshr_q[e].state == MSHR_WAIT_RESP) && !mshr_q[e].issued) begin
+            mshr_held_dbg[e] = 1'b1;
+          end
+        end
+      end
+    end
+    mshr_inuse_cnt_dbg  = MshrCntW'($countones(mshr_inuse_dbg));
+    mshr_cached_cnt_dbg = MshrCntW'($countones(mshr_cached_dbg));
+    mshr_held_cnt_dbg   = MshrCntW'($countones(mshr_held_dbg));
+    mshr_valid_cnt_dbg  = MshrCntW'($countones(mshr_q_valid));
+  end
+
+  // ------------------------------------------------------------------------
+  // Hold-the-fetch RELEASE-REASON view (simulation-only). One-cycle pulse per entry
+  // in the cycle its withheld fetch is actually handed to the NoC lane (the rising
+  // edge of `issued`, so the pulse lines up with the req_out handshake), split by
+  // which release condition fired:
+  //   mshr_issue_timeout_dbg : the window expired (hold_cnt reached 0) -- the entry
+  //                            waited the full W and no partner ever arrived.
+  //   mshr_issue_subs_dbg    : sub_reqs_num reached the early-release target
+  //                            (group_mshr_hold_subs / _single / _burst) -- a real
+  //                            coalescing catch, the case the hold exists for.
+  // Classified with the SAME expression the replay walker uses (both read the
+  // post-decrement mshr_d view), so the split matches actual behavior. If both
+  // conditions are true in one cycle, timeout wins -- the two vectors are therefore
+  // mutually exclusive and together account for every held issue.
+  // The *_cnt_dbg accumulators are FREE-RUNNING from reset (not csr_trace gated), so
+  // take the delta between two cursors to scope a figure to a kernel region. They
+  // add the per-cycle popcount because the walker can release several entries in one
+  // cycle (one per free outbound lane). Both stay 0 when group_mshr_hold_window = 0.
+  // ------------------------------------------------------------------------
+  logic [MshrNum-1:0] mshr_issue_timeout_dbg;
+  logic [MshrNum-1:0] mshr_issue_subs_dbg;
+  logic [31:0]        mshr_issue_timeout_cnt_dbg;
+  logic [31:0]        mshr_issue_subs_cnt_dbg;
+
+  always_comb begin
+    mshr_issue_timeout_dbg = '0;
+    mshr_issue_subs_dbg    = '0;
+    if (HoldWindow != 0) begin
+      for (int e = 0; e < MshrNum; e++) begin
+        // Rising edge of `issued` on a valid entry. A fresh allocation always starts
+        // with issued = 0 when the hold is enabled, so a realloc cannot fake an edge.
+        if (mshr_d_valid[e] && mshr_d[e].issued &&
+            !(mshr_q_valid[e] && mshr_q[e].issued)) begin
+          if (mshr_d[e].hold_cnt == '0) mshr_issue_timeout_dbg[e] = 1'b1;
+          else                          mshr_issue_subs_dbg[e]    = 1'b1;
+        end
+      end
+    end
+  end
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      mshr_issue_timeout_cnt_dbg <= '0;
+      mshr_issue_subs_cnt_dbg    <= '0;
+    end else begin
+      mshr_issue_timeout_cnt_dbg <=
+          mshr_issue_timeout_cnt_dbg + 32'($countones(mshr_issue_timeout_dbg));
+      mshr_issue_subs_cnt_dbg    <=
+          mshr_issue_subs_cnt_dbg    + 32'($countones(mshr_issue_subs_dbg));
+    end
+  end
+  // pragma translate_on
+
   // Debug-only view of cached/uncached valid entries.
   // pragma translate_off
   `ifndef VERILATOR
@@ -1431,6 +1619,19 @@ module mempool_group_mshr
     mshr_d = mshr_q;
     mshr_d_valid = mshr_q_valid;
 
+    // Hold-the-fetch: count down every held (allocated, fetch not yet sent) entry. Placed on the
+    // _q view before this cycle's allocations overwrite their entries, so a fresh alloc keeps its
+    // full window. The countdown never stalls -> a held fetch always releases within HoldWindow
+    // cycles (deadlock-free by construction).
+    if (HoldWindow != 0) begin
+      for (int e = 0; e < MshrNum; e++) begin
+        if (mshr_q_valid[e] && (mshr_q[e].state == MSHR_WAIT_RESP) && !mshr_q[e].issued &&
+            (mshr_q[e].hold_cnt != '0)) begin
+          mshr_d[e].hold_cnt = mshr_q[e].hold_cnt - HoldCntW'(1);
+        end
+      end
+    end
+
     req_out = req_in;
     req_out_valid = '0;
     req_in_ready = '1;
@@ -1513,8 +1714,17 @@ module mempool_group_mshr
             end else begin
               // ALLOCATE (won the per-bank slot) or BYPASS (non-mergeable store/AMO, or a mergeable
               // miss whose bank is full): forward this request to the NoC.
-              req_in_ready[tile_i][port_i]  = req_out_ready[tile_i][port_i];
-              req_out_valid[tile_i][port_i] = 1'b1;
+              if ((HoldWindow != 0) && req_can_merge[tile_i][port_i] &&
+                  req_alloc_found[tile_i][port_i]) begin
+                // Hold-the-fetch: allocate the entry but WITHHOLD its NoC fetch (the replay walker
+                // below issues it once hold_done). Consume the request locally so the door never
+                // couples to NoC readiness and never head-of-line-blocks the tile port.
+                req_in_ready[tile_i][port_i]  = 1'b1;
+                req_out_valid[tile_i][port_i] = 1'b0;
+              end else begin
+                req_in_ready[tile_i][port_i]  = req_out_ready[tile_i][port_i];
+                req_out_valid[tile_i][port_i] = 1'b1;
+              end
               if (req_can_merge[tile_i][port_i]) begin
                 // Allocate a new MSHR entry (only the bank's slot winner has req_alloc_found set;
                 // bank-full mergeable misses fall through here as a plain bypass).
@@ -1554,6 +1764,12 @@ module mempool_group_mshr
 `ifndef TARGET_SYNTHESIS
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].cache_hit_cnt = '0;
 `endif
+                // Hold-the-fetch: arm the hold window; with the feature off the fetch went out
+                // this same cycle on the passthrough, so mark it issued immediately.
+                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].hold_cnt =
+                    HoldCntW'(HoldWindow);
+                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].issued =
+                    (HoldWindow == 0);
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].sub_reqs_num =
                     SubReqCountW'(1);
                 end
@@ -1593,6 +1809,46 @@ module mempool_group_mshr
           end
         end else begin
           req_in_ready[tile_i][port_i] = 1'b1;
+        end
+      end
+    end
+
+    // ------------------------------------------------------------
+    // Hold-the-fetch replay: issue the withheld fetch of every hold_done entry (window expired,
+    // or subscriber count reached HoldSubs -- checked on mshr_d so a merge landing THIS cycle
+    // releases immediately). Runs after the door logic above, so fresh traffic (including
+    // non-backpressurable bypasses) has already claimed its lanes; injection uses only idle
+    // lanes, on the entry owner's original lane (the response-capture guard re-validates the
+    // owner tile). valid is asserted only when the lane's ready is ALREADY high (spill-register
+    // ready is state-only), so an injected request is always accepted in the same cycle and no
+    // lane ever presents a retractable/mutating valid.
+    // ------------------------------------------------------------
+    if (HoldWindow != 0) begin
+      for (int k = 0; k < MshrNum; k++) begin
+        automatic int unsigned e = 32'(hold_replay_rr_q) + 32'(k);
+        automatic int unsigned rt, rp;
+        automatic logic hold_done;
+        if (e >= MshrNum) e -= MshrNum;
+        if (mshr_d_valid[e] && (mshr_d[e].state == MSHR_WAIT_RESP) && !mshr_d[e].issued) begin
+          hold_done = (mshr_d[e].hold_cnt == '0) ||
+                      (mshr_d[e].sub_reqs_num >=
+                       SubReqCountW'((mshr_d[e].burst_len == BurstLenWidth'(1)) ?
+                                     HoldSubsSingle : HoldSubsBurst));
+          rt = 32'(mshr_d[e].sub_reqs[0].tile_id);
+          rp = 32'(mshr_d[e].sub_reqs[0].port_id);
+          if (hold_done && !req_out_valid[rt][rp] && req_out_ready[rt][rp]) begin
+            req_out_valid[rt][rp]         = 1'b1;
+            req_out[rt][rp]               = '0;
+            req_out[rt][rp].wdata.meta_id = mshr_d[e].sub_reqs[0].meta_id_base;
+            req_out[rt][rp].wdata.core_id = mshr_d[e].sub_reqs[0].core_id;
+            req_out[rt][rp].wen           = 1'b0;
+            req_out[rt][rp].be            = '1;
+            req_out[rt][rp].tgt_group_id  = mshr_d[e].tgt_group_id;
+            req_out[rt][rp].tgt_addr      = mshr_d[e].base_addr;
+            req_out[rt][rp].burst_len     = mshr_d[e].burst_len;
+            req_out[rt][rp].mshr_tag      = MshrTagWidth'(e) + MshrTagWidth'(1);
+            mshr_d[e].issued              = 1'b1;
+          end
         end
       end
     end
@@ -2165,6 +2421,132 @@ module mempool_group_mshr
   `ifndef VERILATOR
   generate
     if (EnableStats) begin : gen_stats
+      // ------------------------------------------------------------------
+      // Root-cause instrumentation (whole-run accumulators, one dump at final):
+      //  - per-bank alloc / bank-full histograms: is the way-conflict pressure
+      //    concentrated in a few hot banks or uniform?
+      //  - per-entry outcome at free: how many requesters did one fetch actually
+      //    serve (sub_reqs_num at dealloc; + cache hits for singles) -- the
+      //    direct partner-capture measurement, split single/burst.
+      //  - door stall cycles on same-address drain / meta conflict: the price
+      //    too-late partners pay serializing behind the leader's drain.
+      //  - hold-the-fetch release reason: early (subs target) vs timeout,
+      //    split single/burst. (timeout also includes rare lane-blocked-past-
+      //    expiry releases.)
+      // All increments are staged combinationally (blocking accumulation) so
+      // same-cycle events on multiple ports/entries are not lost to
+      // last-write-wins nonblocking updates.
+      // ------------------------------------------------------------------
+      logic [63:0] stat_bank_alloc_hist [MshrBankNum];
+      logic [63:0] stat_bank_ovf_hist   [MshrBankNum];
+      logic [63:0] stat_free_s_subs1, stat_free_s_subs2p, stat_free_s_subs_sum, stat_free_s_cachehit_sum;
+      logic [63:0] stat_free_b_subs1, stat_free_b_subs2p, stat_free_b_subs_sum;
+      logic [63:0] stat_drain_stall_s, stat_drain_stall_b;
+      logic [63:0] stat_hold_early_s, stat_hold_early_b, stat_hold_to_s, stat_hold_to_b;
+      logic [MshrNum-1:0] stat_issued_shadow_q;
+      logic [7:0]  rc_bank_alloc_inc [MshrBankNum];
+      logic [7:0]  rc_bank_ovf_inc   [MshrBankNum];
+      logic [7:0]  rc_drain_stall_s_inc, rc_drain_stall_b_inc;
+      logic [7:0]  rc_free_s_subs1_inc, rc_free_s_subs2p_inc, rc_free_b_subs1_inc, rc_free_b_subs2p_inc;
+      logic [15:0] rc_free_s_subs_sum_inc, rc_free_b_subs_sum_inc;
+      logic [31:0] rc_free_s_cachehit_inc;
+      logic [7:0]  rc_hold_early_s_inc, rc_hold_early_b_inc, rc_hold_to_s_inc, rc_hold_to_b_inc;
+
+      always_comb begin
+        for (int b = 0; b < MshrBankNum; b++) begin
+          rc_bank_alloc_inc[b] = '0;
+          rc_bank_ovf_inc[b]   = '0;
+        end
+        rc_drain_stall_s_inc = '0; rc_drain_stall_b_inc = '0;
+        rc_free_s_subs1_inc = '0; rc_free_s_subs2p_inc = '0; rc_free_s_subs_sum_inc = '0;
+        rc_free_b_subs1_inc = '0; rc_free_b_subs2p_inc = '0; rc_free_b_subs_sum_inc = '0;
+        rc_free_s_cachehit_inc = '0;
+        rc_hold_early_s_inc = '0; rc_hold_early_b_inc = '0; rc_hold_to_s_inc = '0; rc_hold_to_b_inc = '0;
+        for (int t = 0; t < NumTilesPerGroup; t++) begin
+          for (int p = 1; p < NumRemoteReqPortsPerTile; p++) begin
+            if (req_in_valid[t][p] && req_can_merge[t][p]) begin
+              if (req_in_ready[t][p] && !req_merge_valid[t][p]) begin
+                if (req_alloc_found[t][p]) begin
+                  rc_bank_alloc_inc[req_bank[t][p]] = rc_bank_alloc_inc[req_bank[t][p]] + 1'b1;
+                end else begin
+                  rc_bank_ovf_inc[req_bank[t][p]] = rc_bank_ovf_inc[req_bank[t][p]] + 1'b1;
+                end
+              end
+              if (req_addr_hit_drain[t][p] || req_meta_conflict[t][p]) begin
+                if (req_len[t][p] == BurstLenWidth'(1)) begin
+                  rc_drain_stall_s_inc = rc_drain_stall_s_inc + 1'b1;
+                end else begin
+                  rc_drain_stall_b_inc = rc_drain_stall_b_inc + 1'b1;
+                end
+              end
+            end
+          end
+        end
+        for (int e = 0; e < MshrNum; e++) begin
+          if (mshr_q_valid[e] && !mshr_d_valid[e]) begin
+            if (mshr_q[e].burst_len == BurstLenWidth'(1)) begin
+              if (mshr_q[e].sub_reqs_num <= SubReqCountW'(1)) rc_free_s_subs1_inc = rc_free_s_subs1_inc + 1'b1;
+              else                                            rc_free_s_subs2p_inc = rc_free_s_subs2p_inc + 1'b1;
+              rc_free_s_subs_sum_inc = rc_free_s_subs_sum_inc + 16'(mshr_q[e].sub_reqs_num);
+`ifndef TARGET_SYNTHESIS
+              rc_free_s_cachehit_inc = rc_free_s_cachehit_inc + mshr_q[e].cache_hit_cnt;
+`endif
+            end else begin
+              if (mshr_q[e].sub_reqs_num <= SubReqCountW'(1)) rc_free_b_subs1_inc = rc_free_b_subs1_inc + 1'b1;
+              else                                            rc_free_b_subs2p_inc = rc_free_b_subs2p_inc + 1'b1;
+              rc_free_b_subs_sum_inc = rc_free_b_subs_sum_inc + 16'(mshr_q[e].sub_reqs_num);
+            end
+          end
+          if ((HoldWindow != 0) && mshr_q_valid[e] && mshr_q[e].issued && !stat_issued_shadow_q[e]) begin
+            if (mshr_q[e].burst_len == BurstLenWidth'(1)) begin
+              if (mshr_q[e].hold_cnt == '0) rc_hold_to_s_inc    = rc_hold_to_s_inc + 1'b1;
+              else                          rc_hold_early_s_inc = rc_hold_early_s_inc + 1'b1;
+            end else begin
+              if (mshr_q[e].hold_cnt == '0) rc_hold_to_b_inc    = rc_hold_to_b_inc + 1'b1;
+              else                          rc_hold_early_b_inc = rc_hold_early_b_inc + 1'b1;
+            end
+          end
+        end
+      end
+
+      always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+          for (int b = 0; b < MshrBankNum; b++) begin
+            stat_bank_alloc_hist[b] <= '0;
+            stat_bank_ovf_hist[b]   <= '0;
+          end
+          stat_free_s_subs1 <= '0; stat_free_s_subs2p <= '0; stat_free_s_subs_sum <= '0;
+          stat_free_s_cachehit_sum <= '0;
+          stat_free_b_subs1 <= '0; stat_free_b_subs2p <= '0; stat_free_b_subs_sum <= '0;
+          stat_drain_stall_s <= '0; stat_drain_stall_b <= '0;
+          stat_hold_early_s <= '0; stat_hold_early_b <= '0; stat_hold_to_s <= '0; stat_hold_to_b <= '0;
+          stat_issued_shadow_q <= '0;
+        end else begin
+          for (int e = 0; e < MshrNum; e++) begin
+            stat_issued_shadow_q[e] <= mshr_q_valid[e] && mshr_q[e].issued;
+          end
+          if (csr_trace_any_i) begin
+            for (int b = 0; b < MshrBankNum; b++) begin
+              stat_bank_alloc_hist[b] <= stat_bank_alloc_hist[b] + 64'(rc_bank_alloc_inc[b]);
+              stat_bank_ovf_hist[b]   <= stat_bank_ovf_hist[b]   + 64'(rc_bank_ovf_inc[b]);
+            end
+            stat_free_s_subs1        <= stat_free_s_subs1        + 64'(rc_free_s_subs1_inc);
+            stat_free_s_subs2p       <= stat_free_s_subs2p       + 64'(rc_free_s_subs2p_inc);
+            stat_free_s_subs_sum     <= stat_free_s_subs_sum     + 64'(rc_free_s_subs_sum_inc);
+            stat_free_s_cachehit_sum <= stat_free_s_cachehit_sum + 64'(rc_free_s_cachehit_inc);
+            stat_free_b_subs1        <= stat_free_b_subs1        + 64'(rc_free_b_subs1_inc);
+            stat_free_b_subs2p       <= stat_free_b_subs2p       + 64'(rc_free_b_subs2p_inc);
+            stat_free_b_subs_sum     <= stat_free_b_subs_sum     + 64'(rc_free_b_subs_sum_inc);
+            stat_drain_stall_s       <= stat_drain_stall_s       + 64'(rc_drain_stall_s_inc);
+            stat_drain_stall_b       <= stat_drain_stall_b       + 64'(rc_drain_stall_b_inc);
+            stat_hold_early_s        <= stat_hold_early_s        + 64'(rc_hold_early_s_inc);
+            stat_hold_early_b        <= stat_hold_early_b        + 64'(rc_hold_early_b_inc);
+            stat_hold_to_s           <= stat_hold_to_s           + 64'(rc_hold_to_s_inc);
+            stat_hold_to_b           <= stat_hold_to_b           + 64'(rc_hold_to_b_inc);
+          end
+        end
+      end
+
       // Configuration summary at start of simulation.
       initial begin
         $display("[%0t] %m MSHR cfg: NumGroups=%0d NumTilesPerGroup=%0d NumRemoteReqPortsPerTile=%0d NumRemoteRespPortsPerTile=%0d",
@@ -2307,7 +2689,11 @@ module mempool_group_mshr
         stat_req_accept_single_cycle = '0;
         stat_req_accept_burst_cycle = '0;
         stat_req_merge_cycle = '0;
+        stat_req_merge_single_cycle = '0;
+        stat_req_merge_burst_cycle = '0;
         stat_req_alloc_cycle = '0;
+        stat_req_alloc_single_cycle = '0;
+        stat_req_alloc_burst_cycle = '0;
         stat_req_bypass_cycle = '0;
         stat_req_mshr_overflow_cycle = '0;
         stat_req_subreq_overflow_cycle = '0;
@@ -2339,11 +2725,21 @@ module mempool_group_mshr
               end
               if (req_merge_valid[tile_i][port_i]) begin
                 stat_req_merge_cycle = stat_req_merge_cycle + 1'b1;
+                if (req_len[tile_i][port_i] == BurstLenWidth'(1)) begin
+                  stat_req_merge_single_cycle = stat_req_merge_single_cycle + 1'b1;
+                end else begin
+                  stat_req_merge_burst_cycle = stat_req_merge_burst_cycle + 1'b1;
+                end
               end else begin
                 stat_req_bypass_cycle = stat_req_bypass_cycle + 1'b1;
                 if (req_can_merge[tile_i][port_i]) begin
                   if (req_alloc_found[tile_i][port_i]) begin
                     stat_req_alloc_cycle = stat_req_alloc_cycle + 1'b1;
+                    if (req_len[tile_i][port_i] == BurstLenWidth'(1)) begin
+                      stat_req_alloc_single_cycle = stat_req_alloc_single_cycle + 1'b1;
+                    end else begin
+                      stat_req_alloc_burst_cycle = stat_req_alloc_burst_cycle + 1'b1;
+                    end
                   end else begin
                     stat_req_mshr_overflow_cycle = stat_req_mshr_overflow_cycle + 1'b1;
                   end
@@ -2445,7 +2841,11 @@ module mempool_group_mshr
           stat_req_accept_single <= 0;
           stat_req_accept_burst <= 0;
           stat_req_merge <= 0;
+          stat_req_merge_single <= 0;
+          stat_req_merge_burst <= 0;
           stat_req_alloc <= 0;
+          stat_req_alloc_single <= 0;
+          stat_req_alloc_burst <= 0;
           stat_req_bypass <= 0;
           stat_req_mshr_overflow <= 0;
           stat_req_subreq_overflow <= 0;
@@ -2473,7 +2873,11 @@ module mempool_group_mshr
           stat_req_accept_single_next = stat_req_accept_single;
           stat_req_accept_burst_next = stat_req_accept_burst;
           stat_req_merge_next = stat_req_merge;
+          stat_req_merge_single_next = stat_req_merge_single;
+          stat_req_merge_burst_next = stat_req_merge_burst;
           stat_req_alloc_next = stat_req_alloc;
+          stat_req_alloc_single_next = stat_req_alloc_single;
+          stat_req_alloc_burst_next = stat_req_alloc_burst;
           stat_req_bypass_next = stat_req_bypass;
           stat_req_mshr_overflow_next = stat_req_mshr_overflow;
           stat_req_subreq_overflow_next = stat_req_subreq_overflow;
@@ -2508,7 +2912,11 @@ module mempool_group_mshr
             stat_req_accept_single_next = stat_req_accept_single + stat_req_accept_single_cycle;
             stat_req_accept_burst_next = stat_req_accept_burst + stat_req_accept_burst_cycle;
             stat_req_merge_next = stat_req_merge + stat_req_merge_cycle;
+            stat_req_merge_single_next = stat_req_merge_single + stat_req_merge_single_cycle;
+            stat_req_merge_burst_next = stat_req_merge_burst + stat_req_merge_burst_cycle;
             stat_req_alloc_next = stat_req_alloc + stat_req_alloc_cycle;
+            stat_req_alloc_single_next = stat_req_alloc_single + stat_req_alloc_single_cycle;
+            stat_req_alloc_burst_next = stat_req_alloc_burst + stat_req_alloc_burst_cycle;
             stat_req_bypass_next = stat_req_bypass + stat_req_bypass_cycle;
             stat_req_mshr_overflow_next = stat_req_mshr_overflow + stat_req_mshr_overflow_cycle;
             stat_req_subreq_overflow_next = stat_req_subreq_overflow + stat_req_subreq_overflow_cycle;
@@ -2551,6 +2959,27 @@ module mempool_group_mshr
                         stat_cache_evict_next,
                         stat_cache_store_update_next,
                         stat_cache_amo_inval_next);
+            $display("  reqs_by_class: merged_single=%0d merged_burst=%0d alloc_single=%0d alloc_burst=%0d",
+                     stat_req_merge_single_next, stat_req_merge_burst_next,
+                     stat_req_alloc_single_next, stat_req_alloc_burst_next);
+            // Root-cause dump at the trace-off flush (the `final` block is skipped whenever the
+            // trace-off flush already zeroed stat_cycle_count, which is the common EOC path).
+            // These accumulators are whole-run cumulative (never reset per period).
+            if (print_fall) begin
+              $write("  bank_alloc_hist:");
+              for (int b = 0; b < MshrBankNum; b++) $write(" %0d", stat_bank_alloc_hist[b]);
+              $write("\n  bank_ovf_hist:");
+              for (int b = 0; b < MshrBankNum; b++) $write(" %0d", stat_bank_ovf_hist[b]);
+              $write("\n");
+              $display("  free_outcome: single subs1=%0d subs2p=%0d subs_sum=%0d cachehit_sum=%0d | burst subs1=%0d subs2p=%0d subs_sum=%0d",
+                       stat_free_s_subs1, stat_free_s_subs2p, stat_free_s_subs_sum, stat_free_s_cachehit_sum,
+                       stat_free_b_subs1, stat_free_b_subs2p, stat_free_b_subs_sum);
+              $display("  drain_stall_cycles: single=%0d burst=%0d", stat_drain_stall_s, stat_drain_stall_b);
+              if (HoldWindow != 0) begin
+                $display("  hold_release: early_single=%0d timeout_single=%0d early_burst=%0d timeout_burst=%0d",
+                         stat_hold_early_s, stat_hold_to_s, stat_hold_early_b, stat_hold_to_b);
+              end
+            end
             stat_cycle_count <= 0;
             stat_mshr_valid_acc <= 0;
             stat_mshr_valid_uncached_acc <= 0;
@@ -2564,7 +2993,11 @@ module mempool_group_mshr
             stat_req_accept_single <= 0;
             stat_req_accept_burst <= 0;
             stat_req_merge <= 0;
+            stat_req_merge_single <= 0;
+            stat_req_merge_burst <= 0;
             stat_req_alloc <= 0;
+            stat_req_alloc_single <= 0;
+            stat_req_alloc_burst <= 0;
             stat_req_bypass <= 0;
             stat_req_mshr_overflow <= 0;
             stat_req_subreq_overflow <= 0;
@@ -2589,7 +3022,11 @@ module mempool_group_mshr
             stat_req_accept_single <= stat_req_accept_single_next;
             stat_req_accept_burst <= stat_req_accept_burst_next;
             stat_req_merge <= stat_req_merge_next;
+            stat_req_merge_single <= stat_req_merge_single_next;
+            stat_req_merge_burst <= stat_req_merge_burst_next;
             stat_req_alloc <= stat_req_alloc_next;
+            stat_req_alloc_single <= stat_req_alloc_single_next;
+            stat_req_alloc_burst <= stat_req_alloc_burst_next;
             stat_req_bypass <= stat_req_bypass_next;
             stat_req_mshr_overflow <= stat_req_mshr_overflow_next;
             stat_req_subreq_overflow <= stat_req_subreq_overflow_next;
@@ -2631,6 +3068,22 @@ module mempool_group_mshr
                       stat_cache_evict,
                       stat_cache_store_update,
                       stat_cache_amo_inval);
+          $display("  reqs_by_class: merged_single=%0d merged_burst=%0d alloc_single=%0d alloc_burst=%0d",
+                   stat_req_merge_single, stat_req_merge_burst,
+                   stat_req_alloc_single, stat_req_alloc_burst);
+          $write("  bank_alloc_hist:");
+          for (int b = 0; b < MshrBankNum; b++) $write(" %0d", stat_bank_alloc_hist[b]);
+          $write("\n  bank_ovf_hist:");
+          for (int b = 0; b < MshrBankNum; b++) $write(" %0d", stat_bank_ovf_hist[b]);
+          $write("\n");
+          $display("  free_outcome: single subs1=%0d subs2p=%0d subs_sum=%0d cachehit_sum=%0d | burst subs1=%0d subs2p=%0d subs_sum=%0d",
+                   stat_free_s_subs1, stat_free_s_subs2p, stat_free_s_subs_sum, stat_free_s_cachehit_sum,
+                   stat_free_b_subs1, stat_free_b_subs2p, stat_free_b_subs_sum);
+          $display("  drain_stall_cycles: single=%0d burst=%0d", stat_drain_stall_s, stat_drain_stall_b);
+          if (HoldWindow != 0) begin
+            $display("  hold_release: early_single=%0d timeout_single=%0d early_burst=%0d timeout_burst=%0d",
+                     stat_hold_early_s, stat_hold_to_s, stat_hold_early_b, stat_hold_to_b);
+          end
         end
       end
     end

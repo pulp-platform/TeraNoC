@@ -118,6 +118,27 @@ group_mshr_enable_single ?= 1
 group_mshr_enable_stats  ?= 1
 # Stats print period (cycles) while csr_trace is active (0 = final dump only).
 group_mshr_stats_period  ?= 1000
+
+# Response-drain width per MSHR entry (ParityDrain: 2-wide burst receive).
+# 1 = legacy single-beat drain (bit-identical netlist); 2 = 2 beats/cycle (beat b on tile
+# resp port 1+(b&1) with core_id+(b&1); entries stay fully mergeable). Requires
+# noc_resp_channel_num >= 2; only 1 and 2 are legal. Also drives the tile->VLSU
+# NumRespPorts (mempool_tile MshrDrainBeats). See docs/respbw_paritydrain_design.md.
+group_mshr_drain_beats   ?= 1
+
+# Hold-the-fetch request-hold merge window (docs/mshr_request_hold_design.md).
+# 0 = OFF (fetch issues the same cycle as the allocation; logic const-folds out);
+# any W > 0 withholds the fetch up to W cycles to widen the merge window (no upper
+# bound -- the hold counter is sized from W). Measured
+# net-negative on sp-fmatmul at every W (see the terapool flavor for the data).
+group_mshr_hold_window   ?= 0
+# Early-release subscriber target for a held entry. Range [2, group_mshr_merge_reqs].
+group_mshr_hold_subs     ?= 2
+# Per-request-type overrides (_single = 1-word scalar entries, _burst = multi-beat vector
+# entries); default: inherit the uniform target above.
+group_mshr_hold_subs_single ?= $(group_mshr_hold_subs)
+group_mshr_hold_subs_burst  ?= $(group_mshr_hold_subs)
+
 # Enable tb_group_merge.svh (TB-side merge-opportunity analysis).
 group_merge_profiling    ?= 1
 
