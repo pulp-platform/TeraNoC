@@ -142,6 +142,23 @@ group_mshr_hold_subs_burst  ?= $(group_mshr_hold_subs)
 # Enable tb_group_merge.svh (TB-side merge-opportunity analysis).
 group_merge_profiling    ?= 1
 
+# Dual-context TCDM burst expander (docs/tcdm_burst_interleave_design.md).
+# 0 = OFF: legacy stall-while-draining expansion, bit-identical netlist. 1 = while one
+# burst drains, a second LOAD is accepted into a shadow context and beats interleave
+# round-robin -- two same-address bursts (which converge on the destination tile's
+# expander and today serialize, the second completing a full drain-time later) finish
+# within ~1 cycle of each other. Removes the intra-group pair-skew injection that
+# poisons subsequent remote MSHR coalescing (see design doc 1). Loads-only shadow
+# acceptance: stores/AMOs still wait for full drain, so no write reordering.
+tcdm_burst_interleave    ?= 0
+
+# MSHR bank-select hash (docs/mshr_bank_hash_design.md). 0 = legacy strided XOR-fold; 1 =
+# xorshift-mixed fold that spreads a temporally-concentrated working set across more banks
+# (the legacy fold maps each address bit to a single bank bit, so addresses differing only in
+# one residue-class of bits collapse onto 2 banks). Both are pure functions of {group, line
+# address} -> same-line requests always share a bank, so coalescing is preserved either way.
+group_mshr_bank_hash     ?= 0
+
 ###########################
 ## 3. AXI and DMA Config
 ###########################

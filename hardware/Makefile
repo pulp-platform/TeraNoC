@@ -166,6 +166,9 @@ vlog_defs += -DNOC_VIRTUAL_CHANNEL_NUM=$(noc_virtual_channel_num)
 # Prefer setting these in the per-flavor config (e.g. config/terapool_spatz4_fpu.mk).
 # Keeping them minimal here so other configs match the RTL module defaults.
 group_mshr_num           ?= 16
+# Ways (entries) per MSHR bank; number of banks = group_mshr_num / group_mshr_ways_per_bank. Empty
+# = RTL default 4. E.g. num=16, ways=2 -> 8 banks x 2 ways.
+group_mshr_ways_per_bank ?=
 group_mshr_merge_reqs    ?= 8
 group_mshr_enable_single ?= 0
 group_mshr_enable_stats  ?= 0
@@ -187,13 +190,30 @@ group_mshr_drain_beats   ?=
 # reaches group_mshr_hold_subs subscribers -- extends the MSHR merge window by exactly the held
 # cycles. group_mshr_hold_subs (default 2) = early-release sharing degree, legal range [2, merge_reqs].
 group_mshr_hold_window   ?=
+# Per-request-type hold windows (override the uniform group_mshr_hold_window): _single applies to
+# 1-word (scalar) loads, _burst to multi-beat (vector) loads. Empty = inherit
+# group_mshr_hold_window. A 0 window for a class means that class is never held (issues immediately).
+group_mshr_hold_window_single ?=
+group_mshr_hold_window_burst  ?=
 group_mshr_hold_subs     ?=
 # Per-request-type early-release targets (override the uniform group_mshr_hold_subs): _single
 # applies to 1-word (scalar) entries, _burst to multi-beat (vector) entries. Empty = inherit
 # group_mshr_hold_subs. Legal range [2, group_mshr_merge_reqs].
 group_mshr_hold_subs_single ?=
 group_mshr_hold_subs_burst  ?=
+# Dual-context tcdm_burst_expander (docs/tcdm_burst_interleave_design.md). Empty/unset/0 = OFF
+# (legacy stall-while-draining, bit-identical). Set =1 so a second LOAD is accepted while a burst
+# drains and beats interleave round-robin -- same-address burst pairs then complete together
+# instead of a drain-time apart (removes the intra-group pair-skew injection).
+tcdm_burst_interleave    ?=
+# MSHR bank-select hash (docs/mshr_bank_hash_design.md). 0/unset = legacy strided XOR-fold;
+# 1 = xorshift-mixed fold that de-correlates address bits of one residue class (breaks temporal
+# bank concentration). Both preserve coalescing (pure function of {group, line addr}).
+group_mshr_bank_hash     ?=
 vlog_defs += -DGROUP_MSHR_NUM=$(group_mshr_num)
+ifneq ($(strip $(group_mshr_ways_per_bank)),)
+  vlog_defs += -DGROUP_MSHR_WAYS_PER_BANK=$(group_mshr_ways_per_bank)
+endif
 vlog_defs += -DGROUP_MSHR_MERGE_REQS=$(group_mshr_merge_reqs)
 vlog_defs += -DGROUP_MSHR_ENABLE_SINGLE=$(group_mshr_enable_single)
 vlog_defs += -DGROUP_MSHR_ENABLE_STATS=$(group_mshr_enable_stats)
@@ -204,6 +224,12 @@ endif
 ifneq ($(strip $(group_mshr_hold_window)),)
   vlog_defs += -DGROUP_MSHR_HOLD_WINDOW=$(group_mshr_hold_window)
 endif
+ifneq ($(strip $(group_mshr_hold_window_single)),)
+  vlog_defs += -DGROUP_MSHR_HOLD_WINDOW_SINGLE=$(group_mshr_hold_window_single)
+endif
+ifneq ($(strip $(group_mshr_hold_window_burst)),)
+  vlog_defs += -DGROUP_MSHR_HOLD_WINDOW_BURST=$(group_mshr_hold_window_burst)
+endif
 ifneq ($(strip $(group_mshr_hold_subs)),)
   vlog_defs += -DGROUP_MSHR_HOLD_SUBS=$(group_mshr_hold_subs)
 endif
@@ -212,6 +238,18 @@ ifneq ($(strip $(group_mshr_hold_subs_single)),)
 endif
 ifneq ($(strip $(group_mshr_hold_subs_burst)),)
   vlog_defs += -DGROUP_MSHR_HOLD_SUBS_BURST=$(group_mshr_hold_subs_burst)
+endif
+ifneq ($(strip $(tcdm_burst_interleave)),)
+  vlog_defs += -DTCDM_BURST_INTERLEAVE=$(tcdm_burst_interleave)
+endif
+ifneq ($(strip $(group_mshr_bank_hash)),)
+  vlog_defs += -DGROUP_MSHR_BANK_HASH=$(group_mshr_bank_hash)
+endif
+ifeq ($(group_mshr_bank_dump), 1)
+  vlog_defs += -DGROUP_MSHR_BANK_DUMP
+endif
+ifneq ($(strip $(group_mshr_bank_shift)),)
+  vlog_defs += -DGROUP_MSHR_BANK_SHIFT=$(group_mshr_bank_shift)
 endif
 ifeq ($(group_merge_profiling), 1)
   vlog_defs += -DGROUP_MERGE_PROFILING

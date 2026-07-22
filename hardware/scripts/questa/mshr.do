@@ -74,5 +74,7 @@ for {set gx 0} {$gx < $NumX} {incr gx} {
     catch {add wave -noupdate -group $L ${m}/mshr_issue_subs_dbg}
     catch {add wave -noupdate -group $L -radix unsigned ${m}/mshr_issue_timeout_cnt_dbg}
     catch {add wave -noupdate -group $L -radix unsigned ${m}/mshr_issue_subs_cnt_dbg}
+    catch {add wave -noupdate -group $L ${m}/req_bankfull_bypass_dbg}
+    catch {add wave -noupdate -group $L -radix unsigned ${m}/req_bankfull_bypass_cnt_dbg}
   }
 }

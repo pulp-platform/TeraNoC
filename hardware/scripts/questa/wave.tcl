@@ -178,6 +178,10 @@ proc add_group_mshr_wave {g NumX NumY} {
     catch {add wave -noupdate -group $L -group HoldRelease ${m}/mshr_issue_subs_dbg}
     catch {add wave -noupdate -group $L -group HoldRelease -radix unsigned ${m}/mshr_issue_timeout_cnt_dbg}
     catch {add wave -noupdate -group $L -group HoldRelease -radix unsigned ${m}/mshr_issue_subs_cnt_dbg}
+    # Bank-full alloc bypass: a mergeable load wanted an MSHR entry but its bank was
+    # full, so it bypassed to the NoC without one (per-request vector + running count).
+    catch {add wave -noupdate -group $L -group BankFullBypass ${m}/req_bankfull_bypass_dbg}
+    catch {add wave -noupdate -group $L -group BankFullBypass -radix unsigned ${m}/req_bankfull_bypass_cnt_dbg}
 
     # --- Entry table (state / base_addr / resp_buf_cnt / sub_reqs / beat_pending ...) ---
     catch {add wave -noupdate -group $L -group Entries ${m}/mshr_q_valid}
