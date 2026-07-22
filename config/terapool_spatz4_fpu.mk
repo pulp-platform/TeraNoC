@@ -117,9 +117,17 @@ tile_id_remap ?= 0
 ## 2b. Group MSHR  ##
 #####################
 # Number of MSHR entries per group (peak outstanding remote bursts).
-# For terapool: 16 tiles/group * 2 remote req ports = 32 concurrent slots,
-# 64+ is recommended to absorb overlapping outstanding bursts without overflow.
-group_mshr_num           ?= 64
+# 32 = 8 banks x 4 ways (user's area-halving experiment; run by hand). CAUTION: earlier runs
+# measured 32 entries collapsing the matmul ~14x (54.5k cyc, barrier-write congestion) with BOTH
+# the fold and the field-select hash -- terapool has 16 tiles x 2 remote req ports = 32 concurrent
+# request slots, so 32 entries has ~zero headroom. 64 (16 banks x 4 ways) was the measured-safe
+# value; revert to 64 if the collapse reproduces.
+group_mshr_num           ?= 32
+# Ways (entries) per bank; banks = group_mshr_num / group_mshr_ways_per_bank. 16 entries / 2 ways
+# = 8 banks x 2 ways (user experiment). WARNING: 16 entries is HALF of the 32 concurrent request
+# slots (16 tiles x 2 remote ports) -- 32 entries already collapsed the matmul ~14x, so 16 is very
+# likely to collapse harder. Revert to 64 (16 banks x 4 ways) for the measured-safe design.
+group_mshr_ways_per_bank ?= 4
 # Max sub-requests coalesced into one MSHR entry.
 group_mshr_merge_reqs    ?= 8
 # Admit single-word reqs into MSHR merge pool (1) or let them bypass (0).
@@ -167,7 +175,14 @@ group_mshr_drain_beats   ?= 2
 # W in latency for nothing, while the extra way occupancy crowds out allocations
 # (bank-full overflow 42% -> 51%). sp-fmatmul is latency-bound; coalescing saves NoC
 # traffic, which is not the scarce resource here.
-group_mshr_hold_window   ?= 100
+group_mshr_hold_window   ?= 0
+# Per-request-type hold windows (override the uniform group_mshr_hold_window above). These are what
+# is ACTIVE: scalar single-word loads are NEVER held (0 -> issue immediately), multi-beat vector
+# bursts are held up to 16 cycles to widen their coalescing window. A 0 window = that class issues
+# its fetch the same cycle (no hold). (The uniform value above only applies to a class that has no
+# override.)
+group_mshr_hold_window_single ?= 0
+group_mshr_hold_window_burst  ?= 16
 # Early-release subscriber target: a held entry issues its fetch as soon as this many
 # requesters have merged into it. Legal range [2, group_mshr_merge_reqs].
 group_mshr_hold_subs     ?= 2
@@ -183,6 +198,39 @@ group_mshr_hold_subs_burst  ?= 2
 # Enable tb_group_merge.svh (TB-side merge-opportunity analysis).
 # Produces [GroupMerge] lines and `group_merge_profiling/*.log` per 10k cycles.
 group_merge_profiling    ?= 1
+
+# Dual-context TCDM burst expander (docs/tcdm_burst_interleave_design.md).
+# 0 = OFF: legacy stall-while-draining expansion, bit-identical netlist. 1 = while one
+# burst drains, a second LOAD is accepted into a shadow context and beats interleave
+# round-robin -- two same-address bursts (which converge on the destination tile's
+# expander and today serialize, the second completing a full drain-time later) finish
+# within ~1 cycle of each other. Removes the intra-group pair-skew injection that
+# poisons subsequent remote MSHR coalescing (see design doc 1). Loads-only shadow
+# acceptance: stores/AMOs still wait for full drain, so no write reordering.
+tcdm_burst_interleave    ?= 1
+
+# MSHR bank-select hash (docs/mshr_bank_hash_design.md). Root cause of bank concentration
+# (measured, §7): the legacy fold (0) and the xorshift fold (1) both drop addr_key[3:0] (the tile
+# field) -- the bits that distinguish the concurrent requests -- so ~16 requests collapse onto one
+# bank while ~13 sit empty. 2 = legacy fold PLUS the tile bits (stride-agnostic, best on measured
+# traffic). 3 = field-select on the reconstructed LINEAR word address: bank = word[group_mshr_bank_shift
+# +: BankIdW], i.e. select the bits that carry the dominant access stride (see group_mshr_bank_shift).
+# All modes are pure functions of {group, line address} -> coalescing preserved.
+# 2 (fold+tile) is the measured WINNER at 64 entries -- bank-full overflow 28400 -> 120, merge
+# 14.3% -> 37.7%, stride-AGNOSTIC (no shift / no N tuning / no CSR). 3 (field-select) is set here
+# for the user's 32-entry experiment: bank = word_addr[group_mshr_bank_shift +: BankIdW], which
+# needs the shift tuned to the data stride N (below).
+group_mshr_bank_hash     ?= 3
+# BankHash==3 field-select shift: bank = word_addr[shift +: BankIdW] on the reconstructed LINEAR
+# WORD address (addr_key is already byte-offset-trimmed, so word bit b = byte bit b+2).
+# 5 = word[7:5] = byte[9:7]: the A-load stride is N=32 words = 0x80 bytes = byte bit 7, so 8
+# consecutive stride-N A-loads span byte[9:7] (= word[7:5]) -> select those 3 bits to spread them
+# across the 8 banks. shift = log2(N_words) = log2(32) = 5. This is DATA(N)-DEPENDENT: for a
+# different N, set shift = log2(N) (e.g. N=8 -> 3, N=64 -> 6); that is why a field-select ideally
+# wants SW configurability, whereas group_mshr_bank_hash=2 (fold) needs none.
+# (An earlier value of 3 was from a shift sweep on biased/warm-up-contaminated capture data; the
+# correct value for the real N=32 timed region is 5.)
+group_mshr_bank_shift    ?= 5
 
 ###########################
 ## 3. AXI and DMA Config

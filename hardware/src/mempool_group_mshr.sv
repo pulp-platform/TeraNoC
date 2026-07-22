@@ -126,6 +126,18 @@ module mempool_group_mshr
   // construction (the countdown always expires). 0 = off, everything const-folds out.
   localparam int unsigned HoldWindow =
     `ifdef GROUP_MSHR_HOLD_WINDOW `GROUP_MSHR_HOLD_WINDOW `else 0 `endif;
+  // Per-request-type hold windows (default: the uniform HoldWindow). Scalar single-word loads and
+  // multi-beat vector bursts have different sharing/timing, so each gets its own window: at alloc
+  // an entry is armed with HoldWindowSingle (burst_len==1) or HoldWindowBurst. A per-type window of
+  // 0 means that class is never held (issues its fetch the same cycle, like the feature-off path).
+  localparam int unsigned HoldWindowSingle =
+    `ifdef GROUP_MSHR_HOLD_WINDOW_SINGLE `GROUP_MSHR_HOLD_WINDOW_SINGLE `else HoldWindow `endif;
+  localparam int unsigned HoldWindowBurst =
+    `ifdef GROUP_MSHR_HOLD_WINDOW_BURST `GROUP_MSHR_HOLD_WINDOW_BURST `else HoldWindow `endif;
+  // The hold feature is active (and its logic generated) iff EITHER class holds; the counter is
+  // sized from the larger of the two windows.
+  localparam int unsigned HoldWindowMax =
+    (HoldWindowSingle > HoldWindowBurst) ? HoldWindowSingle : HoldWindowBurst;
   localparam int unsigned HoldSubs =
     `ifdef GROUP_MSHR_HOLD_SUBS `GROUP_MSHR_HOLD_SUBS `else 2 `endif;
   // Per-request-type early-release targets (default: the uniform HoldSubs). Rationale: the two
@@ -145,7 +157,7 @@ module mempool_group_mshr
   // up to W cycles; once W approaches the TB scoreboard's 1000-cycle stuck-request threshold the
   // held requests will start raising [CMS WARN] lines. Liveness is independent of W (the countdown
   // is free-running, so the fetch always issues).
-  localparam int unsigned HoldCntW = (HoldWindow > 1) ? $clog2(HoldWindow + 1) : 1;
+  localparam int unsigned HoldCntW = (HoldWindowMax > 1) ? $clog2(HoldWindowMax + 1) : 1;
   if ((HoldSubs < 2) || (HoldSubs > MshrMergeReqs))
     $error("[mempool_group_mshr] group_mshr_hold_subs (%0d) must be in [2, MshrMergeReqs].",
            HoldSubs);
@@ -166,15 +178,80 @@ module mempool_group_mshr
   localparam int unsigned BankIdW     = idx_width(MshrBankNum);
   // Current coalescer merges only exact 32-bit words (MshrMergeWords should be 1).
 
-  // Map a (target group, merge address key) to its MSHR bank: XOR-fold address bits ABOVE the
-  // burst-alignment boundary together with the target group. Pure function of {group,addr} (no
-  // requester dependence) so all same-(group,line) requests hash to the same bank (cross-tile merge
-  // preserved); folding above BurstAlignBits keeps a burst's beats within one bank.
+  // Bank-select hash choice (docs/mshr_bank_hash_design.md). 0 (default) = the legacy strided
+  // XOR-fold; 1 = an xorshift-mixed fold that de-correlates address bits sharing a residue class
+  // mod BankIdW (the legacy fold maps every address bit i to the single bank bit (i-align) mod
+  // BankIdW, so a concurrent working set differing only in bits of one residue class collapses
+  // onto 2 banks -- the temporal bank concentration this knob targets). Both are pure functions of
+  // {group, line address}, so same-line requests always hash to the same bank -> coalescing is
+  // preserved by construction regardless of the choice.
+  localparam int unsigned BankHash =
+    `ifdef GROUP_MSHR_BANK_HASH `GROUP_MSHR_BANK_HASH `else 0 `endif;
+  // Bank-select field shift for BankHash==3 (field-select on the reconstructed LINEAR word
+  // address). bank = word_addr[BankSelShift +: BankIdW]. Default 5 = the matmul A-load stride
+  // (N=32 words -> log2(N)=5), i.e. word-address bits [BankSelShift+BankIdW-1 : BankSelShift].
+  // Compile-time for now (a runtime SW register can drive this later; see docs). The word address
+  // is reconstructed from {addr_key, group} by pure re-wiring (§0 layout):
+  //   word[bank_in_tile | tile | group | bank_row]  (group re-inserted above the tile field).
+  localparam int unsigned BankSelShift =
+    `ifdef GROUP_MSHR_BANK_SHIFT `GROUP_MSHR_BANK_SHIFT `else 5 `endif;
+  localparam int unsigned BankInTileW  = idx_width(mempool_pkg::NumBanksPerTile);
+  localparam int unsigned GroupBits    = idx_width(NumGroups);
+  // Reconstructed linear word address width = full addr_key + the re-inserted group field.
+  localparam int unsigned WordAddrW    = $bits(tcdm_addr_t) + GroupBits;
+  if ((BankHash == 3) && (BankSelShift + BankIdW > WordAddrW))
+    $error("[mempool_group_mshr] group_mshr_bank_shift (%0d) + BankIdW (%0d) exceeds word-addr width (%0d).",
+           BankSelShift, BankIdW, WordAddrW);
+
+  // Map a (target group, merge address key) to its MSHR bank. Folds address bits ABOVE the
+  // burst-alignment boundary (so a burst's beats stay within one bank) together with the target
+  // group. Pure function of {group,addr} (no requester dependence) so all same-(group,line)
+  // requests hash to the same bank (cross-tile merge preserved).
   function automatic logic [BankIdW-1:0] mshr_bank_of(input tcdm_addr_t addr_key, input group_id_t grp);
-    logic [BankIdW-1:0] b;
+    logic [BankIdW-1:0]              b;
+    logic [$bits(tcdm_addr_t)-1:0]   mix;
+    logic [WordAddrW-1:0]            word_addr;
     b = BankIdW'(grp);
-    for (int i = BurstAlignBits; i < $bits(tcdm_addr_t); i++) begin
-      b[(i - BurstAlignBits) % BankIdW] = b[(i - BurstAlignBits) % BankIdW] ^ addr_key[i];
+    if (BankHash == 3) begin
+      // Field-select on the reconstructed LINEAR word address (pure re-wiring: put the group
+      // field back above the tile field). Then take BankIdW contiguous bits at BankSelShift.
+      // Default shift 5 targets the matmul A-load stride (N=32 words). Coalescing-safe: same
+      // line -> same word_addr -> same bank.
+      word_addr = { addr_key[$bits(tcdm_addr_t)-1 : TileIdBits + BankInTileW], // bank_row (high)
+                    grp[GroupBits-1:0],                                        // group
+                    addr_key[TileIdBits-1:0],                                  // tile
+                    addr_key[TileIdBits +: BankInTileW] };                     // bank_in_tile (low)
+      b = word_addr[BankSelShift +: BankIdW];
+    end else if (BankHash == 0) begin
+      // Legacy: each bank bit is the XOR of a fixed stride-BankIdW subset of address bits.
+      for (int i = BurstAlignBits; i < $bits(tcdm_addr_t); i++) begin
+        b[(i - BurstAlignBits) % BankIdW] = b[(i - BurstAlignBits) % BankIdW] ^ addr_key[i];
+      end
+    end else if (BankHash == 1) begin
+      // (Superseded by 2; kept for the record.) xorshift-mix the line index then fold. FAILED:
+      // still GF(2)-linear AND still drops addr_key[BurstAlignBits-1:0], so it discards the tile
+      // field -- the very bits that distinguish the concurrent colliding requests (measured: it is
+      // bit-identical to the legacy fold on the real matmul traffic). See docs/mshr_bank_hash_design.md.
+      mix = addr_key >> BurstAlignBits;
+      mix = mix ^ (mix >> 7);
+      mix = mix ^ (mix >> 13);
+      mix = mix ^ (mix >> 17);
+      for (int i = 0; i < $bits(tcdm_addr_t); i++) begin
+        b[i % BankIdW] = b[i % BankIdW] ^ mix[i];
+      end
+    end else begin
+      // Include the low BurstAlignBits (the tile field of tgt_addr) in the bank index, on top of
+      // the legacy fold of the higher bits. MEASURED root cause: at every bank-full overflow ~13/16
+      // banks are free and the colliding requests differ ONLY in addr_key[BurstAlignBits-1:0] (the
+      // tile field) -- distinct addresses (scalar A-loads to different tiles of the same bank-row)
+      // that the legacy fold drops and thus collapses onto one bank. XORing those bits in spreads
+      // them ~2.4x (avg distinct banks/window 1.84 -> 4.5). Coalescing preserved: still a pure
+      // function of {group, full addr_key}, so same-line requests share a bank; aligned bursts have
+      // addr_key[BurstAlignBits-1:0]==0 so their bank is unchanged.
+      b = b ^ BankIdW'(addr_key[BurstAlignBits-1:0]);
+      for (int i = BurstAlignBits; i < $bits(tcdm_addr_t); i++) begin
+        b[(i - BurstAlignBits) % BankIdW] = b[(i - BurstAlignBits) % BankIdW] ^ addr_key[i];
+      end
     end
     return b;
   endfunction
@@ -252,7 +329,7 @@ module mempool_group_mshr
     logic [31:0] cache_hit_cnt;
 `endif
     // Hold-the-fetch: remaining cycles the entry's NoC fetch is withheld (counts down while
-    // !issued; 0 = release now) and the fetch-sent one-shot. Const-folds when HoldWindow == 0
+    // !issued; 0 = release now) and the fetch-sent one-shot. Const-folds when HoldWindowMax == 0
     // (every alloc then sets issued = 1 and the replay walker is not generated).
     logic [HoldCntW-1:0] hold_cnt;
     logic                issued;
@@ -987,7 +1064,7 @@ module mempool_group_mshr
     // Hold-the-fetch invariant: an entry whose fetch has not been issued can have no response
     // activity -- it must sit in WAIT_RESP with zero beats seen. A violation means a response
     // was captured for a never-sent tag (tag aliasing / capture-guard bug).
-    if (HoldWindow != 0) begin : gen_hold_assert
+    if (HoldWindowMax != 0) begin : gen_hold_assert
       for (genvar he = 0; he < MshrNum; he++) begin : gen_hold_assert_entry
         hold_unissued_no_beats: assert property(
           @(posedge clk_i) disable iff (!rst_ni)
@@ -1284,7 +1361,7 @@ module mempool_group_mshr
   `FF(subreq_rr_q,     subreq_rr_d,     '0)
 
   // Hold-the-fetch replay base: same free-running pattern; compiled out with the feature.
-  if (HoldWindow != 0) begin : gen_hold_replay_rr
+  if (HoldWindowMax != 0) begin : gen_hold_replay_rr
     mshr_id_t hold_replay_rr_d;
     assign hold_replay_rr_d = (hold_replay_rr_q == mshr_id_t'(MshrNum - 1)) ?
                               '0 : hold_replay_rr_q + mshr_id_t'(1);
@@ -1369,7 +1446,7 @@ module mempool_group_mshr
   always_comb begin
     mshr_issue_timeout_dbg = '0;
     mshr_issue_subs_dbg    = '0;
-    if (HoldWindow != 0) begin
+    if (HoldWindowMax != 0) begin
       for (int e = 0; e < MshrNum; e++) begin
         // Rising edge of `issued` on a valid entry. A fresh allocation always starts
         // with issued = 0 when the hold is enabled, so a realloc cannot fake an edge.
@@ -1393,6 +1470,122 @@ module mempool_group_mshr
           mshr_issue_subs_cnt_dbg    + 32'($countones(mshr_issue_subs_dbg));
     end
   end
+
+  // ------------------------------------------------------------------------
+  // Bank-full alloc bypass view (simulation-only). A request that WANTS an MSHR
+  // entry (req_can_merge, a mergeable load) but is forwarded to the NoC without one
+  // (req_out_valid, not a hit-merge, no alloc slot won). That combination is only
+  // reachable when the request's bank has no free way: had a free way existed it
+  // would have STALLed and retried (mempool_group_mshr.sv, the bank_has_free branch)
+  // rather than bypassing. This is the per-request, per-cycle view of the
+  // stat_req_mshr_overflow counter -- the "wanted an entry, bank full, bypassed"
+  // event. NOT the same as sub_reqs-full (an entry exists but its requester list is
+  // full); that is stat_req_subreq_overflow.
+  //   req_bankfull_bypass_dbg[t][p] : high while such a bypass is presented on the
+  //                                   tile's request lane.
+  //   req_bankfull_bypass_cnt_dbg   : free-running count of ACCEPTED ones (fired
+  //                                   handshake); take a cursor delta to scope it.
+  // ------------------------------------------------------------------------
+  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] req_bankfull_bypass_dbg;
+  logic [31:0]                                               req_bankfull_bypass_cnt_dbg;
+  logic [15:0]                                               req_bankfull_bypass_fire_cnt;
+
+  always_comb begin
+    req_bankfull_bypass_dbg      = '0;
+    req_bankfull_bypass_fire_cnt = '0;
+    for (int t = 0; t < NumTilesPerGroup; t++) begin
+      for (int p = 1; p < NumRemoteReqPortsPerTile; p++) begin
+        if (req_in_valid[t][p] && req_can_merge[t][p] &&
+            !req_merge_valid[t][p] && !req_alloc_found[t][p] &&
+            req_out_valid[t][p]) begin
+          req_bankfull_bypass_dbg[t][p] = 1'b1;
+          if (req_in_ready[t][p]) begin
+            req_bankfull_bypass_fire_cnt = req_bankfull_bypass_fire_cnt + 16'd1;
+          end
+        end
+      end
+    end
+  end
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) req_bankfull_bypass_cnt_dbg <= '0;
+    else         req_bankfull_bypass_cnt_dbg <=
+                     req_bankfull_bypass_cnt_dbg + 32'(req_bankfull_bypass_fire_cnt);
+  end
+
+  // ------------------------------------------------------------------------
+  // Bank-concentration measurement (settles: is bank-full overflow caused by the
+  // hash concentrating a temporal batch into few banks, or by genuine aggregate
+  // fullness?). At each bank-full-bypass event, sample how many OTHER banks could
+  // have accepted the request (bank_has_free popcount) -- the count of banks the
+  // request's own address-pinned bank prevented it from using.
+  //   bfb_free_banks_sum : running sum of free-bank-count over all events; the
+  //                        AVERAGE (sum / req_bankfull_bypass_cnt_dbg) is the
+  //                        headline number. High avg (many banks free at overflow)
+  //                        => concentration => a better hash helps. ~0 => aggregate
+  //                        full => only more ways/entries help.
+  //   bfb_alias_events   : events with >= half the banks free (clear "could have
+  //                        been placed elsewhere" cases).
+  //   bfb_full_events    : events with ZERO other banks free (genuine aggregate full).
+  // Free-running from reset (take a cursor delta to scope to the kernel).
+  // ------------------------------------------------------------------------
+  logic [BankIdW:0] bfb_free_banks_now;   // 0..MshrBankNum
+  logic [47:0]      bfb_free_banks_sum;
+  logic [31:0]      bfb_alias_events;
+  logic [31:0]      bfb_full_events;
+  always_comb begin
+    bfb_free_banks_now = '0;
+    for (int b = 0; b < MshrBankNum; b++) begin
+      if (bank_has_free[b]) bfb_free_banks_now = bfb_free_banks_now + 1'b1;
+    end
+  end
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      bfb_free_banks_sum <= '0;
+      bfb_alias_events   <= '0;
+      bfb_full_events    <= '0;
+    end else if (req_bankfull_bypass_fire_cnt != '0) begin
+      bfb_free_banks_sum <= bfb_free_banks_sum +
+                            48'(req_bankfull_bypass_fire_cnt) * 48'(bfb_free_banks_now);
+      if ((bfb_free_banks_now * 2) >= (BankIdW+1)'(MshrBankNum)) begin
+        bfb_alias_events <= bfb_alias_events + 32'(req_bankfull_bypass_fire_cnt);
+      end
+      if (bfb_free_banks_now == '0) begin
+        bfb_full_events <= bfb_full_events + 32'(req_bankfull_bypass_fire_cnt);
+      end
+    end
+  end
+`ifndef VERILATOR
+  // Address-capture probe (BankHashDump): dump the merge key + target group + current-hash bank
+  // of bank-full-bypass events in ONE group (group 0), up to a cap, so the actual colliding
+  // address set can be analyzed offline and a hash designed against real data. Gated to
+  // +GROUP_MSHR_BANK_DUMP to keep it off by default.
+`ifdef GROUP_MSHR_BANK_DUMP
+  int unsigned bank_dump_cnt;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) bank_dump_cnt <= 0;
+    else if ((group_id_i == '0) && (bank_dump_cnt < 4000)) begin
+      for (int t = 0; t < NumTilesPerGroup; t++) begin
+        for (int p = 1; p < NumRemoteReqPortsPerTile; p++) begin
+          if (req_bankfull_bypass_dbg[t][p] && req_in_ready[t][p] && (bank_dump_cnt < 4000)) begin
+            $display("[BFBADDR] t=%0t key=%0h tgtgrp=%0d bank0=%0d",
+                     $time, req_addr_key[t][p], req_in[t][p].tgt_group_id, req_bank[t][p]);
+            bank_dump_cnt <= bank_dump_cnt + 1;
+          end
+        end
+      end
+    end
+  end
+`endif
+  final begin
+    if (req_bankfull_bypass_cnt_dbg != 0) begin
+      $display("[BFBHASH] %m bankfull_bypass=%0d avg_free_banks_x1000=%0d alias_events=%0d full_events=%0d (banks=%0d)",
+               req_bankfull_bypass_cnt_dbg,
+               (bfb_free_banks_sum * 48'd1000) / 48'(req_bankfull_bypass_cnt_dbg),
+               bfb_alias_events, bfb_full_events, MshrBankNum);
+    end
+  end
+`endif
   // pragma translate_on
 
   // Debug-only view of cached/uncached valid entries.
@@ -1621,9 +1814,9 @@ module mempool_group_mshr
 
     // Hold-the-fetch: count down every held (allocated, fetch not yet sent) entry. Placed on the
     // _q view before this cycle's allocations overwrite their entries, so a fresh alloc keeps its
-    // full window. The countdown never stalls -> a held fetch always releases within HoldWindow
-    // cycles (deadlock-free by construction).
-    if (HoldWindow != 0) begin
+    // full window. The countdown never stalls -> a held fetch always releases within its (per-type)
+    // window (deadlock-free by construction).
+    if (HoldWindowMax != 0) begin
       for (int e = 0; e < MshrNum; e++) begin
         if (mshr_q_valid[e] && (mshr_q[e].state == MSHR_WAIT_RESP) && !mshr_q[e].issued &&
             (mshr_q[e].hold_cnt != '0)) begin
@@ -1714,7 +1907,12 @@ module mempool_group_mshr
             end else begin
               // ALLOCATE (won the per-bank slot) or BYPASS (non-mergeable store/AMO, or a mergeable
               // miss whose bank is full): forward this request to the NoC.
-              if ((HoldWindow != 0) && req_can_merge[tile_i][port_i] &&
+              // Per-type hold window: single (burst_len==1) uses HoldWindowSingle, burst uses
+              // HoldWindowBurst. A 0 window for this class -> take the normal issue path (a held
+              // door with a 0 window would never issue -> deadlock).
+              if ((((req_len[tile_i][port_i] == BurstLenWidth'(1)) ?
+                     HoldWindowSingle : HoldWindowBurst) != 0) &&
+                  req_can_merge[tile_i][port_i] &&
                   req_alloc_found[tile_i][port_i]) begin
                 // Hold-the-fetch: allocate the entry but WITHHOLD its NoC fetch (the replay walker
                 // below issues it once hold_done). Consume the request locally so the door never
@@ -1764,12 +1962,15 @@ module mempool_group_mshr
 `ifndef TARGET_SYNTHESIS
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].cache_hit_cnt = '0;
 `endif
-                // Hold-the-fetch: arm the hold window; with the feature off the fetch went out
-                // this same cycle on the passthrough, so mark it issued immediately.
+                // Hold-the-fetch: arm the per-type hold window (single vs burst). A 0 window (or
+                // the feature off) means the fetch went out this same cycle on the passthrough, so
+                // mark it issued immediately.
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].hold_cnt =
-                    HoldCntW'(HoldWindow);
+                    HoldCntW'((req_len[tile_i][port_i] == BurstLenWidth'(1)) ?
+                              HoldWindowSingle : HoldWindowBurst);
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].issued =
-                    (HoldWindow == 0);
+                    (((req_len[tile_i][port_i] == BurstLenWidth'(1)) ?
+                      HoldWindowSingle : HoldWindowBurst) == 0);
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].sub_reqs_num =
                     SubReqCountW'(1);
                 end
@@ -1823,7 +2024,7 @@ module mempool_group_mshr
     // ready is state-only), so an injected request is always accepted in the same cycle and no
     // lane ever presents a retractable/mutating valid.
     // ------------------------------------------------------------
-    if (HoldWindow != 0) begin
+    if (HoldWindowMax != 0) begin
       for (int k = 0; k < MshrNum; k++) begin
         automatic int unsigned e = 32'(hold_replay_rr_q) + 32'(k);
         automatic int unsigned rt, rp;
@@ -2497,7 +2698,7 @@ module mempool_group_mshr
               rc_free_b_subs_sum_inc = rc_free_b_subs_sum_inc + 16'(mshr_q[e].sub_reqs_num);
             end
           end
-          if ((HoldWindow != 0) && mshr_q_valid[e] && mshr_q[e].issued && !stat_issued_shadow_q[e]) begin
+          if ((HoldWindowMax != 0) && mshr_q_valid[e] && mshr_q[e].issued && !stat_issued_shadow_q[e]) begin
             if (mshr_q[e].burst_len == BurstLenWidth'(1)) begin
               if (mshr_q[e].hold_cnt == '0) rc_hold_to_s_inc    = rc_hold_to_s_inc + 1'b1;
               else                          rc_hold_early_s_inc = rc_hold_early_s_inc + 1'b1;
@@ -2975,7 +3176,7 @@ module mempool_group_mshr
                        stat_free_s_subs1, stat_free_s_subs2p, stat_free_s_subs_sum, stat_free_s_cachehit_sum,
                        stat_free_b_subs1, stat_free_b_subs2p, stat_free_b_subs_sum);
               $display("  drain_stall_cycles: single=%0d burst=%0d", stat_drain_stall_s, stat_drain_stall_b);
-              if (HoldWindow != 0) begin
+              if (HoldWindowMax != 0) begin
                 $display("  hold_release: early_single=%0d timeout_single=%0d early_burst=%0d timeout_burst=%0d",
                          stat_hold_early_s, stat_hold_to_s, stat_hold_early_b, stat_hold_to_b);
               end
@@ -3080,7 +3281,7 @@ module mempool_group_mshr
                    stat_free_s_subs1, stat_free_s_subs2p, stat_free_s_subs_sum, stat_free_s_cachehit_sum,
                    stat_free_b_subs1, stat_free_b_subs2p, stat_free_b_subs_sum);
           $display("  drain_stall_cycles: single=%0d burst=%0d", stat_drain_stall_s, stat_drain_stall_b);
-          if (HoldWindow != 0) begin
+          if (HoldWindowMax != 0) begin
             $display("  hold_release: early_single=%0d timeout_single=%0d early_burst=%0d timeout_burst=%0d",
                      stat_hold_early_s, stat_hold_to_s, stat_hold_early_b, stat_hold_to_b);
           end
