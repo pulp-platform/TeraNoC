@@ -77,6 +77,14 @@ module mempool_tile
   localparam int unsigned MshrDrainBeats =
     `ifdef GROUP_MSHR_DRAIN_BEATS `GROUP_MSHR_DRAIN_BEATS
     `else 1 `endif;
+  // Burst-expander contexts (docs/tcdm_burst_interleave_design.md). OPT-IN via
+  // tcdm_burst_interleave=1: 2 = while one burst drains, a second LOAD is accepted and
+  // beats interleave round-robin, equalizing completion of same-address burst pairs
+  // (unset/0 => 1 = legacy stall-while-draining, bit-identical). Applied to both the
+  // slave-side (NoC/LIC-arriving) and the local master-side expanders.
+  localparam int unsigned BurstXpdrContexts =
+    `ifdef TCDM_BURST_INTERLEAVE ((`TCDM_BURST_INTERLEAVE != 0) ? 2 : 1)
+    `else 1 `endif;
   // ParityDrain misconfig guards: the core_id+(b&1) retag assumes ONE core per tile whose data
   // port 1 is the burst-issuing VLSU port 0 (flat +1 lands on VLSU port 1); it also needs a
   // second core data port to retag into.
@@ -1063,7 +1071,8 @@ module mempool_tile
       .req_t         (tcdm_slave_req_t     ),
       .MaxBurstWords (MaxBurstWords        ),
       .BurstLenWidth (BurstLenWidth        ),
-      .IssueWidth    (RemoteBurstIssueWidth)
+      .IssueWidth    (RemoteBurstIssueWidth),
+      .NumContexts   (BurstXpdrContexts    )
     ) i_remote_burst_expander (
       .clk_i   (clk_i                                                            ),
       .rst_ni  (rst_ni                                                           ),
@@ -1338,10 +1347,11 @@ module mempool_tile
       assign local_req_exp_ready[0]         = local_req_interco_ready[idx];
 
       tcdm_burst_expander #(
-        .req_t         (tcdm_slave_req_t),
+        .req_t         (tcdm_slave_req_t ),
         .MaxBurstWords (MaxBurstWords    ),
         .BurstLenWidth (BurstLenWidth    ),
-        .IssueWidth    (1                )
+        .IssueWidth    (1                ),
+        .NumContexts   (BurstXpdrContexts)
       ) i_local_burst_expander (
         .clk_i   (clk_i                              ),
         .rst_ni  (rst_ni                             ),
