@@ -1265,23 +1265,38 @@ module mempool_group_mshr
     end
   end
 
-  // Per-bank free-way lookup: lowest free (or reclaimable CACHED) way in each bank.
+  // Per-bank free-way lookup with INVALID-FIRST priority (idea 2): prefer a truly free (invalid)
+  // way, and reclaim a CACHED way only when the bank has no invalid way. This preserves the
+  // response cache better than the old lowest-index-free-or-cached scan (which could evict a
+  // low-index CACHED line while a higher-index invalid way sat unused). Allocation priority is
+  // therefore invalid -> reclaimable-CACHED -> bypass (bank_has_free stays 0 => request bypasses).
   always_comb begin
     int e;
     for (int b = 0; b < MshrBankNum; b++) begin
       bank_has_free[b] = 1'b0;
       bank_free_id[b]  = mshr_id_t'(b * MshrWaysPerBank);
+      // Pass 1: lowest INVALID way.
       for (int w = 0; w < MshrWaysPerBank; w++) begin
         e = b * MshrWaysPerBank + w;
-        if (!bank_has_free[b] &&
-            (!mshr_q_valid[e] ||
-             (EnableRespCache &&
+        if (!bank_has_free[b] && !mshr_q_valid[e]) begin
+          bank_has_free[b] = 1'b1;
+          bank_free_id[b]  = mshr_id_t'(e);
+        end
+      end
+      // Pass 2: only if no invalid way, reclaim the lowest reclaimable CACHED way (a resident
+      // cache line with no pending subscribers that no request is about to hit-merge this cycle).
+      if (!bank_has_free[b]) begin
+        for (int w = 0; w < MshrWaysPerBank; w++) begin
+          e = b * MshrWaysPerBank + w;
+          if (!bank_has_free[b] &&
+              EnableRespCache &&
               mshr_q_valid[e] &&
               (mshr_q[e].state == MSHR_CACHED) &&
               (mshr_q[e].sub_reqs_num == '0) &&
-              !mshr_hit_req[e]))) begin
-          bank_has_free[b] = 1'b1;
-          bank_free_id[b]  = mshr_id_t'(e);
+              !mshr_hit_req[e]) begin
+            bank_has_free[b] = 1'b1;
+            bank_free_id[b]  = mshr_id_t'(e);
+          end
         end
       end
     end
