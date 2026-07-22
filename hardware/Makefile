@@ -210,6 +210,12 @@ tcdm_burst_interleave    ?=
 # 1 = xorshift-mixed fold that de-correlates address bits of one residue class (breaks temporal
 # bank concentration). Both preserve coalescing (pure function of {group, line addr}).
 group_mshr_bank_hash     ?=
+# Cache self-invalidate (idea 1, docs/mshr_bank_hash_design.md). 0/unset = OFF (bit-identical);
+# 1 = a CACHED entry frees itself once it has served its per-type sharing target
+# (group_mshr_hold_subs_single for scalar/single, group_mshr_hold_subs_burst for burst), turning a
+# done cache line into an INVALID way that the invalid-first allocator prefers. Cached entries stay
+# reclaimable-on-demand regardless, so an unreached target cannot leak a way.
+group_mshr_cache_self_inval ?=
 vlog_defs += -DGROUP_MSHR_NUM=$(group_mshr_num)
 ifneq ($(strip $(group_mshr_ways_per_bank)),)
   vlog_defs += -DGROUP_MSHR_WAYS_PER_BANK=$(group_mshr_ways_per_bank)
@@ -244,6 +250,9 @@ ifneq ($(strip $(tcdm_burst_interleave)),)
 endif
 ifneq ($(strip $(group_mshr_bank_hash)),)
   vlog_defs += -DGROUP_MSHR_BANK_HASH=$(group_mshr_bank_hash)
+endif
+ifneq ($(strip $(group_mshr_cache_self_inval)),)
+  vlog_defs += -DGROUP_MSHR_CACHE_SELF_INVAL=$(group_mshr_cache_self_inval)
 endif
 ifeq ($(group_mshr_bank_dump), 1)
   vlog_defs += -DGROUP_MSHR_BANK_DUMP

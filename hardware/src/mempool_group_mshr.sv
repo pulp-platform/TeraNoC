@@ -150,6 +150,14 @@ module mempool_group_mshr
     `ifdef GROUP_MSHR_HOLD_SUBS_SINGLE `GROUP_MSHR_HOLD_SUBS_SINGLE `else HoldSubs `endif;
   localparam int unsigned HoldSubsBurst =
     `ifdef GROUP_MSHR_HOLD_SUBS_BURST `GROUP_MSHR_HOLD_SUBS_BURST `else HoldSubs `endif;
+  // Cache self-invalidate (idea 1, docs/mshr_bank_hash_design.md): a CACHED entry that has served
+  // its per-type sharing target (HoldSubsSingle for scalar/single entries, HoldSubsBurst for
+  // bursts) self-invalidates, turning the done cache line into an INVALID way promptly (which the
+  // invalid-first allocator then prefers, so OTHER cache lines survive). CACHED entries stay
+  // reclaimable-on-demand regardless, so an entry whose target is never reached cannot leak
+  // (no liveness hazard). 0 = off (served_cnt maintained but unused -> optimized away).
+  localparam bit CacheSelfInval =
+    `ifdef GROUP_MSHR_CACHE_SELF_INVAL `GROUP_MSHR_CACHE_SELF_INVAL `else 1'b0 `endif;
   // hold_cnt is sized from the window itself, so ANY window value is supported -- there is no
   // width-imposed ceiling (an earlier > 31 guard wrongly claimed one; the counter had always been
   // parameterized). Practical notes when experimenting with large W: a held entry keeps its MSHR
@@ -294,6 +302,11 @@ module mempool_group_mshr
     mempool_group_mshr_sub_req_t [MshrMergeReqs-1:0] sub_reqs;
     // Number of valid requester records currently stored in sub_reqs.
     logic [SubReqCountW-1:0] sub_reqs_num;
+    // Cache self-invalidate (group_mshr_cache_self_inval): cumulative count of sub-requests this
+    // entry has admitted/served over its whole life (owner + every merge, in WAIT_RESP and CACHED).
+    // When it reaches the entry's per-type sharing target the entry self-invalidates (see the
+    // self-invalidate block). Unused (stays 0) when the feature is off.
+    logic [5:0] served_cnt;
     // Per-head-beat pending mask: bit s=1 means requester s still needs the current
     // buffered response beat; cleared as each requester is serviced.
     logic [MshrMergeReqs-1:0] beat_pending;
@@ -1891,6 +1904,9 @@ module mempool_group_mshr
                     req_in[tile_i][port_i].wdata.amo;
                 mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num =
                     mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num + SubReqCountW'(1);
+                // Cache self-invalidate: count this merged sub-request toward the sharing target.
+                mshr_d[req_merge_mshr_id[tile_i][port_i]].served_cnt =
+                    mshr_d[req_merge_mshr_id[tile_i][port_i]].served_cnt + 6'd1;
                 if (EnableRespCache &&
                     (mshr_d[req_merge_mshr_id[tile_i][port_i]].state == MSHR_CACHED)) begin
                   mshr_d[req_merge_mshr_id[tile_i][port_i]].state = MSHR_DRAIN_RESP;
@@ -1988,6 +2004,8 @@ module mempool_group_mshr
                       HoldWindowSingle : HoldWindowBurst) == 0);
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].sub_reqs_num =
                     SubReqCountW'(1);
+                // Cache self-invalidate: the owner is the first served sub-request.
+                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].served_cnt = 6'd1;
                 end
               end
             end
@@ -2075,6 +2093,26 @@ module mempool_group_mshr
         if (mshr_d_valid[mshr_i] && (mshr_d[mshr_i].state == MSHR_CACHED)) begin
           mshr_d_valid[mshr_i] = 1'b0;
           mshr_d[mshr_i] = '0;
+        end
+      end
+    end
+
+    // Cache self-invalidate (idea 1): a CACHED entry (all subscribers drained, sub_reqs_num==0)
+    // that has served its per-type sharing target -- HoldSubsSingle for a scalar/single entry,
+    // HoldSubsBurst for a burst -- frees itself. The done cache line becomes an INVALID way, which
+    // the invalid-first allocator prefers, so other cache lines survive longer. Placed after the
+    // alloc/merge updates: an entry a request merged into this cycle is now DRAIN_RESP, and one an
+    // alloc just reclaimed is now WAIT_RESP, so neither is CACHED here -> untouched. CACHED entries
+    // also stay reclaimable-on-demand (bank_free_id pass 2), so a target that is never reached
+    // simply waits to be reclaimed -- no way can leak (liveness preserved).
+    if (CacheSelfInval && EnableRespCache) begin
+      for (int e = 0; e < MshrNum; e++) begin
+        if (mshr_d_valid[e] && (mshr_d[e].state == MSHR_CACHED) &&
+            (mshr_d[e].sub_reqs_num == '0) &&
+            (mshr_d[e].served_cnt >=
+             6'((mshr_d[e].burst_len == BurstLenWidth'(1)) ? HoldSubsSingle : HoldSubsBurst))) begin
+          mshr_d_valid[e] = 1'b0;
+          mshr_d[e]       = '0;
         end
       end
     end
