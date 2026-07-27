@@ -290,10 +290,35 @@ ifeq ($(spatz), 1)
 	SPATZ_CLUSTER_DIR := $(SPATZ_DIR)/hw/system/spatz_cluster
 endif
 # --------------------------
+# Spatz VLSU / ROB area-timing knobs (docs/spatz_mlp_design_plan.md)
+# --------------------------
+# R1: reorder_buffer free-id tracking from status_cnt_q instead of the id_valid_q
+# bitmap. Unset/0 = legacy bitmap (bit-identical netlist); 1 deletes NumWords flops,
+# the write-pointer decoder and the two NumWords:1 muxes per ROB -- a netlist change.
+ifneq ($(strip $(spatz_rob_cnt_idvalid)),)
+  vlog_defs += -DSPATZ_ROB_CNT_IDVALID=$(spatz_rob_cnt_idvalid)
+endif
+# R2: size the VLSU commit-metadata FIFO to the reachable occupancy
+# (NrParallelInstructions) instead of NrOutstandingLoads. Unset/0 = legacy depth
+# (bit-identical netlist); 1 = 8x smaller FIFO -- a netlist change.
+ifneq ($(strip $(spatz_vlsu_commit_qmin)),)
+  vlog_defs += -DSPATZ_VLSU_COMMIT_QMIN=$(spatz_vlsu_commit_qmin)
+endif
+# Block ROB-id reservation: the port-0 burst allocator reserves its whole MaxBurstWords id
+# window in ONE cycle instead of walking one id per cycle (18 -> 3 cycles from burst
+# eligibility to the request handshake, -30 cyc per two-burst load). Unset/0 = legacy walk
+# (bit-identical netlist); 1 = block reservation.
+ifneq ($(strip $(spatz_vlsu_block_alloc)),)
+  vlog_defs += -DSPATZ_VLSU_BLOCK_ALLOC=$(spatz_vlsu_block_alloc)
+endif
+# --------------------------
 # AXI & DMA Configuration
 # --------------------------
 vlog_defs += -DAXI_DATA_WIDTH=$(axi_data_width)
 vlog_defs += -DRO_LINE_WIDTH=$(ro_line_width)
+# R-MCAST: 1-cycle multicast of the RO instruction-cache response to all merged tile icaches
+# (docs/icache_rmcast_design.md). 0 = OFF, bit-identical. Default lives in config/config.mk.
+vlog_defs += -DRO_CACHE_R_MCAST=$(ro_cache_r_multicast)
 vlog_defs += -DDMAS_PER_GROUP=$(dmas_per_group)
 vlog_defs += -DAXI_HIER_RADIX=$(axi_hier_radix)
 vlog_defs += -DAXI_MASTERS_PER_GROUP=$(axi_masters_per_group)
