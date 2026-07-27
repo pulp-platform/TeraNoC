@@ -203,19 +203,37 @@ module mempool_group_mshr
   //   word[bank_in_tile | tile | group | bank_row]  (group re-inserted above the tile field).
   localparam int unsigned BankSelShift =
     `ifdef GROUP_MSHR_BANK_SHIFT `GROUP_MSHR_BANK_SHIFT `else 5 `endif;
+  // Per-request-type field-select shifts (default: the uniform BankSelShift). The two concurrent
+  // streams of a vector kernel have different key strides -- scalar loads step by the data row
+  // stride, bursts step by MaxBurstWords -- so one shift cannot give both the maximal spread.
+  // The classifier is the CLAMPED req_is_single (:878), NEVER req_len_raw: a store is force-clamped
+  // to req_len=1, and it must hash like the single-word CACHED entry it write-updates (:2026-2031),
+  // otherwise it misses that copy and leaves stale data for a later cache hit.
+  localparam int unsigned BankSelShiftSingle =
+    `ifdef GROUP_MSHR_BANK_SHIFT_SINGLE `GROUP_MSHR_BANK_SHIFT_SINGLE `else BankSelShift `endif;
+  localparam int unsigned BankSelShiftBurst =
+    `ifdef GROUP_MSHR_BANK_SHIFT_BURST `GROUP_MSHR_BANK_SHIFT_BURST `else BankSelShift `endif;
   localparam int unsigned BankInTileW  = idx_width(mempool_pkg::NumBanksPerTile);
   localparam int unsigned GroupBits    = idx_width(NumGroups);
   // Reconstructed linear word address width = full addr_key + the re-inserted group field.
   localparam int unsigned WordAddrW    = $bits(tcdm_addr_t) + GroupBits;
-  if ((BankHash == 3) && (BankSelShift + BankIdW > WordAddrW))
-    $error("[mempool_group_mshr] group_mshr_bank_shift (%0d) + BankIdW (%0d) exceeds word-addr width (%0d).",
-           BankSelShift, BankIdW, WordAddrW);
+  if ((BankHash == 3) && (BankSelShiftSingle + BankIdW > WordAddrW))
+    $error("[mempool_group_mshr] group_mshr_bank_shift_single (%0d) + BankIdW (%0d) exceeds word-addr width (%0d).",
+           BankSelShiftSingle, BankIdW, WordAddrW);
+  if ((BankHash == 3) && (BankSelShiftBurst + BankIdW > WordAddrW))
+    $error("[mempool_group_mshr] group_mshr_bank_shift_burst (%0d) + BankIdW (%0d) exceeds word-addr width (%0d).",
+           BankSelShiftBurst, BankIdW, WordAddrW);
 
-  // Map a (target group, merge address key) to its MSHR bank. Folds address bits ABOVE the
-  // burst-alignment boundary (so a burst's beats stay within one bank) together with the target
-  // group. Pure function of {group,addr} (no requester dependence) so all same-(group,line)
-  // requests hash to the same bank (cross-tile merge preserved).
-  function automatic logic [BankIdW-1:0] mshr_bank_of(input tcdm_addr_t addr_key, input group_id_t grp);
+  // Map a (target group, merge address key, request type) to its MSHR bank. Folds address bits
+  // ABOVE the burst-alignment boundary (so a burst's beats stay within one bank) together with the
+  // target group. Pure function of {group, addr, TYPE} -- no requester dependence -- so all
+  // same-(group,line,type) requests hash to the same bank (cross-tile merge preserved).
+  // is_single only matters for BankHash==3 (the two field-select shifts); every other mode ignores
+  // it and stays a pure function of {group,addr}. Splitting single from burst costs ZERO merging:
+  // req_hit_way already requires burst_len equality (:1197) and the CACHED arm requires req_len==1
+  // (:1203), so a single and a burst for the same line can never merge in the first place.
+  function automatic logic [BankIdW-1:0] mshr_bank_of(input tcdm_addr_t addr_key, input group_id_t grp,
+                                                      input logic is_single);
     logic [BankIdW-1:0]              b;
     logic [$bits(tcdm_addr_t)-1:0]   mix;
     logic [WordAddrW-1:0]            word_addr;
@@ -223,13 +241,15 @@ module mempool_group_mshr
     if (BankHash == 3) begin
       // Field-select on the reconstructed LINEAR word address (pure re-wiring: put the group
       // field back above the tile field). Then take BankIdW contiguous bits at BankSelShift.
-      // Default shift 5 targets the matmul A-load stride (N=32 words). Coalescing-safe: same
-      // line -> same word_addr -> same bank.
+      // Per-type shift: singles use BankSelShiftSingle, bursts BankSelShiftBurst (equal by default
+      // -> bit-identical to the single-shift behaviour). Coalescing-safe: same line AND same type
+      // -> same word_addr -> same bank. Both part-selects are constant so this is a 2:1 mux.
       word_addr = { addr_key[$bits(tcdm_addr_t)-1 : TileIdBits + BankInTileW], // bank_row (high)
                     grp[GroupBits-1:0],                                        // group
                     addr_key[TileIdBits-1:0],                                  // tile
                     addr_key[TileIdBits +: BankInTileW] };                     // bank_in_tile (low)
-      b = word_addr[BankSelShift +: BankIdW];
+      b = is_single ? word_addr[BankSelShiftSingle +: BankIdW]
+                    : word_addr[BankSelShiftBurst  +: BankIdW];
     end else if (BankHash == 0) begin
       // Legacy: each bank bit is the XOR of a fixed stride-BankIdW subset of address bits.
       for (int i = BurstAlignBits; i < $bits(tcdm_addr_t); i++) begin
@@ -646,6 +666,7 @@ module mempool_group_mshr
   logic [63-1:0]                                                               stat_cache_evict_cycle;
   logic [63-1:0]                                                               stat_cache_store_update_cycle;
   logic [63-1:0]                                                               stat_cache_amo_inval_cycle;
+  logic [63-1:0]                                                               stat_cache_self_inval_cycle;
   logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                   stat_req_subreq_full_match;
 
   logic [63-1:0]                                                               stat_cycle_count;
@@ -676,6 +697,7 @@ module mempool_group_mshr
   logic [63-1:0]                                                               stat_cache_evict;
   logic [63-1:0]                                                               stat_cache_store_update;
   logic [63-1:0]                                                               stat_cache_amo_inval;
+  logic [63-1:0]                                                               stat_cache_self_inval;
   logic                                                                        stat_trace_q;
   // Next-state debug signals for stats (for waveform visibility).
   logic [63-1:0]                                                               stat_cycle_count_next;
@@ -706,6 +728,7 @@ module mempool_group_mshr
   logic [63-1:0]                                                               stat_cache_evict_next;
   logic [63-1:0]                                                               stat_cache_store_update_next;
   logic [63-1:0]                                                               stat_cache_amo_inval_next;
+  logic [63-1:0]                                                               stat_cache_self_inval_next;
   `endif
   // pragma translate_on
 
@@ -1162,8 +1185,11 @@ module mempool_group_mshr
   generate
     for (genvar tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin : gen_req_bank_tile
       for (genvar port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin : gen_req_bank_port
+        // Type comes from the CLAMPED req_is_single (:878), not req_len_raw: a store or a
+        // misaligned burst is forced to req_len=1 and must bank like a single (see BankSelShift*).
         assign req_bank[tile_i][port_i] =
-            mshr_bank_of(req_addr_key[tile_i][port_i], req_in[tile_i][port_i].tgt_group_id);
+            mshr_bank_of(req_addr_key[tile_i][port_i], req_in[tile_i][port_i].tgt_group_id,
+                         req_is_single[tile_i][port_i]);
       end
     end
   endgenerate
@@ -1476,10 +1502,15 @@ module mempool_group_mshr
     mshr_issue_subs_dbg    = '0;
     if (HoldWindowMax != 0) begin
       for (int e = 0; e < MshrNum; e++) begin
-        // Rising edge of `issued` on a valid entry. A fresh allocation always starts
-        // with issued = 0 when the hold is enabled, so a realloc cannot fake an edge.
+        // Genuine held->released edge: the entry was VALID and NOT issued last cycle and is
+        // issued now. This excludes a 0-window class (issued=1, hold_cnt=0 at birth), which was
+        // never held -- otherwise every immediate issue would fall into the timeout bucket. The
+        // per-type window != 0 gate makes it airtight even under a same-cycle realloc collision
+        // (an evicted held entry replaced by a 0-window alloc in one cycle).
         if (mshr_d_valid[e] && mshr_d[e].issued &&
-            !(mshr_q_valid[e] && mshr_q[e].issued)) begin
+            mshr_q_valid[e] && !mshr_q[e].issued &&
+            (((mshr_d[e].burst_len == BurstLenWidth'(1)) ?
+               HoldWindowSingle : HoldWindowBurst) != 0)) begin
           if (mshr_d[e].hold_cnt == '0) mshr_issue_timeout_dbg[e] = 1'b1;
           else                          mshr_issue_subs_dbg[e]    = 1'b1;
         end
@@ -2751,13 +2782,22 @@ module mempool_group_mshr
               rc_free_b_subs_sum_inc = rc_free_b_subs_sum_inc + 16'(mshr_q[e].sub_reqs_num);
             end
           end
+          // Only classify entries whose OWN per-type window is non-zero. A 0-window class is issued
+          // at birth (issued=1, hold_cnt=0) and was never held, so counting it here reports a
+          // phantom "timeout" for every such request -- e.g. hold_window_single=0 with
+          // hold_window_burst=63 made HoldWindowMax!=0 and mislabelled all 8k scalar issues as
+          // timeout_single. (Same bug class as the mshr_issue_timeout_dbg wave signals, fixed there.)
           if ((HoldWindowMax != 0) && mshr_q_valid[e] && mshr_q[e].issued && !stat_issued_shadow_q[e]) begin
             if (mshr_q[e].burst_len == BurstLenWidth'(1)) begin
-              if (mshr_q[e].hold_cnt == '0) rc_hold_to_s_inc    = rc_hold_to_s_inc + 1'b1;
-              else                          rc_hold_early_s_inc = rc_hold_early_s_inc + 1'b1;
+              if (HoldWindowSingle != 0) begin
+                if (mshr_q[e].hold_cnt == '0) rc_hold_to_s_inc    = rc_hold_to_s_inc + 1'b1;
+                else                          rc_hold_early_s_inc = rc_hold_early_s_inc + 1'b1;
+              end
             end else begin
-              if (mshr_q[e].hold_cnt == '0) rc_hold_to_b_inc    = rc_hold_to_b_inc + 1'b1;
-              else                          rc_hold_early_b_inc = rc_hold_early_b_inc + 1'b1;
+              if (HoldWindowBurst != 0) begin
+                if (mshr_q[e].hold_cnt == '0) rc_hold_to_b_inc    = rc_hold_to_b_inc + 1'b1;
+                else                          rc_hold_early_b_inc = rc_hold_early_b_inc + 1'b1;
+              end
             end
           end
         end
@@ -2839,7 +2879,8 @@ module mempool_group_mshr
                                  input logic [63-1:0] cache_fill,
                                  input logic [63-1:0] cache_evict,
                                  input logic [63-1:0] cache_store_update,
-                                 input logic [63-1:0] cache_amo_inval);
+                                 input logic [63-1:0] cache_amo_inval,
+                                 input logic [63-1:0] cache_self_inval);
         real avg_mshr_valid;
         real avg_mshr_util;
         real avg_subreq_valid;
@@ -2909,9 +2950,9 @@ module mempool_group_mshr
         $display("  resps: from_mshr=%0d from_bypass=%0d",
                  resp_mshr, resp_bypass);
         if (EnableRespCache) begin
-          $display("  cache: valid_avg=%0f valid_max=%0d hit=%0d fill=%0d evict=%0d store_update=%0d amo_inval=%0d",
+          $display("  cache: valid_avg=%0f valid_max=%0d hit=%0d fill=%0d evict=%0d store_update=%0d amo_inval=%0d self_inval=%0d",
                    avg_cache_valid, cache_max_valid, cache_hit, cache_fill, cache_evict,
-                   cache_store_update, cache_amo_inval);
+                   cache_store_update, cache_amo_inval, cache_self_inval);
           $display("  cache: hit_rate(hit/(hit+evict))=%0f", cache_hit_rate);
         end
       endtask
@@ -3014,6 +3055,7 @@ module mempool_group_mshr
         stat_cache_evict_cycle = '0;
         stat_cache_store_update_cycle = '0;
         stat_cache_amo_inval_cycle = '0;
+        stat_cache_self_inval_cycle = '0;
         for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
           for (int port_i = 1; port_i < NumRemoteRespPortsPerTile; port_i++) begin
             if (resp_out_valid[tile_i][port_i] && resp_out_ready[tile_i][port_i]) begin
@@ -3075,6 +3117,19 @@ module mempool_group_mshr
               stat_cache_fill_cycle = stat_cache_fill_cycle + 1'b1;
             end
           end
+          // Cache self-invalidate (idea 1): a CACHED way that goes invalid this cycle without an
+          // AMO and without being reclaimed by an allocation (alloc-reclaim keeps mshr_d_valid=1)
+          // is a self-invalidation. Counting it keeps the cache lifecycle balanced
+          // (fills == evict + amo_inval + self_inval + net-resident) and stops it from silently
+          // deflating stat_cache_evict (which would inflate hit_rate=hit/(hit+evict)).
+          if (CacheSelfInval) begin
+            for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
+              if (mshr_q_valid[mshr_i] && (mshr_q[mshr_i].state == MSHR_CACHED) &&
+                  !mshr_d_valid[mshr_i] && !amo_invalidate) begin
+                stat_cache_self_inval_cycle = stat_cache_self_inval_cycle + 1'b1;
+              end
+            end
+          end
         end
       end
 
@@ -3110,6 +3165,7 @@ module mempool_group_mshr
           stat_cache_evict <= 0;
           stat_cache_store_update <= 0;
           stat_cache_amo_inval <= 0;
+          stat_cache_self_inval <= 0;
           stat_trace_q <= 1'b0;
         end else begin
           stat_trace_q <= csr_trace_any_i;
@@ -3142,6 +3198,7 @@ module mempool_group_mshr
           stat_cache_evict_next = stat_cache_evict;
           stat_cache_store_update_next = stat_cache_store_update;
           stat_cache_amo_inval_next = stat_cache_amo_inval;
+          stat_cache_self_inval_next = stat_cache_self_inval;
 
           if (csr_trace_any_i) begin
             stat_cycle_count_next = stat_cycle_count + 1;
@@ -3182,6 +3239,7 @@ module mempool_group_mshr
             stat_cache_store_update_next =
                 stat_cache_store_update + stat_cache_store_update_cycle;
             stat_cache_amo_inval_next = stat_cache_amo_inval + stat_cache_amo_inval_cycle;
+            stat_cache_self_inval_next = stat_cache_self_inval + stat_cache_self_inval_cycle;
           end
 
           print_period = (StatsPeriod != 0) && csr_trace_any_i &&
@@ -3212,7 +3270,8 @@ module mempool_group_mshr
                         stat_cache_fill_next,
                         stat_cache_evict_next,
                         stat_cache_store_update_next,
-                        stat_cache_amo_inval_next);
+                        stat_cache_amo_inval_next,
+                        stat_cache_self_inval_next);
             $display("  reqs_by_class: merged_single=%0d merged_burst=%0d alloc_single=%0d alloc_burst=%0d",
                      stat_req_merge_single_next, stat_req_merge_burst_next,
                      stat_req_alloc_single_next, stat_req_alloc_burst_next);
@@ -3262,6 +3321,7 @@ module mempool_group_mshr
             stat_cache_evict <= 0;
             stat_cache_store_update <= 0;
             stat_cache_amo_inval <= 0;
+            stat_cache_self_inval <= 0;
           end else begin
             stat_cycle_count <= stat_cycle_count_next;
             stat_mshr_valid_acc <= stat_mshr_valid_acc_next;
@@ -3291,6 +3351,7 @@ module mempool_group_mshr
             stat_cache_evict <= stat_cache_evict_next;
             stat_cache_store_update <= stat_cache_store_update_next;
             stat_cache_amo_inval <= stat_cache_amo_inval_next;
+            stat_cache_self_inval <= stat_cache_self_inval_next;
           end
         end
       end
@@ -3321,7 +3382,8 @@ module mempool_group_mshr
                       stat_cache_fill,
                       stat_cache_evict,
                       stat_cache_store_update,
-                      stat_cache_amo_inval);
+                      stat_cache_amo_inval,
+                      stat_cache_self_inval);
           $display("  reqs_by_class: merged_single=%0d merged_burst=%0d alloc_single=%0d alloc_burst=%0d",
                    stat_req_merge_single, stat_req_merge_burst,
                    stat_req_alloc_single, stat_req_alloc_burst);
@@ -3370,11 +3432,13 @@ module mempool_group_mshr
       mshr_entry_in_its_bank: assert property(
         @(posedge clk_i) disable iff (!rst_ni)
         mshr_q_valid[mshr_i] |->
-          (mshr_bank_of(mshr_q[mshr_i].base_addr, mshr_q[mshr_i].tgt_group_id) ==
+          (mshr_bank_of(mshr_q[mshr_i].base_addr, mshr_q[mshr_i].tgt_group_id,
+                        mshr_q[mshr_i].burst_len == BurstLenWidth'(1)) ==
            BankIdW'(mshr_i / MshrWaysPerBank)))
         else $fatal(1, "MSHR entry %0d not in its address bank (got %0d, expected %0d)",
                     mshr_i,
-                    mshr_bank_of(mshr_q[mshr_i].base_addr, mshr_q[mshr_i].tgt_group_id),
+                    mshr_bank_of(mshr_q[mshr_i].base_addr, mshr_q[mshr_i].tgt_group_id,
+                                 mshr_q[mshr_i].burst_len == BurstLenWidth'(1)),
                     mshr_i / MshrWaysPerBank);
     end
   endgenerate
