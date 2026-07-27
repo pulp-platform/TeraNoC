@@ -216,6 +216,23 @@ package mempool_pkg;
   localparam int unsigned ROCacheSizeByte   = 8192;
   localparam int unsigned ROCacheSets       = 2;
 
+  // R-MCAST (docs/icache_rmcast_design.md): deliver a merged RO-cache instruction-line response to
+  // ALL waiting tile icaches in ONE cycle instead of unrolling the requester bitmask one id per
+  // cycle. The 512-b R datapath is already replicated to every slave port by the group axi_mux, so
+  // this is a control-only change.
+  localparam bit ROCacheRMcast = `ifdef RO_CACHE_R_MCAST `RO_CACHE_R_MCAST `else 1'b0 `endif;
+  // Eligibility is an ELABORATION CONSTANT, not a runtime predicate -- that is what makes the design
+  // safe (every reviewed alternative died on per-transaction bookkeeping). The two guards give us:
+  //   ROCacheLineWidth == AxiDataWidth : the cache's r_offset is tied '1 -> one R beat == one line.
+  //   ICacheLineWidth  <= AxiDataWidth : BeatsPerRefill == 1 -> a tile refill has ar.len == 0, so
+  //                                      r.last == 1 is STRUCTURAL (no burst tracking can go wrong).
+  // terapool_spatz4_fpu: 512==512 and 256<=512 -> enabled. mempool/systolic (4 cores/tile) have
+  // ICacheLineWidth = 1024 > 512 -> the guard FAILS CLOSED (that config would otherwise be the
+  // reachable silent-corruption case).
+  localparam bit ROCacheMcastOk = ROCacheRMcast &&
+                                  (ROCacheLineWidth == AxiDataWidth) &&
+                                  (ICacheLineWidth  <= AxiDataWidth);
+
   localparam int unsigned ROCacheNumAddrRules = 4;
   typedef struct packed {
     logic enable;
