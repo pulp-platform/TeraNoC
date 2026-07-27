@@ -25,6 +25,11 @@ module snitch_read_only_cache #(
   parameter int unsigned AxiUserWidth = 0,
   parameter int unsigned MaxTrans     = 0,
   parameter int unsigned NrAddrRules  = 1,
+  // R-MCAST (docs/icache_rmcast_design.md): one merged instruction-line response delivered to all
+  // waiting tile icaches in a single beat. McastPortMask == '0 disables it (everything const-folds).
+  parameter int unsigned McastNumPorts = 1,
+  parameter int unsigned McastIdShift  = 0,
+  parameter logic [McastNumPorts-1:0] McastPortMask = '0,
   parameter type slv_req_t = logic,
   parameter type slv_rsp_t = logic,
   parameter type mst_req_t = logic,
@@ -40,7 +45,9 @@ module snitch_read_only_cache #(
   input  slv_req_t                                 axi_slv_req_i,
   output slv_rsp_t                                 axi_slv_rsp_o,
   output mst_req_t                                 axi_mst_req_o,
-  input  mst_rsp_t                                 axi_mst_rsp_i
+  input  mst_rsp_t                                 axi_mst_rsp_i,
+  // R-MCAST: N-hot 'deliver this R beat to these slave ports'; '0 for ordinary unicast beats.
+  output logic [McastNumPorts-1:0]                 r_mcast_mask_o
 );
 
   `include "axi/typedef.svh"
@@ -89,6 +96,15 @@ module snitch_read_only_cache #(
   index_t slv_ar_waiting;
   index_t dec_ar;
 
+  // R-MCAST (docs/icache_rmcast_design.md): ids retired together by one multicast R beat. Only
+  // the Cache master port can produce them; Bypass is always '0.
+  logic [2**AxiIdWidth-1:0]                  r_mcast_idset;
+  logic [NoMstPorts-1:0][2**AxiIdWidth-1:0]  demux_r_pop_mask;
+  always_comb begin
+    demux_r_pop_mask          = '0;
+    demux_r_pop_mask[Cache]   = r_mcast_idset;
+  end
+
   axi_demux #(
     .AxiIdWidth  ( AxiIdWidth    ),
     .aw_chan_t   ( axi_aw_chan_t ),
@@ -115,7 +131,8 @@ module snitch_read_only_cache #(
     .slv_ar_select_i ( slv_ar_select ),
     .slv_resp_o      ( axi_slv_rsp_o ),
     .mst_reqs_o      ( demux_req     ),
-    .mst_resps_i     ( demux_rsp     )
+    .mst_resps_i     ( demux_rsp     ),
+    .mst_r_pop_mask_i( demux_r_pop_mask )
   );
 
   typedef struct packed {
@@ -253,10 +270,13 @@ module snitch_read_only_cache #(
   // The axi_to_cache module converts AXI requests to cache requests and
   // reconstructs AXI responses from the cache's responses
   snitch_axi_to_cache #(
-    .MaxTrans ( MaxTrans   ),
-    .req_t    ( axi_req_t  ),
-    .resp_t   ( axi_resp_t ),
-    .CFG      ( CFG        )
+    .MaxTrans      ( MaxTrans      ),
+    .req_t         ( axi_req_t     ),
+    .resp_t        ( axi_resp_t    ),
+    .McastNumPorts ( McastNumPorts ),
+    .McastIdShift  ( McastIdShift  ),
+    .McastPortMask ( McastPortMask ),
+    .CFG           ( CFG           )
   ) i_axi_to_cache (
     .clk_i,
     .rst_ni,
@@ -273,7 +293,9 @@ module snitch_read_only_cache #(
     .rsp_ready_o ( in_rsp_ready     ),
     // AXI
     .slv_req_i   ( demux_req[Cache] ),
-    .slv_rsp_o   ( demux_rsp[Cache] )
+    .slv_rsp_o   ( demux_rsp[Cache] ),
+    .r_mcast_mask_o ( r_mcast_mask_o ),
+    .r_mcast_idset_o( r_mcast_idset  )
   );
 
   // The lookup module contains the actual cache RAMs and performs lookups.

@@ -493,11 +493,27 @@ module mempool_group
     assign {axi_dma_resp[i],axi_tile_resp[i*NumTilesPerDma+:NumTilesPerDma]} = axi_slv_resp[i*(NumTilesPerDma+1)+:NumTilesPerDma+1];
   end : gen_axi_slv_vec
 
+  // R-MCAST (docs/icache_rmcast_design.md): which axi_slv_req slots are TILE ports (eligible to share
+  // one multicast R beat) rather than DMA ports. MIRRORS the packing above -- {dma, tiles} per DMA
+  // group means slot i*(NumTilesPerDma+1)+NumTilesPerDma is the DMA and the ones below it are tiles.
+  // Within a tile port the icache is further selected by id[SlvIdWidth-1:0]==0 inside the RO cache,
+  // so this mask only has to separate tiles from DMAs. For terapool_spatz4_fpu: 17'h0FFFF.
+  // '0 (feature off, or a config where the elaboration guard fails) => plain unicast everywhere.
+  function automatic logic [NumTilesPerGroup+NumDmasPerGroup-1:0] icache_slv_mask();
+    icache_slv_mask = '0;
+    for (int unsigned i = 0; i < NumDmasPerGroup; i++)
+      for (int unsigned t = 0; t < NumTilesPerDma; t++)
+        icache_slv_mask[i*(NumTilesPerDma+1) + t] = 1'b1;
+  endfunction
+  localparam logic [NumTilesPerGroup+NumDmasPerGroup-1:0] IcacheSlvMask =
+      ROCacheMcastOk ? icache_slv_mask() : '0;
+
   axi_hier_interco #(
     .NumSlvPorts    (NumTilesPerGroup+NumDmasPerGroup),
     .NumMstPorts    (NumAXIMastersPerGroup           ),
     .Radix          (AxiHierRadix                    ),
     .EnableCache    (32'hFFFFFFFF                    ),
+    .McastPortMask  (IcacheSlvMask                   ),
     .CacheLineWidth (ROCacheLineWidth                ),
     .CacheSizeByte  (ROCacheSizeByte                 ),
     .CacheSets      (ROCacheSets                     ),
