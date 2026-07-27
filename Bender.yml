@@ -29,6 +29,9 @@ export_include_dirs:
 sources:
   # Level 0
   - hardware/src/mempool_pkg.sv
+  # R-MCAST multicast R-channel variant of axi_mux (docs/icache_rmcast_design.md); must precede
+  # axi_hier_interco.sv, which instantiates it.
+  - hardware/src/axi_mux_mcast.sv
   - hardware/src/axi_hier_interco.sv
   - hardware/src/tcdm_id_remapper.sv
   - hardware/src/mempool_cc.sv
