@@ -122,12 +122,12 @@ tile_id_remap ?= 0
 # the fold and the field-select hash -- terapool has 16 tiles x 2 remote req ports = 32 concurrent
 # request slots, so 32 entries has ~zero headroom. 64 (16 banks x 4 ways) was the measured-safe
 # value; revert to 64 if the collapse reproduces.
-group_mshr_num           ?= 32
+group_mshr_num           ?= 128
 # Ways (entries) per bank; banks = group_mshr_num / group_mshr_ways_per_bank. 16 entries / 2 ways
 # = 8 banks x 2 ways (user experiment). WARNING: 16 entries is HALF of the 32 concurrent request
 # slots (16 tiles x 2 remote ports) -- 32 entries already collapsed the matmul ~14x, so 16 is very
 # likely to collapse harder. Revert to 64 (16 banks x 4 ways) for the measured-safe design.
-group_mshr_ways_per_bank ?= 4
+group_mshr_ways_per_bank ?= 8
 # Max sub-requests coalesced into one MSHR entry.
 group_mshr_merge_reqs    ?= 8
 # Admit single-word reqs into MSHR merge pool (1) or let them bypass (0).
@@ -182,7 +182,7 @@ group_mshr_hold_window   ?= 0
 # its fetch the same cycle (no hold). (The uniform value above only applies to a class that has no
 # override.)
 group_mshr_hold_window_single ?= 0
-group_mshr_hold_window_burst  ?= 16
+group_mshr_hold_window_burst  ?= 63
 # Early-release subscriber target: a held entry issues its fetch as soon as this many
 # requesters have merged into it. Legal range [2, group_mshr_merge_reqs].
 group_mshr_hold_subs     ?= 2
@@ -221,16 +221,30 @@ tcdm_burst_interleave    ?= 1
 # for the user's 32-entry experiment: bank = word_addr[group_mshr_bank_shift +: BankIdW], which
 # needs the shift tuned to the data stride N (below).
 group_mshr_bank_hash     ?= 3
-# BankHash==3 field-select shift: bank = word_addr[shift +: BankIdW] on the reconstructed LINEAR
-# WORD address (addr_key is already byte-offset-trimmed, so word bit b = byte bit b+2).
-# 5 = word[7:5] = byte[9:7]: the A-load stride is N=32 words = 0x80 bytes = byte bit 7, so 8
-# consecutive stride-N A-loads span byte[9:7] (= word[7:5]) -> select those 3 bits to spread them
-# across the 8 banks. shift = log2(N_words) = log2(32) = 5. This is DATA(N)-DEPENDENT: for a
-# different N, set shift = log2(N) (e.g. N=8 -> 3, N=64 -> 6); that is why a field-select ideally
-# wants SW configurability, whereas group_mshr_bank_hash=2 (fold) needs none.
-# (An earlier value of 3 was from a shift sweep on biased/warm-up-contaminated capture data; the
-# correct value for the real N=32 timed region is 5.)
-group_mshr_bank_shift    ?= 5
+# BankHash==3 field-select. Per request type (mempool_group_mshr.sv:232):
+#
+#     bank = word_addr[shift +: $clog2(mshr_banks)]
+#
+#     word_addr  = byte_addr >> 2      (tcdm_addr_t is word-granular, mempool_pkg.sv:74)
+#     mshr_banks = group_mshr_num / group_mshr_ways_per_bank   (128/8 = 16 here)
+#
+# shift = $clog2(smallest stride IN WORDS between concurrent keys of that type):
+#     scalar : shift = $clog2(N)               = $clog2(32) = 5   # N = A row stride
+#     burst  : shift = $clog2(MaxBurstWords)   = $clog2(16) = 4   # the burst stride
+#
+# Floor: shift >= $clog2(MaxBurstWords) = 4 -- below that every burst base has zero low
+# bits and all bursts collapse onto one bank. Retune `_single` when N changes.
+group_mshr_bank_shift        ?= 5
+# Per-type overrides. Both default to group_mshr_bank_shift above; setting them equal is
+# bit-identical to the old single-shift behaviour.
+group_mshr_bank_shift_single ?= 5
+group_mshr_bank_shift_burst  ?= 4
+# Cache self-invalidate (idea 1). 0 = OFF (bit-identical baseline). 1 = a CACHED entry frees itself
+# once it has served its per-type sharing target (group_mshr_hold_subs_single scalar /
+# group_mshr_hold_subs_burst burst), so a done cache line becomes an INVALID way the invalid-first
+# allocator prefers -- keeping other cache lines resident longer. Reclaim-on-demand still applies,
+# so an unreached target never leaks a way. Opt-in for A/B; leave 0 until measured.
+group_mshr_cache_self_inval ?= 1
 
 ###########################
 ## 3. AXI and DMA Config
