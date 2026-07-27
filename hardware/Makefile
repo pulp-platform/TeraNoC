@@ -33,6 +33,11 @@ questa_args      ?=
 questa_config    ?=
 questa_voptargs ?= +acc
 questa_wlf      ?= vsim.wlf
+# Soft fd limit for the sim shell. The Spatz/Snitch tracers + DMA/profiling hold ~1030 files open
+# at once on a 256-core run (4 streams x 256 harts), which overflows the default 1024 and silently
+# drops the last cores' traces (EMFILE -> [FOFIW]/vsim-PLI-3085). Must exceed that; 8192 is the
+# smallest power of two comfortably above. Override with sim_ulimit_n=... if the host caps lower.
+sim_ulimit_n    ?= 8192
 # VCS Configuration
 vcs_version      ?= 2024.09-zr
 vcs_cmd          ?= vcs-$(vcs_version)
@@ -50,6 +55,10 @@ verilator_top    ?= mempool_tb_verilator
 python           ?= python3
 # Enable Snitch tracing
 snitch_trace     ?= 1
+# Per-Spatz-core vector trace (working_dir/spatz spatz_mempool_cc.sv). 0 = emit only inside the
+# benchmark's csr_trace region (default); 1 = force always-on for the whole sim (heavy: one line
+# per active cycle per core). Files land in $(buildpath); post-process with `make spatz-trace`.
+spatz_trace      ?= 0
 
 # Enable spatz (automatically set when using spatz configuration)
 spatz            ?= 1
@@ -210,6 +219,11 @@ tcdm_burst_interleave    ?=
 # 1 = xorshift-mixed fold that de-correlates address bits of one residue class (breaks temporal
 # bank concentration). Both preserve coalescing (pure function of {group, line addr}).
 group_mshr_bank_hash     ?=
+# Per-request-type bank-select shifts for group_mshr_bank_hash=3 (override the uniform
+# group_mshr_bank_shift): _single applies to 1-word (scalar) requests, _burst to multi-beat (vector)
+# ones. Empty = inherit group_mshr_bank_shift (bit-identical to the single-shift behaviour).
+group_mshr_bank_shift_single ?=
+group_mshr_bank_shift_burst  ?=
 # Cache self-invalidate (idea 1, docs/mshr_bank_hash_design.md). 0/unset = OFF (bit-identical);
 # 1 = a CACHED entry frees itself once it has served its per-type sharing target
 # (group_mshr_hold_subs_single for scalar/single, group_mshr_hold_subs_burst for burst), turning a
@@ -257,6 +271,12 @@ endif
 ifeq ($(group_mshr_bank_dump), 1)
   vlog_defs += -DGROUP_MSHR_BANK_DUMP
 endif
+ifneq ($(strip $(group_mshr_bank_shift_single)),)
+  vlog_defs += -DGROUP_MSHR_BANK_SHIFT_SINGLE=$(group_mshr_bank_shift_single)
+endif
+ifneq ($(strip $(group_mshr_bank_shift_burst)),)
+  vlog_defs += -DGROUP_MSHR_BANK_SHIFT_BURST=$(group_mshr_bank_shift_burst)
+endif
 ifneq ($(strip $(group_mshr_bank_shift)),)
   vlog_defs += -DGROUP_MSHR_BANK_SHIFT=$(group_mshr_bank_shift)
 endif
@@ -271,6 +291,7 @@ vlog_defs += -DZFINX=$(zfinx)
 vlog_defs += -DZQUARTERINX=$(zquarterinx)
 vlog_defs += -DXDIVSQRT=$(xDivSqrt)
 vlog_defs += -DSNITCH_TRACE=$(snitch_trace)
+vlog_defs += -DSPATZ_TRACE=$(spatz_trace)
 # --------------------------
 # Spatz Core Settings
 # --------------------------
@@ -489,12 +510,14 @@ $(buildpath)/compile.tcl: $(bender) $(config_mk) Makefile $(MEMPOOL_DIR)/Bender.
 .PHONY: sim
 sim: clean-dasm compile
 	cd $(buildpath) && \
+	ulimit -n $(sim_ulimit_n) 2>/dev/null || true; \
 	$(questa_cmd) vsim -voptargs=$(questa_voptargs) -wlf $(questa_wlf) $(questa_args) $(library).$(top_level) -do "set config ${config}" -do ../scripts/questa/run.tcl
 	./scripts/return_status.sh $(buildpath)/transcript
 
 .PHONY: simc
 simc: clean-dasm compile
 	cd $(buildpath) && \
+	ulimit -n $(sim_ulimit_n) 2>/dev/null || true; \
 	$(questa_cmd) vsim -c -voptargs=$(questa_voptargs) -wlf $(questa_wlf) $(questa_args) $(library).$(top_level) -do "log -r *" -do "run -a"
 	./scripts/return_status.sh $(buildpath)/transcript
 
@@ -684,6 +707,12 @@ $(buildpath)/%.trace: $(buildpath)/%.dasm
 tracevis:
 	$(MEMPOOL_DIR)/scripts/tracevis.py $(preload) $(buildpath)/*.trace -o $(buildpath)/tracevis.json
 
+# Post-process the per-Spatz-core vector traces (trace_spatz_insn_hart_*.log +
+# trace_spatz_cyc_hart_*.log emitted by spatz_mempool_cc.sv) into readable per-core timelines and
+# FU-utilization / stall-reason summaries. Reads from $(buildpath); writes $(buildpath)/spatz_traces.
+spatz-trace:
+	$(python) $(ROOT_DIR)/scripts/gen_spatz_trace.py --buildpath $(buildpath) --out $(buildpath)/spatz_traces
+
 ############################
 # NoC traffic visualization #
 ############################
@@ -719,6 +748,7 @@ verilate_test: clean-dasm $(VERILATOR_EXE) $(buildpath) $(tests_verilate)
 $(tests_vsim): $(test_result_dir_vsim)/%.out : $(app_path)/%
 	mkdir -p $(test_result_dir_vsim)
 	cd $(buildpath) && \
+	ulimit -n $(sim_ulimit_n) 2>/dev/null || true; \
 	$(questa_cmd) vsim -c $(questa_args) +PRELOAD=$< $(library).$(top_level) -do "run -a"
 	./scripts/return_status.sh $(buildpath)/transcript > $@
 
