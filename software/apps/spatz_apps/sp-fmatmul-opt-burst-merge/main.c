@@ -238,7 +238,16 @@ int main() {
 
   // Set kernel size - this determines how many rows of C are computed per iteration
   // kernel_size = 8 means we compute 8 rows at a time (using 8 vector registers)
-  kernel_size = 8;
+  // S1 experiment (docs/spatz_bottleneck_analysis_and_plan.md): kernel_size also selects LMUL --
+  //   8 -> matmul_8xVL (e32,m2 -> vl=32, 8 accumulators)
+  //   4 -> matmul_4xVL (e32,m4 -> vl=64, 4 accumulators)
+  //   2 -> matmul_2xVL (e32,m8 -> vl=128, 2 accumulators)
+  // Higher LMUL = fewer, longer vector ops = more FPU work per load => the 109-cycle load latency
+  // needs less memory-level parallelism to hide. Override with DEFINES=-DKERNEL_SIZE=4.
+#ifndef KERNEL_SIZE
+#define KERNEL_SIZE 8
+#endif
+  kernel_size = KERNEL_SIZE;
 
   //========================================================--
   // STEP 2: DISTRIBUTE WORK ACROSS CORES
@@ -310,6 +319,8 @@ int main() {
   // Print status message from core 0
   if (cid == 0) {
     printf("finish copy\n");
+    printf("N, P, m_start, m_end, p_start, p_end = %u, %u, %u, %u, %u, %u\n",
+        gemm_l.N, gemm_l.P, m_start, m_end, p_start, p_end);
   }
 
   // Wait for all cores to finish data transfer
@@ -372,7 +383,7 @@ int main() {
       timer_start = mempool_get_timer();
 
       // Start benchmark instrumentation
-      if (cid == 0)
+      // if (cid == 0)
         mempool_start_benchmark();
 
 #if COLDSTART_GROUP_SYNC
@@ -402,7 +413,7 @@ int main() {
       mempool_barrier(num_cores);
 
       // Stop benchmark instrumentation
-      if (cid == 0)
+      // if (cid == 0)
         mempool_stop_benchmark();
 
       // Calculate elapsed time
