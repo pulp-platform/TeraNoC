@@ -275,3 +275,34 @@ xpulpimg ?= 0
 
 # Make sure zfinx is off for Spatz configuration
 zfinx ?= 0
+
+# --- VLSU / ROB area-timing cleanups (docs/spatz_mlp_design_plan.md §5.2, §5.3) ---
+# Both are deliberate netlist changes when ON (they delete provably unreachable
+# silicon), so they are NOT bit-identical to the 0 build -- keep them 0 until each has
+# its own A/B + LEC run, and commit them separately.
+#
+# The two knobs below are AREA-reduction / timing cleanups, NOT performance changes. They
+# deliberately change the netlist (they remove hardware), so unlike block-alloc they are NOT
+# bit-identical when off -- keep them OFF unless deliberately measuring area, and give each its
+# own A/B + LEC run and its own commit.
+#
+# R1: reorder_buffer id_valid_o from status_cnt_q instead of the id_valid_q free-id
+# bitmap. 0 = legacy bitmap. 1 = -NumWords(32) flops, -1 decoder and -2 32:1 muxes per
+# ROB (x4 ROBs/core), and ~6 fewer logic levels on the id_valid_o -> mem_req_lvalid path.
+spatz_rob_cnt_idvalid ?= 0
+# R2: VLSU commit-metadata FIFO DEPTH NrOutstandingLoads(32) -> NrParallelInstructions(4),
+# the most entries that can ever be resident (the push is gated on the per-id
+# mem_insn_pending_q bit). 0 = legacy depth. 1 = -28 x 37 flops + a 37b 32:1 read mux.
+spatz_vlsu_commit_qmin ?= 0
+
+# --- Block ROB-id reservation (docs/spatz_mlp_design_plan.md §5.1, the main MLP lever) ---
+# Unlike R1/R2 above, this one IS bit-identical when 0 (every added statement is guarded by a
+# (BlockWords > 1) elaboration constant).
+# 0 = OFF: the port-0 burst allocator walks its ROB ids one per cycle, so every 16-beat burst
+# waits 18 cycles between becoming eligible and its request handshake (1 decide + 16 walk +
+# 1 send). 1 = ON: ROB0 grants the whole 16-id window in a single cycle -- decide -> reserve ->
+# send = 3 cycles -- removing 15 cyc/burst = 30 cyc/load from the load recurrence the FPU-idle
+# analysis is short on (T = 88.6 cyc today vs the W = 64 target). The ROB's own room guard is
+# status_cnt_q <= 16 (NON-STRICT: after burst 1 the count is exactly 16, so a strict < would
+# silently re-serialise burst 2 and look like a null result).
+spatz_vlsu_block_alloc ?= 1
