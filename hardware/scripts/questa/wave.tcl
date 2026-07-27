@@ -182,6 +182,18 @@ proc add_group_mshr_wave {g NumX NumY} {
     # full, so it bypassed to the NoC without one (per-request vector + running count).
     catch {add wave -noupdate -group $L -group BankFullBypass ${m}/req_bankfull_bypass_dbg}
     catch {add wave -noupdate -group $L -group BankFullBypass -radix unsigned ${m}/req_bankfull_bypass_cnt_dbg}
+    # Cache lifecycle counters (present only when group_mshr_enable_stats=1). A CACHED line
+    # leaves the cache via evict (alloc reclaim), amo_inval (AMO), or self_inval (idea 1
+    # self-invalidate at the served target). self_inval is the NEW drain path -- without it the
+    # fill vs evict accounting does not balance and hit_rate=hit/(hit+evict) reads high. The
+    # *_cycle signal pulses every cycle (always live); the bare accumulators advance only while
+    # csr_trace is active (benchmark-gated). served_cnt (per entry) is under Entries/mshr_q.
+    catch {add wave -noupdate -group $L -group CacheStats -radix unsigned ${m}/stat_cache_self_inval_cycle}
+    catch {add wave -noupdate -group $L -group CacheStats -radix unsigned ${m}/stat_cache_self_inval}
+    catch {add wave -noupdate -group $L -group CacheStats -radix unsigned ${m}/stat_cache_evict}
+    catch {add wave -noupdate -group $L -group CacheStats -radix unsigned ${m}/stat_cache_amo_inval}
+    catch {add wave -noupdate -group $L -group CacheStats -radix unsigned ${m}/stat_cache_fill}
+    catch {add wave -noupdate -group $L -group CacheStats -radix unsigned ${m}/stat_cache_hit}
 
     # --- Entry table (state / base_addr / resp_buf_cnt / sub_reqs / beat_pending ...) ---
     catch {add wave -noupdate -group $L -group Entries ${m}/mshr_q_valid}
@@ -236,6 +248,65 @@ proc add_group_mshr_wave {g NumX NumY} {
 for {set g 0} {$g < $NumGroups_noc} {incr g} {
     add_group_mshr_wave $g $NumX_noc $NumY_noc
 }
+
+# Spatz vector-core signals for one core (group g, tile t, core c). Answers: what vector
+# instruction is executing, why the core is stalled, and which lanes/FPUs do useful work each
+# cycle. Every add is catch-wrapped so non-Spatz configs / absent submodules skip cleanly.
+proc add_spatz_core_wave {g t c NumX NumY} {
+    set gx [expr {$g / $NumX}]
+    set gy [expr {$g % $NumY}]
+    set cc "sim:/mempool_tb/dut/i_mempool_cluster/gen_groups_x\[${gx}\]/gen_groups_y\[${gy}\]/gen_rtl_group/i_group/i_mempool_group/gen_tiles\[${t}\]/i_tile/gen_cores\[${c}\]/gen_mempool_cc/riscv_core"
+    set s "${cc}/i_spatz"
+    # Skip if this core has no Spatz instance (non-Spatz config).
+    if {[catch {examine ${s}/i_controller/spatz_req_valid_o}]} { return }
+    set L "SPATZ_G${g}_T${t}_C${c}"
+
+    # --- Trace cycle counter (FIRST, so it reads as the time base for everything below) ---
+    # sp_cycle is the tracer's own free-running counter (spatz_mempool_cc.sv: reset to 0, +1 per
+    # posedge clk_i). It is the EXACT `cyc` field printed in trace_spatz_{insn,cyc,fplsu}_hart_*.log
+    # (and identical to the Snitch tracer's `cycle` in trace_hart_*.dasm), so a cycle number read
+    # here jumps straight to the matching trace line. Waveform time relation: ns = 2*cyc + 10
+    # (ClockPeriod 2ns, reset released at 10ns). Sim-only (translate_off), so it is catch-guarded.
+    catch {add wave -noupdate -group $L -radix unsigned ${cc}/sp_cycle}
+
+    # --- Issue / decode: which vector instruction is executing, and the in-flight id set ---
+    catch {add wave -noupdate -group $L -group Issue ${s}/i_controller/spatz_req_valid_o}
+    catch {add wave -noupdate -group $L -group Issue ${s}/i_controller/spatz_req_o}
+    catch {add wave -noupdate -group $L -group Issue ${s}/i_controller/running_insn_q}
+    catch {add wave -noupdate -group $L -group Issue ${s}/i_controller/running_insn_full}
+    # --- Stall + reason (issue stage + dependency scoreboard) ---
+    catch {add wave -noupdate -group $L -group Stall ${s}/i_controller/stall}
+    catch {add wave -noupdate -group $L -group Stall ${s}/i_controller/vfu_stall}
+    catch {add wave -noupdate -group $L -group Stall ${s}/i_controller/vlsu_stall}
+    catch {add wave -noupdate -group $L -group Stall ${s}/i_controller/vsldu_stall}
+    catch {add wave -noupdate -group $L -group Stall ${s}/i_controller/sb_port_has_deps_dbg}
+    catch {add wave -noupdate -group $L -group Stall ${s}/i_controller/sb_port_enable_dbg}
+    # FP sequencer (scalar FP path) stall reasons.
+    catch {add wave -noupdate -group $L -group Stall ${s}/gen_fpu_sequencer/i_fpu_sequencer/stall}
+    catch {add wave -noupdate -group $L -group Stall ${s}/gen_fpu_sequencer/i_fpu_sequencer/lsu_stall}
+    catch {add wave -noupdate -group $L -group Stall ${s}/gen_fpu_sequencer/i_fpu_sequencer/move_stall}
+    catch {add wave -noupdate -group $L -group Stall ${s}/gen_fpu_sequencer/i_fpu_sequencer/operands_available}
+    # --- VFU: per-lane IPU + per-FPU useful work (int_ipu_result_valid / fpu_result_valid carry
+    # ELENB bits per lane; a lane worked this cycle if any of its bits are set). ---
+    catch {add wave -noupdate -group $L -group VFU ${s}/i_vfu/state_q}
+    catch {add wave -noupdate -group $L -group VFU ${s}/i_vfu/int_ipu_busy}
+    catch {add wave -noupdate -group $L -group VFU ${s}/i_vfu/int_ipu_result_valid}
+    catch {add wave -noupdate -group $L -group VFU ${s}/i_vfu/fpu_result_valid}
+    catch {add wave -noupdate -group $L -group VFU ${s}/i_vfu/is_ipu_busy}
+    catch {add wave -noupdate -group $L -group VFU ${s}/i_vfu/is_fpu_busy}
+    catch {add wave -noupdate -group $L -group VFU ${s}/i_vfu/vfu_rsp_valid_o}
+    # --- VLSU: memory-beat activity + FSM state ---
+    catch {add wave -noupdate -group $L -group VLSU ${s}/i_vlsu/state_q}
+    catch {add wave -noupdate -group $L -group VLSU ${s}/i_vlsu/spatz_mem_req_valid_o}
+    catch {add wave -noupdate -group $L -group VLSU ${s}/i_vlsu/spatz_mem_req_ready_i}
+    catch {add wave -noupdate -group $L -group VLSU ${s}/i_vlsu/spatz_mem_rsp_valid_i}
+    catch {add wave -noupdate -group $L -group VLSU ${s}/i_vlsu/commit_operation_valid}
+    catch {add wave -noupdate -group $L -group VLSU ${s}/i_vlsu/vlsu_rsp_valid_o}
+}
+
+# Default: wave core 0 of group 0 (tile 0). Waving all 256 cores is impractical -- call the proc
+# for more cores of interest, e.g. `add_spatz_core_wave 0 1 0 $NumX_noc $NumY_noc`.
+add_spatz_core_wave 0 0 0 $NumX_noc $NumY_noc
 
 
 # Add a vector of the core's wfi signal to quickly see which cores are active

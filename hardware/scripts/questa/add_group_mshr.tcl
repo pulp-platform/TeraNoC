@@ -47,6 +47,16 @@ proc add_group_mshr_wave {g NumX NumY} {
     # full, so it bypassed to the NoC without one (per-request vector + running count).
     catch {add wave -noupdate -group $L -group BankFullBypass ${m}/req_bankfull_bypass_dbg}
     catch {add wave -noupdate -group $L -group BankFullBypass -radix unsigned ${m}/req_bankfull_bypass_cnt_dbg}
+    # Cache lifecycle counters (only when group_mshr_enable_stats=1). A CACHED line leaves via
+    # evict (alloc reclaim), amo_inval (AMO), or self_inval (idea 1 self-invalidate at the served
+    # target -- the NEW drain path). *_cycle pulses every cycle; bare accumulators advance only
+    # while csr_trace is active. served_cnt (per entry) is under Entries/mshr_q.
+    catch {add wave -noupdate -group $L -group CacheStats -radix unsigned ${m}/stat_cache_self_inval_cycle}
+    catch {add wave -noupdate -group $L -group CacheStats -radix unsigned ${m}/stat_cache_self_inval}
+    catch {add wave -noupdate -group $L -group CacheStats -radix unsigned ${m}/stat_cache_evict}
+    catch {add wave -noupdate -group $L -group CacheStats -radix unsigned ${m}/stat_cache_amo_inval}
+    catch {add wave -noupdate -group $L -group CacheStats -radix unsigned ${m}/stat_cache_fill}
+    catch {add wave -noupdate -group $L -group CacheStats -radix unsigned ${m}/stat_cache_hit}
 
     # Entry table (state / base_addr / resp_buf_cnt / sub_reqs / beat_pending ...)
     catch {add wave -noupdate -group $L -group Entries ${m}/mshr_q_valid}
