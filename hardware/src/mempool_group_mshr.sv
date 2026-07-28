@@ -178,6 +178,14 @@ module mempool_group_mshr
   localparam int unsigned RespBufPtrW      = idx_width(RespBufWords);
   localparam int unsigned MergeWordOffset  = (MshrMergeWords <= 1) ? 0 : $clog2(MshrMergeWords);
   localparam int unsigned BurstAlignBits  = (MaxBurstWords > 1) ? $clog2(MaxBurstWords) : 1;
+  // ParityDrain bypass-retag tracking depth (FF-1). Depth 2 encodes "one instruction in flight x
+  // <=2 bursts/insn" -- but the VLSU burst admission scales with the ROB depth, so at ROB64 one
+  // e32,m4 load alone is 4 bursts and a full MSHR bank would overflow the 2 ways -> the depth
+  // assert $fatals. Bound: outstanding bypass ways <= floor(RobDepth/MaxBurstWords), because any
+  // 16-id grant implies the oldest 16 ROB pops completed, and in-order pops retire the oldest
+  // tracked burst completely. max(2, ...) keeps today's shape at ROB32.
+  localparam int unsigned BypassTrackWays =
+    (2 > (snitch_pkg::RobDepth / MaxBurstWords)) ? 2 : (snitch_pkg::RobDepth / MaxBurstWords);
   localparam int unsigned TileIdBits       = idx_width(NumTilesPerGroup);
   localparam int unsigned TcdmAddrNoTileW  = $bits(tcdm_addr_t) - TileIdBits;
   localparam int unsigned SpatzNumOutstandingLoads = snitch_pkg::NumIntOutstandingLoads;
@@ -501,7 +509,7 @@ module mempool_group_mshr
     logic [BurstLenWidth-1:0] len;         // original burst length (range check)
     logic [BurstLenWidth-1:0] beats_left;  // outstanding beats; free the way at 0
   } bypass_track_t;
-  bypass_track_t [NumTilesPerGroup-1:0][1:0]                                   bypass_track_q, bypass_track_d;
+  bypass_track_t [NumTilesPerGroup-1:0][BypassTrackWays-1:0]                     bypass_track_q, bypass_track_d;
   logic          [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]         bypass_match;
   logic          [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]         bypass_match_way;
   logic          [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]         bypass_beat_parity;
@@ -528,7 +536,7 @@ module mempool_group_mshr
               (resp_in[t][p].wen == 1'b0) &&
               (resp_in[t][p].rdata.amo == '0) &&
               (resp_in[t][p].rdata.core_id == tile_core_id_t'(1))) begin
-            for (int w = 0; w < 2; w++) begin
+            for (int w = 0; w < BypassTrackWays; w++) begin
               off = resp_in[t][p].rdata.meta_id - bypass_track_q[t][w].meta_base;
               if (!bypass_match[t][p] && bypass_track_q[t][w].valid &&
                   (off < meta_id_t'(bypass_track_q[t][w].len))) begin
@@ -571,14 +579,16 @@ module mempool_group_mshr
               (req_out[t][p].mshr_tag == '0) &&
               req_is_load[t][p] && (req_len[t][p] > BurstLenWidth'(1)) &&
               !req_alloc_found[t][p]) begin
-            if (!bypass_track_d[t][0].valid) begin
-              bypass_track_d[t][0] = '{valid: 1'b1,
-                                       meta_base: req_in[t][p].wdata.meta_id,
-                                       len: req_len[t][p], beats_left: req_len[t][p]};
-            end else if (!bypass_track_d[t][1].valid) begin
-              bypass_track_d[t][1] = '{valid: 1'b1,
-                                       meta_base: req_in[t][p].wdata.meta_id,
-                                       len: req_len[t][p], beats_left: req_len[t][p]};
+            begin : alloc_bypass_way
+              automatic logic way_found = 1'b0;
+              for (int w = 0; w < BypassTrackWays; w++) begin
+                if (!way_found && !bypass_track_d[t][w].valid) begin
+                  bypass_track_d[t][w] = '{valid: 1'b1,
+                                           meta_base: req_in[t][p].wdata.meta_id,
+                                           len: req_len[t][p], beats_left: req_len[t][p]};
+                  way_found          = 1'b1;
+                end
+              end
             end
             // else: untracked (cannot happen -- asserted); the burst degrades to 1-wide, correct.
           end
@@ -1066,6 +1076,16 @@ module mempool_group_mshr
     // or the retirement accounting broke -- fatal in sim.
     if (PD2) begin : gen_bypass_depth_assert
       for (genvar bt = 0; bt < NumTilesPerGroup; bt++) begin : gen_bypass_depth_tile
+        // All tracking ways occupied = overflow. bypass_track_q is a PACKED ARRAY of structs,
+        // so bypass_track_q[bt].valid is NOT a legal field select across the dimension (vlog
+        // accepts it, vopt rejects it) -- reduce explicitly. all_ways_valid is sim-only (this
+        // whole block is inside pragma translate_off).
+        logic all_ways_valid;
+        always_comb begin
+          all_ways_valid = 1'b1;
+          for (int w = 0; w < BypassTrackWays; w++)
+            all_ways_valid = all_ways_valid & bypass_track_q[bt][w].valid;
+        end
         for (genvar bp = 1; bp < NumRemoteReqPortsPerTile; bp++) begin : gen_bypass_depth_port
           bypass_track_overflow: assert property(
             @(posedge clk_i) disable iff (!rst_ni)
@@ -1073,8 +1093,8 @@ module mempool_group_mshr
                (req_out[bt][bp].mshr_tag == '0) &&
                req_is_load[bt][bp] && (req_len[bt][bp] > BurstLenWidth'(1)) &&
                !req_alloc_found[bt][bp])
-              |-> (!bypass_track_q[bt][0].valid || !bypass_track_q[bt][1].valid))
-            else $fatal(1, "ParityDrain: bypass-track overflow at tile %0d (3rd outstanding bypassed burst).", bt);
+              |-> !all_ways_valid)
+            else $fatal(1, "ParityDrain: bypass-track overflow at tile %0d (all %0d ways outstanding).", bt, BypassTrackWays);
         end
       end
     end

@@ -320,3 +320,13 @@ spatz_vlsu_commit_qmin ?= 0
 # status_cnt_q <= 16 (NON-STRICT: after burst 1 the count is exactly 16, so a strict < would
 # silently re-serialise burst 2 and look like a null result).
 spatz_vlsu_block_alloc ?= 1
+
+# --- ROB64: VLSU ROB 32->64 ids + system meta_id 5b->6b (docs/spatz_rob64_h1_design_plan.md) ---
+# Unset = 32 (bit-identical). Moves THREE roots atomically (snitch_pkg::RobDepth, spatz
+# NrOutstandingLoads, spatz_mem_rsp_t.id); spatz_mempool_cc elaboration asserts pin the pairing.
+# NOT bit-identical when set (widens every mesh link by 1 bit). Set =64 only after S0 (the ROB
+# window-mask generalization) has landed and passed its gate. Leave unset for now.
+spatz_vlsu_rob_depth ?=
+# --- H1 dual-load runahead (validated only with spatz_vlsu_rob_depth=64). Unset = MaxInflight 1
+# (bit-identical). 2 = a 2nd burst-safe load co-resident while the elder drains. Leave unset.
+spatz_vlsu_dual_load ?=
