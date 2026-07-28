@@ -36,6 +36,16 @@ add wave -noupdate -group Utilization -color {Cornflower Blue} -format Analog-St
 add wave -noupdate -group Utilization /mempool_tb/lsu_handshake
 add wave -noupdate -group Utilization -color {Cornflower Blue} -format Analog-Step -height 84 -max $num_cores -radix unsigned /mempool_tb/lsu_pressure
 add wave -noupdate -group Utilization /mempool_tb/lsu_request
+
+# Fleet-wide Spatz FPU utilization (exists only under TARGET_SPATZ; sim-only TB block).
+# fpu_busy_count: analog "how many FPUs are busy right now". fpu_busy: 256-bit per-core
+# busy pattern (bit i == hart i == (group<<4)|tile) -- expand to see each core's busy
+# pattern over time. fpu_busy_group: per-group counts (spot group skew).
+if {![catch {examine /mempool_tb/fpu_busy_count}]} {
+  add wave -noupdate -group FPU_Fleet -color {Medium Orchid} -format Analog-Step -height 84 -max $num_cores -radix unsigned /mempool_tb/fpu_busy_count
+  add wave -noupdate -group FPU_Fleet -radix unsigned /mempool_tb/fpu_busy_group
+  add wave -noupdate -group FPU_Fleet -radix binary /mempool_tb/fpu_busy
+}
 if {![catch {examine -radix dec /mempool_tb/spatz_issue_utilization}]} {
   set spatz_lsu_channels [expr $num_cores * [examine -radix dec mempool_pkg::NumMemPortsPerSpatz]]
   if {$spatz_lsu_channels < 1} { set spatz_lsu_channels 1 }

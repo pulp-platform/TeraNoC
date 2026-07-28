@@ -258,6 +258,64 @@ module mempool_tb;
   assign core_stall_count      = $countones(core_stall);
   assign core_stall_long_count = $countones(core_stall_long);
 
+`ifdef TARGET_SPATZ
+  // --------------------------------------------------------------------------
+  // Fleet-wide Spatz FPU utilization (wave + per-cycle log; sim-only).
+  //   fpu_busy[i]    : core i's FPU lanes computing this cycle (i_vfu.is_fpu_busy,
+  //                    a LEVEL, not the fpu_result_valid completion pulse).
+  //   fpu_busy_count : $countones(fpu_busy) -- "how many FPUs are busy right now".
+  //   fpu_busy_group : per-group count (NumGroups entries).
+  // Wave: /mempool_tb/fpu_busy (256-bit per-core pattern), /fpu_busy_count,
+  //       /fpu_busy_group. Log: trace_fpu_fleet.log, one line per cycle
+  //       "cyc busy_count g0 ... g15" (bit i of fpu_busy == hart i == (g<<4)|t).
+  // --------------------------------------------------------------------------
+  logic [NumCores-1:0] fpu_busy;
+  for (genvar g = 0; g < NumGroups; g++) begin: gen_fpu_busy_groups
+    for (genvar t = 0; t < NumTilesPerGroup; t++) begin: gen_fpu_busy_tiles
+      for (genvar c = 0; c < NumCoresPerTile; c++) begin: gen_fpu_busy_cores
+        assign fpu_busy[g*NumTilesPerGroup*NumCoresPerTile + t*NumCoresPerTile + c] =
+            dut.i_mempool_cluster.gen_groups_x[g/NumY].gen_groups_y[g%NumY].gen_rtl_group
+                .i_group.i_mempool_group.gen_tiles[t].i_tile.gen_cores[c].gen_mempool_cc
+                .riscv_core.i_spatz.i_vfu.is_fpu_busy;
+      end: gen_fpu_busy_cores
+    end: gen_fpu_busy_tiles
+  end: gen_fpu_busy_groups
+
+  localparam int unsigned FpuCntW     = $clog2(NumCores+1);
+  localparam int unsigned FpuGrpCntW  = $clog2(NumTilesPerGroup*NumCoresPerTile+1);
+  logic [FpuCntW-1:0]                        fpu_busy_count;
+  logic [NumGroups-1:0][FpuGrpCntW-1:0]      fpu_busy_group;
+  assign fpu_busy_count = $countones(fpu_busy);
+  for (genvar g = 0; g < NumGroups; g++) begin: gen_fpu_busy_grp_cnt
+    assign fpu_busy_group[g] =
+        $countones(fpu_busy[g*NumTilesPerGroup*NumCoresPerTile +: NumTilesPerGroup*NumCoresPerTile]);
+  end: gen_fpu_busy_grp_cnt
+
+  // Per-cycle fleet utilization log (bit-index == hart id). Always-on: one line per
+  // cycle, so the warmup / compute / epilogue phases are all visible.
+  int          fpu_fleet_f;
+  int unsigned fpu_fleet_cyc;
+  initial begin
+    fpu_fleet_f = $fopen("trace_fpu_fleet.log", "w");
+    $fwrite(fpu_fleet_f, "# cyc busy_cores[0..%0d] then per-group counts[0..%0d]\n",
+            NumCores, NumTilesPerGroup*NumCoresPerTile);
+  end
+  final begin
+    if (fpu_fleet_f) $fclose(fpu_fleet_f);
+  end
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      fpu_fleet_cyc <= 0;
+    end else begin
+      fpu_fleet_cyc <= fpu_fleet_cyc + 1;
+      $fwrite(fpu_fleet_f, "%0d %0d", fpu_fleet_cyc, fpu_busy_count);
+      for (int unsigned g = 0; g < NumGroups; g++)
+        $fwrite(fpu_fleet_f, " %0d", fpu_busy_group[g]);
+      $fwrite(fpu_fleet_f, "\n");
+    end
+  end
+`endif
+
   // CSR trace OR across all groups (for MSHR stats gating).
   logic [NumGroups-1:0][NumTilesPerGroup-1:0][NumCoresPerTile-1:0] csr_trace_q;
   logic csr_trace_any_global;
