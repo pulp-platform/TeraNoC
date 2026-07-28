@@ -421,6 +421,41 @@ def write_fplsu_alignment(out_dir, fplsu_by_hart, gap=24):
     return path
 
 
+def write_fleet_fpu(out_dir, buildpath):
+    """Per-cycle fleet FPU-busy series: how many cores have any FPU lane emitting a result
+    (fpu_vld != 0) each cycle, across all traced cores. The waveform counterpart is the TB
+    fpu_busy vector (is_fpu_busy level); this is the no-re-run trace version (result pulse,
+    so slightly sparser). Output: spatz_fleet_fpu.csv  'cyc,busy_cores,busy_pct'."""
+    counts = {}
+    total = 0
+    for cpath in sorted(glob.glob(os.path.join(buildpath, 'trace_spatz_cyc_hart_*.log'))):
+        n = 0
+        with open(cpath) as fh:
+            for line in fh:
+                if line.startswith('#'):
+                    continue
+                m = CYC_RE.match(line)
+                if not m:
+                    continue
+                cyc = int(m.group(1))
+                fpu_v = m.group(7)   # fpu_vld is group 7 (group 6 is ipu_vld)
+                if '1' in fpu_v:
+                    counts[cyc] = counts.get(cyc, 0) + 1
+                n += 1
+        if n:
+            total += 1
+    if not counts:
+        return
+    path = os.path.join(out_dir, 'spatz_fleet_fpu.csv')
+    with open(path, 'w') as fh:
+        fh.write('cyc,busy_cores,busy_pct\n')
+        for cyc in sorted(counts):
+            fh.write(f'{cyc},{counts[cyc]},{100.0*counts[cyc]/total:.1f}\n')
+    mean = sum(counts.values()) / len(counts)
+    print(f'[gen_spatz_trace] fleet FPU: {total} cores, mean {mean:.1f} busy/cycle '
+          f'({100.0*mean/total:.1f}%) -> {path}')
+
+
 def main():
     ap = argparse.ArgumentParser(description='Post-process Spatz vector-core traces.')
     ap.add_argument('--buildpath', required=True, help='dir containing trace_spatz_*_hart_*.log')
@@ -478,6 +513,7 @@ def main():
         for r in per_core:
             fh.write(','.join(f'{r[c]:.1f}' if isinstance(r[c], float) else str(r[c])
                               for c in cols) + '\n')
+    write_fleet_fpu(args.out, args.buildpath)
     agg_path = write_aggregate(args.out, per_core) if per_core else '(none)'
     align_path = write_fplsu_alignment(args.out, fplsu_by_hart) if fplsu_by_hart else '(no fplsu stream)'
     print(f'[gen_spatz_trace] wrote {reported} core report(s), {csv_path}, {agg_path}, {align_path}')
