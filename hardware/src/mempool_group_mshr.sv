@@ -186,6 +186,10 @@ module mempool_group_mshr
   // tracked burst completely. max(2, ...) keeps today's shape at ROB32.
   localparam int unsigned BypassTrackWays =
     (2 > (snitch_pkg::RobDepth / MaxBurstWords)) ? 2 : (snitch_pkg::RobDepth / MaxBurstWords);
+  // Way-index width for the match->retire path. MUST track BypassTrackWays: at 4 ways a 1-bit
+  // index aliases ways 2/3 onto 0/1, leaking them (allocated, never retired) until the overflow
+  // assert fires (observed on 512x256x512 fmatmul, the first geometry with >2 concurrent bypasses).
+  localparam int unsigned BypassTrackWayW = (BypassTrackWays > 1) ? $clog2(BypassTrackWays) : 1;
   localparam int unsigned TileIdBits       = idx_width(NumTilesPerGroup);
   localparam int unsigned TcdmAddrNoTileW  = $bits(tcdm_addr_t) - TileIdBits;
   localparam int unsigned SpatzNumOutstandingLoads = snitch_pkg::NumIntOutstandingLoads;
@@ -511,7 +515,8 @@ module mempool_group_mshr
   } bypass_track_t;
   bypass_track_t [NumTilesPerGroup-1:0][BypassTrackWays-1:0]                     bypass_track_q, bypass_track_d;
   logic          [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]         bypass_match;
-  logic          [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]         bypass_match_way;
+  logic          [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]
+                 [BypassTrackWayW-1:0]                                         bypass_match_way;
   logic          [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]         bypass_beat_parity;
 
   if (PD2) begin : gen_bypass_retag
@@ -529,7 +534,7 @@ module mempool_group_mshr
         for (int p = 1; p < NumRemoteRespPortsPerTile; p++) begin
           automatic meta_id_t off;
           bypass_match[t][p]       = 1'b0;
-          bypass_match_way[t][p]   = 1'b0;
+          bypass_match_way[t][p]   = '0;
           bypass_beat_parity[t][p] = 1'b0;
           if (resp_in_valid[t][p] &&
               (resp_in[t][p].mshr_tag == '0) &&
@@ -541,7 +546,7 @@ module mempool_group_mshr
               if (!bypass_match[t][p] && bypass_track_q[t][w].valid &&
                   (off < meta_id_t'(bypass_track_q[t][w].len))) begin
                 bypass_match[t][p]       = 1'b1;
-                bypass_match_way[t][p]   = w[0];
+                bypass_match_way[t][p]   = BypassTrackWayW'(w);
                 bypass_beat_parity[t][p] = off[0];
               end
             end
