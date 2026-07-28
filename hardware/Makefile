@@ -332,6 +332,17 @@ endif
 ifneq ($(strip $(spatz_vlsu_block_alloc)),)
   vlog_defs += -DSPATZ_VLSU_BLOCK_ALLOC=$(spatz_vlsu_block_alloc)
 endif
+# ROB64: VLSU ROB 32->64 ids + system meta_id 5b->6b (docs/spatz_rob64_h1_design_plan.md).
+# Unset = 32 (bit-identical). Moves THREE roots atomically (snitch_pkg::RobDepth, spatz
+# NrOutstandingLoads, spatz_mem_rsp_t.id); spatz_mempool_cc elaboration asserts pin the pairing.
+ifneq ($(strip $(spatz_vlsu_rob_depth)),)
+  vlog_defs += -DSPATZ_VLSU_ROB_DEPTH=$(spatz_vlsu_rob_depth)
+endif
+# H1 dual-load runahead (validated only with spatz_vlsu_rob_depth=64). Unset = MaxInflight 1
+# (bit-identical). 2 = a 2nd burst-safe load co-resident while the elder drains.
+ifneq ($(strip $(spatz_vlsu_dual_load)),)
+  vlog_defs += -DSPATZ_VLSU_DUAL_LOAD=$(spatz_vlsu_dual_load)
+endif
 # --------------------------
 # AXI & DMA Configuration
 # --------------------------
