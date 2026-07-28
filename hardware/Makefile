@@ -224,6 +224,9 @@ group_mshr_bank_hash     ?=
 # ones. Empty = inherit group_mshr_bank_shift (bit-identical to the single-shift behaviour).
 group_mshr_bank_shift_single ?=
 group_mshr_bank_shift_burst  ?=
+# Intra-load burst bits in the hash-3 burst bank index: clog2(bursts per vector load) =
+# clog2(VL/MaxBurstWords) -> m1=0, m2=1, m4=2, m8=3. Empty = 1 (m2).
+group_mshr_bank_burst_bits ?=
 # Cache self-invalidate (idea 1, docs/mshr_bank_hash_design.md). 0/unset = OFF (bit-identical);
 # 1 = a CACHED entry frees itself once it has served its per-type sharing target
 # (group_mshr_hold_subs_single for scalar/single, group_mshr_hold_subs_burst for burst), turning a
@@ -283,6 +286,9 @@ ifneq ($(strip $(group_mshr_bank_shift_single)),)
 endif
 ifneq ($(strip $(group_mshr_bank_shift_burst)),)
   vlog_defs += -DGROUP_MSHR_BANK_SHIFT_BURST=$(group_mshr_bank_shift_burst)
+endif
+ifneq ($(strip $(group_mshr_bank_burst_bits)),)
+  vlog_defs += -DGROUP_MSHR_BANK_BURST_BITS=$(group_mshr_bank_burst_bits)
 endif
 ifneq ($(strip $(group_mshr_bank_shift)),)
   vlog_defs += -DGROUP_MSHR_BANK_SHIFT=$(group_mshr_bank_shift)

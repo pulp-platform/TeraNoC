@@ -234,6 +234,21 @@ module mempool_group_mshr
     `ifdef GROUP_MSHR_BANK_SHIFT_SINGLE `GROUP_MSHR_BANK_SHIFT_SINGLE `else BankSelShift `endif;
   localparam int unsigned BankSelShiftBurst =
     `ifdef GROUP_MSHR_BANK_SHIFT_BURST `GROUP_MSHR_BANK_SHIFT_BURST `else BankSelShift `endif;
+  // Burst-branch hash structure (BankHash==3, bursts only). A vector load of VL words issues
+  // VL/MaxBurstWords bursts; with LMUL=m (e32) that is exactly m bursts, i.e. clog2(m) address
+  // bits ABOVE the burst boundary distinguish one load's bursts from each other. The concurrent
+  // requests the bank spread must separate are the DISTINCT (p_start, burst-half) pairs of one
+  // inner iteration, so the burst bank index is built from two disjoint fields:
+  //   bank = { word_addr[BankSelShiftBurst +: BankIdW-BankBurstBits],   <- inter-core field
+  //            word_addr[BurstAlignBits  +: BankBurstBits] }            <- intra-load burst bits
+  // BankSelShiftBurst = clog2 of the p_start GAP between sibling cores in words (the workload's
+  // core-to-core address step); the field above it carries the bits that distinguish the cores
+  // (and, at its top, the unrolled-iteration parity). The low BankBurstBits come from just above
+  // the burst boundary (BurstAlignBits tracks MaxBurstWords automatically if the HW burst length
+  // ever grows). BankBurstBits = clog2(bursts per load): m1=0, m2=1, m4=2, m8=3. m1 -> 0 bits ->
+  // the burst branch degenerates to the plain contiguous field, like a single.
+  localparam int unsigned BankBurstBits =
+    `ifdef GROUP_MSHR_BANK_BURST_BITS `GROUP_MSHR_BANK_BURST_BITS `else 1 `endif;
   localparam int unsigned BankInTileW  = idx_width(mempool_pkg::NumBanksPerTile);
   localparam int unsigned GroupBits    = idx_width(NumGroups);
   // Reconstructed linear word address width = full addr_key + the re-inserted group field.
@@ -241,9 +256,19 @@ module mempool_group_mshr
   if ((BankHash == 3) && (BankSelShiftSingle + BankIdW > WordAddrW))
     $error("[mempool_group_mshr] group_mshr_bank_shift_single (%0d) + BankIdW (%0d) exceeds word-addr width (%0d).",
            BankSelShiftSingle, BankIdW, WordAddrW);
-  if ((BankHash == 3) && (BankSelShiftBurst + BankIdW > WordAddrW))
-    $error("[mempool_group_mshr] group_mshr_bank_shift_burst (%0d) + BankIdW (%0d) exceeds word-addr width (%0d).",
-           BankSelShiftBurst, BankIdW, WordAddrW);
+  if ((BankHash == 3) && (BankSelShiftBurst + (BankIdW - BankBurstBits) > WordAddrW))
+    $error("[mempool_group_mshr] group_mshr_bank_shift_burst (%0d) + gap field (%0d) exceeds word-addr width (%0d).",
+           BankSelShiftBurst, BankIdW - BankBurstBits, WordAddrW);
+  // The two burst-hash fields must not overlap: the gap field starts at BankSelShiftBurst, the
+  // intra-load burst bits end at BurstAlignBits+BankBurstBits-1. An overlapping shift (e.g. the
+  // legacy contiguous value 4 at BankBurstBits=1) would double-count a bit and collapse half
+  // the banks -- retune shift_burst to the p_start gap bit (see the config comment).
+  if ((BankHash == 3) && (BankSelShiftBurst < BurstAlignBits + BankBurstBits))
+    $error("[mempool_group_mshr] group_mshr_bank_shift_burst (%0d) overlaps the intra-load burst bits [%0d +: %0d]. Set it to clog2(p_start gap in words), e.g. 5 (M=P=256) / 7 (M=P=512).",
+           BankSelShiftBurst, BurstAlignBits, BankBurstBits);
+  if ((BankHash == 3) && (BankBurstBits >= BankIdW))
+    $error("[mempool_group_mshr] group_mshr_bank_burst_bits (%0d) must leave at least 1 gap bit (BankIdW=%0d).",
+           BankBurstBits, BankIdW);
 
   // Map a (target group, merge address key, request type) to its MSHR bank. Folds address bits
   // ABOVE the burst-alignment boundary (so a burst's beats stay within one bank) together with the
@@ -261,16 +286,25 @@ module mempool_group_mshr
     b = BankIdW'(grp);
     if (BankHash == 3) begin
       // Field-select on the reconstructed LINEAR word address (pure re-wiring: put the group
-      // field back above the tile field). Then take BankIdW contiguous bits at BankSelShift.
-      // Per-type shift: singles use BankSelShiftSingle, bursts BankSelShiftBurst (equal by default
-      // -> bit-identical to the single-shift behaviour). Coalescing-safe: same line AND same type
-      // -> same word_addr -> same bank. Both part-selects are constant so this is a 2:1 mux.
+      // field back above the tile field). Singles take BankIdW contiguous bits at
+      // BankSelShiftSingle. Bursts take the split field documented at BankBurstBits above:
+      // { gap field at BankSelShiftBurst : BankIdW-BankBurstBits bits } over
+      // { intra-load burst bits at BurstAlignBits : BankBurstBits bits }. Equal-shift defaults
+      // (and BankBurstBits=0) collapse to the old contiguous behaviour. Coalescing-safe: same
+      // line AND same type -> same word_addr -> same bank. All part-selects are constant, so
+      // this is re-wiring plus a 2:1 mux.
       word_addr = { addr_key[$bits(tcdm_addr_t)-1 : TileIdBits + BankInTileW], // bank_row (high)
                     grp[GroupBits-1:0],                                        // group
                     addr_key[TileIdBits-1:0],                                  // tile
                     addr_key[TileIdBits +: BankInTileW] };                     // bank_in_tile (low)
-      b = is_single ? word_addr[BankSelShiftSingle +: BankIdW]
-                    : word_addr[BankSelShiftBurst  +: BankIdW];
+      if (is_single) begin
+        b = word_addr[BankSelShiftSingle +: BankIdW];
+      end else if (BankBurstBits == 0) begin
+        b = word_addr[BankSelShiftBurst +: BankIdW];
+      end else begin
+        b = { word_addr[BankSelShiftBurst +: BankIdW - BankBurstBits],
+              word_addr[BurstAlignBits   +: BankBurstBits] };
+      end
     end else if (BankHash == 0) begin
       // Legacy: each bank bit is the XOR of a fixed stride-BankIdW subset of address bits.
       for (int i = BurstAlignBits; i < $bits(tcdm_addr_t); i++) begin
