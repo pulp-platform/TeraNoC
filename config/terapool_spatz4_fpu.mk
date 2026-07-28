@@ -245,6 +245,13 @@ group_mshr_bank_shift_burst  ?= 4
 # allocator prefers -- keeping other cache lines resident longer. Reclaim-on-demand still applies,
 # so an unreached target never leaks a way. Opt-in for A/B; leave 0 until measured.
 group_mshr_cache_self_inval ?= 1
+# CACHED-victim selection within a bank (pass-2 reclaim). 0 = legacy lowest-index-first:
+# the lowest reclaimable CACHED way is ALWAYS the victim -> way-0 lines thrash while
+# high-way lines stay pinned. 1 = per-bank round-robin victim start pointer, advanced past
+# the evicted way only when a reclaim actually fires (invalid-first pass 1 unchanged, hit
+# path untouched). HW: clog2(ways) flops/bank (16x3 = 48 here) + a rotated scan input.
+# Bit-identical when 0. Policy change -> A/B measure before flipping the default.
+group_mshr_cache_victim_rr ?= 0
 
 ###########################
 ## 3. AXI and DMA Config

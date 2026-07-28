@@ -158,6 +158,15 @@ module mempool_group_mshr
   // (no liveness hazard). 0 = off (served_cnt maintained but unused -> optimized away).
   localparam bit CacheSelfInval =
     `ifdef GROUP_MSHR_CACHE_SELF_INVAL `GROUP_MSHR_CACHE_SELF_INVAL `else 1'b0 `endif;
+  // RR cache-victim selection (group_mshr_cache_victim_rr): per-bank round-robin start pointer
+  // for the pass-2 CACHED-reclaim scan, instead of always taking the lowest-index reclaimable
+  // CACHED way (which thrashes way 0 of each bank while high ways stay pinned). The pointer
+  // advances to victim+1 ONLY when a reclaim actually fires (a still-valid CACHED way is
+  // reallocated) -- never on a mere selection, a stalled grant, or an invalid-way alloc.
+  // 0 = legacy lowest-index-first (pointer tied 0, const-folds out -> bit-identical).
+  localparam bit CacheVictimRR =
+    `ifdef GROUP_MSHR_CACHE_VICTIM_RR `GROUP_MSHR_CACHE_VICTIM_RR `else 1'b0 `endif;
+  localparam int unsigned VictimPtrW = (MshrWaysPerBank > 1) ? $clog2(MshrWaysPerBank) : 1;
   // hold_cnt is sized from the window itself, so ANY window value is supported -- there is no
   // width-imposed ceiling (an earlier > 31 guard wrongly claimed one; the counter had always been
   // parameterized). Practical notes when experimenting with large W: a held entry keeps its MSHR
@@ -473,6 +482,9 @@ module mempool_group_mshr
   logic    [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                req_alloc_cand;
   logic    [MshrBankNum-1:0]                                                   bank_has_free;
   mshr_id_t[MshrBankNum-1:0]                                                   bank_free_id;
+  // RR victim start pointer per bank (CacheVictimRR); consumed by the pass-2 reclaim scan,
+  // advanced only on a reclaim fire. Tied 0 / unread when CacheVictimRR=0 (const-folds out).
+  logic    [MshrBankNum-1:0][VictimPtrW-1:0]                                   victim_rr_q, victim_rr_d;
 
   // Response drain scheduling (per response port).
   logic      [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]             resp_sel_valid;
@@ -1347,11 +1359,19 @@ module mempool_group_mshr
           bank_free_id[b]  = mshr_id_t'(e);
         end
       end
-      // Pass 2: only if no invalid way, reclaim the lowest reclaimable CACHED way (a resident
-      // cache line with no pending subscribers that no request is about to hit-merge this cycle).
+      // Pass 2: only if no invalid way, reclaim a reclaimable CACHED way (a resident
+      // cache line with no pending subscribers that no request is about to hit-merge this
+      // cycle). CacheVictimRR=0: legacy lowest-index-first (way 0 always the first victim).
+      // CacheVictimRR=1: the scan starts at the bank's RR victim pointer, so the victim
+      // rotates across the ways (pointer advanced by reclaim fires, see the alloc block).
       if (!bank_has_free[b]) begin
         for (int w = 0; w < MshrWaysPerBank; w++) begin
-          e = b * MshrWaysPerBank + w;
+          automatic int unsigned rw = w;
+          if (CacheVictimRR) begin
+            rw = int'(victim_rr_q[b]) + w;
+            if (rw >= MshrWaysPerBank) rw = rw - MshrWaysPerBank;
+          end
+          e = b * MshrWaysPerBank + rw;
           if (!bank_has_free[b] &&
               EnableRespCache &&
               mshr_q_valid[e] &&
@@ -1422,6 +1442,7 @@ module mempool_group_mshr
   // Sequential state update
   `FF(mshr_q_valid, mshr_d_valid, '0)
   `FF(mshr_q, mshr_d, '0)
+  `FF(victim_rr_q, victim_rr_d, '0)
 
   // Round-robin fairness bases: free-running +1 mod-N every cycle, reset '0.
   // Each _d depends ONLY on its own _q (pure mod-N increment), never on any
@@ -1895,6 +1916,7 @@ module mempool_group_mshr
     // Defaults
     mshr_d = mshr_q;
     mshr_d_valid = mshr_q_valid;
+    victim_rr_d = victim_rr_q;
 
     // Hold-the-fetch: count down every held (allocated, fetch not yet sent) entry. Placed on the
     // _q view before this cycle's allocations overwrite their entries, so a fresh alloc keeps its
@@ -2016,6 +2038,21 @@ module mempool_group_mshr
                 if (req_alloc_found[tile_i][port_i] &&
                     req_in_ready[tile_i][port_i]) begin
                 mshr_d_valid[req_alloc_found_mshr_id[tile_i][port_i]] = 1'b1;
+                // RR victim advance: firing on a still-valid CACHED way IS a reclaim -- move
+                // that bank's scan start just past the evicted way. Invalid-way allocs (the
+                // common case) leave the pointer alone. Reads the _q view: the fresh entry's
+                // own fields are only in mshr_d, so this cycle's alloc cannot mask the reclaim.
+                // At most one alloc fires per bank per cycle (bank_alloc_taken), so this
+                // per-bank write never conflicts. /,% are shift/bit-select for the power-of-two
+                // ways-per-bank here, not a divider.
+                if (CacheVictimRR) begin
+                  automatic int unsigned vid = int'(req_alloc_found_mshr_id[tile_i][port_i]);
+                  automatic int unsigned vw  = vid % MshrWaysPerBank;
+                  if (mshr_q_valid[vid] && (mshr_q[vid].state == MSHR_CACHED)) begin
+                    victim_rr_d[vid / MshrWaysPerBank] =
+                        (vw + 1 >= MshrWaysPerBank) ? '0 : VictimPtrW'(vw + 1);
+                  end
+                end
                 // Tier-b: stamp the egress NoC request with (allocated entry id + 1) so the returning
                 // response routes back to this entry by direct index (tag 0 stays the bypass sentinel).
                 req_out[tile_i][port_i].mshr_tag =
