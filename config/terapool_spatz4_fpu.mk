@@ -221,24 +221,44 @@ tcdm_burst_interleave    ?= 1
 # for the user's 32-entry experiment: bank = word_addr[group_mshr_bank_shift +: BankIdW], which
 # needs the shift tuned to the data stride N (below).
 group_mshr_bank_hash     ?= 3
-# BankHash==3 field-select. Per request type (mempool_group_mshr.sv:232):
+# BankHash==3 field-select. Per request type (mempool_group_mshr.sv, mshr_bank_of):
 #
-#     bank = word_addr[shift +: $clog2(mshr_banks)]
+#     single: bank = word_addr[shift_single +: BankIdW]
+#     burst : bank = { word_addr[shift_burst +: BankIdW-burst_bits],
+#                      word_addr[clog2(MaxBurstWords) +: burst_bits] }
 #
-#     word_addr  = byte_addr >> 2      (tcdm_addr_t is word-granular, mempool_pkg.sv:74)
-#     mshr_banks = group_mshr_num / group_mshr_ways_per_bank   (128/8 = 16 here)
+#     word_addr = byte_addr >> 2   (tcdm_addr_t is word-granular, mempool_pkg.sv:74)
+#     BankIdW   = $clog2(group_mshr_num / group_mshr_ways_per_bank)   (128/8 -> 4 here)
 #
-# shift = $clog2(smallest stride IN WORDS between concurrent keys of that type):
-#     scalar : shift = $clog2(N)               = $clog2(32) = 5   # N = A row stride
-#     burst  : shift = $clog2(MaxBurstWords)   = $clog2(16) = 4   # the burst stride
+# Idea: the concurrent burst requests of one inner iteration differ in (a) WHICH 16-word
+# burst of a vector load they are -- the low burst_bits, taken just above the burst boundary
+# (tracks MaxBurstWords automatically if the HW burst ever grows) -- and (b) which CORE's
+# p_start they come from -- the field above shift_burst. Splitting them keeps the two
+# streams from ever overlapping a bit.
 #
-# Floor: shift >= $clog2(MaxBurstWords) = 4 -- below that every burst base has zero low
-# bits and all bursts collapse onto one bank. Retune `_single` when N changes.
+# Quick calculation of the two burst knobs:
+#   burst_bits  = $clog2(bursts per vector load) = $clog2(VL/MaxBurstWords):
+#                 m1=0, m2=1, m4=2, m8=3. (m1 -> 0 -> plain contiguous field, like single.)
+#   shift_burst = $clog2(p_start gap between sibling cores, IN WORDS)
+#               = $clog2(P / split_p_count),
+#                 split_p_count = cores_per_group / (dim_group/KERNEL_SIZE),
+#                 dim_group = M / num_groups.
+#                 M=P=256 ks=8: gap = 256/8  = 32w  -> 5
+#                 M=P=512 ks=8: gap = 512/4  = 128w -> 7
+#   RULE: shift_burst must be > clog2(MaxBurstWords)+burst_bits-1 (=4 here) -- the RTL
+#   elaboration $errors on overlap. Retune when M/P/KERNEL_SIZE changes.
+#   shift_single = $clog2(A row stride N in words): N=32 -> 5, N=512 -> 9.
 group_mshr_bank_shift        ?= 5
-# Per-type overrides. Both default to group_mshr_bank_shift above; setting them equal is
-# bit-identical to the old single-shift behaviour.
+# Per-type overrides. Both default to group_mshr_bank_shift above.
+group_mshr_bank_burst_bits   ?= 1      # m2 (KERNEL_SIZE=8)
+# M=P=256: 5 (reproduces the old contiguous shift=4 EXACTLY: {7,6,5}+{4} = {7:4})
+group_mshr_bank_shift_burst  ?= 5
+# M=P=512: 7
+# group_mshr_bank_shift_burst ?= 7
+# N = 32: 5
 group_mshr_bank_shift_single ?= 5
-group_mshr_bank_shift_burst  ?= 4
+# N = 512: 9
+# group_mshr_bank_shift_single ?= 9
 # Cache self-invalidate (idea 1). 0 = OFF (bit-identical baseline). 1 = a CACHED entry frees itself
 # once it has served its per-type sharing target (group_mshr_hold_subs_single scalar /
 # group_mshr_hold_subs_burst burst), so a done cache line becomes an INVALID way the invalid-first
