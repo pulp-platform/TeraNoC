@@ -230,6 +230,10 @@ group_mshr_bank_shift_burst  ?=
 # done cache line into an INVALID way that the invalid-first allocator prefers. Cached entries stay
 # reclaimable-on-demand regardless, so an unreached target cannot leak a way.
 group_mshr_cache_self_inval ?=
+# RR cache-victim selection. 0/unset = legacy lowest-index reclaimable CACHED way (way-0
+# thrash); 1 = per-bank round-robin victim start pointer, advanced past the evicted way only
+# when a reclaim actually fires. Bit-identical when 0.
+group_mshr_cache_victim_rr ?=
 vlog_defs += -DGROUP_MSHR_NUM=$(group_mshr_num)
 ifneq ($(strip $(group_mshr_ways_per_bank)),)
   vlog_defs += -DGROUP_MSHR_WAYS_PER_BANK=$(group_mshr_ways_per_bank)
@@ -267,6 +271,9 @@ ifneq ($(strip $(group_mshr_bank_hash)),)
 endif
 ifneq ($(strip $(group_mshr_cache_self_inval)),)
   vlog_defs += -DGROUP_MSHR_CACHE_SELF_INVAL=$(group_mshr_cache_self_inval)
+endif
+ifneq ($(strip $(group_mshr_cache_victim_rr)),)
+  vlog_defs += -DGROUP_MSHR_CACHE_VICTIM_RR=$(group_mshr_cache_victim_rr)
 endif
 ifeq ($(group_mshr_bank_dump), 1)
   vlog_defs += -DGROUP_MSHR_BANK_DUMP
