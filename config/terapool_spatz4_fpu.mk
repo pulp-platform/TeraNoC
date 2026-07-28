@@ -295,38 +295,45 @@ zfinx ?= 0
 # silicon), so they are NOT bit-identical to the 0 build -- keep them 0 until each has
 # its own A/B + LEC run, and commit them separately.
 #
-# The two knobs below are AREA-reduction / timing cleanups, NOT performance changes. They
-# deliberately change the netlist (they remove hardware), so unlike block-alloc they are NOT
-# bit-identical when off -- keep them OFF unless deliberately measuring area, and give each its
-# own A/B + LEC run and its own commit.
+# --- Spatz VLSU / ROB knobs (toggle guide) ---------------------------------------
+# Quick reference:
+#   block-alloc only (shipped default):  spatz_vlsu_block_alloc=1, everything else 0/unset
+#     -> 3589 cycles.
+#   + H1 dual load:                      spatz_vlsu_rob_depth=64 + spatz_vlsu_dual_load=2
+#     -> 3488 cycles (-2.8%; needs BOTH). dual_load without rob_depth=64 has no ROB room.
+#   R1/R2 are AREA-only (no perf change): enable to shrink the netlist once timing allows.
+# Any knob can also be overridden on the command line: make ... spatz_vlsu_dual_load=2
 #
 # R1: reorder_buffer id_valid_o from status_cnt_q instead of the id_valid_q free-id
-# bitmap. 0 = legacy bitmap. 1 = -NumWords(32) flops, -1 decoder and -2 32:1 muxes per
+# bitmap. 0 = legacy bitmap. 1 = -NumWords flops, -1 decoder and -2 32:1 muxes per
 # ROB (x4 ROBs/core), and ~6 fewer logic levels on the id_valid_o -> mem_req_lvalid path.
+# AREA-reduction / timing cleanup, NOT a performance change (measured cycle-identical
+# at ROB32 and ROB64). Deliberate netlist change when on; not bit-identical.
 spatz_rob_cnt_idvalid ?= 0
 # R2: VLSU commit-metadata FIFO DEPTH NrOutstandingLoads(32) -> NrParallelInstructions(4),
 # the most entries that can ever be resident (the push is gated on the per-id
 # mem_insn_pending_q bit). 0 = legacy depth. 1 = -28 x 37 flops + a 37b 32:1 read mux.
+# AREA-reduction only, NOT a performance change (measured cycle-identical).
 spatz_vlsu_commit_qmin ?= 0
 
 # --- Block ROB-id reservation (docs/spatz_mlp_design_plan.md §5.1, the main MLP lever) ---
-# Unlike R1/R2 above, this one IS bit-identical when 0 (every added statement is guarded by a
-# (BlockWords > 1) elaboration constant).
 # 0 = OFF: the port-0 burst allocator walks its ROB ids one per cycle, so every 16-beat burst
 # waits 18 cycles between becoming eligible and its request handshake (1 decide + 16 walk +
 # 1 send). 1 = ON: ROB0 grants the whole 16-id window in a single cycle -- decide -> reserve ->
 # send = 3 cycles -- removing 15 cyc/burst = 30 cyc/load from the load recurrence the FPU-idle
-# analysis is short on (T = 88.6 cyc today vs the W = 64 target). The ROB's own room guard is
-# status_cnt_q <= 16 (NON-STRICT: after burst 1 the count is exactly 16, so a strict < would
-# silently re-serialise burst 2 and look like a null result).
+# analysis is short on. Measured: 3821 -> 3589 cycles (-6.1%, reproduced twice). Bit-identical
+# netlist when 0.
 spatz_vlsu_block_alloc ?= 1
 
 # --- ROB64: VLSU ROB 32->64 ids + system meta_id 5b->6b (docs/spatz_rob64_h1_design_plan.md) ---
-# Unset = 32 (bit-identical). Moves THREE roots atomically (snitch_pkg::RobDepth, spatz
-# NrOutstandingLoads, spatz_mem_rsp_t.id); spatz_mempool_cc elaboration asserts pin the pairing.
-# NOT bit-identical when set (widens every mesh link by 1 bit). Set =64 only after S0 (the ROB
-# window-mask generalization) has landed and passed its gate. Leave unset for now.
+# Unset = 32 (bit-identical). Set = 64: room for TWO m2 loads (2x32 ids). Moves THREE roots
+# atomically (snitch_pkg::RobDepth, spatz NrOutstandingLoads, spatz_mem_rsp_t.id); widens
+# every mesh link by 1 bit (PNR re-close needed). Measured: cycle-identical (3589) for m2 --
+# invisible on its own, it is the enabler for dual_load below.
 spatz_vlsu_rob_depth ?=
-# --- H1 dual-load runahead (validated only with spatz_vlsu_rob_depth=64). Unset = MaxInflight 1
-# (bit-identical). 2 = a 2nd burst-safe load co-resident while the elder drains. Leave unset.
+# --- H1 dual-load runahead (REQUIRES spatz_vlsu_rob_depth=64 to have ROB room) ---
+# Unset/1 = legacy: the next load starts only when the previous one fully retires
+# (bit-identical). 2 = the next burst-safe load starts as soon as the previous one's requests
+# are all ISSUED, so its flight overlaps the elder's drain. Measured with rob_depth=64:
+# 3589 -> 3488 cycles (-2.8%), dual_adv on 32/40 instructions, all assertions silent.
 spatz_vlsu_dual_load ?=
