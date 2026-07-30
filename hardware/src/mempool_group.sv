@@ -37,7 +37,12 @@ module mempool_group
   parameter bit          EnableGroupBarrier   = 1'b1,
 `endif
   parameter int unsigned NumGroupBarriers     = NumCoresPerGroup,
-  parameter int unsigned GroupBarrierWdLimit  = 1024,
+  // Group-barrier watchdog, in cycles. 0 (default) = none: the barrier waits until every `target`
+  // core arrives -- the intended rendezvous semantics. A non-zero value force-releases the arrived
+  // subset after that many cycles, which desynchronizes rather than synchronizes; keep it 0 unless
+  // you deliberately want a deadlock escape while debugging. Driven by group_barrier_wd_limit.
+  parameter int unsigned GroupBarrierWdLimit  =
+    `ifdef GROUP_BARRIER_WD_LIMIT `GROUP_BARRIER_WD_LIMIT `else 0 `endif,
   // Reserved within-tile word base (master-port tgt_addr word field). The barrier
   // owns words [GroupBarrierWord, GroupBarrierWord+NumGroupBarriers); struct =
   // word - GroupBarrierWord. SW forms a load at byte addr (word<<14)|(target_tile<<6),

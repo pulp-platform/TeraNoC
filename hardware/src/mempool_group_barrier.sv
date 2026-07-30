@@ -34,7 +34,13 @@
 module mempool_group_barrier #(
   parameter int unsigned NumCoresPerGroup = 16,
   parameter int unsigned NumBarriers      = 16,
-  parameter int unsigned WatchdogLimit    = 1024,  // 0 disables the watchdog
+  // 0 = NO watchdog: a barrier waits indefinitely until all `target` cores arrive (the intended
+  // rendezvous semantics). Any W > 0 force-releases after W cycles measured from the FIRST arrival,
+  // which does NOT synchronize -- it releases the arrived subset and leaves the stragglers a round
+  // behind, so every later barrier times out too (measured 2026-07-30: a >1024-cycle inter-lane
+  // skew turned every group barrier into a 1024-cycle penalty that synchronized nothing). Use W > 0
+  // only as a deadlock escape while debugging, never as the normal mode.
+  parameter int unsigned WatchdogLimit    = 0,
   // Derived (do not override)
   parameter int unsigned IniW    = $clog2(NumCoresPerGroup),
   parameter int unsigned StructW = (NumBarriers > 1) ? $clog2(NumBarriers) : 1,
@@ -73,6 +79,15 @@ module mempool_group_barrier #(
   logic                                          releasing_q, releasing_d;
   logic [StructW-1:0]                            rel_struct_q, rel_struct_d;
   logic [NumCoresPerGroup-1:0]                  rel_rem_q, rel_rem_d;   // responders still to release
+  // Per-struct set of cores that have actually ARRIVED this round (one bit per core, set by
+  // OP_ARRIVE, cleared when the struct's release completes). The release set is taken from THIS,
+  // never from mask_q: on a watchdog force-release only count_q < target_q cores have arrived, and
+  // releasing the configured mask would fire a held-load response at a core that never issued one
+  // -- a phantom response its LSU has no metadata for (observed 2026-07-30: struct 8 force-fired
+  // with count=15/target=16, the mask walk hit the non-arrived core and tripped
+  // snitch_lsu invalid_resp_id). arrived_q == mask_q on every normal (ready) release, so this is
+  // behaviourally identical there; it only changes the force-release path.
+  logic [NumBarriers-1:0][NumCoresPerGroup-1:0]  arrived_q, arrived_d;
   logic                                          ack_pend_q, ack_pend_d; // config-write ack pending
   logic [IniW-1:0]                              ack_ini_q,  ack_ini_d;
 
@@ -95,6 +110,7 @@ module mempool_group_barrier #(
     releasing_d = releasing_q;
     rel_struct_d= rel_struct_q;
     rel_rem_d   = rel_rem_q;
+    arrived_d   = arrived_q;
     ack_pend_d  = ack_pend_q;
     ack_ini_d   = ack_ini_q;
 
@@ -129,6 +145,7 @@ module mempool_group_barrier #(
         end
         default: begin // OP_ARRIVE
           count_d[req_struct_i] = count_q[req_struct_i] + 1'b1;
+          arrived_d[req_struct_i][req_ini_addr_i] = 1'b1;  // this core is now releasable
         end
       endcase
     end
@@ -157,11 +174,18 @@ module mempool_group_barrier #(
     if (releasing_q && (rel_rem_d != '0)) begin
       releasing_d = 1'b1; rel_struct_d = rel_struct_q;  // keep draining
     end else begin
-      if (releasing_q) count_d[rel_struct_q] = '0;      // finished -> reset counter (target/mask persist)
+      if (releasing_q) begin
+        count_d[rel_struct_q]   = '0;                   // finished -> reset counter (target/mask persist)
+        arrived_d[rel_struct_q] = '0;                   // ... and the arrival set for the next round
+      end
       if (pick_valid) begin
         releasing_d  = 1'b1;
         rel_struct_d = pick_struct;
-        rel_rem_d    = mask_q[pick_struct];
+        // Release exactly the cores that arrived. arrived_d (not _q) so a core arriving in this
+        // very cycle is included -- otherwise it would wait out another full watchdog window.
+        // pick_struct != rel_struct_q (ready_other excludes the releasing struct), so the clear
+        // above can never clobber the set being loaded here.
+        rel_rem_d    = arrived_d[pick_struct];
         if (force_rel[pick_struct]) wd_fire_d[pick_struct] = 1'b1;
       end else begin
         releasing_d = 1'b0;
@@ -173,12 +197,13 @@ module mempool_group_barrier #(
     if (!rst_ni) begin
       target_q <= '0; mask_q <= '0; count_q <= '0;
       wd_q <= {NumBarriers{WdW'(WatchdogLimit)}}; wd_fire_q <= '0;
-      releasing_q <= 1'b0; rel_struct_q <= '0; rel_rem_q <= '0;
+      releasing_q <= 1'b0; rel_struct_q <= '0; rel_rem_q <= '0; arrived_q <= '0;
       ack_pend_q <= 1'b0; ack_ini_q <= '0;
     end else begin
       target_q <= target_d; mask_q <= mask_d; count_q <= count_d;
       wd_q <= wd_d; wd_fire_q <= wd_fire_d;
       releasing_q <= releasing_d; rel_struct_q <= rel_struct_d; rel_rem_q <= rel_rem_d;
+      arrived_q <= arrived_d;
       ack_pend_q <= ack_pend_d; ack_ini_q <= ack_ini_d;
     end
   end
@@ -186,12 +211,34 @@ module mempool_group_barrier #(
   assign wd_fire_o = wd_fire_q;
 
   // pragma translate_off
-  int unsigned dbg_arrive_cnt = 0, dbg_release_cnt = 0;
+  int unsigned dbg_arrive_cnt = 0, dbg_release_cnt = 0, dbg_wd_cnt = 0;
   always_ff @(posedge clk_i) begin
     if (rst_ni && req_valid_i && req_ready_o && req_op_i == OP_ARRIVE) dbg_arrive_cnt  <= dbg_arrive_cnt + 1;
     if (rst_ni && rel_fire)                                            dbg_release_cnt <= dbg_release_cnt + 1;
+    // A watchdog fire means this barrier did NOT synchronize: it timed out and released only the
+    // cores that had arrived. Never silent -- the skew it reports is the actionable number (the
+    // 2026-07-30 GBAR_PLOOP failure was a first-barrier skew > WatchdogLimit).
+    if (rst_ni) begin
+      for (int unsigned s = 0; s < NumBarriers; s++) begin
+        if (!releasing_q && force_rel[s] && (pick_valid && (pick_struct == StructW'(s)))) begin
+          dbg_wd_cnt <= dbg_wd_cnt + 1;
+          $display("[GBAR WD] %m t=%0t struct=%0d TIMEOUT: arrived=%0d/%0d arrived_set=%b mask=%b -- releasing arrived only",
+                   $time, s, count_q[s], target_q[s], arrived_q[s], mask_q[s]);
+        end
+      end
+    end
   end
-  final $display("[GBAR] %m arrives=%0d releases=%0d wd_fire=%b", dbg_arrive_cnt, dbg_release_cnt, wd_fire_q);
+  // A core may only be released if it arrived; the configured mask must cover the arrival set.
+  // A violation means SW mis-sized target/mask for the participating set.
+  for (genvar s = 0; s < NumBarriers; s++) begin : gen_gbar_mask_chk
+    arrived_subset_of_mask: assert property (
+      @(posedge clk_i) disable iff (!rst_ni)
+        (mask_q[s] == '0) || ((arrived_q[s] & ~mask_q[s]) == '0))
+      else $error("[GBAR] %m struct %0d: core arrived outside resp_mask (arrived=%b mask=%b)",
+                  s, arrived_q[s], mask_q[s]);
+  end
+  final $display("[GBAR] %m arrives=%0d releases=%0d wd_timeouts=%0d wd_fire=%b",
+                 dbg_arrive_cnt, dbg_release_cnt, dbg_wd_cnt, wd_fire_q);
   // pragma translate_on
 
 endmodule
