@@ -184,6 +184,12 @@ module mempool_group_mshr
   // still-held entry is reported; 0 = off.
   localparam int unsigned RespHoldProbe =
     `ifdef GROUP_MSHR_RESP_HOLD_PROBE `GROUP_MSHR_RESP_HOLD_PROBE `else 0 `endif;
+  // Stall (instead of allocating a duplicate entry) when a same-address entry is receiving its
+  // response this very cycle -- see req_addr_hit_drain_way. 1 = stall and retry (default),
+  // 0 = legacy allocate-a-second-way. Costs nothing on the merge/alloc timing path: it reuses
+  // mshr_resp_seen_now / mshr_resp_inflight, which already feed req_hit_way at this level.
+  localparam bit StallOnResp =
+    `ifdef GROUP_MSHR_STALL_ON_RESP `GROUP_MSHR_STALL_ON_RESP `else 1'b1 `endif;
   localparam int unsigned VictimPtrW = (MshrWaysPerBank > 1) ? $clog2(MshrWaysPerBank) : 1;
   // hold_cnt is sized from the window itself, so ANY window value is supported -- there is no
   // width-imposed ceiling (an earlier > 31 guard wrongly claimed one; the counter had always been
@@ -192,7 +198,23 @@ module mempool_group_mshr
   // up to W cycles; once W approaches the TB scoreboard's 1000-cycle stuck-request threshold the
   // held requests will start raising [CMS WARN] lines. Liveness is independent of W (the countdown
   // is free-running, so the fetch always issues).
-  localparam int unsigned HoldCntW = (HoldWindowMax > 1) ? $clog2(HoldWindowMax + 1) : 1;
+  // Serve-target timeout, in cycles. An entry that is holding its response data while waiting to
+  // reach a per-type serve target can wait forever if that target is never reached -- the target is
+  // a property of the ACCESS PATTERN, which the hardware cannot guarantee. Measured 2026-07-30: the
+  // I$ warm-up pass runs the kernel with a clamped row stride, so its scalar A loads never reach
+  // HoldSubsSingle=4 and whole MSHR banks saturate (bank[hold=8/8], subs stuck at 1..3 of 4).
+  // 0 = no timeout (legacy). Any W > 0 behaves exactly like group_mshr_hold_window: a free-running
+  // countdown that is never gated, so liveness holds for ANY target. It covers both waiting states:
+  //   RESP_HOLD -> on expiry, deliver to whatever subscribers are present (state = DRAIN_RESP);
+  //   CACHED with served_cnt below target -> on expiry, self-invalidate and free the way.
+  // The counter reuses the hold_cnt field: the request-side hold only lives in WAIT_RESP && !issued,
+  // which is mutually exclusive with both states above, so this costs no extra flops -- only the
+  // width has to cover whichever window is larger.
+  localparam int unsigned ServeTimeout =
+    `ifdef GROUP_MSHR_SERVE_TIMEOUT `GROUP_MSHR_SERVE_TIMEOUT `else 0 `endif;
+  localparam int unsigned HoldCntMax =
+    (HoldWindowMax > ServeTimeout) ? HoldWindowMax : ServeTimeout;
+  localparam int unsigned HoldCntW = (HoldCntMax > 1) ? $clog2(HoldCntMax + 1) : 1;
   if ((HoldSubs < 2) || (HoldSubs > MshrMergeReqs))
     $error("[mempool_group_mshr] group_mshr_hold_subs (%0d) must be in [2, MshrMergeReqs].",
            HoldSubs);
@@ -202,6 +224,13 @@ module mempool_group_mshr
            HoldSubsSingle, HoldSubsBurst);
   if (RespWaitSubsSingle && !EnableMshrSingleReq)
     $error("[mempool_group_mshr] group_mshr_resp_wait_subs_single requires scalar MSHRs.");
+  // Both of these remove a release path that previously bounded how long an entry can hold data:
+  // resp_wait_subs_single makes delivery wait for a subscriber target, and cache_reclaimable=0 stops
+  // an idle CACHED way from being an allocation victim. With neither a timeout nor those paths, an
+  // entry whose target the access pattern never delivers holds its way forever. Refuse the
+  // combination rather than let it wedge a bank silently at run time.
+  if ((RespWaitSubsSingle || !CacheReclaimable) && (ServeTimeout == 0))
+    $error("[mempool_group_mshr] group_mshr_resp_wait_subs_single=1 or group_mshr_cache_reclaimable=0 requires group_mshr_serve_timeout > 0 (no release path otherwise).");
   localparam int unsigned SubReqCountW     = idx_width(MshrMergeReqs + 1);
   localparam int unsigned RespBufCountW    = idx_width(RespBufWords + 1);
   localparam int unsigned RespBufPtrW      = idx_width(RespBufWords);
@@ -1164,6 +1193,27 @@ module mempool_group_mshr
     // outstanding bypassed multi-beat burst (VLSU one-insn serialization x <=2 bursts/insn).
     // An untracked burst is functionally safe (1-wide legacy delivery) but means the invariant
     // or the retirement accounting broke -- fatal in sim.
+    // Priority check for StallOnResp: req_addr_hit_drain (now including "a same-address entry is
+    // mid-response") must always steer a request into the WAIT branch, never into ALLOCATE.
+    // Deliberately NOT "any same-address entry": a request whose same-address entry has a FULL
+    // sub-request list (sub_reqs_num + 1 > MshrMergeReqs, reachable at group_mshr_merge_reqs=4)
+    // legitimately allocates a second entry -- stalling it would block on an entry that can never
+    // accept it. Likewise a length mismatch (a burst vs a resident single-word entry) is a
+    // by-design miss. This assertion therefore checks only the case the knob governs.
+    if (StallOnResp) begin : gen_stall_on_resp_assert
+      for (genvar at = 0; at < NumTilesPerGroup; at++) begin : gen_sor_tile
+        for (genvar ap = 1; ap < NumRemoteReqPortsPerTile; ap++) begin : gen_sor_port
+          no_alloc_while_resp_landing: assert property(
+            @(posedge clk_i) disable iff (!rst_ni)
+              !(req_in_valid[at][ap] && req_in_ready[at][ap] &&
+                req_alloc_found[at][ap] && req_addr_hit_drain[at][ap]))
+            else $fatal(1,
+                "MSHR allocated a second entry while a same-address entry was draining/receiving (tile %0d port %0d)",
+                at, ap);
+        end
+      end
+    end
+
     if (PD2) begin : gen_bypass_depth_assert
       for (genvar bt = 0; bt < NumTilesPerGroup; bt++) begin : gen_bypass_depth_tile
         // All tracking ways occupied = overflow. bypass_track_q is a PACKED ARRAY of structs,
@@ -1320,9 +1370,24 @@ module mempool_group_mshr
               mshr_q_valid[e_abs] &&
               (mshr_q[e_abs].base_addr == req_addr_key[tile_i][port_i]) &&
               (mshr_q[e_abs].tgt_group_id == req_in[tile_i][port_i].tgt_group_id);
+          // A same-address entry that cannot be merged into RIGHT NOW makes the request WAIT rather
+          // than allocate a second entry for the same line.
+          // The DRAIN_RESP term is the original one. The StallOnResp term closes a one-cycle hole:
+          // while a response for the entry is arriving, req_hit_way is killed by
+          // mshr_resp_seen_now/mshr_resp_inflight (correct -- a mid-burst joiner would miss the
+          // earlier beats), but mshr_q still reads WAIT_RESP, so req_addr_hit_drain was false too.
+          // The request therefore matched NEITHER the merge path nor the wait path and fell through
+          // to ALLOCATE, taking a second way for an address whose data was already landing: a
+          // redundant NoC fetch, a wasted way, and -- with resp_wait_subs_single -- two entries that
+          // each fall short of the subscriber target and ride out group_mshr_serve_timeout.
+          // Stalling instead costs this requester a few cycles: next cycle the entry is RESP_HOLD
+          // (mergeable -- it then counts toward the target) or DRAIN_RESP (wait, then hit as CACHED).
+          // Cheaper than a duplicate entry, and it adds nothing to req_hit_way / the alloc
+          // arbitration path -- both signals are already computed at this level.
           assign req_addr_hit_drain_way[tile_i][port_i][way_i] =
               req_addr_hit_way[tile_i][port_i][way_i] &&
-              (mshr_q[e_abs].state == MSHR_DRAIN_RESP);
+              ((mshr_q[e_abs].state == MSHR_DRAIN_RESP) ||
+               (StallOnResp && (mshr_resp_seen_now[e_abs] || mshr_resp_inflight[e_abs])));
 
           assign req_hit_way[tile_i][port_i][way_i] =
               req_can_merge[tile_i][port_i] &&
@@ -2603,6 +2668,8 @@ module mempool_group_mshr
               (mshr_d[resp_mshr_id[tile_i][port_i]].sub_reqs_num <
                SubReqCountW'(HoldSubsSingle))) begin
             mshr_d[resp_mshr_id[tile_i][port_i]].state = MSHR_RESP_HOLD;
+            // Arm the serve-target timeout (0 => never expires; the countdown below is skipped).
+            mshr_d[resp_mshr_id[tile_i][port_i]].hold_cnt = HoldCntW'(ServeTimeout);
           end else begin
             mshr_d[resp_mshr_id[tile_i][port_i]].state = MSHR_DRAIN_RESP;
           end
@@ -2653,6 +2720,46 @@ module mempool_group_mshr
           mshr_d[mshr_i].beat_seen = '0;
           mshr_d[mshr_i].beat_seen[0] = 1'b1;
           mshr_d[mshr_i].beat_done = '0;
+        end
+      end
+    end
+
+    // ------------------------------------------------------------
+    // Serve-target timeout (group_mshr_serve_timeout). Free-running countdown -- never gated on
+    // traffic, arbitration or readiness -- so an entry cannot wait on a target that the access
+    // pattern never delivers. Same contract as the request-side hold window: early release on
+    // reaching the target is the MECHANISM, this countdown is the LIVENESS GUARANTEE. Placed after
+    // response capture and the store/AMO forced-drain passes so it observes this cycle's state and
+    // never fights them. Entirely const-folded away when ServeTimeout == 0.
+    // ------------------------------------------------------------
+    if (ServeTimeout != 0) begin
+      for (int e = 0; e < MshrNum; e++) begin
+        if (mshr_d_valid[e] && (mshr_d[e].state == MSHR_RESP_HOLD)) begin
+          if (mshr_d[e].hold_cnt != '0) begin
+            mshr_d[e].hold_cnt = mshr_d[e].hold_cnt - HoldCntW'(1);
+          end else begin
+            // Expired: stop waiting for subscribers that are not coming and deliver the buffered
+            // word to whoever HAS subscribed. Same re-arm the merge-target path performs.
+            mshr_d[e].state         = MSHR_DRAIN_RESP;
+            mshr_d[e].beats_left    = BurstLenWidth'(1);
+            mshr_d[e].beat_pending  = '0;
+            mshr_d[e].beat_pending2 = '0;
+            mshr_d[e].beat2_armed   = 1'b0;
+            mshr_d[e].beat_seen     = '0;
+            mshr_d[e].beat_seen[0]  = 1'b1;
+            mshr_d[e].beat_done     = '0;
+          end
+        end else if (CacheSelfInval && EnableRespCache && mshr_d_valid[e] &&
+                     (mshr_d[e].state == MSHR_CACHED) &&
+                     (mshr_d[e].sub_reqs_num == '0)) begin
+          // A cache line that never reaches its sharing target ages out instead of pinning its way
+          // forever. Entries that DO reach the target are freed earlier by the self-invalidate pass.
+          if (mshr_d[e].hold_cnt != '0) begin
+            mshr_d[e].hold_cnt = mshr_d[e].hold_cnt - HoldCntW'(1);
+          end else begin
+            mshr_d_valid[e] = 1'b0;
+            mshr_d[e]       = '0;
+          end
         end
       end
     end
@@ -3018,6 +3125,12 @@ module mempool_group_mshr
             mshr_d[mshr_i].beat_done[resp_beat_offset[mshr_i]] = 1'b1;
             mshr_d[mshr_i].beats_left = '0;
             mshr_d[mshr_i].state = MSHR_CACHED;
+            // Re-arm the serve-target timeout for the cache-resident phase: a line whose target is
+            // never reached would otherwise never self-invalidate, and with CacheReclaimable=0 it
+            // is not an allocation victim either -- so its way would be pinned for good. A cache
+            // HIT re-enters DRAIN_RESP and returns here, which refreshes the window, so a
+            // frequently-used line keeps its way and only an idle one ages out.
+            mshr_d[mshr_i].hold_cnt = HoldCntW'(ServeTimeout);
             mshr_d[mshr_i].resp_valid = (mshr_d[mshr_i].resp_buf_cnt != '0);
           end else begin
             // Pop the drained head beat.

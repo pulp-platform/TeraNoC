@@ -262,6 +262,22 @@ group_mshr_bypass_probe ?=
 # requests LOST to the bypass path (byp) vs merely stalled (stl), same-address peer entries, and
 # the bank's per-state way census. 0/unset = off.
 group_mshr_resp_hold_probe ?=
+# Serve-target timeout in cycles for an entry holding data while waiting to reach its serve target.
+# 0/unset = no timeout (an unreachable target wedges the entry and eventually the whole bank).
+# W > 0 behaves like group_mshr_hold_window: a free-running countdown, so liveness holds for any
+# target. Covers RESP_HOLD (deliver to whoever subscribed) and CACHED below target (self-invalidate).
+group_mshr_serve_timeout ?=
+# Same-address request handling while that entry is receiving its response. 1/unset = STALL and
+# retry (the request merges next cycle, into RESP_HOLD or the resulting CACHED line). 0 = legacy:
+# the request misses and allocates a SECOND way for the same address, costing a redundant NoC fetch
+# and leaving both entries short of their subscriber target.
+group_mshr_stall_on_resp ?=
+ifneq ($(strip $(group_mshr_stall_on_resp)),)
+  vlog_defs += -DGROUP_MSHR_STALL_ON_RESP=$(group_mshr_stall_on_resp)
+endif
+ifneq ($(strip $(group_mshr_serve_timeout)),)
+  vlog_defs += -DGROUP_MSHR_SERVE_TIMEOUT=$(group_mshr_serve_timeout)
+endif
 vlog_defs += -DGROUP_MSHR_NUM=$(group_mshr_num)
 ifneq ($(strip $(group_mshr_ways_per_bank)),)
   vlog_defs += -DGROUP_MSHR_WAYS_PER_BANK=$(group_mshr_ways_per_bank)
