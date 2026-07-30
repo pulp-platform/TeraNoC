@@ -58,7 +58,24 @@
 #ifndef GBAR_STEADY
 #define GBAR_STEADY GROUP_BARRIER
 #endif
-#if GROUP_BARRIER
+// ---- Per-p-iteration GROUP-WIDE barrier (outer-loop alignment) --------------
+// INDEPENDENT of GROUP_BARRIER above (which is the per-STEP, per-PAIR rendezvous that
+// measured net-negative: it fires once per n step and cannot fix the downstream emission
+// skew). This one fires only at the TOP of each outer p iteration -- (p_end-p_start)/gvl
+// times per kernel, i.e. 4x for a 128-column range at m2 (VL=32), 2x at m4 -- and syncs
+// ALL cores of the group instead of a pair.
+// Rationale: the B-line sharing set is the cores with the same p_start (degree
+// cores_per_group/split_m_count, = 4 at M=P=512), and they can only coalesce in the group
+// MSHR if they issue inside the merge window. They drift apart over the long n sweep;
+// one rendezvous per column block re-locks them at negligible cost. It also subsumes
+// COLDSTART_GROUP_SYNC: the first iteration is aligned by the same barrier.
+// Uses its OWN struct (>= cores_per_group/2) so it can never collide with the pair
+// structs 0..7 that GROUP_BARRIER configures.
+#ifndef GBAR_PLOOP
+#define GBAR_PLOOP 1
+#endif
+#define GBAR_PLOOP_STRUCT 8u
+#if GROUP_BARRIER || GBAR_PLOOP
 #define GBAR_BASE_WORD 200u
 static inline uint32_t gbar_tgt_tile(void) {                 // a same-group tile != own
   uint32_t hid; asm volatile("csrr %0, mhartid" : "=r"(hid));
@@ -96,6 +113,12 @@ static inline void gbar_sync(uint32_t a) {
   gbar_arrive(a);         // arrive: held load to the barrier struct
   gbar_wait_snitch();     // wait for the held lw to return (the pair has rendezvoused)
 }
+#endif
+// Per-STEP / per-PAIR macros. These stay gated on GROUP_BARRIER ALONE (not the helper
+// gate above): their call sites reference the pair address `gbar`, which is only declared
+// under GROUP_BARRIER. Making them real whenever the helpers exist would break a
+// GBAR_PLOOP=1, GROUP_BARRIER=0 build.
+#if GROUP_BARRIER
 #define GBAR_SETUP(s,t,m) gbar_setup((s),(t),(m))
 #define GBAR_ARRIVE(a)    gbar_arrive(a)
 #define GBAR_WAIT()       gbar_wait_both()
@@ -111,6 +134,13 @@ static inline void gbar_sync(uint32_t a) {
 #define GBAR_WAIT()       ((void)0)
 #define GBAR_SYNC(a)      ((void)0)
 #define GBAR_SYNC_STEADY(a) ((void)0)
+#endif
+// Per-p-iteration sync. When off, the macro discards its argument at preprocess time, so
+// the (also compiled-out) address variable is never referenced.
+#if GBAR_PLOOP
+#define GBAR_SYNC_PLOOP(a) gbar_sync(a)
+#else
+#define GBAR_SYNC_PLOOP(a) ((void)0)
 #endif
 
 //==========================================================
@@ -135,8 +165,15 @@ void matmul_8xVL(float *c, const float *a, const float *b,
   uint32_t bhid; asm volatile("csrr %0, mhartid" : "=r"(bhid));
   const uint32_t gbar = gbar_base(bhid & 7u);
 #endif
+#if GBAR_PLOOP
+  const uint32_t gbar_pl = gbar_base(GBAR_PLOOP_STRUCT);
+#endif
   unsigned int p = p_start;
   while (p < p_end) {
+    // Re-align every core of the group at the start of this column block, so the
+    // same-p_start B-line sharing set issues its bursts inside the MSHR merge
+    // window (see GBAR_PLOOP). Request-sent fence only: responses stay in flight.
+    GBAR_SYNC_PLOOP(gbar_pl);
     // LMUL=2: each vector holds up to 32 float32 elements (VLEN=512, m2).
     // The VLSU auto-splits aligned loads > 16 words into 16-word bursts.
     size_t gvl;
@@ -320,9 +357,14 @@ void matmul_4xVL(float *c, const float *a, const float *b,
                  const unsigned int m_start, const unsigned int m_end,
                  const unsigned int N, const unsigned int P,
                  const unsigned int p_start, const unsigned int p_end) {
+#if GBAR_PLOOP
+  const uint32_t gbar_pl = gbar_base(GBAR_PLOOP_STRUCT);
+#endif
 
   unsigned int p = p_start;
   while (p < p_end) {
+    // Group-wide re-alignment at each column block (see GBAR_PLOOP).
+    GBAR_SYNC_PLOOP(gbar_pl);
     size_t gvl;
     asm volatile("vsetvli %[gvl], %[vl], e32, m4, ta, ma"
                  : [gvl] "=r"(gvl)
@@ -440,9 +482,14 @@ void matmul_2xVL(float *c, const float *a, const float *b,
                  const unsigned int m_start, const unsigned int m_end,
                  const unsigned int N, const unsigned int P,
                  const unsigned int p_start, const unsigned int p_end) {
+#if GBAR_PLOOP
+  const uint32_t gbar_pl = gbar_base(GBAR_PLOOP_STRUCT);
+#endif
 
   unsigned int p = p_start;
   while (p < p_end) {
+    // Group-wide re-alignment at each column block (see GBAR_PLOOP).
+    GBAR_SYNC_PLOOP(gbar_pl);
     size_t gvl;
     asm volatile("vsetvli %[gvl], %[vl], e32, m8, ta, ma"
                  : [gvl] "=r"(gvl)

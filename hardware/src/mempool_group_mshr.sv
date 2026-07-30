@@ -150,12 +150,18 @@ module mempool_group_mshr
     `ifdef GROUP_MSHR_HOLD_SUBS_SINGLE `GROUP_MSHR_HOLD_SUBS_SINGLE `else HoldSubs `endif;
   localparam int unsigned HoldSubsBurst =
     `ifdef GROUP_MSHR_HOLD_SUBS_BURST `GROUP_MSHR_HOLD_SUBS_BURST `else HoldSubs `endif;
+  // Scalar response-release policy. 0 preserves the original behavior: a returned scalar word
+  // starts draining to its current subscribers immediately. 1 keeps the returned word resident
+  // in MSHR_RESP_HOLD and admits later same-address scalar subscribers until HoldSubsSingle is
+  // reached. This is independent of HoldWindowSingle: the request-side hold window is unchanged.
+  localparam bit RespWaitSubsSingle =
+    `ifdef GROUP_MSHR_RESP_WAIT_SUBS_SINGLE `GROUP_MSHR_RESP_WAIT_SUBS_SINGLE `else 1'b0 `endif;
   // Cache self-invalidate (idea 1, docs/mshr_bank_hash_design.md): a CACHED entry that has served
   // its per-type sharing target (HoldSubsSingle for scalar/single entries, HoldSubsBurst for
   // bursts) self-invalidates, turning the done cache line into an INVALID way promptly (which the
   // invalid-first allocator then prefers, so OTHER cache lines survive). CACHED entries stay
-  // reclaimable-on-demand regardless, so an entry whose target is never reached cannot leak
-  // (no liveness hazard). 0 = off (served_cnt maintained but unused -> optimized away).
+  // reclaimable-on-demand when CacheReclaimable=1. With CacheReclaimable=0, self-invalidation or
+  // AMO invalidation is the only release path. 0 = off (served_cnt maintained but unused).
   localparam bit CacheSelfInval =
     `ifdef GROUP_MSHR_CACHE_SELF_INVAL `GROUP_MSHR_CACHE_SELF_INVAL `else 1'b0 `endif;
   // RR cache-victim selection (group_mshr_cache_victim_rr): per-bank round-robin start pointer
@@ -166,6 +172,18 @@ module mempool_group_mshr
   // 0 = legacy lowest-index-first (pointer tied 0, const-folds out -> bit-identical).
   localparam bit CacheVictimRR =
     `ifdef GROUP_MSHR_CACHE_VICTIM_RR `GROUP_MSHR_CACHE_VICTIM_RR `else 1'b0 `endif;
+  // CACHED replacement policy. 1 preserves the original pass-2 allocator behavior, where a bank
+  // with no INVALID way may reclaim an idle CACHED way. 0 protects CACHED ways from allocation;
+  // they remain resident until self-invalidation or the existing AMO invalidation.
+  localparam bit CacheReclaimable =
+    `ifdef GROUP_MSHR_CACHE_RECLAIMABLE `GROUP_MSHR_CACHE_RECLAIMABLE `else 1'b1 `endif;
+  // Bypass-path delivery probe (simulation-only; see the gen_bypass_probe block). 0 = off.
+  localparam bit BypassProbe =
+    `ifdef GROUP_MSHR_BYPASS_PROBE `GROUP_MSHR_BYPASS_PROBE `else 1'b0 `endif;
+  // RESP_HOLD stall probe (simulation-only; see gen_resp_hold_probe). Age in cycles after which a
+  // still-held entry is reported; 0 = off.
+  localparam int unsigned RespHoldProbe =
+    `ifdef GROUP_MSHR_RESP_HOLD_PROBE `GROUP_MSHR_RESP_HOLD_PROBE `else 0 `endif;
   localparam int unsigned VictimPtrW = (MshrWaysPerBank > 1) ? $clog2(MshrWaysPerBank) : 1;
   // hold_cnt is sized from the window itself, so ANY window value is supported -- there is no
   // width-imposed ceiling (an earlier > 31 guard wrongly claimed one; the counter had always been
@@ -182,6 +200,8 @@ module mempool_group_mshr
       (HoldSubsBurst  < 2) || (HoldSubsBurst  > MshrMergeReqs))
     $error("[mempool_group_mshr] group_mshr_hold_subs_single/burst (%0d/%0d) must be in [2, MshrMergeReqs].",
            HoldSubsSingle, HoldSubsBurst);
+  if (RespWaitSubsSingle && !EnableMshrSingleReq)
+    $error("[mempool_group_mshr] group_mshr_resp_wait_subs_single requires scalar MSHRs.");
   localparam int unsigned SubReqCountW     = idx_width(MshrMergeReqs + 1);
   localparam int unsigned RespBufCountW    = idx_width(RespBufWords + 1);
   localparam int unsigned RespBufPtrW      = idx_width(RespBufWords);
@@ -342,14 +362,16 @@ module mempool_group_mshr
   // Per-entry MSHR lifecycle:
   // - IDLE       : entry is free/unused (typically valid=0).
   // - WAIT_RESP  : entry is allocated; requests are tracked while waiting for NoC data.
-  // - DRAIN_RESP : at least one response beat is buffered; current head beat is draining to sub-requests.
+  // - DRAIN_RESP : at least one response beat is buffered; current head beat drains to subscribers.
   // - CACHED     : best-effort response cache state (no pending sub-requests, data kept for hits).
   //                On a cache hit the entry can go back to DRAIN_RESP; on replacement it is reallocated.
-  typedef enum logic [1:0] {
-    MSHR_IDLE       = 2'b00,
-    MSHR_WAIT_RESP  = 2'b01,
-    MSHR_DRAIN_RESP = 2'b10,
-    MSHR_CACHED     = 2'b11
+  // - RESP_HOLD  : a scalar response is buffered, but delivery waits for HoldSubsSingle subscribers.
+  typedef enum logic [2:0] {
+    MSHR_IDLE       = 3'b000,
+    MSHR_WAIT_RESP  = 3'b001,
+    MSHR_DRAIN_RESP = 3'b010,
+    MSHR_CACHED     = 3'b011,
+    MSHR_RESP_HOLD  = 3'b100
   } mshr_state_t;
 
   typedef struct packed {
@@ -412,6 +434,9 @@ module mempool_group_mshr
     logic [RespBufPtrW-1:0] resp_buf_wr_ptr;
     // Convenience mirror of (resp_buf_cnt != 0), used by scheduling logic.
     logic resp_valid;
+    // Cleared when a store/AMO overlaps a held response. Existing subscribers may consume the
+    // captured value, but the entry must deallocate afterward instead of caching stale data.
+    logic cacheable;
 `ifndef TARGET_SYNTHESIS
     // Debug: number of cached hits before this entry is reallocated.
     logic [31:0] cache_hit_cnt;
@@ -421,7 +446,7 @@ module mempool_group_mshr
     // (every alloc then sets issued = 1 and the replay walker is not generated).
     logic [HoldCntW-1:0] hold_cnt;
     logic                issued;
-    // Entry lifecycle state (IDLE/WAIT_RESP/DRAIN_RESP/CACHED).
+    // Entry lifecycle state (IDLE/WAIT_RESP/DRAIN_RESP/CACHED/RESP_HOLD).
     mshr_state_t state;
   } mempool_group_mshr_t;
 
@@ -511,8 +536,8 @@ module mempool_group_mshr
   mshr_id_t[NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                req_alloc_found_mshr_id;
   // Per-bank single-allocation-per-cycle scheme (Increment 3): req_alloc_cand marks a request that
   // wants a new entry (mergeable load that missed, no drain/meta hazard); bank_free_id/bank_has_free
-  // give each bank its lowest free (or reclaimable-CACHED) way; only one candidate per bank is granted
-  // an allocation per cycle, the rest stall and merge once the entry becomes resident next cycle.
+  // give each bank its lowest free (or, when enabled, reclaimable-CACHED) way; only one candidate
+  // per bank is granted an allocation per cycle.
   logic    [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                req_alloc_cand;
   logic    [MshrBankNum-1:0]                                                   bank_has_free;
   mshr_id_t[MshrBankNum-1:0]                                                   bank_free_id;
@@ -1087,6 +1112,20 @@ module mempool_group_mshr
         else $fatal(1, "MSHR CACHED entry without buffered data (resp_buf_cnt==0): mshr=%0d",
                     mshr_i);
 
+      response_hold_is_live_scalar: assert property(
+        @(posedge clk_i) disable iff (!rst_ni)
+          !mshr_q_valid[mshr_i] ||
+          (mshr_q[mshr_i].state != MSHR_RESP_HOLD) ||
+          (RespWaitSubsSingle &&
+           (mshr_q[mshr_i].burst_len == BurstLenWidth'(1)) &&
+           (mshr_q[mshr_i].resp_buf_cnt != '0) &&
+           (mshr_q[mshr_i].sub_reqs_num != '0) &&
+           (mshr_q[mshr_i].sub_reqs_num < SubReqCountW'(HoldSubsSingle))))
+        else $fatal(1,
+                    "MSHR invalid RESP_HOLD entry: mshr=%0d len=%0d resp=%0d subreqs=%0d",
+                    mshr_i, mshr_q[mshr_i].burst_len, mshr_q[mshr_i].resp_buf_cnt,
+                    mshr_q[mshr_i].sub_reqs_num);
+
       beat_done_subset_seen: assert property(
         @(posedge clk_i) disable iff (!rst_ni)
           !mshr_q_valid[mshr_i] ||
@@ -1291,6 +1330,10 @@ module mempool_group_mshr
               (mshr_q[e_abs].burst_len == req_len[tile_i][port_i]) &&
               (((mshr_q[e_abs].state == MSHR_WAIT_RESP) &&
                 (mshr_q[e_abs].beats_left == mshr_q[e_abs].burst_len)) ||
+               (RespWaitSubsSingle && !amo_invalidate &&
+                (mshr_q[e_abs].state == MSHR_RESP_HOLD) &&
+                mshr_q[e_abs].resp_valid &&
+                (req_len[tile_i][port_i] == BurstLenWidth'(1))) ||
                (EnableRespCache && !amo_invalidate &&
                 (mshr_q[e_abs].state == MSHR_CACHED) &&
                 mshr_q[e_abs].resp_valid &&
@@ -1312,7 +1355,8 @@ module mempool_group_mshr
               req_can_merge[tile_i][port_i] &&
               mshr_q_valid[mshr_i] &&
               ((mshr_q[mshr_i].state == MSHR_WAIT_RESP) ||
-               (mshr_q[mshr_i].state == MSHR_DRAIN_RESP)) &&
+               (mshr_q[mshr_i].state == MSHR_DRAIN_RESP) ||
+               (mshr_q[mshr_i].state == MSHR_RESP_HOLD)) &&
               (mshr_q[mshr_i].sub_reqs[0].tile_id == tile_group_id_t'(tile_i)) &&
               (mshr_q[mshr_i].sub_reqs[0].core_id == req_in[tile_i][port_i].wdata.core_id) &&
               // Keep same-entry hits legal; block only cross-entry overlaps.
@@ -1379,7 +1423,8 @@ module mempool_group_mshr
   // way, and reclaim a CACHED way only when the bank has no invalid way. This preserves the
   // response cache better than the old lowest-index-free-or-cached scan (which could evict a
   // low-index CACHED line while a higher-index invalid way sat unused). Allocation priority is
-  // therefore invalid -> reclaimable-CACHED -> bypass (bank_has_free stays 0 => request bypasses).
+  // With CacheReclaimable=1 priority is invalid -> CACHED -> bypass. With it at 0, pass 2 is
+  // disabled and a bank containing only CACHED ways reports full.
   always_comb begin
     int e;
     for (int b = 0; b < MshrBankNum; b++) begin
@@ -1398,7 +1443,7 @@ module mempool_group_mshr
       // cycle). CacheVictimRR=0: legacy lowest-index-first (way 0 always the first victim).
       // CacheVictimRR=1: the scan starts at the bank's RR victim pointer, so the victim
       // rotates across the ways (pointer advanced by reclaim fires, see the alloc block).
-      if (!bank_has_free[b]) begin
+      if (!bank_has_free[b] && CacheReclaimable) begin
         for (int w = 0; w < MshrWaysPerBank; w++) begin
           automatic int unsigned rw = w;
           if (CacheVictimRR) begin
@@ -1509,11 +1554,10 @@ module mempool_group_mshr
   // always available -- no debug define needed).
   //
   // mshr_q_valid alone is NOT utilization: it also counts ways that merely hold a
-  // response-cache line (state == MSHR_CACHED), which are reclaimable on demand by
-  // an allocating request (see bank_has_free). Split into the two populations:
+  // response-cache line (state == MSHR_CACHED), whose reclaimability is controlled by
+  // CacheReclaimable. Split into the two populations:
   //   mshr_inuse_dbg  : entry tracks an OUTSTANDING remote miss (WAIT_RESP /
-  //                     DRAIN_RESP) -- the true MSHR occupancy, i.e. what competes
-  //                     for ways and what "mshr_overflow" is really about.
+  //                     RESP_HOLD / DRAIN_RESP) -- the true MSHR occupancy.
   //   mshr_cached_dbg : entry is only a response-cache way (CACHED).
   //   mshr_held_dbg   : subset of in-use whose NoC fetch is still WITHHELD by
   //                     hold-the-fetch (WAIT_RESP && !issued) -- all-zero when
@@ -1609,6 +1653,198 @@ module mempool_group_mshr
           mshr_issue_subs_cnt_dbg    + 32'($countones(mshr_issue_subs_dbg));
     end
   end
+
+  // ------------------------------------------------------------------------
+  // RESP_HOLD stall probe (simulation-only, group_mshr_resp_hold_probe = age threshold).
+  // Diagnoses WHY an entry holding a returned scalar response never reaches HoldSubsSingle
+  // subscribers. It does not assume a cause -- it records, per held entry, the evidence that
+  // separates the competing explanations:
+  //   byp   : same-{addr,group} single-beat mergeable requests that BYPASSED to the NoC while this
+  //           entry was held. A bank with no free way sends such a request to the bypass branch
+  //           instead of merging, so its subscriber is lost to this entry FOREVER -> the target can
+  //           never be met. (Hypothesis: bank pressure steals the missing subscriber.)
+  //   stl   : same-{addr,group} requests presented but not accepted (drain-hazard / meta-conflict /
+  //           lost the per-bank alloc slot). These retry, so they are a delay, not a loss --
+  //           distinguishing them from `byp` is the whole point.
+  //   peers : other VALID entries with the SAME {addr,group}. Non-zero means the sharers SPLIT
+  //           across entries, so no single entry can reach the target.
+  //   census: ways of this entry's bank by state (invalid/wait/drain/hold/cached) at the moment of
+  //           the report -- shows whether the bank was full, and of what.
+  // Reported once per hold episode (rh_rep), so a wedged entry does not spam.
+  // ------------------------------------------------------------------------
+  // pragma translate_off
+  if (RespHoldProbe != 0) begin : gen_resp_hold_probe
+    int  rh_age   [MshrNum];
+    int  rh_byp   [MshrNum];
+    int  rh_stl   [MshrNum];
+    bit  rh_rep   [MshrNum];
+    longint rh_cyc;
+    int  rh_report_cnt;
+
+    always @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        rh_cyc = 0; rh_report_cnt = 0;
+        for (int e = 0; e < MshrNum; e++) begin
+          rh_age[e] = 0; rh_byp[e] = 0; rh_stl[e] = 0; rh_rep[e] = 0;
+        end
+      end else begin
+        rh_cyc = rh_cyc + 1;
+        for (int e = 0; e < MshrNum; e++) begin
+          if (mshr_q_valid[e] && (mshr_q[e].state == MSHR_RESP_HOLD)) begin
+            rh_age[e] = rh_age[e] + 1;
+            // Attribute this cycle's same-address traffic to the held entry.
+            for (int t = 0; t < NumTilesPerGroup; t++) begin
+              for (int p = 1; p < NumRemoteReqPortsPerTile; p++) begin
+                if (req_in_valid[t][p] && req_can_merge[t][p] &&
+                    (req_len[t][p] == BurstLenWidth'(1)) &&
+                    (mshr_q[e].base_addr    == req_addr_key[t][p]) &&
+                    (mshr_q[e].tgt_group_id == req_in[t][p].tgt_group_id)) begin
+                  if (req_in_ready[t][p] && req_out_valid[t][p] &&
+                      (req_out[t][p].mshr_tag == '0)) begin
+                    rh_byp[e] = rh_byp[e] + 1;      // LOST to the bypass path
+                  end else if (!req_in_ready[t][p]) begin
+                    rh_stl[e] = rh_stl[e] + 1;      // merely delayed
+                  end
+                end
+              end
+            end
+            // One-shot report once the hold gets pathological.
+            if ((rh_age[e] >= RespHoldProbe) && !rh_rep[e]) begin : rh_do_report
+              automatic int bk    = e / MshrWaysPerBank;
+              automatic int n_inv = 0, n_wait = 0, n_drain = 0, n_hold = 0, n_cach = 0;
+              automatic int peers = 0;
+              rh_rep[e] = 1'b1;
+              rh_report_cnt = rh_report_cnt + 1;
+              for (int w = 0; w < MshrWaysPerBank; w++) begin
+                automatic int ee = bk * MshrWaysPerBank + w;
+                if (!mshr_q_valid[ee]) n_inv = n_inv + 1;
+                else case (mshr_q[ee].state)
+                  MSHR_WAIT_RESP:  n_wait  = n_wait  + 1;
+                  MSHR_DRAIN_RESP: n_drain = n_drain + 1;
+                  MSHR_RESP_HOLD:  n_hold  = n_hold  + 1;
+                  MSHR_CACHED:     n_cach  = n_cach  + 1;
+                  default: ;
+                endcase
+              end
+              for (int ee = 0; ee < MshrNum; ee++) begin
+                if ((ee != e) && mshr_q_valid[ee] &&
+                    (mshr_q[ee].base_addr    == mshr_q[e].base_addr) &&
+                    (mshr_q[ee].tgt_group_id == mshr_q[e].tgt_group_id)) peers = peers + 1;
+              end
+              $display({"[RH STUCK] cyc=%0d g=%0d e=%0d bank=%0d addr=0x%0h tgt_g=%0d ",
+                        "subs=%0d/%0d byp=%0d stl=%0d peers=%0d bank[inv=%0d wait=%0d drain=%0d hold=%0d cached=%0d]"},
+                       rh_cyc, group_id_i, e, bk, mshr_q[e].base_addr, mshr_q[e].tgt_group_id,
+                       mshr_q[e].sub_reqs_num, HoldSubsSingle,
+                       rh_byp[e], rh_stl[e], peers,
+                       n_inv, n_wait, n_drain, n_hold, n_cach);
+              for (int s = 0; s < MshrMergeReqs; s++) begin
+                if (mshr_q[e].sub_reqs[s].valid) begin
+                  $display("[RH SUB  ] cyc=%0d g=%0d e=%0d s=%0d tile=%0d core=%0d meta=%0d",
+                           rh_cyc, group_id_i, e, s, mshr_q[e].sub_reqs[s].tile_id,
+                           mshr_q[e].sub_reqs[s].core_id, mshr_q[e].sub_reqs[s].meta_id_base);
+                end
+              end
+            end
+          end else begin
+            rh_age[e] = 0; rh_byp[e] = 0; rh_stl[e] = 0; rh_rep[e] = 0;
+          end
+        end
+        if ((StatsPeriod != 0) && ((rh_cyc % StatsPeriod) == 0) && (rh_report_cnt != 0)) begin
+          $display("[RH] cyc=%0d g=%0d hold_episodes_reported=%0d", rh_cyc, group_id_i, rh_report_cnt);
+        end
+      end
+    end
+  end
+  // pragma translate_on
+
+  // ------------------------------------------------------------------------
+  // Bypass-path delivery probe (simulation-only, group_mshr_bypass_probe).
+  // Pairs every request forwarded to the NoC WITHOUT an MSHR entry (mshr_tag == 0)
+  // against the bypass response later handed back to the tile, keyed on
+  // {tile, core_id, meta_id}. A bypass response whose key has no outstanding
+  // forward is an ORPHAN -- a response the core never asked for -- and is reported
+  // the cycle it is delivered, i.e. BEFORE the core's own invalid_resp_id assertion
+  // fires. Direct instrument for the 2026-07-30 cyc-23327 failure, where waveform
+  // archaeology was needed just to learn the stray response came via resp_from_bypass.
+  //   [BYP ORPHAN] : the anomaly, printed with full context.
+  //   [BYP]        : periodic fwd/rsp/orphan counts (StatsPeriod, 0 = never).
+  // Silent unless something is wrong, so it costs no transcript volume.
+  //
+  // Scope limits, chosen to avoid FALSE orphans rather than to be exhaustive:
+  //  - single-beat traffic only. A multi-beat bypassed burst returns one response
+  //    PER BEAT with meta = base+b, and under ParityDrain its core_id is retagged
+  //    to core_id+(b&1), so those keys do not round-trip.
+  //  - a response the retag table claims (bypass_match) is skipped, and so is any
+  //    response to a tile that currently has a tracked bypass burst.
+  // Counters are plain sim variables written with blocking assignments: a forward
+  // and a response can touch the same key in the same cycle.
+  // ------------------------------------------------------------------------
+  // pragma translate_off
+  if (BypassProbe) begin : gen_bypass_probe
+    localparam int unsigned BpCoreN = 2**$bits(tile_core_id_t);
+    localparam int unsigned BpMetaN = 2**$bits(meta_id_t);
+    integer bp_out_cnt [NumTilesPerGroup][BpCoreN][BpMetaN];
+    longint bp_cyc, bp_fwd, bp_rsp, bp_orphan;
+    logic [NumTilesPerGroup-1:0] bp_tile_tracked;
+
+    always_comb begin
+      bp_tile_tracked = '0;
+      for (int t = 0; t < NumTilesPerGroup; t++) begin
+        for (int w = 0; w < BypassTrackWays; w++) begin
+          if (bypass_track_q[t][w].valid) bp_tile_tracked[t] = 1'b1;
+        end
+      end
+    end
+
+    always @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        bp_cyc = 0; bp_fwd = 0; bp_rsp = 0; bp_orphan = 0;
+        for (int t = 0; t < NumTilesPerGroup; t++) begin
+          for (int c = 0; c < BpCoreN; c++) begin
+            for (int m = 0; m < BpMetaN; m++) bp_out_cnt[t][c][m] = 0;
+          end
+        end
+      end else begin
+        bp_cyc = bp_cyc + 1;
+        // (1) single-beat requests leaving the group without an entry.
+        for (int t = 0; t < NumTilesPerGroup; t++) begin
+          for (int p = 1; p < NumRemoteReqPortsPerTile; p++) begin
+            if (req_out_valid[t][p] && req_out_ready[t][p] &&
+                (req_out[t][p].mshr_tag == '0) &&
+                (req_len[t][p] == BurstLenWidth'(1))) begin
+              bp_out_cnt[t][int'(req_out[t][p].wdata.core_id)]
+                        [int'(req_out[t][p].wdata.meta_id)] += 1;
+              bp_fwd = bp_fwd + 1;
+            end
+          end
+        end
+        // (2) bypass responses handed back to the tile.
+        for (int t = 0; t < NumTilesPerGroup; t++) begin
+          for (int p = 1; p < NumRemoteRespPortsPerTile; p++) begin
+            if (resp_out_valid[t][p] && resp_out_ready[t][p] &&
+                resp_from_bypass[t][p] && !bypass_match[t][p]) begin : bp_resp
+              automatic int bc = int'(resp_out[t][p].rdata.core_id);
+              automatic int bm = int'(resp_out[t][p].rdata.meta_id);
+              bp_rsp = bp_rsp + 1;
+              if (bp_out_cnt[t][bc][bm] > 0) begin
+                bp_out_cnt[t][bc][bm] -= 1;
+              end else if (!bp_tile_tracked[t]) begin
+                bp_orphan = bp_orphan + 1;
+                $display("[BYP ORPHAN] cyc=%0d g=%0d t=%0d p=%0d core=%0d meta=%0d wen=%0b : bypass response with no outstanding forward for this key",
+                         bp_cyc, group_id_i, t, p, bc, bm, resp_out[t][p].wen);
+              end
+            end
+          end
+        end
+        // (3) periodic summary.
+        if ((StatsPeriod != 0) && ((bp_cyc % StatsPeriod) == 0)) begin
+          $display("[BYP] cyc=%0d g=%0d fwd=%0d rsp=%0d orphan=%0d",
+                   bp_cyc, group_id_i, bp_fwd, bp_rsp, bp_orphan);
+        end
+      end
+    end
+  end
+  // pragma translate_on
 
   // ------------------------------------------------------------------------
   // Bank-full alloc bypass view (simulation-only). A request that WANTS an MSHR
@@ -1760,11 +1996,11 @@ module mempool_group_mshr
   logic [255:0] e16_curr_sig;
   always_comb begin
     e16_curr_sig = '0;
-    e16_curr_sig[1:0]   = mshr_q[16].state;
-    e16_curr_sig[2]     = mshr_q_valid[16];
-    e16_curr_sig[10:3]  = mshr_q[16].sub_reqs_num;
-    e16_curr_sig[18:11] = mshr_q[16].beat_pending[7:0];
-    e16_curr_sig[26:19] = {mshr_q[16].sub_reqs[7].valid,
+    e16_curr_sig[2:0]   = mshr_q[16].state;
+    e16_curr_sig[3]     = mshr_q_valid[16];
+    e16_curr_sig[11:4]  = mshr_q[16].sub_reqs_num;
+    e16_curr_sig[19:12] = mshr_q[16].beat_pending[7:0];
+    e16_curr_sig[27:20] = {mshr_q[16].sub_reqs[7].valid,
                             mshr_q[16].sub_reqs[6].valid,
                             mshr_q[16].sub_reqs[5].valid,
                             mshr_q[16].sub_reqs[4].valid,
@@ -1772,9 +2008,9 @@ module mempool_group_mshr
                             mshr_q[16].sub_reqs[2].valid,
                             mshr_q[16].sub_reqs[1].valid,
                             mshr_q[16].sub_reqs[0].valid};
-    e16_curr_sig[34:27] = 8'(mshr_q[16].resp_buf_cnt); // zero-extend (width varies by config)
-    e16_curr_sig[35]    = mshr_q[16].resp_valid;
-    e16_curr_sig[39:36] = mshr_q[16].beats_left[3:0];
+    e16_curr_sig[35:28] = 8'(mshr_q[16].resp_buf_cnt); // zero-extend (width varies by config)
+    e16_curr_sig[36]    = mshr_q[16].resp_valid;
+    e16_curr_sig[40:37] = mshr_q[16].beats_left[3:0];
   end
   always_ff @(posedge clk_i) begin
     if (rst_ni && (group_id_i == 4'd12) && 1'b1) begin
@@ -2029,6 +2265,20 @@ module mempool_group_mshr
                   mshr_d[req_merge_mshr_id[tile_i][port_i]].beat_seen = '0;
                   mshr_d[req_merge_mshr_id[tile_i][port_i]].beat_seen[0] = 1'b1;
                   mshr_d[req_merge_mshr_id[tile_i][port_i]].beat_done = '0;
+                end else if (
+                    RespWaitSubsSingle &&
+                    (mshr_d[req_merge_mshr_id[tile_i][port_i]].state == MSHR_RESP_HOLD) &&
+                    (mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num >=
+                     SubReqCountW'(HoldSubsSingle))) begin
+                  // The merge that landed this cycle reached the response-release target.
+                  mshr_d[req_merge_mshr_id[tile_i][port_i]].state = MSHR_DRAIN_RESP;
+                  mshr_d[req_merge_mshr_id[tile_i][port_i]].beats_left = BurstLenWidth'(1);
+                  mshr_d[req_merge_mshr_id[tile_i][port_i]].beat_pending = '0;
+                  mshr_d[req_merge_mshr_id[tile_i][port_i]].beat_pending2 = '0;
+                  mshr_d[req_merge_mshr_id[tile_i][port_i]].beat2_armed = 1'b0;
+                  mshr_d[req_merge_mshr_id[tile_i][port_i]].beat_seen = '0;
+                  mshr_d[req_merge_mshr_id[tile_i][port_i]].beat_seen[0] = 1'b1;
+                  mshr_d[req_merge_mshr_id[tile_i][port_i]].beat_done = '0;
                 end
               end
             end
@@ -2100,6 +2350,7 @@ module mempool_group_mshr
                     req_len[tile_i][port_i];
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].state      = MSHR_WAIT_RESP;
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].resp_valid = 1'b0;
+                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].cacheable  = 1'b1;
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].beats_left =
                     req_len[tile_i][port_i];
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].beat_pending = '0;
@@ -2229,9 +2480,8 @@ module mempool_group_mshr
     // HoldSubsBurst for a burst -- frees itself. The done cache line becomes an INVALID way, which
     // the invalid-first allocator prefers, so other cache lines survive longer. Placed after the
     // alloc/merge updates: an entry a request merged into this cycle is now DRAIN_RESP, and one an
-    // alloc just reclaimed is now WAIT_RESP, so neither is CACHED here -> untouched. CACHED entries
-    // also stay reclaimable-on-demand (bank_free_id pass 2), so a target that is never reached
-    // simply waits to be reclaimed -- no way can leak (liveness preserved).
+    // alloc just reclaimed is now WAIT_RESP, so neither is CACHED here -> untouched. When
+    // CacheReclaimable=0 this becomes the normal capacity-release path for resident cache lines.
     if (CacheSelfInval && EnableRespCache) begin
       for (int e = 0; e < MshrNum; e++) begin
         if (mshr_d_valid[e] && (mshr_d[e].state == MSHR_CACHED) &&
@@ -2348,8 +2598,61 @@ module mempool_group_mshr
           end
           mshr_d[resp_mshr_id[tile_i][port_i]].resp_buf_wr_ptr = resp_push_ptr[resp_mshr_id[tile_i][port_i]];
           mshr_d[resp_mshr_id[tile_i][port_i]].resp_valid = 1'b1;
-          mshr_d[resp_mshr_id[tile_i][port_i]].state      = MSHR_DRAIN_RESP;
+          if (RespWaitSubsSingle && !amo_invalidate &&
+              (mshr_d[resp_mshr_id[tile_i][port_i]].burst_len == BurstLenWidth'(1)) &&
+              (mshr_d[resp_mshr_id[tile_i][port_i]].sub_reqs_num <
+               SubReqCountW'(HoldSubsSingle))) begin
+            mshr_d[resp_mshr_id[tile_i][port_i]].state = MSHR_RESP_HOLD;
+          end else begin
+            mshr_d[resp_mshr_id[tile_i][port_i]].state = MSHR_DRAIN_RESP;
+          end
           mshr_d[resp_mshr_id[tile_i][port_i]].beat_seen[resp_capture_beat_offset[tile_i][port_i]] = 1'b1;
+        end
+      end
+    end
+
+    // A buffered response predates any store/AMO observed after it returned. Release the old value
+    // to its already-recorded subscribers, but prohibit the entry from becoming a stale cache line.
+    // This pass is after response capture so it also covers a response and invalidating operation
+    // arriving in the same cycle.
+    for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
+      for (int port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin
+        if (req_in_valid[tile_i][port_i] && req_in_ready[tile_i][port_i] &&
+            req_is_store[tile_i][port_i] &&
+            (req_len[tile_i][port_i] == BurstLenWidth'(1))) begin
+          for (int way_i = 0; way_i < MshrWaysPerBank; way_i++) begin
+            automatic int hit_e =
+                int'(req_bank[tile_i][port_i]) * MshrWaysPerBank + way_i;
+            if (mshr_d_valid[hit_e] &&
+                (mshr_d[hit_e].state == MSHR_RESP_HOLD) &&
+                (mshr_d[hit_e].base_addr == req_addr_key[tile_i][port_i]) &&
+                (mshr_d[hit_e].tgt_group_id == req_in[tile_i][port_i].tgt_group_id)) begin
+              mshr_d[hit_e].state = MSHR_DRAIN_RESP;
+              mshr_d[hit_e].cacheable = 1'b0;
+              mshr_d[hit_e].beats_left = BurstLenWidth'(1);
+              mshr_d[hit_e].beat_pending = '0;
+              mshr_d[hit_e].beat_pending2 = '0;
+              mshr_d[hit_e].beat2_armed = 1'b0;
+              mshr_d[hit_e].beat_seen = '0;
+              mshr_d[hit_e].beat_seen[0] = 1'b1;
+              mshr_d[hit_e].beat_done = '0;
+            end
+          end
+        end
+      end
+    end
+    if (amo_invalidate) begin
+      for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
+        if (mshr_d_valid[mshr_i] && (mshr_d[mshr_i].state == MSHR_RESP_HOLD)) begin
+          mshr_d[mshr_i].state = MSHR_DRAIN_RESP;
+          mshr_d[mshr_i].cacheable = 1'b0;
+          mshr_d[mshr_i].beats_left = BurstLenWidth'(1);
+          mshr_d[mshr_i].beat_pending = '0;
+          mshr_d[mshr_i].beat_pending2 = '0;
+          mshr_d[mshr_i].beat2_armed = 1'b0;
+          mshr_d[mshr_i].beat_seen = '0;
+          mshr_d[mshr_i].beat_seen[0] = 1'b1;
+          mshr_d[mshr_i].beat_done = '0;
         end
       end
     end
@@ -2697,6 +3000,7 @@ module mempool_group_mshr
         if (!resp_head_beat_pending[mshr_i]) begin
           if ((mshr_d[mshr_i].beats_left == BurstLenWidth'(1)) &&
               EnableRespCache && !amo_invalidate &&
+              mshr_d[mshr_i].cacheable &&
               (mshr_d[mshr_i].burst_len == BurstLenWidth'(1))) begin
             // Keep final drained head response as cache data (do not pop).
             // Guarded by !amo_invalidate: a single-word load finalizing in the
@@ -3095,7 +3399,8 @@ module mempool_group_mshr
               for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
                 if (!stat_req_subreq_full_match[tile_i][port_i] &&
                     mshr_q_valid[mshr_i] &&
-                    (mshr_q[mshr_i].state == MSHR_WAIT_RESP) &&
+                    ((mshr_q[mshr_i].state == MSHR_WAIT_RESP) ||
+                     (mshr_q[mshr_i].state == MSHR_RESP_HOLD)) &&
                     !mshr_resp_seen_now[mshr_i] &&
                     !mshr_resp_inflight[mshr_i] &&
                     (mshr_q[mshr_i].base_addr == req_addr_key[tile_i][port_i]) &&

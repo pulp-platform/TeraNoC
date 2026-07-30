@@ -139,6 +139,14 @@ ifeq ($(terapool), 1)
 	vlog_defs += -DTERAPOOL
 endif
 # Group-level fine-grained barrier (held-response TCDM slave). Default ON in
+# Group-barrier watchdog in cycles. 0/unset = NO watchdog: the barrier waits until all `target`
+# cores arrive (the intended rendezvous). A non-zero W force-releases the arrived subset after W
+# cycles from the first arrival -- that does not synchronize, it splits the group into cohorts one
+# round apart and every later barrier times out too. Use W > 0 only as a debug deadlock escape.
+group_barrier_wd_limit ?=
+ifneq ($(strip $(group_barrier_wd_limit)),)
+  vlog_defs += -DGROUP_BARRIER_WD_LIMIT=$(group_barrier_wd_limit)
+endif
 # mempool_group; group_barrier=0 disables it (-DGROUP_BARRIER_OFF) for A/B.
 ifeq ($(group_barrier), 0)
 	vlog_defs += -DGROUP_BARRIER_OFF
@@ -210,6 +218,10 @@ group_mshr_hold_subs     ?=
 # group_mshr_hold_subs. Legal range [2, group_mshr_merge_reqs].
 group_mshr_hold_subs_single ?=
 group_mshr_hold_subs_burst  ?=
+# Scalar response-release policy. 0/unset = drain a returned scalar word immediately. 1 = retain
+# it in the MSHR and keep merging same-address scalar requests until group_mshr_hold_subs_single
+# subscribers are present, then multicast the buffered word. Independent of the request hold window.
+group_mshr_resp_wait_subs_single ?=
 # Dual-context tcdm_burst_expander (docs/tcdm_burst_interleave_design.md). Empty/unset/0 = OFF
 # (legacy stall-while-draining, bit-identical). Set =1 so a second LOAD is accepted while a burst
 # drains and beats interleave round-robin -- same-address burst pairs then complete together
@@ -230,13 +242,26 @@ group_mshr_bank_burst_bits ?=
 # Cache self-invalidate (idea 1, docs/mshr_bank_hash_design.md). 0/unset = OFF (bit-identical);
 # 1 = a CACHED entry frees itself once it has served its per-type sharing target
 # (group_mshr_hold_subs_single for scalar/single, group_mshr_hold_subs_burst for burst), turning a
-# done cache line into an INVALID way that the invalid-first allocator prefers. Cached entries stay
-# reclaimable-on-demand regardless, so an unreached target cannot leak a way.
+# done cache line into an INVALID way that the invalid-first allocator prefers. Whether an idle
+# CACHED line is also reclaimable by allocation is controlled by group_mshr_cache_reclaimable.
 group_mshr_cache_self_inval ?=
 # RR cache-victim selection. 0/unset = legacy lowest-index reclaimable CACHED way (way-0
 # thrash); 1 = per-bank round-robin victim start pointer, advanced past the evicted way only
 # when a reclaim actually fires. Bit-identical when 0.
 group_mshr_cache_victim_rr ?=
+# CACHED replacement policy. 1/unset = CACHED ways are allocator victims when their bank has no
+# invalid way (legacy behavior). 0 = protect CACHED ways until self-invalidation or AMO invalidation.
+group_mshr_cache_reclaimable ?=
+# Bypass-path delivery probe (SIM ONLY, pragma translate_off -- no synthesis impact).
+# 1 = pair each entry-less (mshr_tag==0) single-beat forward against the bypass response
+# returned to the tile; report [BYP ORPHAN] the cycle a response arrives with no outstanding
+# forward, plus a periodic [BYP] fwd/rsp/orphan summary. Silent otherwise.
+group_mshr_bypass_probe ?=
+# RESP_HOLD stall probe (SIM ONLY). Age in cycles after which a still-held entry is reported once
+# with the evidence needed to explain WHY it never reached its subscriber target: same-address
+# requests LOST to the bypass path (byp) vs merely stalled (stl), same-address peer entries, and
+# the bank's per-state way census. 0/unset = off.
+group_mshr_resp_hold_probe ?=
 vlog_defs += -DGROUP_MSHR_NUM=$(group_mshr_num)
 ifneq ($(strip $(group_mshr_ways_per_bank)),)
   vlog_defs += -DGROUP_MSHR_WAYS_PER_BANK=$(group_mshr_ways_per_bank)
@@ -266,6 +291,9 @@ endif
 ifneq ($(strip $(group_mshr_hold_subs_burst)),)
   vlog_defs += -DGROUP_MSHR_HOLD_SUBS_BURST=$(group_mshr_hold_subs_burst)
 endif
+ifneq ($(strip $(group_mshr_resp_wait_subs_single)),)
+  vlog_defs += -DGROUP_MSHR_RESP_WAIT_SUBS_SINGLE=$(group_mshr_resp_wait_subs_single)
+endif
 ifneq ($(strip $(tcdm_burst_interleave)),)
   vlog_defs += -DTCDM_BURST_INTERLEAVE=$(tcdm_burst_interleave)
 endif
@@ -277,6 +305,15 @@ ifneq ($(strip $(group_mshr_cache_self_inval)),)
 endif
 ifneq ($(strip $(group_mshr_cache_victim_rr)),)
   vlog_defs += -DGROUP_MSHR_CACHE_VICTIM_RR=$(group_mshr_cache_victim_rr)
+endif
+ifneq ($(strip $(group_mshr_cache_reclaimable)),)
+  vlog_defs += -DGROUP_MSHR_CACHE_RECLAIMABLE=$(group_mshr_cache_reclaimable)
+endif
+ifneq ($(strip $(group_mshr_bypass_probe)),)
+  vlog_defs += -DGROUP_MSHR_BYPASS_PROBE=$(group_mshr_bypass_probe)
+endif
+ifneq ($(strip $(group_mshr_resp_hold_probe)),)
+  vlog_defs += -DGROUP_MSHR_RESP_HOLD_PROBE=$(group_mshr_resp_hold_probe)
 endif
 ifeq ($(group_mshr_bank_dump), 1)
   vlog_defs += -DGROUP_MSHR_BANK_DUMP
