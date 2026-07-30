@@ -117,6 +117,12 @@ DEFINES += -DLOG2_SEQ_MEM_SIZE=$(shell awk 'BEGIN{print log($(seq_mem_size))/log
 DEFINES += -DSTACK_SIZE=$(stack_size)
 DEFINES += -DLOG2_STACK_SIZE=$(shell awk 'BEGIN{print log($(stack_size))/log(2)}')
 DEFINES += -DXQUEUE_SIZE=$(xqueue_size)
+# Per-build extra defines (app/kernel A/B knobs), e.g.
+#   make <app> config=<cfg> EXTRA_DEFINES="-DGBAR_PLOOP=1 -DKERNEL_SIZE=4"
+# Use THIS, never `DEFINES=...` on the command line: a command-line assignment overrides
+# every `DEFINES +=` above (make gives command-line variables top precedence), silently
+# dropping NUM_CORES/NUM_GROUPS/VLEN/... and failing the build.
+DEFINES += $(EXTRA_DEFINES)
 # Spatz related
 DEFINES += -DRVF=$(rvf) -DRVD=$(rvd)
 DEFINES += -DMEMPOOL

@@ -65,7 +65,7 @@
 // can coalesce). 0 = unaligned baseline. Flip to 0 and rebuild for the A/B
 // comparison. See WORKLOG 2026-06-20 / memory project_mshr_bcoalesce_sync_plan.
 #ifndef COLDSTART_GROUP_SYNC
-#define COLDSTART_GROUP_SYNC 0  // Phase-0 BASELINE run (unaligned); set 1 for aligned
+#define COLDSTART_GROUP_SYNC 1  // Phase-0 BASELINE run (unaligned); set 1 for aligned
 #endif
 
 // ---- Instruction-cache warm-up knob ---------------------------------------
@@ -81,7 +81,7 @@
 #define ICACHE_WARMUP 1
 #endif
 #ifndef ICACHE_WARMUP_N
-#define ICACHE_WARMUP_N 8u  // even; >=6 covers peel + both steady-state halves + epilogue
+#define ICACHE_WARMUP_N 6u  // even; >=6 covers peel + both steady-state halves + epilogue
 #endif
 
 #ifdef USE_DMA
@@ -243,7 +243,9 @@ int main() {
   //   4 -> matmul_4xVL (e32,m4 -> vl=64, 4 accumulators)
   //   2 -> matmul_2xVL (e32,m8 -> vl=128, 2 accumulators)
   // Higher LMUL = fewer, longer vector ops = more FPU work per load => the 109-cycle load latency
-  // needs less memory-level parallelism to hide. Override with DEFINES=-DKERNEL_SIZE=4.
+  // needs less memory-level parallelism to hide. Override with
+  // EXTRA_DEFINES=-DKERNEL_SIZE=4 (NOT DEFINES=..., which overrides the build's own
+  // -DNUM_CORES/-DVLEN/... and fails to compile).
 #ifndef KERNEL_SIZE
 #define KERNEL_SIZE 8
 #endif
@@ -357,6 +359,22 @@ int main() {
   mempool_barrier(num_cores);
 #endif
 
+#if GBAR_PLOOP
+  // Configure the GROUP-WIDE barrier struct ONCE (target+mask persist and auto-reuse).
+  // One core per group configures it: target = every core of the group, resp_mask = all
+  // of them, so each outer p iteration releases the whole group together.
+  // NOTE: this assumes all cores_per_group cores of a group execute the kernel, which
+  // holds here (active_cores == num_cores by construction above). If a future work split
+  // ever leaves cores idle, target must be the ACTIVE count of the group -- otherwise the
+  // struct only releases via the HW watchdog.
+  if (is_core_active && (cid % cores_per_group) == 0u) {
+    uint32_t gmask = (cores_per_group >= 32u) ? 0xFFFFFFFFu
+                                              : ((1u << cores_per_group) - 1u);
+    gbar_setup(GBAR_PLOOP_STRUCT, cores_per_group, gmask);
+  }
+  mempool_barrier(num_cores);
+#endif
+
 #if ICACHE_WARMUP
   // Instruction-cache warm-up: one short reduced-N pass of the kernel so the matmul
   // (+ gbar_sync) code is resident in each core's I$ before the timed run. Same m/p
@@ -382,10 +400,7 @@ int main() {
       // Start timer
       timer_start = mempool_get_timer();
 
-      // Start benchmark instrumentation
-      // if (cid == 0)
-        mempool_start_benchmark();
-
+      
 #if COLDSTART_GROUP_SYNC
       // Cold-start intra-group alignment (Phase-0 experiment). Re-align all
       // cores_per_group cores so their first (n=0) shared-B bursts issue within
@@ -398,6 +413,10 @@ int main() {
       mempool_log_partial_barrier(2, cid, cores_per_group);
 #endif
 
+      // Start benchmark instrumentation
+      // if (cid == 0)
+        mempool_start_benchmark();
+      
       // Dispatch to appropriate kernel based on kernel_size
       if (kernel_size == 2) {
         matmul_2xVL(c, a, b, m_start, m_end, gemm_l.N, gemm_l.P, p_start, p_end);
