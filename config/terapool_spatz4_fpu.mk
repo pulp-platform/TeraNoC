@@ -122,14 +122,17 @@ tile_id_remap ?= 0
 # the fold and the field-select hash -- terapool has 16 tiles x 2 remote req ports = 32 concurrent
 # request slots, so 32 entries has ~zero headroom. 64 (16 banks x 4 ways) was the measured-safe
 # value; revert to 64 if the collapse reproduces.
-group_mshr_num           ?= 128
+group_mshr_num           ?= 64
 # Ways (entries) per bank; banks = group_mshr_num / group_mshr_ways_per_bank. 16 entries / 2 ways
 # = 8 banks x 2 ways (user experiment). WARNING: 16 entries is HALF of the 32 concurrent request
 # slots (16 tiles x 2 remote ports) -- 32 entries already collapsed the matmul ~14x, so 16 is very
 # likely to collapse harder. Revert to 64 (16 banks x 4 ways) for the measured-safe design.
-group_mshr_ways_per_bank ?= 8
+group_mshr_ways_per_bank ?= 4
 # Max sub-requests coalesced into one MSHR entry.
-group_mshr_merge_reqs    ?= 8
+# # M=P=256
+# group_mshr_merge_reqs    ?= 8
+# M=P=512
+group_mshr_merge_reqs    ?= 4
 # Admit single-word reqs into MSHR merge pool (1) or let them bypass (0).
 # Set to 1 (design intent: single-word loads coalesce + multicast via the MSHR).
 # The earlier sporadic sp-fmatmul deadlocks attributed here to a "duplicate-entry
@@ -176,13 +179,11 @@ group_mshr_drain_beats   ?= 2
 # (bank-full overflow 42% -> 51%). sp-fmatmul is latency-bound; coalescing saves NoC
 # traffic, which is not the scarce resource here.
 group_mshr_hold_window   ?= 0
-# Per-request-type hold windows (override the uniform group_mshr_hold_window above). These are what
-# is ACTIVE: scalar single-word loads are NEVER held (0 -> issue immediately), multi-beat vector
-# bursts are held up to 16 cycles to widen their coalescing window. A 0 window = that class issues
-# its fetch the same cycle (no hold). (The uniform value above only applies to a class that has no
-# override.)
+# Per-request-type hold windows (override the uniform group_mshr_hold_window above).
+# A 0 window = that class issues its fetch the same cycle (no hold). (The uniform
+# value above only applies to a class that has no override.)
 group_mshr_hold_window_single ?= 0
-group_mshr_hold_window_burst  ?= 63
+group_mshr_hold_window_burst  ?= 255
 # Early-release subscriber target: a held entry issues its fetch as soon as this many
 # requesters have merged into it. Legal range [2, group_mshr_merge_reqs].
 group_mshr_hold_subs     ?= 2
@@ -192,8 +193,17 @@ group_mshr_hold_subs     ?= 2
 # single=8 / burst=2 measured 4167 (W=16) and 4354 (W=24, worst point of the sweep):
 # singles essentially never reach 8 subscribers in-window, so a higher target only
 # lengthens the timeout path.
-group_mshr_hold_subs_single ?= 8
-group_mshr_hold_subs_burst  ?= 2
+
+# # M=P=256
+# group_mshr_hold_subs_single ?= 8
+# group_mshr_hold_subs_burst  ?= 2
+# M=P=512
+group_mshr_hold_subs_single ?= 4
+group_mshr_hold_subs_burst  ?= 4
+# Scalar response-release policy. The request-side hold window above remains 127. 1 = after the
+# scalar response returns, keep its word in the MSHR and continue merging until
+# group_mshr_hold_subs_single subscribers are present; 0 = start responding immediately.
+group_mshr_resp_wait_subs_single ?= 1
 
 # Enable tb_group_merge.svh (TB-side merge-opportunity analysis).
 # Produces [GroupMerge] lines and `group_merge_profiling/*.log` per 10k cycles.
@@ -251,19 +261,21 @@ group_mshr_bank_hash     ?= 3
 group_mshr_bank_shift        ?= 5
 # Per-type overrides. Both default to group_mshr_bank_shift above.
 group_mshr_bank_burst_bits   ?= 1      # m2 (KERNEL_SIZE=8)
-# M=P=256: 5 (reproduces the old contiguous shift=4 EXACTLY: {7,6,5}+{4} = {7:4})
-group_mshr_bank_shift_burst  ?= 5
+# M=P=256: 5
+# group_mshr_bank_shift_burst ?= 5
 # M=P=512: 7
-# group_mshr_bank_shift_burst ?= 7
+group_mshr_bank_shift_burst  ?= 7
 # N = 32: 5
-group_mshr_bank_shift_single ?= 5
+# group_mshr_bank_shift_single ?= 5
+# N = 256: 8
+# group_mshr_bank_shift_single ?= 8
 # N = 512: 9
-# group_mshr_bank_shift_single ?= 9
+group_mshr_bank_shift_single ?= 9
 # Cache self-invalidate (idea 1). 0 = OFF (bit-identical baseline). 1 = a CACHED entry frees itself
 # once it has served its per-type sharing target (group_mshr_hold_subs_single scalar /
 # group_mshr_hold_subs_burst burst), so a done cache line becomes an INVALID way the invalid-first
-# allocator prefers -- keeping other cache lines resident longer. Reclaim-on-demand still applies,
-# so an unreached target never leaks a way. Opt-in for A/B; leave 0 until measured.
+# allocator prefers -- keeping other cache lines resident longer. Reclaim-on-demand is controlled
+# separately by group_mshr_cache_reclaimable below.
 group_mshr_cache_self_inval ?= 1
 # CACHED-victim selection within a bank (pass-2 reclaim). 0 = legacy lowest-index-first:
 # the lowest reclaimable CACHED way is ALWAYS the victim -> way-0 lines thrash while
@@ -271,7 +283,62 @@ group_mshr_cache_self_inval ?= 1
 # the evicted way only when a reclaim actually fires (invalid-first pass 1 unchanged, hit
 # path untouched). HW: clog2(ways) flops/bank (16x3 = 48 here) + a rotated scan input.
 # Bit-identical when 0. Policy change -> A/B measure before flipping the default.
-group_mshr_cache_victim_rr ?= 0
+group_mshr_cache_victim_rr ?= 1
+# CACHED replacement policy. 0 = an idle CACHED entry is not an allocation victim and remains
+# resident until cache self-invalidation (enabled above) or AMO invalidation. 1 = legacy
+# reclaim-on-demand behavior when a bank has no invalid way.
+group_mshr_cache_reclaimable ?= 0
+# Bypass-path delivery probe (SIM ONLY, pragma translate_off -- zero synthesis/area impact).
+# 1 = report [BYP ORPHAN] the cycle a bypass response is delivered to a tile with no
+# outstanding entry-less forward for its {tile, core_id, meta_id} -- i.e. the cyc-23327
+# "Response ID does not match with valid metadata" failure, caught at its source and one
+# cycle BEFORE the core's own assertion. Also prints a periodic [BYP] fwd/rsp/orphan
+# summary (uses group_mshr_stats_period). Single-beat traffic only (multi-beat bypass
+# responses are retagged by ParityDrain and would produce false orphans). Silent when clean.
+group_mshr_bypass_probe ?= 1
+# RESP_HOLD stall probe (SIM ONLY): age threshold in cycles. An entry still holding its response
+# after this many cycles is reported ONCE with byp/stl/peers/bank-census -- the evidence that says
+# whether the missing subscriber was LOST to the bypass path (bank full), merely delayed, or split
+# onto a second entry. 1000 matches the CMS stuck-request threshold. 0 = off.
+group_mshr_resp_hold_probe ?= 1000
+
+# Serve-target timeout, in cycles, for an entry holding data that has not reached its serve target.
+# 0 = NO timeout (legacy): an entry whose target is never met waits forever, holds its way, and the
+# bank eventually saturates -- measured 2026-07-30, the I$ warm-up pass (clamped row stride, so its
+# scalar A loads never reach HoldSubsSingle=4) wedged whole banks at hold=8/8 with subs stuck at
+# 1..3 of 4. Any W > 0 works exactly like group_mshr_hold_window: a free-running countdown that is
+# never gated, so liveness holds for ANY target. Covers both waiting states -- RESP_HOLD delivers to
+# whoever subscribed, and a CACHED line below its sharing target self-invalidates and frees the way.
+# Reuses the hold_cnt field (mutually exclusive states), so no extra flops; only its width grows to
+# cover the larger of the two windows. Required whenever group_mshr_resp_wait_subs_single=1 or
+# group_mshr_cache_reclaimable=0, since both remove the release paths that used to bound the wait.
+group_mshr_serve_timeout ?= 255
+
+# Same-address request arriving in the SAME CYCLE as that entry's response.
+# 1 = STALL and retry (default). 0 = legacy, which allocated a SECOND entry for the same address.
+# Found from the waveform 2026-07-30: mshr_resp_seen_now/mshr_resp_inflight correctly kill
+# req_hit_way while a response is landing (a mid-burst joiner would miss the earlier beats), but
+# mshr_q still read WAIT_RESP so req_addr_hit_drain was false too -- the request matched NEITHER the
+# merge path nor the wait path and fell through to ALLOCATE. Cost per occurrence: a wasted way, a
+# redundant NoC fetch for data already arriving, and -- with group_mshr_resp_wait_subs_single=1 --
+# two entries that each fall short of the subscriber target and ride out group_mshr_serve_timeout.
+# Stalling costs the requester a few cycles instead: next cycle the entry is RESP_HOLD (mergeable,
+# so it counts toward the target) or DRAIN_RESP (wait, then hit it as a CACHED line).
+# Adds nothing to the merge/alloc timing path -- it reuses signals already feeding req_hit_way.
+group_mshr_stall_on_resp ?= 1
+
+# Group-barrier watchdog, in cycles. 0 = NO watchdog: a barrier waits until every core in its
+# target set arrives -- the intended rendezvous semantics, and what the p-loop barrier
+# (GBAR_PLOOP in kernel/sp-fmatmul.c) needs to actually synchronize. A non-zero W force-releases
+# only the ARRIVED cores after W cycles from the first arrival, which does NOT synchronize: the
+# stragglers end up a barrier round behind, so every subsequent barrier times out as well.
+# Measured 2026-07-30 at the old default of 1024: a systematic >1024-cycle inter-lane skew
+# (cores with core_gid%4==2 lag the rest) made EVERY group barrier time out, costing ~1024 cycles
+# per cohort per barrier while synchronizing nothing. With W=0 the barrier costs the real skew but
+# actually aligns the group. NOTE: with no watchdog, a mismatched arrival count (e.g. the I$
+# warm-up pass and the timed run disagreeing on barrier count) HANGS instead of degrading
+# silently -- that is intended, it surfaces the bug.
+group_barrier_wd_limit ?= 0
 
 ###########################
 ## 3. AXI and DMA Config
@@ -357,10 +424,10 @@ spatz_vlsu_block_alloc ?= 1
 # atomically (snitch_pkg::RobDepth, spatz NrOutstandingLoads, spatz_mem_rsp_t.id); widens
 # every mesh link by 1 bit (PNR re-close needed). Measured: cycle-identical (3589) for m2 --
 # invisible on its own, it is the enabler for dual_load below.
-spatz_vlsu_rob_depth ?=
+spatz_vlsu_rob_depth ?= 64
 # --- H1 dual-load runahead (REQUIRES spatz_vlsu_rob_depth=64 to have ROB room) ---
 # Unset/1 = legacy: the next load starts only when the previous one fully retires
 # (bit-identical). 2 = the next burst-safe load starts as soon as the previous one's requests
 # are all ISSUED, so its flight overlaps the elder's drain. Measured with rob_depth=64:
 # 3589 -> 3488 cycles (-2.8%), dual_adv on 32/40 instructions, all assertions silent.
-spatz_vlsu_dual_load ?=
+spatz_vlsu_dual_load ?= 2
