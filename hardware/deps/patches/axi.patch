@@ -1,0 +1,105 @@
+diff --git a/hardware/deps/axi/src/axi_demux.sv b/hardware/deps/axi/src/axi_demux.sv
+index 899d8352..e86b916b 100644
+--- a/hardware/deps/axi/src/axi_demux.sv
++++ b/hardware/deps/axi/src/axi_demux.sv
+@@ -70,6 +70,13 @@ module axi_demux #(
+   input  select_t                       slv_aw_select_i,
+   input  select_t                       slv_ar_select_i,
+   output axi_resp_t                     slv_resp_o,
++  // R-MCAST (docs/icache_rmcast_design.md): per-master-port N-hot id mask retired together
++  // with that port's R beat. '0 (default) => unchanged behaviour.
++`ifdef VERILATOR
++  input  logic [NoMstPorts-1:0][2**AxiLookBits-1:0] mst_r_pop_mask_i,
++`else
++  input  logic [NoMstPorts-1:0][2**AxiLookBits-1:0] mst_r_pop_mask_i = '0,
++`endif
+   // Master Ports
+   output axi_req_t    [NoMstPorts-1:0]  mst_reqs_o,
+   input  axi_resp_t   [NoMstPorts-1:0]  mst_resps_i
+@@ -196,6 +203,7 @@ module axi_demux #(
+     .AxiLookBits( AxiLookBits ),
+     .UniqueIds  ( UniqueIds   )
+   ) i_demux_simple (
++    .mst_r_pop_mask_i ( mst_r_pop_mask_i ),
+     .clk_i,
+     .rst_ni,
+     .test_i,
+diff --git a/hardware/deps/axi/src/axi_demux_simple.sv b/hardware/deps/axi/src/axi_demux_simple.sv
+index c7ba39f3..40169249 100644
+--- a/hardware/deps/axi/src/axi_demux_simple.sv
++++ b/hardware/deps/axi/src/axi_demux_simple.sv
+@@ -61,6 +61,13 @@ module axi_demux_simple #(
+   input  select_t                       slv_aw_select_i,
+   input  select_t                       slv_ar_select_i,
+   output axi_resp_t                     slv_resp_o,
++  // R-MCAST (docs/icache_rmcast_design.md): per-master-port N-hot id mask retired together
++  // with that port's R beat. '0 (default) => unchanged behaviour.
++`ifdef VERILATOR
++  input  logic [NoMstPorts-1:0][2**AxiLookBits-1:0] mst_r_pop_mask_i,
++`else
++  input  logic [NoMstPorts-1:0][2**AxiLookBits-1:0] mst_r_pop_mask_i = '0,
++`endif
+   // Master Ports
+   output axi_req_t    [NoMstPorts-1:0]  mst_reqs_o,
+   input  axi_resp_t   [NoMstPorts-1:0]  mst_resps_i
+@@ -352,6 +359,10 @@ module axi_demux_simple #(
+       assign ar_select_occupied = 1'b0;
+       assign ar_id_cnt_full = 1'b0;
+     end else begin : gen_ar_id_counter
++      // R-MCAST: ids retired by a multicast R beat (assigned in the R Channel section below, where
++      // the arbiter winner r_idx exists). Declaration must precede this instantiation.
++      logic [2**AxiLookBits-1:0] r_pop_mask;
++
+       axi_demux_id_counters #(
+         .AxiIdBits         ( AxiLookBits    ),
+         .CounterWidth      ( IdCounterWidth ),
+@@ -369,7 +380,10 @@ module axi_demux_simple #(
+         .push_mst_select_i            ( slv_ar_select_i                             ),
+         .push_i                       ( ar_push                                     ),
+         .pop_axi_id_i                 ( slv_resp_o.r.id[0+:AxiLookBits]               ),
+-        .pop_i                        ( slv_resp_o.r_valid & slv_req_i.r_ready & slv_resp_o.r.last )
++        // A masked (multicast) handshake pops via pop_mask_i instead, so suppress the single pop.
++        .pop_i                        ( (slv_resp_o.r_valid & slv_req_i.r_ready & slv_resp_o.r.last)
++                                        & ~|r_pop_mask                                 ),
++        .pop_mask_i                   ( r_pop_mask                                    )
+       );
+     end
+ 
+@@ -399,6 +413,10 @@ module axi_demux_simple #(
+       .idx_o  ( r_idx              )
+     );
+ 
++    // R-MCAST: qualify the winning master port's id mask with the upstream R handshake.
++    assign r_pop_mask = (slv_resp_o.r_valid & slv_req_i.r_ready & slv_resp_o.r.last)
++                      ? mst_r_pop_mask_i[r_idx] : '0;
++
+     always_comb begin
+       if (slv_resp_o.r_valid) begin
+         `AXI_SET_R_STRUCT(slv_resp_o.r, mst_resps_i[r_idx].r)
+@@ -532,7 +550,16 @@ module axi_demux_id_counters #(
+   input  logic                 inject_i,
+   // pop
+   input  logic [AxiIdBits-1:0] pop_axi_id_i,
+-  input  logic                 pop_i
++  input  logic                 pop_i,
++  // R-MCAST (docs/icache_rmcast_design.md): decrement EVERY counter in this mask this cycle. A
++  // multicast R beat retires N ids with a single handshake; without this only the beat's own id
++  // would pop and the other N-1 counters would stay occupied forever, permanently blocking those
++  // masters' future ARs. Defaulted so existing instantiations are unaffected.
++`ifdef VERILATOR
++  input  logic [2**AxiIdBits-1:0] pop_mask_i
++`else
++  input  logic [2**AxiIdBits-1:0] pop_mask_i = '0
++`endif
+ );
+   localparam int unsigned NoCounters = 2**AxiIdBits;
+   typedef logic [CounterWidth-1:0] cnt_t;
+@@ -553,7 +580,7 @@ module axi_demux_id_counters #(
+   //-----------------------------------
+   assign push_en   = (push_i)   ? (1 << push_axi_id_i)   : '0;
+   assign inject_en = (inject_i) ? (1 << inject_axi_id_i) : '0;
+-  assign pop_en    = (pop_i)    ? (1 << pop_axi_id_i)    : '0;
++  assign pop_en    = pop_mask_i | ((pop_i) ? (1 << pop_axi_id_i) : '0);
+   assign full_o    = |cnt_full;
+   // counters
+   for (genvar i = 0; i < NoCounters; i++) begin : gen_counters
