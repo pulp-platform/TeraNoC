@@ -129,9 +129,17 @@ group_mshr_num           ?= 64
 # likely to collapse harder. Revert to 64 (16 banks x 4 ways) for the measured-safe design.
 group_mshr_ways_per_bank ?= 4
 # Max sub-requests coalesced into one MSHR entry.
-# # M=P=256
-# group_mshr_merge_reqs    ?= 8
-# M=P=512
+# MUST be max(A-share, B-share), where A-share = split_p_count and B-share =
+# split_m_count. The two INVERT with M: at M<=256 A is the shared matrix, at
+# M>=1024 it is B. Derive with `scripts/gemm_autotune.py -M .. -N .. -P ..`.
+# Under-provisioning does not merely slow things down -- it removes N-amortisation
+# and pins utilisation at ~24% regardless of N.
+#   M=256 (A 8-way, B 2-way) -> 8      M=512  (A 4-way, B 4-way)  -> 4
+#   M=128 (A 16-way,B 1-way) -> 16     M=1024 (A 2-way, B 8-way)  -> 8
+# group_mshr_merge_reqs    ?= 8      # 256x512x256: A 8-way, B 2-way
+# group_mshr_merge_reqs    ?= 8      # 1024x128x128: A 2-way, B 8-way
+# group_mshr_merge_reqs    ?= 16     # 128x1024x512 (best measured 96.8%): A 16-way, B 1-way
+# 512x512x512 (default): A 4-way, B 4-way -> max = 4
 group_mshr_merge_reqs    ?= 4
 # Admit single-word reqs into MSHR merge pool (1) or let them bypass (0).
 # Set to 1 (design intent: single-word loads coalesce + multicast via the MSHR).
@@ -194,10 +202,21 @@ group_mshr_hold_subs     ?= 2
 # singles essentially never reach 8 subscribers in-window, so a higher target only
 # lengthens the timeout path.
 
-# # M=P=256
-# group_mshr_hold_subs_single ?= 8
+# _single = A-share = split_p_count, _burst = B-share = split_m_count, each CLAMPED
+# to the legal range [2, group_mshr_merge_reqs]. A raw share degree of 1 is ILLEGAL
+# (elaboration $error in mempool_group_mshr.sv): Verilator does not enforce it and
+# will happily run, QuestaSim refuses to elaborate. When a share degree is 1, clamp
+# to 2 AND zero that class's hold window -- and for the SINGLE class also set
+# group_mshr_resp_wait_subs_single=0, because that gate blocks DELIVERY on the
+# subscriber target independently of the hold window (an unreachable target then
+# rides out group_mshr_serve_timeout on every entry: measured -25% on 2048x128x128).
+# group_mshr_hold_subs_single ?= 8   # 256x512x256    (A 8-way, B 2-way)
 # group_mshr_hold_subs_burst  ?= 2
-# M=P=512
+# group_mshr_hold_subs_single ?= 2   # 1024x128x128   (A 2-way, B 8-way)
+# group_mshr_hold_subs_burst  ?= 8
+# group_mshr_hold_subs_single ?= 16  # 128x1024x512   (A 16-way, B 1-way; needs hold_window_burst=0)
+# group_mshr_hold_subs_burst  ?= 2
+# 512x512x512 (default): A 4-way, B 4-way
 group_mshr_hold_subs_single ?= 4
 group_mshr_hold_subs_burst  ?= 4
 # Scalar response-release policy. The request-side hold window above remains 127. 1 = after the
@@ -261,15 +280,19 @@ group_mshr_bank_hash     ?= 3
 group_mshr_bank_shift        ?= 5
 # Per-type overrides. Both default to group_mshr_bank_shift above.
 group_mshr_bank_burst_bits   ?= 1      # m2 (KERNEL_SIZE=8)
-# M=P=256: 5
-# group_mshr_bank_shift_burst ?= 5
-# M=P=512: 7
+# shift_burst = $clog2(P / split_p_count) = $clog2(words each core owns along P).
+# RTL rule: must be > $clog2(MaxBurstWords)+burst_bits-1, i.e. >= 5, so a shape with
+# fewer than 32 words per core along P is REJECTED at elaboration.
+# group_mshr_bank_shift_burst ?= 5    # 256x512x256    (256/8  = 32 words, the legal minimum)
+# group_mshr_bank_shift_burst ?= 6    # 1024x128x128   (128/2  = 64 words)
+# 512x512x512 (default): P/split_p_count = 512/4 = 128 words -> 7
 group_mshr_bank_shift_burst  ?= 7
-# N = 32: 5
-# group_mshr_bank_shift_single ?= 5
-# N = 256: 8
-# group_mshr_bank_shift_single ?= 8
-# N = 512: 9
+# shift_single = $clog2(N), the A row stride in words.
+# group_mshr_bank_shift_single ?= 5   # N = 32
+# group_mshr_bank_shift_single ?= 7   # N = 128   (1024x128x128, s19)
+# group_mshr_bank_shift_single ?= 8   # N = 256
+# group_mshr_bank_shift_single ?= 10  # N = 1024  (128x1024x512, best 96.8%)
+# 512x512x512 (default): N = 512 -> 9
 group_mshr_bank_shift_single ?= 9
 # Cache self-invalidate (idea 1). 0 = OFF (bit-identical baseline). 1 = a CACHED entry frees itself
 # once it has served its per-type sharing target (group_mshr_hold_subs_single scalar /
