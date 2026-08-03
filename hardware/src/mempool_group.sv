@@ -46,10 +46,24 @@ module mempool_group
   // Reserved within-tile word base (master-port tgt_addr word field). The barrier
   // owns words [GroupBarrierWord, GroupBarrierWord+NumGroupBarriers); struct =
   // word - GroupBarrierWord. SW forms a load at byte addr (word<<14)|(target_tile<<6),
-  // target_tile = a same-group tile != own (word 200 = 0x320000>>14). The bank
+  // target_tile = a same-group tile != own. The bank
   // field (byte[5:2]) selects the op: 0=arrive(load), 1=set target, 2=set mask.
-  // Aliases (any tile, these words) -- reserve them.
-  parameter int unsigned GroupBarrierWord     = 200
+  //
+  // These words are STOLEN FROM THE DATA ADDRESS SPACE group-wide: any intra-group,
+  // different-tile access whose word field lands here is re-routed to the barrier port
+  // and its response is WITHHELD until a rendezvous that a data access never performs
+  // -> silent deadlock. The linker MUST keep data out of the window; the l1 region in
+  // software/runtime/arch.ld.c is truncated at GROUP_BARRIER_WORD<<14 to enforce it,
+  // and `gbar_window_no_data_access` below fires if anything slips through.
+  //
+  // Default 240 (not 200): with NumGroupBarriers=16 and TCDMAddrMemWidth=8 (256 words)
+  // the window [240,256) is exactly the TOP 16 words of L1, so the reservation costs a
+  // trailing 256 KB instead of punching a hole in the middle of the data region. At
+  // word 200 the hole sat at 0x320000, which a >3.125 MB working set cannot grow past
+  // (a contiguous array cannot straddle it) -- that is what deadlocked 512x512x512.
+  // MUST stay in sync with GBAR_BASE_WORD in the barrier-using software.
+  parameter int unsigned GroupBarrierWord     =
+    `ifdef GROUP_BARRIER_WORD `GROUP_BARRIER_WORD `else 240 `endif
 ) (
   // Clock and reset
   input  logic                                                                                   clk_i,
@@ -301,9 +315,18 @@ module mempool_group
   // unchanged; a barrier word forces tgt_sel = NumTilesPerGroup (the barrier port).
   for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_bar_addr_remap
     // barrier window = words [GroupBarrierWord, GroupBarrierWord+NumGroupBarriers)
+    // The bounds are compared ONE BIT WIDER than the word field. The upper bound
+    // GroupBarrierWord+NumGroupBarriers can legitimately equal 2**TCDMAddrMemWidth (the window
+    // ending exactly at the top of the bank, e.g. 240+16 = 256 with an 8-bit word field); casting
+    // it to TCDMAddrMemWidth would truncate it to 0, making `word < 0` always false and silently
+    // DISABLING the barrier for every access. That is not hypothetical: it cost a 2x matmul
+    // slowdown (the per-iteration group barrier stopped synchronizing, so cores drifted apart)
+    // before being caught. Zero-extending both sides keeps the compare exact.
     assign bar_sel[t] = EnableGroupBarrier &&
-      (master_local_req_tgt_addr[t][TCDMAddrWidth-1 -: TCDMAddrMemWidth] >= TCDMAddrMemWidth'(GroupBarrierWord)) &&
-      (master_local_req_tgt_addr[t][TCDMAddrWidth-1 -: TCDMAddrMemWidth] <  TCDMAddrMemWidth'(GroupBarrierWord + NumGroupBarriers));
+      ({1'b0, master_local_req_tgt_addr[t][TCDMAddrWidth-1 -: TCDMAddrMemWidth]} >=
+       (TCDMAddrMemWidth+1)'(GroupBarrierWord)) &&
+      ({1'b0, master_local_req_tgt_addr[t][TCDMAddrWidth-1 -: TCDMAddrMemWidth]} <
+       (TCDMAddrMemWidth+1)'(GroupBarrierWord + NumGroupBarriers));
     assign req_tgt_addr_lic[t] = bar_sel[t]
       // barrier: tgt_sel = NumTilesPerGroup (port 16); pass {word,bank} as the mem-addr
       // so the adapter can decode struct (word-base) + op (bank).
@@ -312,6 +335,52 @@ module mempool_group
           1'b0,                                                        // inserted barrier-select bit
           master_local_req_tgt_addr[t][TileSelW-1 : 0] };             // tile = LIC output select
   end
+
+  // Data-alias tripwire for the reserved barrier window.
+  //
+  // The barrier's own ops span BOTH directions: bank0 = arrive (LOAD), bank1 = set target
+  // (STORE), bank2 = set mask (STORE) -- see gbar_setup() in the barrier-using software. So
+  // loads and stores are both legitimate in this window and must NOT be flagged; doing so
+  // would $fatal on correct barrier configuration.
+  //
+  // An **AMO** is never a barrier op, so an AMO landing in [GroupBarrierWord, +NumGroupBarriers)
+  // can only be ordinary data that the linker failed to keep out of the window. It is re-routed
+  // to the barrier port and has its response withheld forever, deadlocking the core with NO
+  // other symptom (no MSHR entry, no orphan response, no backpressure: nothing else sees it).
+  // This fires at the exact cycle of the aliasing access instead of leaving a silent hang; the
+  // 512x512x512 failure was `amoadd.w` on the runtime `barrier` word.
+  //
+  // Coverage caveat: this catches the AMO case only. A plain load/store alias is
+  // indistinguishable from a real barrier op here and stays silent -- the linker reservation in
+  // software/runtime/arch.ld.c is the actual guarantee; this is only a backstop.
+  // NOTE: Verilator ignores SVA unless run with --assert, so this is effective under
+  // QuestaSim/VCS but inert in the default Verilator flow.
+  // Elaboration guard: the window must fit inside the word field and must not be empty.
+  // A window that runs past 2**TCDMAddrMemWidth would wrap and disable the barrier silently.
+  if (EnableGroupBarrier) begin : gen_gbar_window_check
+    if (GroupBarrierWord + NumGroupBarriers > (1 << TCDMAddrMemWidth))
+      $fatal(1, "GroupBarrierWord(%0d)+NumGroupBarriers(%0d) exceeds the %0d-word bank (max %0d).",
+             GroupBarrierWord, NumGroupBarriers, 1 << TCDMAddrMemWidth, 1 << TCDMAddrMemWidth);
+    if (NumGroupBarriers == 0)
+      $fatal(1, "NumGroupBarriers must be > 0 when EnableGroupBarrier is set.");
+  end
+
+`ifndef TARGET_SYNTHESIS
+  if (EnableGroupBarrier) begin : gen_gbar_alias_check
+    for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_gbar_alias_tile
+      gbar_window_no_amo_alias: assert property (@(posedge clk_i) disable iff (!rst_ni)
+          (master_local_req_valid[t] && bar_sel[t])
+            |-> (master_local_req_wdata[t].amo == '0))
+        else $fatal(1,
+          {"GROUP BARRIER WINDOW ALIASED BY DATA: tile %0d issued an AMO to reserved word %0d ",
+           "(window [%0d,%0d)). The linker placed data in the barrier window; this request is ",
+           "re-routed to the barrier port and its response is withheld forever. Keep data below ",
+           "GROUP_BARRIER_WORD<<14 -- see the l1 region in software/runtime/arch.ld.c."},
+          t, master_local_req_tgt_addr[t][TCDMAddrWidth-1 -: TCDMAddrMemWidth],
+          GroupBarrierWord, GroupBarrierWord + NumGroupBarriers);
+    end
+  end
+`endif
 
   variable_latency_interconnect #(
     .NumIn            (NumTilesPerGroup                             ),

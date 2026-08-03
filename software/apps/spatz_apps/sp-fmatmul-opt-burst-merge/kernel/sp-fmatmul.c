@@ -76,7 +76,13 @@
 #endif
 #define GBAR_PLOOP_STRUCT 8u
 #if GROUP_BARRIER || GBAR_PLOOP
-#define GBAR_BASE_WORD 200u
+// Reserved barrier word base. Derived from the build's GROUP_BARRIER_WORD (runtime.mk) so it
+// cannot drift from mempool_group.sv's GroupBarrierWord -- a mismatch either misses the barrier
+// port entirely or, worse, points ordinary data at it (response withheld forever = silent hang).
+#ifndef GROUP_BARRIER_WORD
+#error "GROUP_BARRIER_WORD not defined: build via the app Makefile so runtime.mk supplies it."
+#endif
+#define GBAR_BASE_WORD ((uint32_t)GROUP_BARRIER_WORD)
 static inline uint32_t gbar_tgt_tile(void) {                 // a same-group tile != own
   uint32_t hid; asm volatile("csrr %0, mhartid" : "=r"(hid));
   return (hid & 0xF0u) | (((hid & 0xFu) + 1u) & 0xFu);

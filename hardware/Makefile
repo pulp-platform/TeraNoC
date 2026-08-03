@@ -147,6 +147,11 @@ group_barrier_wd_limit ?=
 ifneq ($(strip $(group_barrier_wd_limit)),)
   vlog_defs += -DGROUP_BARRIER_WD_LIMIT=$(group_barrier_wd_limit)
 endif
+# Reserved within-tile word base for the group barrier. MUST match GROUP_BARRIER_WORD on the
+# software side (software/runtime/runtime.mk -> arch.ld.c truncates L1 at this word, and
+# barrier-using apps derive GBAR_BASE_WORD from it). See mempool_group.sv GroupBarrierWord.
+group_barrier_word ?= 240
+vlog_defs += -DGROUP_BARRIER_WORD=$(group_barrier_word)
 # mempool_group; group_barrier=0 disables it (-DGROUP_BARRIER_OFF) for A/B.
 ifeq ($(group_barrier), 0)
 	vlog_defs += -DGROUP_BARRIER_OFF
