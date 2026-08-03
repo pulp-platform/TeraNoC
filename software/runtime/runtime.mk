@@ -117,6 +117,11 @@ DEFINES += -DLOG2_SEQ_MEM_SIZE=$(shell awk 'BEGIN{print log($(seq_mem_size))/log
 DEFINES += -DSTACK_SIZE=$(stack_size)
 DEFINES += -DLOG2_STACK_SIZE=$(shell awk 'BEGIN{print log($(stack_size))/log(2)}')
 DEFINES += -DXQUEUE_SIZE=$(xqueue_size)
+# Group-barrier reserved word window. Consumed by arch.ld.c (to truncate L1 so no data can
+# alias the window) and by barrier-using apps (GBAR_BASE_WORD). MUST match GroupBarrierWord
+# in hardware/src/mempool_group.sv.
+DEFINES += -DGROUP_BARRIER_WORD=$(group_barrier_word)
+DEFINES += -DNUM_GROUP_BARRIERS=$(shell awk 'BEGIN{print $(num_cores)/$(num_groups)}')
 # Per-build extra defines (app/kernel A/B knobs), e.g.
 #   make <app> config=<cfg> EXTRA_DEFINES="-DGBAR_PLOOP=1 -DKERNEL_SIZE=4"
 # Use THIS, never `DEFINES=...` on the command line: a command-line assignment overrides
