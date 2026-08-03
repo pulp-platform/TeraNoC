@@ -1313,6 +1313,23 @@ module mempool_group_mshr
   // Detect whether any response beat on input already targets each MSHR entry.
   // This blocks late-join on burst entries as soon as first beat appears,
   // even when that beat is not accepted in the same cycle.
+  //
+  // TIMING/AREA REWRITE (RespSeenByTag, default on): route by the round-tripped tag instead of
+  // scanning every entry -- the same Tier-b trick the capture path (resp_is_mshr/resp_mshr_id)
+  // already uses; this signal simply predates it. The legacy form ran the full predicate for
+  // (resp ports x MshrNum) = 32 x 128 = 4096 candidate matches, each a subtract plus range compare,
+  // and its result feeds req_hit_way -> the allocation grant -> req_in_ready. Tag routing does ONE
+  // indexed lookup per response slot (32 total) with a byte-identical predicate.
+  //
+  // Equivalence: the tagged entry always matches (the tag was stamped from it), and no OTHER entry
+  // can match, because req_meta_conflict forbids two live entries with the same owner tile+core and
+  // overlapping meta ranges. The one exception is two SAME-ADDRESS entries of one core (the meta
+  // check exempts same-address via same_addr_excl, reachable when a merge is refused by a full
+  // sub-request list): there the legacy scan set the bit on BOTH entries while the tag sets it only
+  // on the entry the beat actually belongs to -- strictly more accurate, and it only ever removes a
+  // spurious merge block. Keep the knob to A/B that corner if a workload ever exercises it.
+  localparam bit RespSeenByTag =
+    `ifdef GROUP_MSHR_RESP_SEEN_BY_TAG `GROUP_MSHR_RESP_SEEN_BY_TAG `else 1'b1 `endif;
   always_comb begin
     mshr_resp_seen_now = '0;
     for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
@@ -1320,15 +1337,32 @@ module mempool_group_mshr
         if (resp_in_valid[tile_i][port_i] &&
             (resp_in[tile_i][port_i].wen == 1'b0) &&
             (resp_in[tile_i][port_i].rdata.amo == '0)) begin
-          for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
-            if (mshr_q_valid[mshr_i] &&
-                ((mshr_q[mshr_i].state == MSHR_WAIT_RESP) ||
-                 (mshr_q[mshr_i].state == MSHR_DRAIN_RESP)) &&
-                (mshr_q[mshr_i].sub_reqs[0].tile_id == tile_group_id_t'(tile_i)) &&
-                (mshr_q[mshr_i].sub_reqs[0].core_id == resp_in[tile_i][port_i].rdata.core_id) &&
-                ((resp_in[tile_i][port_i].rdata.meta_id -
-                  mshr_q[mshr_i].sub_reqs[0].meta_id_base) < mshr_q[mshr_i].burst_len)) begin
-              mshr_resp_seen_now[mshr_i] = 1'b1;
+          if (RespSeenByTag) begin
+            // O(1): index the tagged entry, then run the identical re-validation.
+            if (resp_in[tile_i][port_i].mshr_tag != '0) begin : rsn_tag
+              automatic mshr_id_t cand =
+                  mshr_id_t'(resp_in[tile_i][port_i].mshr_tag - MshrTagWidth'(1));
+              if (mshr_q_valid[cand] &&
+                  ((mshr_q[cand].state == MSHR_WAIT_RESP) ||
+                   (mshr_q[cand].state == MSHR_DRAIN_RESP)) &&
+                  (mshr_q[cand].sub_reqs[0].tile_id == tile_group_id_t'(tile_i)) &&
+                  (mshr_q[cand].sub_reqs[0].core_id == resp_in[tile_i][port_i].rdata.core_id) &&
+                  ((resp_in[tile_i][port_i].rdata.meta_id -
+                    mshr_q[cand].sub_reqs[0].meta_id_base) < mshr_q[cand].burst_len)) begin
+                mshr_resp_seen_now[cand] = 1'b1;
+              end
+            end
+          end else begin
+            for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
+              if (mshr_q_valid[mshr_i] &&
+                  ((mshr_q[mshr_i].state == MSHR_WAIT_RESP) ||
+                   (mshr_q[mshr_i].state == MSHR_DRAIN_RESP)) &&
+                  (mshr_q[mshr_i].sub_reqs[0].tile_id == tile_group_id_t'(tile_i)) &&
+                  (mshr_q[mshr_i].sub_reqs[0].core_id == resp_in[tile_i][port_i].rdata.core_id) &&
+                  ((resp_in[tile_i][port_i].rdata.meta_id -
+                    mshr_q[mshr_i].sub_reqs[0].meta_id_base) < mshr_q[mshr_i].burst_len)) begin
+                mshr_resp_seen_now[mshr_i] = 1'b1;
+              end
             end
           end
         end
@@ -1539,31 +1573,67 @@ module mempool_group_mshr
   // bank by a low-index one. This gives starvation-FREEDOM (a loser whose bank is full bypasses to the
   // NoC and completes, 1260-ish) plus best-effort fair rotation -- NOT a hard bounded-wait under
   // adversarial periodic bank occupancy. Exactly-one-grant-per-bank is unchanged (bank_alloc_taken[b]).
+  // TIMING REWRITE (same grants, by construction -- see the equivalence argument below).
+  //
+  // The previous form walked the NumAllocSlots requester slots in rotated order and carried a
+  // bank_alloc_taken bitmap between iterations, so slot k's decision depended on every slot < k:
+  // a NumAllocSlots-deep (32 here) SERIAL chain, with a dynamic index per stage from the rotation,
+  // sitting directly in front of req_in_ready / req_out_valid (the door handshake).
+  //
+  // Equivalence: a slot maps to exactly ONE bank, so "the first candidate for bank b in rotated
+  // order" is independent per bank -- the carried bitmap only ever excluded slots of the SAME bank.
+  // And visiting base, base+1, ... (mod N) is exactly (slots >= base, ascending) followed by
+  // (slots < base, ascending). So splitting each bank's request vector at the rotation base and
+  // taking the lowest set bit of the high half, else of the low half, picks the identical winner.
+  // Depth becomes one priority encode (~log2 N) with all MshrBankNum banks evaluated in parallel.
+  logic [NumAllocSlots-1:0]                  alloc_cand_flat;
+  logic [NumAllocSlots-1:0][BankIdW-1:0]     alloc_bank_flat;
+  logic [NumAllocSlots-1:0]                  alloc_rr_mask;   // 1 = slot is at/above the RR base
+  logic [MshrBankNum-1:0][NumAllocSlots-1:0] bank_win_oh;     // one-hot winner per bank
+
   always_comb begin
-    int b;
-    int alloc_base;
-    logic [MshrBankNum-1:0] bank_alloc_taken;
+    alloc_cand_flat = '0;
+    alloc_bank_flat = '0;
+    // slot = tile*NumReqPortsActive + (port-1) is a bijection over the active req ports
+    // (1..NumRemoteReqPortsPerTile-1); the * and + are constant folds, not arithmetic.
     for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
       for (int port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin
-        req_alloc_found[tile_i][port_i]         = 1'b0;
-        req_alloc_found_mshr_id[tile_i][port_i] = '0;
+        automatic int s = tile_i * NumReqPortsActive + (port_i - 1);
+        alloc_cand_flat[s] = req_alloc_cand[tile_i][port_i];
+        alloc_bank_flat[s] = req_bank[tile_i][port_i];
       end
     end
-    bank_alloc_taken = '0;
-    // Visit the NumAllocSlots flattened (tile,port) requester slots starting at the RR base, so the
-    // first candidate for each bank in ROTATED order wins it. slot = tile*NumReqPortsActive+(port-1)
-    // is a bijection over the active req ports (1..NumRemoteReqPortsPerTile-1); the /,% by
-    // NumReqPortsActive is a shift/bit-select for the power-of-two port count here, not a divider.
-    alloc_base = EnableRrFairness ? int'(alloc_rr_q) : 0;
-    for (int k = 0; k < NumAllocSlots; k++) begin
-      automatic int slot   = (alloc_base + k) % NumAllocSlots;
-      automatic int tile_i = slot / NumReqPortsActive;
-      automatic int port_i = (slot % NumReqPortsActive) + 1;
-      b = int'(req_bank[tile_i][port_i]);
-      if (req_alloc_cand[tile_i][port_i] && !bank_alloc_taken[b] && bank_has_free[b]) begin
-        req_alloc_found[tile_i][port_i]         = 1'b1;
-        req_alloc_found_mshr_id[tile_i][port_i] = bank_free_id[b];
-        bank_alloc_taken[b]                     = 1'b1;
+    // Thermometer mask from the rotation base, computed once and shared by every bank.
+    // EnableRrFairness = 0 collapses it to all-ones, i.e. plain ascending priority from slot 0 --
+    // exactly the old alloc_base = 0 behaviour.
+    for (int s = 0; s < NumAllocSlots; s++) begin
+      alloc_rr_mask[s] = EnableRrFairness ? (s >= int'(alloc_rr_q)) : 1'b1;
+    end
+    for (int b = 0; b < MshrBankNum; b++) begin
+      automatic logic [NumAllocSlots-1:0] rq, hi, lo, hi_lsb, lo_lsb;
+      rq = '0;
+      for (int s = 0; s < NumAllocSlots; s++) begin
+        rq[s] = alloc_cand_flat[s] && (int'(alloc_bank_flat[s]) == b);
+      end
+      hi     = rq &  alloc_rr_mask;
+      lo     = rq & ~alloc_rr_mask;
+      hi_lsb = hi & (~hi + NumAllocSlots'(1));   // isolate lowest set bit
+      lo_lsb = lo & (~lo + NumAllocSlots'(1));
+      // bank_has_free gating reproduces the old `bank_has_free[b]` term: a bank with no free way
+      // grants nobody, and its candidates fall through to the stall/bypass decision unchanged.
+      bank_win_oh[b] = !bank_has_free[b] ? '0 : ((hi != '0) ? hi_lsb : lo_lsb);
+    end
+  end
+
+  // Scatter the per-bank one-hot grant back to the (tile,port) requesters. Slot s only ever appears
+  // in its own bank's vector, so indexing by req_bank here selects that same bank.
+  always_comb begin
+    for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
+      for (int port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin
+        automatic int s = tile_i * NumReqPortsActive + (port_i - 1);
+        automatic int b = int'(req_bank[tile_i][port_i]);
+        req_alloc_found[tile_i][port_i]         = bank_win_oh[b][s];
+        req_alloc_found_mshr_id[tile_i][port_i] = bank_win_oh[b][s] ? bank_free_id[b] : '0;
       end
     end
   end
@@ -2861,32 +2931,81 @@ module mempool_group_mshr
             // drained), so the marching base reaches it within N. The eligibility predicate, the
             // per-PHYSICAL-index subreq_claimed cross-port guard, and resp_sel_* are byte-identical;
             // only the visit order rotates.
-            automatic int drain_base = EnableRrFairness ? int'(drain_mshr_rr_q) : 0;
-            for (int kk = 0; kk < MshrNum; kk++) begin
-              automatic int mshr_i = (drain_base + kk) % MshrNum;
-              if (mshr_d_valid[mshr_i] && mshr_d[mshr_i].resp_valid &&
-                  mshr_d[mshr_i].state == MSHR_DRAIN_RESP) begin
-                automatic int subreq_base = EnableRrFairness ? int'(subreq_rr_q) : 0;
-                for (int ks = 0; ks < MshrMergeReqs; ks++) begin
-                  automatic int s = (subreq_base + ks) % MshrMergeReqs;
-                  if (!resp_sel_valid[tile_i][port_i] &&
-                      mshr_d[mshr_i].sub_reqs[s].valid &&
-                      mshr_d[mshr_i].beat_pending[s] &&
-                      !subreq_claimed[mshr_i][s] &&
-                      (mshr_d[mshr_i].sub_reqs[s].tile_id == tile_group_id_t'(tile_i)) &&
-                      // ParityDrain pins a burst beat to port 1+(boff&1); single-word entries
-                      // keep the legacy per-requester port map (PD2=0 folds to legacy exactly).
-                      ((PD2 && (mshr_d[mshr_i].burst_len != BurstLenWidth'(1)))
-                           ? ((RespPortIdW'(1) + RespPortIdW'(resp_beat_offset[mshr_i][0])) ==
+            // TIMING REWRITE (same selection; see the equivalence argument).
+            //
+            // The legacy form walked all MshrNum entries x MshrMergeReqs sub-requests in rotated
+            // order carrying resp_sel_valid, i.e. a 128 x 4 = 512-deep serial first-match chain PER
+            // PORT, and additionally carried subreq_claimed ACROSS the 32 ports -- chaining the
+            // ports to each other as well.
+            //
+            // (1) subreq_claimed is DEAD. A candidate (entry,s) has exactly ONE destination:
+            //     its tile comes from sub_reqs[s].tile_id and its port from either
+            //     map_resp_port_id(sub_reqs[s].port_id) (single) or 1+(beat_offset&1) (PD2 burst).
+            //     No two ports can ever evaluate the same (entry,s), so the flag could never block
+            //     anything; only resp_sel_valid (one pick per port) ever mattered. Dropping it makes
+            //     the 32 ports independent. It is still written below so the existing debug view and
+            //     any waveform reference keep working.
+            // (2) Within a port the scan is entry-major then sub-request-major in fixed rotated
+            //     orders, so it is exactly: pick the first ENTRY that has any eligible sub-request,
+            //     then the first eligible sub-request inside it. Two small rotated priority encodes
+            //     (MshrNum-wide, then MshrMergeReqs-wide) reproduce that, at ~log2 depth instead of
+            //     512 sequential stages.
+            automatic int drain_base   = EnableRrFairness ? int'(drain_mshr_rr_q) : 0;
+            automatic int subreq_base  = EnableRrFairness ? int'(subreq_rr_q) : 0;
+            automatic logic [MshrNum-1:0]       ent_cand;
+            automatic logic [MshrMergeReqs-1:0] sub_cand;
+            automatic int                       win_e;
+            automatic int                       win_s;
+            automatic bit                       have_e;
+            automatic bit                       have_s;
+            // Per-entry: does this entry offer any sub-request eligible for THIS port?
+            ent_cand = '0;
+            for (int e = 0; e < MshrNum; e++) begin
+              if (mshr_d_valid[e] && mshr_d[e].resp_valid &&
+                  (mshr_d[e].state == MSHR_DRAIN_RESP)) begin
+                for (int s = 0; s < MshrMergeReqs; s++) begin
+                  if (mshr_d[e].sub_reqs[s].valid && mshr_d[e].beat_pending[s] &&
+                      (mshr_d[e].sub_reqs[s].tile_id == tile_group_id_t'(tile_i)) &&
+                      ((PD2 && (mshr_d[e].burst_len != BurstLenWidth'(1)))
+                           ? ((RespPortIdW'(1) + RespPortIdW'(resp_beat_offset[e][0])) ==
                               port_i[RespPortIdW-1:0])
-                           : (map_resp_port_id(mshr_d[mshr_i].sub_reqs[s].port_id) ==
+                           : (map_resp_port_id(mshr_d[e].sub_reqs[s].port_id) ==
                               port_i[RespPortIdW-1:0]))) begin
-                    resp_sel_valid[tile_i][port_i] = 1'b1;
-                    resp_sel_mshr_id[tile_i][port_i] = mshr_id_t'(mshr_i);
-                    resp_sel_subreq_idx[tile_i][port_i] = s[idx_width(MshrMergeReqs)-1:0];
-                    subreq_claimed[mshr_i][s] = 1'b1;
+                    ent_cand[e] = 1'b1;
                   end
                 end
+              end
+            end
+            // First candidate entry in rotated order (>= base first, then wrap).
+            have_e = 1'b0; win_e = 0;
+            for (int k = 0; k < MshrNum; k++) begin
+              automatic int e = (drain_base + k) % MshrNum;
+              if (!have_e && ent_cand[e]) begin have_e = 1'b1; win_e = e; end
+            end
+            if (have_e) begin
+              // First eligible sub-request inside the winning entry, same rotated order.
+              sub_cand = '0;
+              for (int s = 0; s < MshrMergeReqs; s++) begin
+                if (mshr_d[win_e].sub_reqs[s].valid && mshr_d[win_e].beat_pending[s] &&
+                    (mshr_d[win_e].sub_reqs[s].tile_id == tile_group_id_t'(tile_i)) &&
+                    ((PD2 && (mshr_d[win_e].burst_len != BurstLenWidth'(1)))
+                         ? ((RespPortIdW'(1) + RespPortIdW'(resp_beat_offset[win_e][0])) ==
+                            port_i[RespPortIdW-1:0])
+                         : (map_resp_port_id(mshr_d[win_e].sub_reqs[s].port_id) ==
+                            port_i[RespPortIdW-1:0]))) begin
+                  sub_cand[s] = 1'b1;
+                end
+              end
+              have_s = 1'b0; win_s = 0;
+              for (int k = 0; k < MshrMergeReqs; k++) begin
+                automatic int s = (subreq_base + k) % MshrMergeReqs;
+                if (!have_s && sub_cand[s]) begin have_s = 1'b1; win_s = s; end
+              end
+              if (have_s) begin
+                resp_sel_valid[tile_i][port_i]      = 1'b1;
+                resp_sel_mshr_id[tile_i][port_i]    = mshr_id_t'(win_e);
+                resp_sel_subreq_idx[tile_i][port_i] = win_s[idx_width(MshrMergeReqs)-1:0];
+                subreq_claimed[win_e][win_s]        = 1'b1;  // debug view only; not a guard
               end
             end
           end
