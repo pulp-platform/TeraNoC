@@ -140,20 +140,29 @@ idx_width(NumX) + idx_width(NumY) == idx_width(NumGroups)   // keeps the bit-cas
 
 That last assert is the one that would have caught 4×8 today.
 
-### 3.3 TCDM routing table — the generator does not exist
+### 3.3 TCDM routing table — NOT a blocker for mesh configs (measured 2026-08-04)
 
-`hardware/src/routing_table_pkg.sv` is hardcoded `[3:0][3:0][15:0]`. Its header
-credits `hardware/scripts/gen_routing_table.py`, **which is not in the repo**. It
-must be written from scratch:
+The plan originally called this "the largest new-code item" with a non-negotiable
+bit-identical gate. **That rested on a false premise: the table is not used by
+mesh configs.**
 
-* emit `RoutingTables[NumX-1:0][NumY-1:0][NumGroups-1:0]`, honouring
-  `noc_topology` (mesh/torus) and `noc_routing_algorithm` (XY / odd-even / o1);
-* `routing_rule_addr_t` is `logic [4:0]` today — derive its width, don't literal it;
-* wire into `hardware/Makefile` next to `update-floogen`.
+`routing_table_pkg::RoutingTables` is referenced only inside
+`if (NocTopology == 1) begin: gen_torus` (`mempool_group_floonoc_wrapper.sv`
+:829, :887, :944). With `noc_topology = 0` the `gen_2dmesh` branch instantiates
+`floo_router` with `RouteAlgo = XYRouting`, `xy_id_i = group_xy_id`, and
+`id_route_map_i` tied to `'0`.
 
-**Gate — non-negotiable:** regenerating for 4×4 must be **bit-identical** to the
-committed file. A merely plausible routing table is a routing deadlock found
-hours into a simulation.
+`floo_route_select`'s XY branch computes the direction from `id_in.x/y` against
+`xy_id_i.x/y` — plain comparisons on the struct fields, no table and no baked
+dimensions. **It already scales to any mesh size**, provided the x and y fields
+are sized correctly, which is exactly what §3.2 (Phase 1a) fixed.
+
+This also explains why the committed table decodes as a *torus* table (40/256
+violations against torus-XY, 80 against mesh-XY, no encoding reproducing it
+exactly): torus is its only consumer, so nothing in the mesh path ever noticed.
+
+**Consequence:** a TCDM table generator is needed only if `noc_topology = 1` is
+chosen — which §8 still lists as an open decision. It is off the critical path.
 
 ### 3.4 L2/AXI NoC — source routing is O(N²·diameter)
 
