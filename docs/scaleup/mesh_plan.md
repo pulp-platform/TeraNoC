@@ -214,32 +214,53 @@ Fix: introduce an explicit `NumL2Channels`, decouple from `NumGroups`, assert
 against the perimeter count, derive `l2_banks` from it, and give `l2_size` a
 single source of truth shared by the `.mk` and the yml generator.
 
-### 3.6 Perimeter geometry (both NoCs) — decoded 2026-08-04
+### 3.6 Perimeter geometry — the numbering is OPTIMAL, not arbitrary
 
 `terapool_cluster_floonoc_wrapper.sv:118-270` indexes the perimeter AXI ports with
-literals (`floo_axi_req_i[y+12]`, `[5-x]`, `[x+6]`, `[13-x]`, and an `x < NumX/2`
-split). They are not arbitrary: they encode the yml's HBM numbering exactly.
+literals (`floo_axi_req_i[y+12]`, `[5-x]`, `[x+6]`, `[13-x]`). Decoded:
 
 | channel | edge | router | | channel | edge | router |
 |---|---|---|---|---|---|---|
-| 0..3 | West | (0, y), y=0..3 | | 8, 9 | South | (2,0), (3,0) |
+| 0..3 | West | (0, y) | | 8, 9 | South | (2,0), (3,0) |
 | 4 | South | (1, 0) | | 10, 11 | North | (3,3), (2,3) |
-| 5 | South | (0, 0), via periph_router | | 12..15 | East | (3, y), y=0..3 |
+| 5 | South | (0, 0), via periph_router | | 12..15 | East | (3, y) |
 | 6, 7 | North | (0,3), (1,3) | | | | |
 
-This matches `config/floo_noc_terapool_spatz4_fpu.yml` term for term: hbm 0-3 West,
-hbm 4 South of (1,0), hbm 5 on the periph router, hbm 6-7 North, hbm 8-9 South,
-hbm 10-11 North, hbm 12-15 East — including the irregular 4/5 and 10/11 orderings.
+**This is not an arbitrary hand-assignment. It is a minimum-total-distance
+assignment of groups to perimeter attachment points, and it is provably optimal.**
 
-So the RTL and the yml are two hand-maintained encodings of one mapping, with
-nothing checking that they agree. An 8x8 mesh has 28 perimeter routers against 12,
-so this is a redesign rather than a rescale.
+Because the L2 interleaver makes channel G serve group G (§13), the numbering is
+exactly what sets each group's DMA distance. Measured against a Hungarian solve
+over all 16 groups and all 16 attachment points:
 
-**Fix shape:** one `perimeter_channel_idx(x, y, dir)` function used by *both* the
-wrapper and the yml generator, so they cannot drift. Note this cannot be
-bit-identical at 4x4 unless the function reproduces the irregular numbering above
-exactly — worth deciding deliberately rather than by accident, since a canonical
-numbering is cleaner but renumbers the existing channels.
+| numbering | total hops | avg | |
+|---|---|---|---|
+| **legacy (committed)** | **8** | **0.50** | **optimal** |
+| optimal (Hungarian) | 8 | 0.50 | ties legacy |
+| canonical walk (W,S,E,N in order) | 26 | 1.62 | **3.2x worse** |
+
+How it achieves the optimum: 12 groups get a channel at their own router (0 hops);
+the 4 interior groups — 5,6,9,10 = (1,1),(1,2),(2,1),(2,2), which have no perimeter
+attachment of their own — take the four *spare* corner channels at 2 hops, the
+minimum possible distance from an interior node to the edge. The 4/5 and 10/11
+"swaps" that look like quirks are what places the interior groups on their nearest
+spare corner.
+
+**Consequence for the derivation.** `perimeter_channel_idx(x, y, dir)` must
+**solve the assignment problem**, not walk the perimeter. An earlier draft of this
+plan recommended a canonical walk on the grounds that the existing order had "no
+defensible rationale" — that was wrong on the facts and would have tripled average
+DMA distance.
+
+Legacy is one optimum among several (Hungarian finds an equally-good alternative
+differing at groups 9 and 13), so the generator's tie-breaking should be chosen to
+reproduce legacy exactly. Then 4x4 stays bit-identical at 122,051 and larger rungs
+get a principled mapping — the objection that this change could not be
+bit-identical no longer applies.
+
+Still true: the RTL and the yml are two hand-maintained encodings of one mapping
+with nothing checking that they agree, and an 8x8 mesh has 28 perimeter routers
+against 12. One generator must emit both.
 
 ### 3.7 Address map and linker
 
@@ -515,8 +536,11 @@ QuestaSim refuses — read the log, not the exit code.
 |---|---|---|---|
 | 1 | `ctrl_registers` MAX_NumGroups | `%Warning-USERERROR`; `wake_up_tile[g]` indexed past a 16-entry array | §10, one command |
 | 2 | `mempool_system` L2 adapters | 51× `%Warning-SELRANGE`, indices 16..31 into 16-entry bank arrays | **guarded** (below) |
-| 3 | perimeter channel indices | **silent** — indices stay in range, the wiring is simply wrong | §3.6, needs a decision |
-| 4 | `axi_L2_interleaver` group↔bank affinity | **silent** — `clog2(NumL2Banks)` can no longer equal `clog2(NumGroups)` | §13, unguarded |
+| 3 | perimeter channel indices | **silent** — indices stay in range, the wiring is simply wrong | §3.6 + §14 |
+| 4 | `axi_L2_interleaver` group↔bank affinity | **silent** — `clog2(NumL2Banks)` can no longer equal `clog2(NumGroups)` | §13 + §14, unguarded |
+
+Blockers 3 and 4 are **one design problem**, not two: which group is served by
+which channel (4), and where that channel physically sits (3). See §14.
 
 Nothing else: no structural, width or connectivity breakage. The design is closer
 to 32-group-capable than this plan originally assumed.
@@ -629,3 +653,60 @@ a bank. Nothing currently checks `NumL2Banks` against `NumGroups`.
 This is the same perimeter-versus-area limit as §12, now with a mechanism: it is
 not merely that bandwidth per core falls, but that the group↔channel affinity the
 DMA path is built around stops being expressible.
+
+---
+
+## 14. Next step: the group↔channel assignment problem
+
+Blockers 3 and 4 are one problem. Three facts pin it:
+
+* **§13** — the L2 interleaver keys on `addr[13:10]`, the L1 group field, so
+  **channel G serves group G**. `DmaRegionWidth = 1024 B` is aligned to the same
+  granularity, so `idma_distributed_midend` hands group G exactly the chunks
+  living in bank G.
+* **§3.6** — the perimeter numbering decides **where channel G physically sits**,
+  and today's numbering is the distance-optimal assignment (8 hops total, avg 0.50).
+* **§12** — perimeter capacity is `2·(NumX+NumY)` while groups are `NumX·NumY`.
+  They are equal only at 4×4.
+
+So above 4×4 the bijection is impossible and the design question becomes:
+
+> With more groups than channels, **which groups share a channel, and where is
+> that channel placed**, to minimise DMA distance and contention?
+
+| mesh | groups | channels | groups/channel |
+|---|---|---|---|
+| 4×4 | 16 | 16 | 1 (bijection — today) |
+| 4×8 | 32 | 24 | 1.33 |
+| 8×8 | 64 | 32 | 2 |
+| 16×16 | 256 | 64 | 4 |
+
+### Plan
+
+1. **Write the assignment solver** as a generator step: given (NumX, NumY,
+   NumL2Channels), emit both the perimeter placement and the group→channel map,
+   minimising total distance. Gate: at 4×4 it must reproduce the committed
+   numbering exactly (tie-breaking chosen to match), so the 122,051 reference
+   survives.
+2. **Emit both consumers from it** — the `perimeter_channel_idx` function used by
+   the cluster wrapper, and the floo yml's HBM placement — so the two encodings
+   cannot drift.
+3. **Decide the sharing scheme for `clog2(NumL2Banks)` < `clog2(NumGroups)`.**
+   Options, cheapest first:
+   a. *alias pairs* — keep 1 KB striping, let the scramble map two groups to one
+      bank. Simplest; pairing follows the scramble rather than distance.
+   b. *coarsen the interleave* so the field width matches the channel count;
+      interacts with `DmaBurstLen` and the burst splitter.
+   c. *blocked placement + locality-aware allocation* — best latency, but makes
+      placement software's job and forfeits automatic spreading.
+   Measure (a) first as the baseline; the others must beat it.
+4. **Guard it**: assert that the group→channel map is total and that
+   `NumL2Banks` is compatible with `NumGroups`, so an unsupported combination
+   fails at elaboration rather than silently aliasing.
+
+### Then the first new rung
+
+4×8 is the cheapest — `BlockAw` does not move (§10), yet it breaks every 4×4
+coincidence, so it exercises all four blockers for the least simulation time.
+Order: `MAX_NumGroups=32` + `make update-regs` → assignment solver output →
+elaborate → `hello_world` → matmul → compare against the 4×4 reference.
