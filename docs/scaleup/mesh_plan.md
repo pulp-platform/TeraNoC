@@ -824,6 +824,25 @@ Consequences worth planning around:
 * Verilator remains the sweep engine; QuestaSim only for elaboration and
   assertion checks, since it cannot reach the ROI at this size.
 
+### Scope: 8×8 only (decided 2026-08-05)
+
+The target is **4×4 → 8×8**. Other rungs are deferred, not abandoned:
+
+| rung | status |
+|---|---|
+| 2×2, 2×4 | deferred. Cheaper to simulate than 4×4 and would extend the curve downward. The known small-config boot failure is in `minpool`/`mempool_spatz4_fpu`, which have a different shape (4 cores/tile) — a `terapool_spatz4_fpu` derivative at 2×2 is untested, not known-broken. |
+| 4×8, 8×16 | skip. The power-of-two channel constraint wastes a third of their perimeter (24→16, 48→32 usable), so bandwidth per core is unrepresentative and a point there would distort rather than fill in. |
+| 16×16 | analytical only. 4096 cores is almost certainly beyond full-kernel simulation; the generators already produce its placement (1.023× optimum) and sizing. |
+
+**What this costs, stated plainly:** with one comparison the result is a
+*before/after*, not a curve. Two points cannot distinguish a trend from a pair of
+numbers, so the write-up must report the 4×4→8×8 deltas and the analytically
+derived trend (§12's 1/√N bandwidth, §14's hop counts) as separate claims — the
+measurement does not validate the trend, it anchors it at one end.
+
+Adding 2×2 later would make it three square rungs spanning 64→1024 cores, which is
+the cheapest way to turn the anchor into a curve if that becomes worth having.
+
 ### What "done" looks like
 
 A table of measured FPU utilisation and absolute flop/cycle at 4×4 and 8×8 on an
