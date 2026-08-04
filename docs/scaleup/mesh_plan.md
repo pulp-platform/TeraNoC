@@ -526,3 +526,50 @@ channels, wired 1:1 by `gen_l2_adapters` — which coincide only because NumGrou
 2·(NumX+NumY) and l2_banks are all 16 at 4×4. Merely changing the loop bound would
 have silently dropped masters 16..31, so instead the required equality is asserted
 and fails loudly.
+
+---
+
+## 12. The L2 channel sizing law (measured 2026-08-04)
+
+`NumAXIMasters = NumGroups` (`mempool_system.sv:52`) is not approximately right at
+other mesh sizes — **4×4 is the only rung where it holds at all**:
+
+| mesh | groups | perimeter attach points `2·(NumX+NumY)` | equal? |
+|---|---|---|---|
+| 2×2 | 4 | 8 | no — perimeter exceeds groups |
+| 2×4 | 8 | 12 | no |
+| **4×4** | **16** | **16** | **yes — the coincidence** |
+| 4×8 | 32 | 24 | no — groups exceed perimeter |
+| 8×8 | 64 | 32 | no |
+| 8×16 | 128 | 48 | no |
+| 16×16 | 256 | 64 | no |
+
+The perimeter grows as O(NumX+NumY); the group count as O(NumX·NumY). They diverge
+in both directions, so no single expression can serve both roles.
+
+### Consequences
+
+1. **`NumL2Channels` must be an independent parameter**, not derived from
+   `NumGroups`, and it is bounded above by the perimeter capacity `2·(NumX+NumY)`.
+   This answers §8's open "L2 channel count per rung" by derivation: **at most 32
+   at 8×8**, 24 at 4×8, 64 at 16×16.
+2. **Per-core off-cluster bandwidth necessarily falls as the mesh grows.** Channels
+   scale with the perimeter, cores with the area, so bytes/core/cycle scales as
+   1/√N. At 4×4 it is 16 channels for 256 cores; at 8×8 at best 32 for 1024 — half.
+   That is geometry, not a tuning choice, and it is the reason the scale-up study
+   should report utilisation against a *measured* L2 bandwidth rather than assume
+   the 4×4 ratio holds.
+3. `l2_banks` must equal the channel count (`gen_l2_adapters` is 1:1), which is now
+   asserted in `mempool_system.sv`.
+
+### Design shape
+
+One `perimeter_channel_idx(x, y, dir)` in `mempool_pkg`, consumed by both the
+cluster wrapper and a floo-yml generator, so the two encodings of the mapping
+cannot drift (§3.6 shows they are currently two hand-maintained copies).
+
+Note this cannot be bit-identical at 4×4 unless it reproduces the existing
+irregular numbering (ch 4/5 and 10/11 are swapped relative to any natural order).
+A canonical numbering changes which address range is served by which perimeter
+point, which changes distances and therefore cycles — so the switch needs a
+measurement, not an assumption.
