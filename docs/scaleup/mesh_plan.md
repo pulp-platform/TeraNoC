@@ -750,3 +750,82 @@ routing is deadlock-free here by verification rather than construction.
 Item 3 is the interesting one: the guards were written to pin 4×4's coincidences,
 and they did their job. Relaxing them is not weakening them — it is replacing
 "these four numbers happen to be equal" with the relationships that actually hold.
+
+---
+
+## 16. Full remaining effort to the scale-up goal
+
+Everything up to here was groundwork: the generators, the guards, and the
+measured design decisions. What follows is what it takes to actually **run 8×8 and
+measure the scaling curve**, which is the original goal.
+
+Four phases. Each step has a gate; a step is not done until its gate passes.
+
+### Phase A — make 8×8 elaborate
+
+| # | step | gate |
+|---|---|---|
+| A1 | Introduce `NumL2Channels` and stop `NumAXIMasters` meaning `NumGroups` (§12) | 4×4 = 122,051 |
+| A2 | Relax the guards from 4×4's coincidences to the real relationships | 4×4 = 122,051; each still fires on a bad config |
+| A3 | Config flavor: `num_cores=1024 num_groups=64 num_x=8 l2_banks=32` | generators emit; `axi_width_interleaved` derives to 32 |
+| A4 | `MAX_NumGroups=64` + `make update-regs` | reg files regenerate; **`BlockAw` 8→9** |
+| A5 | Elaborate 8×8 under QuestaSim | 0 errors |
+
+A2 is delicate. The guards currently pin numbers that merely coincide at 4×4;
+relaxing them means replacing coincidence with the relationships that hold once
+channels are shared — **not** loosening them. One of them already caught perimeter
+aliasing that neither simulator reports.
+
+A4 is the first change that is *not* bit-identical at 4×4: more wake-up registers
+in every config, and `BlockAw` grows, moving the peripheral map.
+
+### Phase B — make 8×8 boot
+
+The group field widens from 4 to 6 bits (`addr[15:10]`), moving everything above it.
+
+| # | step | gate |
+|---|---|---|
+| B1 | Derive the `16384` stride in `arch.ld.c` from the defines (§3.7) | 4×4 link map unchanged |
+| B2 | Same literal in `gemm_autotune.py:162` | tuner agrees with 4×4 measurements |
+| B3 | Re-check `group_barrier_word=240` and the L1 truncation at 16 MB | barrier microbenchmark |
+| B4 | `hello_world` at 1024 cores, CMS armed | boots, 0 scoreboard warnings |
+
+### Phase C — make 8×8 run the kernel
+
+| # | step | gate |
+|---|---|---|
+| C1 | Shape ladder: min legal `M = num_groups × KERNEL_SIZE` = **512** | `gemm_autotune.py` accepts |
+| C2 | Regenerate matmul data; re-derive the MSHR knobs for the new shape | build succeeds |
+| C3 | Run the matmul | completes, 0 errors |
+
+### Phase D — measure
+
+| # | step | gate |
+|---|---|---|
+| D1 | Iso-work-per-core: 4×4 `128×1024×512` vs 8×8 `512×1024×512` (§6) | both complete |
+| D2 | Fold into `docs/benchmarks/`, report utilisation *and* absolute flop/cycle | — |
+
+### The binding constraint: simulation cost
+
+This is the risk that most likely decides how far the ladder actually goes.
+
+At 4×4 a Verilator model takes ~20 min to build and ~50 min to run 122k cycles.
+At 8×8 the model is 4× larger, so expect roughly 1–1.5 h to build and a
+simulation rate around a quarter — and the smallest legal kernel is bigger too.
+**A single 8×8 matmul data point is plausibly 4–8 hours.** 16×16 is likely out of
+reach entirely for full-kernel runs and may only be characterisable by
+elaboration and short traces.
+
+Consequences worth planning around:
+* prove correctness at 8×8 with `hello_world` and a *small* matmul before
+  spending a full-size run;
+* the iso-work comparison (D1) is the one measurement that must be paid for in
+  full — the rest can be short runs;
+* Verilator remains the sweep engine; QuestaSim only for elaboration and
+  assertion checks, since it cannot reach the ROI at this size.
+
+### What "done" looks like
+
+A table of measured FPU utilisation and absolute flop/cycle at 4×4 and 8×8 on an
+iso-work-per-core kernel, with the L2 bandwidth per core reported alongside, so
+that the 1/√N bandwidth trend (§12) can be separated from any MSHR or NoC effect.
