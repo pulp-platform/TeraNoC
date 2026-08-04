@@ -1099,6 +1099,22 @@ module mempool_system
   // 4x4 is the only mesh where NumGroups == 2*(NumX+NumY); see mesh_plan.md 12.
   // (Do not start a comment line with the word "verilator" -- it is parsed as a
   // metacomment pragma and fails the build.)
+  // The L2 bank field must sit on the TOP bits of the L1 word-interleave group
+  // field. axi_L2_interleaver picks bank = addr[L2LsbConstBits +: L2ScrambleBits],
+  // and the group field begins at GroupFieldLsb, so they line up iff
+  //     L2LsbConstBits + L2ScrambleBits == GroupFieldLsb + clog2(NumGroups)
+  // i.e. axi_width_interleaved == 16 * num_groups / l2_banks.
+  // If they do not, L2 channel G stops serving group G and the whole DMA path
+  // loses its group-to-channel affinity -- silently, since every address still
+  // decodes to some bank. See docs/scaleup/mesh_plan.md sections 13 and 14.
+  localparam int unsigned GroupFieldLsb  = ByteOffset + $clog2(NumBanksPerTile)
+                                                      + $clog2(NumTilesPerGroup);
+  localparam int unsigned L2LsbConstBits = $clog2(L2BankBeWidth * Interleave);
+  localparam int unsigned L2ScrambleBits = (NumL2Banks == 1) ? 1 : $clog2(NumL2Banks);
+
+  if (L2LsbConstBits + L2ScrambleBits != GroupFieldLsb + $clog2(NumGroups))
+    $error("[mempool_system] the L2 bank field does not align with the L1 group field -- set axi_width_interleaved = 16 * num_groups / l2_banks (see docs/scaleup/mesh_plan.md section 14).");
+
   if (NumAXIMasters != 2 * (NumX + NumY))
     $error("[mempool_system] NumAXIMasters != 2*(NumX+NumY) -- the perimeter channel assignment in the cluster wrapper would alias two attachment points onto one channel. The perimeter mapping needs deriving before this mesh size can be built (see docs/scaleup/mesh_plan.md section 12).");
 

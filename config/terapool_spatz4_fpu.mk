@@ -385,7 +385,26 @@ dmas_per_group ?= 1 # Burst Length = 16
 # L2 Banks/Channels
 l2_size               ?= 16777216  # 1000000
 l2_banks              ?= 16
-axi_width_interleaved ?= 16
+# L2 interleave granularity, in 64 B beats.
+#
+# NOT a free parameter. axi_L2_interleaver selects the L2 bank with
+#     bank = addr[clog2(64*Interleave) +: clog2(l2_banks)]
+# and that field MUST line up with the top of the L1 word-interleave group field
+# (which begins at bit 2+clog2(banks/tile)+clog2(tiles/group) = 10), because the
+# whole DMA path depends on channel G serving group G -- see
+# docs/scaleup/mesh_plan.md sections 13 and 14. The alignment holds iff
+#
+#     axi_width_interleaved = 16 * num_groups / l2_banks
+#
+# At 4x4 there is one channel per group, so this is 16 and nothing changes. Above
+# 4x4 the perimeter cannot host a channel per group (2*(NumX+NumY) < NumX*NumY),
+# so channels are shared and the interleave coarsens by exactly the sharing
+# factor. Coarsening is what makes the groups sharing a channel ADJACENT rather
+# than scattered: at 8x8 it pairs (x,y) with (x,y+1) at 1.62 avg hops, against
+# (x,y) with (x+4,y) at 2.88 if this were left at 16.
+#
+# mempool_system.sv asserts the alignment, so a wrong value fails elaboration.
+axi_width_interleaved ?= $(shell echo $$((16 * $(num_groups) / $(l2_banks))))
 
 ###########################
 ## 4. Spatz Config
