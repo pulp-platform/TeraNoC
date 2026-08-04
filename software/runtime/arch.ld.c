@@ -18,7 +18,17 @@
  * fragmentation. Keep in sync with GroupBarrierWord in hardware/src/mempool_group.sv.
  */
 #define L1_FULL_BYTES  (NUM_CORES * N_FU * BANKING_FACTOR * L1_BANK_SIZE)
-#define GBAR_WINDOW_LO (GROUP_BARRIER_WORD * 16384)
+
+/* Stride between successive within-tile words, i.e. how far you move in the byte
+ * address space when the word field increments. It is everything BELOW that field:
+ *   byte(4) | bank(NumBanksPerTile) | tile(NumTilesPerGroup) | group(NUM_GROUPS)
+ * This was written as the literal 16384, which is only correct while NUM_GROUPS is
+ * 16 -- the group field widens with the mesh (6 bits at 64 groups), moving the word
+ * field up with it. Derive it so the barrier window lands in the right place at any
+ * mesh size. 16 groups -> 16384, 64 groups -> 65536. */
+#define BANKS_PER_TILE (N_FU * BANKING_FACTOR * NUM_CORES_PER_TILE)
+#define WORD_STRIDE    (4 * BANKS_PER_TILE * NUM_TILES_PER_GROUP * NUM_GROUPS)
+#define GBAR_WINDOW_LO (GROUP_BARRIER_WORD * WORD_STRIDE)
 #define L1_USABLE_BYTES ((GBAR_WINDOW_LO) < (L1_FULL_BYTES) ? (GBAR_WINDOW_LO) : (L1_FULL_BYTES))
 
 MEMORY {

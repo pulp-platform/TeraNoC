@@ -159,7 +159,14 @@ def derive(M, N, P, *, num_groups=16, num_cores=256, kernel_size=8,
 
     # ---- L1 capacity ----------------------------------------------------------
     if l1_bytes is None:
-        l1_bytes = gbar_word * 16384          # linker truncates L1 at GROUP_BARRIER_WORD<<14
+        # Word stride = 4 B * banks_per_tile * tiles_per_group * num_groups. The
+        # literal 16384 this replaces is only correct at 16 groups; the group field
+        # widens with the mesh. See software/runtime/arch.ld.c, which derives the
+        # same quantity. Assumes the terapool family's 1 core/tile and 16 banks/tile.
+        banks_per_tile  = 16
+        tiles_per_group = num_cores // num_groups
+        word_stride     = 4 * banks_per_tile * tiles_per_group * num_groups
+        l1_bytes = gbar_word * word_stride
     usable = l1_bytes - seq_bytes - 16 * 1024  # minus sequential region and small syms
     need = 4 * (M * N + N * P + M * P)
     info.update(l1_need=need, l1_usable=usable)
