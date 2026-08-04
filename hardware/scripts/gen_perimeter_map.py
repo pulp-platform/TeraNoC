@@ -207,8 +207,11 @@ def check_committed(placement, num_x, num_y):
 
 
 def render(placement, num_x, num_y):
-    num_groups = num_x * num_y
-    no_ch = num_groups  # sentinel: one past the last valid channel
+    # The channel count is len(placement), NOT num_x*num_y. Those are equal only
+    # when every group owns a channel; above 4x4 channels are shared and emitting
+    # num_groups here would over-declare the array and mis-size NoChannel.
+    num_channels = len(placement)
+    no_ch = num_channels  # sentinel: one past the last valid channel
     # (x, y, dir) -> channel
     idx = {}
     for gid, (pos, d) in placement.items():
@@ -232,7 +235,7 @@ def render(placement, num_x, num_y):
          "",
          f"  localparam int unsigned NumMeshX      = {num_x};",
          f"  localparam int unsigned NumMeshY      = {num_y};",
-         f"  localparam int unsigned NumL2Channels = {num_groups};",
+         f"  localparam int unsigned NumL2Channels = {num_channels};",
          "",
          "  // Value used where a (x, y, direction) triple is not an attachment point.",
          f"  localparam int unsigned NoChannel     = {no_ch};",
