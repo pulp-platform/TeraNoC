@@ -710,3 +710,43 @@ So above 4×4 the bijection is impossible and the design question becomes:
 coincidence, so it exercises all four blockers for the least simulation time.
 Order: `MAX_NumGroups=32` + `make update-regs` → assignment solver output →
 elaborate → `hello_world` → matmul → compare against the 4×4 reference.
+
+---
+
+## 15. Status after §14, and what an 8×8 bring-up needs
+
+§14 is complete. The generators now cover every rung:
+
+| | |
+|---|---|
+| perimeter placement | `gen_perimeter_map.py` — edge rule + 2-opt; optimal at 4×4 and 8×8, 1.023× at 16×16 |
+| floo config | emitted from the same placement (`--emit-yml`) |
+| route table | `gen_floo_route_tables.py`, CDG-gated |
+| register file | `make update-regs` |
+| L2 interleave | derived, `16 × num_groups / l2_banks` |
+
+**An 8×8 config already generates end to end** — perimeter map, floo config
+(98 endpoints), and route table (43 rules/router) all emit and pass syntax, and
+the CDG is **acyclic at 8×8**, which had to be re-verified because shortest-path
+routing is deadlock-free here by verification rather than construction.
+
+### What is left for an actual 8×8 build
+
+1. **A config flavor**: `num_cores=1024`, `num_groups=64`, `num_x=8`,
+   `l2_banks=32`. `axi_width_interleaved` then derives to 32 on its own.
+2. **`MAX_NumGroups = 64`** in the hjson + `make update-regs`. Note this is the
+   rung where `BlockAw` moves 8→9 (§10), so the peripheral address map shifts and
+   the software side has to be checked — unlike 4×8, which was free.
+3. **Guard review**: the four elaboration guards all currently *require* 4×4
+   invariants. `NumAXIMasters == NumL2Banks` and
+   `NumAXIMasters == 2·(NumX+NumY)` both assume one channel per group and will
+   fire at 8×8. They need relaxing to the new relationships:
+   `NumL2Banks == NumL2Channels` and `NumL2Channels ≤ 2·(NumX+NumY)`.
+4. **`NumAXIMasters` itself** must stop being `NumGroups` (§12) — at 8×8 that is
+   64 against 32 channels.
+5. Then: elaborate → `hello_world` → matmul, and compare against 4×4 at
+   iso-work-per-core (§6).
+
+Item 3 is the interesting one: the guards were written to pin 4×4's coincidences,
+and they did their job. Relaxing them is not weakening them — it is replacing
+"these four numbers happen to be equal" with the relationships that actually hold.
