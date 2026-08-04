@@ -1090,4 +1090,16 @@ module mempool_system
   if (NumAXIMasters != NumL2Banks)
     $error("[mempool_system] NumAXIMasters != NumL2Banks -- the L2 adapters are wired 1:1 by index. Set l2_banks to match the AXI master count, or decouple the L2 channel mapping (see docs/scaleup/mesh_plan.md).");
 
+  // The cluster wrapper assigns perimeter channels with formulas that are only
+  // injective when the channel count equals the perimeter capacity. At 4x8, for
+  // instance, West(0,4..7) alias onto South(1,0), South(0,0), North(0,7) and
+  // North(1,7) -- two attachment points driving one floo_axi_*_o element.
+  // Neither simulator flags this: MULTIDRIVEN is not reported here and is not
+  // waived, so it would corrupt L2 traffic silently at run time.
+  // 4x4 is the only mesh where NumGroups == 2*(NumX+NumY); see mesh_plan.md 12.
+  // (Do not start a comment line with the word "verilator" -- it is parsed as a
+  // metacomment pragma and fails the build.)
+  if (NumAXIMasters != 2 * (NumX + NumY))
+    $error("[mempool_system] NumAXIMasters != 2*(NumX+NumY) -- the perimeter channel assignment in the cluster wrapper would alias two attachment points onto one channel. The perimeter mapping needs deriving before this mesh size can be built (see docs/scaleup/mesh_plan.md section 12).");
+
 endmodule : mempool_system
