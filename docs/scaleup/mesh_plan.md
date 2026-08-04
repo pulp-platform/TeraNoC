@@ -214,16 +214,32 @@ Fix: introduce an explicit `NumL2Channels`, decouple from `NumGroups`, assert
 against the perimeter count, derive `l2_banks` from it, and give `l2_size` a
 single source of truth shared by the `.mk` and the yml generator.
 
-### 3.6 Perimeter geometry (both NoCs)
+### 3.6 Perimeter geometry (both NoCs) — decoded 2026-08-04
 
-`terapool_cluster_floonoc_wrapper.sv:118-270` indexes AXI ports with literals
-baked to 16 channels on a 4×4 ring: `floo_axi_req_i[y+12]` (east), `[5-x]`,
-`[x+6]`, `[13-x]` (south/north), and an `x < NumX/2` split at line 253.
+`terapool_cluster_floonoc_wrapper.sv:118-270` indexes the perimeter AXI ports with
+literals (`floo_axi_req_i[y+12]`, `[5-x]`, `[x+6]`, `[13-x]`, and an `x < NumX/2`
+split). They are not arbitrary: they encode the yml's HBM numbering exactly.
 
-Fix: one `perimeter_channel_idx(x, y, dir)` function in `mempool_pkg`, used by
-**both** the wrapper and the yml generator so they cannot disagree. An 8×8 mesh
-has 28 perimeter routers against 12, so HBM placement is a redesign, not a
-rescale — 8 channels per edge maps cleanly at 32 channels.
+| channel | edge | router | | channel | edge | router |
+|---|---|---|---|---|---|---|
+| 0..3 | West | (0, y), y=0..3 | | 8, 9 | South | (2,0), (3,0) |
+| 4 | South | (1, 0) | | 10, 11 | North | (3,3), (2,3) |
+| 5 | South | (0, 0), via periph_router | | 12..15 | East | (3, y), y=0..3 |
+| 6, 7 | North | (0,3), (1,3) | | | | |
+
+This matches `config/floo_noc_terapool_spatz4_fpu.yml` term for term: hbm 0-3 West,
+hbm 4 South of (1,0), hbm 5 on the periph router, hbm 6-7 North, hbm 8-9 South,
+hbm 10-11 North, hbm 12-15 East — including the irregular 4/5 and 10/11 orderings.
+
+So the RTL and the yml are two hand-maintained encodings of one mapping, with
+nothing checking that they agree. An 8x8 mesh has 28 perimeter routers against 12,
+so this is a redesign rather than a rescale.
+
+**Fix shape:** one `perimeter_channel_idx(x, y, dir)` function used by *both* the
+wrapper and the yml generator, so they cannot drift. Note this cannot be
+bit-identical at 4x4 unless the function reproduces the irregular numbering above
+exactly — worth deciding deliberately rather than by accident, since a canonical
+numbering is cleaner but renumbers the existing channels.
 
 ### 3.7 Address map and linker
 
@@ -448,25 +464,11 @@ rules per router (12 vs 23), 1.24% slower here.
 
 ---
 
-## 10. Phase 1b blocker: MAX_NumGroups needs a register-file regeneration step
+## 10. Phase 1b: MAX_NumGroups — now a measured, one-command change
 
-The plan said "derive `MAX_NumGroups` from `NumGroups` instead of a global
-literal". That is not sufficient:
-
-* it sizes the `wake_up_tile` **multireg** in `control_registers.hjson`
-  (`count: "MAX_NumGroups"`) — it decides how many registers exist, not just a
-  bound;
-* `control_registers_reg_pkg.sv` is **generated** with the value baked in, and
-  SystemVerilog package parameters cannot be overridden at instantiation;
-* `reggen`/`regtool` live only under
-  `hardware/deps/register_interface/vendor/patches/` and are referenced by no
-  Makefile — the build has no regeneration step;
-* at 64 groups the block outgrows `BlockAw = 8` (256 B), so the address map moves
-  and the software side has to be checked.
-
-**The ceiling is already loud — measured.** `ctrl_registers.sv:107` imports
-`mempool_pkg::NumGroups`, and line 186 compares it against the generated
-`MAX_NumGroups`. A 4×8 / 32-group / 512-core elaboration aborts with exactly:
+**The ceiling is already loud.** `ctrl_registers.sv:107` imports
+`mempool_pkg::NumGroups` and line 186 compares it against the generated
+`MAX_NumGroups`. A 4×8 / 32-group elaboration aborts with exactly:
 
 ```
 # ** Error: [ctrl_registers] Number of groups exceeds the maximum supported.
@@ -474,14 +476,53 @@ literal". That is not sufficient:
 # Optimization failed        Errors: 1
 ```
 
-So "derive `MAX_NumGroups` from `NumGroups`" — the plan's original suggestion —
+So the plan's original suggestion — "derive `MAX_NumGroups` from `NumGroups`" —
 would add a redundant second error and make the name inaccurate. **Do not do it.**
 
-The only real work is wiring `reggen` into the build and regenerating, which
-belongs at **Phase 3**, where the perimeter and L2 channel count are reworked and
-the register map is disturbed anyway.
+### reggen is now wired in (2026-08-04)
 
-The same probe confirmed the new `group_xy_id_t` guards stay **silent** on a legal
-4×8 mesh, and that `MAX_NumGroups` is the **first** blocker at 32 groups. `vopt`
-stops at the first error, so the rest of the blocker list still needs enumerating
-by neutralising each in turn.
+`make update-regs` regenerates `control_registers_reg_pkg.sv` and `_reg_top.sv`
+from the hjson via the vendored lowRISC regtool. **Regenerating from the committed
+hjson reproduces both files bit-identically**, which is the gate that makes a
+MAX_NumGroups change verifiable rather than a leap. Needs a Python with PyYAML,
+hjson, Mako and tabulate — point `REGTOOL_PYTHON` at one if `python3` lacks them.
+
+Measured cost of raising it:
+
+| MAX_NumGroups | BlockAw | wake_up_tile regs | reg_top lines |
+|---|---|---|---|
+| 16 (committed) | 8 | 16 | 1,342 |
+| **32** | **8 — unchanged** | 32 | 1,934 |
+| 64 | **9** | 64 | 3,118 |
+
+**A 4×8 / 32-group mesh costs nothing in address map**: the block still fits in
+256 B, so only the register count grows. 8×8 pushes `BlockAw` to 9, which moves
+the peripheral map and must be checked against software.
+
+It is not bit-identical at 4×4 either way — a larger `MAX_NumGroups` means more
+registers in every config — so raise it *with* the mesh-size change, not before.
+
+---
+
+## 11. Measured blocker list at 32 groups (4×8), 2026-08-04
+
+Verilator enumerates these in one pass because it does not stop at the first
+error; QuestaSim would need iterative patching. Note Verilator reports `$error`
+as a non-fatal `%Warning-USERERROR` and carries on, so it exits 0 on a design
+QuestaSim refuses — read the log, not the exit code.
+
+| # | blocker | manifestation | status |
+|---|---|---|---|
+| 1 | `ctrl_registers` MAX_NumGroups | `%Warning-USERERROR`; `wake_up_tile[g]` indexed past a 16-entry array | §10, one command |
+| 2 | `mempool_system` L2 adapters | 51× `%Warning-SELRANGE`, indices 16..31 into 16-entry bank arrays | **guarded** (below) |
+| 3 | perimeter channel indices | **silent** — indices stay in range, the wiring is simply wrong | §3.6, needs a decision |
+
+Nothing else: no structural, width or connectivity breakage. The design is closer
+to 32-group-capable than this plan originally assumed.
+
+Blocker 2 is now an elaboration guard in `mempool_system.sv`. `NumAXIMasters =
+NumGroups` silently serves two roles — perimeter attachment points *and* L2
+channels, wired 1:1 by `gen_l2_adapters` — which coincide only because NumGroups,
+2·(NumX+NumY) and l2_banks are all 16 at 4×4. Merely changing the loop bound would
+have silently dropped masters 16..31, so instead the required equality is asserted
+and fails loudly.

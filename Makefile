@@ -288,6 +288,26 @@ $(FLOO_NOC): install-floogen $(FLOO_CFG) $(FLOO_RT_GEN)
 	floogen -c $(FLOO_CFG) -o $(FLOO_GEN_OUTDIR) --only-pkg
 	$(FLOOGEN_PYTHON) $(FLOO_RT_GEN) -c $(FLOO_CFG) -o $(FLOO_GEN_OUTDIR) --turn-model $(FLOO_TURN_MODEL)
 
+#############################
+# Control-register file     #
+#############################
+# lowRISC reggen, vendored in register_interface. Regenerating from the committed
+# hjson reproduces the checked-in reg_pkg/reg_top BIT-IDENTICALLY, which is the
+# gate that makes changing MAX_NumGroups (it sizes the wake_up_tile multireg, so
+# it decides how many registers exist and how wide BlockAw must be) a verifiable
+# operation rather than a leap.
+#
+# Needs a Python with PyYAML, hjson, Mako and tabulate. Point REGTOOL_PYTHON at
+# one if the default python3 lacks them.
+REGTOOL        ?= $(ROOT_DIR)/hardware/deps/register_interface/vendor/lowrisc_opentitan/util/regtool.py
+REGTOOL_PYTHON ?= python3
+REG_HJSON       = $(ROOT_DIR)/hardware/src/control_registers/control_registers.hjson
+REG_OUTDIR      = $(ROOT_DIR)/hardware/src/control_registers
+
+.PHONY: update-regs
+update-regs:
+	$(REGTOOL_PYTHON) $(REGTOOL) -r -t $(REG_OUTDIR) $(REG_HJSON)
+
 # Helper targets
 .PHONY: clean format apps
 
