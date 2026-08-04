@@ -134,12 +134,13 @@ module terapool_cluster_floonoc_wrapper
         assign floo_axi_rsp_in[x][y][East]  = floo_axi_rsp_out[x+1][y][West];
         assign floo_axi_wide_in[x][y][East] = floo_axi_wide_out[x+1][y][West];
         // AXI West
-        assign floo_axi_req_in[x][y][West]  = floo_axi_req_i[y];
-        assign floo_axi_rsp_in[x][y][West]  = floo_axi_rsp_i[y];
-        assign floo_axi_wide_in[x][y][West] = floo_axi_wide_i[y];
-        assign floo_axi_wide_o[y]           = floo_axi_wide_out[x][y][West];
-        assign floo_axi_req_o[y]            = floo_axi_req_out[x][y][West];
-        assign floo_axi_rsp_o[y]            = floo_axi_rsp_out[x][y][West];
+        localparam int unsigned WestCh = perimeter_map_pkg::PerimeterChannel[x][y][West];
+        assign floo_axi_req_in[x][y][West]  = floo_axi_req_i[WestCh];
+        assign floo_axi_rsp_in[x][y][West]  = floo_axi_rsp_i[WestCh];
+        assign floo_axi_wide_in[x][y][West] = floo_axi_wide_i[WestCh];
+        assign floo_axi_wide_o[WestCh]      = floo_axi_wide_out[x][y][West];
+        assign floo_axi_req_o[WestCh]       = floo_axi_req_out[x][y][West];
+        assign floo_axi_rsp_o[WestCh]       = floo_axi_rsp_out[x][y][West];
 
       end else if (x == NumX-1) begin : gen_hbm_chimney_east
         // East
@@ -161,12 +162,13 @@ module terapool_cluster_floonoc_wrapper
         assign floo_axi_wide_in[x][y][West] = floo_axi_wide_out[x-1][y][East];
 
         // AXI East
-        assign floo_axi_req_in[x][y][East]  = floo_axi_req_i[y+12];
-        assign floo_axi_rsp_in[x][y][East]  = floo_axi_rsp_i[y+12];
-        assign floo_axi_wide_in[x][y][East] = floo_axi_wide_i[y+12];
-        assign floo_axi_wide_o[y+12]        = floo_axi_wide_out[x][y][East];
-        assign floo_axi_req_o[y+12]         = floo_axi_req_out[x][y][East];
-        assign floo_axi_rsp_o[y+12]         = floo_axi_rsp_out[x][y][East];
+        localparam int unsigned EastCh = perimeter_map_pkg::PerimeterChannel[x][y][East];
+        assign floo_axi_req_in[x][y][East]  = floo_axi_req_i[EastCh];
+        assign floo_axi_rsp_in[x][y][East]  = floo_axi_rsp_i[EastCh];
+        assign floo_axi_wide_in[x][y][East] = floo_axi_wide_i[EastCh];
+        assign floo_axi_wide_o[EastCh]      = floo_axi_wide_out[x][y][East];
+        assign floo_axi_req_o[EastCh]       = floo_axi_req_out[x][y][East];
+        assign floo_axi_rsp_o[EastCh]       = floo_axi_rsp_out[x][y][East];
 
       end else begin : gen_hor_connections
         // East
@@ -203,33 +205,15 @@ module terapool_cluster_floonoc_wrapper
         assign floo_axi_rsp_in  [x][y][North] = floo_axi_rsp_out  [x][y+1][South];
         assign floo_axi_wide_in [x][y][North] = floo_axi_wide_out [x][y+1][South];
 
-        if (x == 1) begin : gen_normal_chimneys
-          // AXI South
-          assign floo_axi_req_in[x][y][South]  = floo_axi_req_i[5-x];
-          assign floo_axi_rsp_in[x][y][South]  = floo_axi_rsp_i[5-x];
-          assign floo_axi_wide_in[x][y][South] = floo_axi_wide_i[5-x];
-          assign floo_axi_wide_o[5-x]          = floo_axi_wide_out[x][y][South];
-          assign floo_axi_req_o[5-x]           = floo_axi_req_out[x][y][South];
-          assign floo_axi_rsp_o[5-x]           = floo_axi_rsp_out[x][y][South];
-
-        end else if ((x < NumX) && (x != 0)) begin : gen_normal_chimneys_2
-          // AXI South
-          assign floo_axi_req_in[x][y][South]  = floo_axi_req_i[x+6];
-          assign floo_axi_rsp_in[x][y][South]  = floo_axi_rsp_i[x+6];
-          assign floo_axi_wide_in[x][y][South] = floo_axi_wide_i[x+6];
-          assign floo_axi_wide_o[x+6]          = floo_axi_wide_out[x][y][South];
-          assign floo_axi_req_o[x+6]           = floo_axi_req_out[x][y][South];
-          assign floo_axi_rsp_o[x+6]           = floo_axi_rsp_out[x][y][South];
-
-        end else begin
-          // AXI South
-          assign floo_axi_req_in[x][y][South]  = floo_axi_req_i[5];
-          assign floo_axi_rsp_in[x][y][South]  = floo_axi_rsp_i[5];
-          assign floo_axi_wide_in[x][y][South] = floo_axi_wide_i[5];
-          assign floo_axi_wide_o[5]            = floo_axi_wide_out[x][y][South];
-          assign floo_axi_req_o[5]             = floo_axi_req_out[x][y][South];
-          assign floo_axi_rsp_o[5]             = floo_axi_rsp_out[x][y][South];
-        end
+        // The three-way split that used to live here existed only to compute the
+        // channel index ([5-x], [x+6], [5]); the generated map supplies it.
+        localparam int unsigned SouthCh = perimeter_map_pkg::PerimeterChannel[x][y][South];
+        assign floo_axi_req_in[x][y][South]  = floo_axi_req_i[SouthCh];
+        assign floo_axi_rsp_in[x][y][South]  = floo_axi_rsp_i[SouthCh];
+        assign floo_axi_wide_in[x][y][South] = floo_axi_wide_i[SouthCh];
+        assign floo_axi_wide_o[SouthCh]      = floo_axi_wide_out[x][y][South];
+        assign floo_axi_req_o[SouthCh]       = floo_axi_req_out[x][y][South];
+        assign floo_axi_rsp_o[SouthCh]       = floo_axi_rsp_out[x][y][South];
 
       end else if (y == NumY-1) begin
         // TCDM North
@@ -250,23 +234,15 @@ module terapool_cluster_floonoc_wrapper
         assign floo_axi_rsp_in [x][y][South] = floo_axi_rsp_out [x][y-1][North];
         assign floo_axi_wide_in[x][y][South] = floo_axi_wide_out[x][y-1][North];
 
-        if (x < NumX/2) begin
-          // AXI North
-          assign floo_axi_req_in [x][y][North] = floo_axi_req_i [x+6];
-          assign floo_axi_rsp_in [x][y][North] = floo_axi_rsp_i [x+6];
-          assign floo_axi_wide_in[x][y][North] = floo_axi_wide_i[x+6];
-          assign floo_axi_wide_o [x+6]         = floo_axi_wide_out[x][y][North];
-          assign floo_axi_req_o  [x+6]         = floo_axi_req_out [x][y][North];
-          assign floo_axi_rsp_o  [x+6]         = floo_axi_rsp_out [x][y][North];
-        end else begin
-          // AXI North
-          assign floo_axi_req_in [x][y][North] = floo_axi_req_i [13-x];
-          assign floo_axi_rsp_in [x][y][North] = floo_axi_rsp_i [13-x];
-          assign floo_axi_wide_in[x][y][North] = floo_axi_wide_i[13-x];
-          assign floo_axi_wide_o [13-x]        = floo_axi_wide_out[x][y][North];
-          assign floo_axi_req_o  [13-x]        = floo_axi_req_out [x][y][North];
-          assign floo_axi_rsp_o  [13-x]        = floo_axi_rsp_out [x][y][North];
-        end
+        // The x < NumX/2 split that used to live here existed only to compute the
+        // channel index ([x+6], [13-x]); the generated map supplies it.
+        localparam int unsigned NorthCh = perimeter_map_pkg::PerimeterChannel[x][y][North];
+        assign floo_axi_req_in [x][y][North] = floo_axi_req_i [NorthCh];
+        assign floo_axi_rsp_in [x][y][North] = floo_axi_rsp_i [NorthCh];
+        assign floo_axi_wide_in[x][y][North] = floo_axi_wide_i[NorthCh];
+        assign floo_axi_wide_o [NorthCh]     = floo_axi_wide_out[x][y][North];
+        assign floo_axi_req_o  [NorthCh]     = floo_axi_req_out [x][y][North];
+        assign floo_axi_rsp_o  [NorthCh]     = floo_axi_rsp_out [x][y][North];
 
       end else begin
         // North

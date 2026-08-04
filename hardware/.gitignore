@@ -22,3 +22,4 @@ generated/*
 # must show up in a diff. Note this needs `generated/*` above, not `generated`:
 # git cannot re-include a file inside an ignored DIRECTORY.
 !generated/floo_terapool_route_table_pkg.sv
+!generated/perimeter_map_pkg.sv
