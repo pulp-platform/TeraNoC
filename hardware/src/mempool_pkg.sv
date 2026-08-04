@@ -400,11 +400,23 @@ package mempool_pkg;
   localparam integer unsigned TileIdRemap = `ifdef TILE_ID_REMAP `TILE_ID_REMAP `else 0 `endif;
   localparam integer unsigned RouterRemapGroupSize = `ifdef NOC_ROUTER_REMAP_GROUP_SIZE `NOC_ROUTER_REMAP_GROUP_SIZE `else 2 `endif;
 
-  // FlooNoC group id types for XY routing
+  // FlooNoC group id types for XY routing.
+  //
+  // x and y are sized INDEPENDENTLY from NumX and NumY. The previous form gave
+  // both idx_width(NumGroups)/2, which is exact only when idx_width(NumGroups) is
+  // even -- 4, 16, 64, 256 groups -- and is SILENTLY too narrow otherwise: at 32
+  // groups it yields 2 bits per axis for an 8-wide axis. Bit-identical at 4x4,
+  // where idx_width(4) == idx_width(16)/2 == 2.
+  //
+  // The widths must SUM to idx_width(NumGroups), not merely be wide enough: the
+  // mesh coordinate is never computed, it is BIT-CAST from the flat group id
+  // (group_xy_id_t'({tgt_group_id, 1'b0}) in mempool_group_floonoc_wrapper), so a
+  // mismatched sum mis-splits x from y instead of failing. The cluster wrappers
+  // assert that identity at elaboration.
   typedef struct packed {
-    logic [idx_width(NumGroups)/2-1:0] x;
-    logic [idx_width(NumGroups)/2-1:0] y;
-    logic port_id;
+    logic [idx_width(NumX)-1:0] x;
+    logic [idx_width(NumY)-1:0] y;
+    logic                       port_id;
   } group_xy_id_t;
 
   // FlooNoC req types

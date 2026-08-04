@@ -327,4 +327,21 @@ module mempool_cluster_floonoc_wrapper
   if (BankingFactor != 2**$clog2(BankingFactor))
     $fatal(1, "[mempool] The banking factor must be a power of two.");
 
+  /**********************************
+   *  Mesh / group-id elaboration   *
+   **********************************/
+  // The mesh coordinate is not computed anywhere -- it is BIT-CAST out of the flat
+  // group id, which itself is a bit-field of the physical address
+  // (mempool_tile.sv, tgt_group_id). So the mesh must be a power-of-two rectangle
+  // and the group_xy_id_t field widths must sum EXACTLY to idx_width(NumGroups);
+  // otherwise the cast silently mis-splits x from y rather than failing.
+  if (NumX * NumY != NumGroups)
+    $error("[%m] NumX*NumY does not equal NumGroups -- the mesh must tile the groups exactly.");
+  if (NumX & (NumX - 1))
+    $error("[%m] NumX must be a power of two (the group id is an address bit-field).");
+  if (NumY & (NumY - 1))
+    $error("[%m] NumY must be a power of two (the group id is an address bit-field).");
+  if (idx_width(NumX) + idx_width(NumY) != idx_width(NumGroups))
+    $error("[%m] idx_width(NumX)+idx_width(NumY) != idx_width(NumGroups) -- the group_xy_id_t bit-cast would mis-split the mesh coordinate.");
+
 endmodule : mempool_cluster_floonoc_wrapper
