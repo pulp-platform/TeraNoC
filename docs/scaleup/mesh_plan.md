@@ -852,8 +852,53 @@ Still open, and *not* answered by the above:
 
 | # | step | gate |
 |---|---|---|
-| D1 | Iso-work-per-core: 4×4 `128×1024×512` vs 8×8 `512×1024×512` (§6) | both complete |
+| D1 | Iso-work **and iso-merge-degree**: 4×4 `512×512×512` vs 8×8 `2048×512×512` (revised, below) | both complete |
 | D2 | Fold into `docs/benchmarks/`, report utilisation *and* absolute flop/cycle | — |
+
+**D1 shape revised — the original pair would have measured the MSHR doing nothing.**
+
+The `group_mshr_*` bank-hash and merge knobs are *workload* parameters, and all three
+fall directly out of the shape (verified against `1ff73c9`'s tuned `512×512×512`,
+where the derivation reproduces the committed values exactly):
+
+| knob | = | at `512×512×512`/16grp | config |
+|---|---|---|---|
+| `bank_shift_burst` | log2(`p_len`) = log2(P/`split_p_count`) | log2(128) = 7 | 7 ✅ |
+| `bank_shift_single` | log2(A row stride) = log2(N) | log2(512) = 9 | 9 ✅ |
+| `bank_burst_bits` | clog2(LMUL) | m2 → 1 | 1 ✅ |
+| `merge_reqs` | B-sharing degree = `split_m_count` = M/(G·`kernel_size`) | 4 | 4 ✅ |
+
+The originally-planned pair (4×4 `128×1024×512` vs 8×8 `512×1024×512`) sets
+`M/G = kernel_size` exactly, so `split_m_count = 1`: every core in a group takes a
+distinct `p_start`, no two share a B line, and **merge degree collapses to 1**. C1's
+"min legal M = G·`kernel_size`" is precisely the degenerate point. That pair would
+have benchmarked the 4× scale-up with the project's first design pillar idle, and
+would additionally have needed re-tuning to `sb=5, ss=10`.
+
+Revised pair — hold degree at 4 by scaling M with G (`M = G·kernel_size·d`):
+
+| point | shape | deg | sb | ss | bb | L1 | MAC/core |
+|---|---|---|---|---|---|---|---|
+| 4×4 (= the tuned shape) | `512×512×512` | 4 | 7 | 9 | 1 | 3.00 / 3.61 MB | 524288 |
+| 8×8 | `2048×512×512` | 4 | 7 | 9 | 1 | 9.00 / 14.86 MB | 524288 |
+
+Iso-work-per-core *and* iso-degree, both fit L1, and the derived knobs are
+**identical to the shipping config** — so no re-tuning is needed, and the 4×4 arm is
+an already-validated operating point rather than a new one. Cost: ~2× the per-core
+work of the original plan, hence ~2× simulation time. Worth it.
+
+Optionally also run the degree-1 pair afterwards: against the degree-4 pair it
+isolates what coalescing is actually buying at each mesh size.
+
+**Latent kernel-doc bug found and fixed** (`sp-fmatmul.c`): the comment gave the
+sharing degree as `cores_per_group/split_m_count`, which is `split_p_count` — the
+*count* of distinct `p_start` values, not the *size* of a sharing set. Both equal 4 at
+M=P=512 so it never mattered; at the planned 8×8 shape they diverge maximally (true
+degree 1, comment implies 16).
+
+**Still open:** `group_mshr_num = 64` is unaffected by shape — it is latency
+coverage. Demand per group is invariant, but mesh diameter goes 6 → 14 hops, so
+Little's law argues for growth. Watch it first at C3.
 
 ### The binding constraint: simulation cost
 

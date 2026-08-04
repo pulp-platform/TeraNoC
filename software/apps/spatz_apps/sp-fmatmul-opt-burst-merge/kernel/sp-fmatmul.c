@@ -64,8 +64,14 @@
 // skew). This one fires only at the TOP of each outer p iteration -- (p_end-p_start)/gvl
 // times per kernel, i.e. 4x for a 128-column range at m2 (VL=32), 2x at m4 -- and syncs
 // ALL cores of the group instead of a pair.
-// Rationale: the B-line sharing set is the cores with the same p_start (degree
-// cores_per_group/split_m_count, = 4 at M=P=512), and they can only coalesce in the group
+// Rationale: the B-line sharing set is the cores with the same p_start. p_start is indexed
+// by (core_gid % split_p_count), so the set SIZE is cores_per_group/split_p_count, which is
+// split_m_count = M/(active_groups*kernel_size) -- NOT cores_per_group/split_m_count, which
+// is split_p_count (the COUNT of distinct p_start values). The two coincide at M=P=512 (both
+// 4), which is why the distinction never mattered before; they diverge as soon as the group
+// count scales. At 64 groups with M=512, dim_group==kernel_size so split_m_count==1: every
+// core in the group takes a distinct p_start and NOTHING coalesces. Preserving degree d at
+// G groups requires M = G*kernel_size*d. They can only coalesce in the group
 // MSHR if they issue inside the merge window. They drift apart over the long n sweep;
 // one rendezvous per column block re-locks them at negligible cost. It also subsumes
 // COLDSTART_GROUP_SYNC: the first iteration is aligned by the same barrier.
