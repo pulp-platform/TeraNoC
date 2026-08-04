@@ -516,6 +516,7 @@ QuestaSim refuses — read the log, not the exit code.
 | 1 | `ctrl_registers` MAX_NumGroups | `%Warning-USERERROR`; `wake_up_tile[g]` indexed past a 16-entry array | §10, one command |
 | 2 | `mempool_system` L2 adapters | 51× `%Warning-SELRANGE`, indices 16..31 into 16-entry bank arrays | **guarded** (below) |
 | 3 | perimeter channel indices | **silent** — indices stay in range, the wiring is simply wrong | §3.6, needs a decision |
+| 4 | `axi_L2_interleaver` group↔bank affinity | **silent** — `clog2(NumL2Banks)` can no longer equal `clog2(NumGroups)` | §13, unguarded |
 
 Nothing else: no structural, width or connectivity breakage. The design is closer
 to 32-group-capable than this plan originally assumed.
@@ -573,3 +574,58 @@ irregular numbering (ch 4/5 and 10/11 are swapped relative to any natural order)
 A canonical numbering changes which address range is served by which perimeter
 point, which changes distances and therefore cycles — so the switch needs a
 measurement, not an assumption.
+
+---
+
+## 13. L2 address mapping: interleaved, and tied to the L1 group field
+
+**Read this before reasoning about L2 traffic. The SAM is misleading on its own.**
+
+The generated SAM appears to block-partition L2 — `hbm_0` = `0x8000_0000`–`0x8010_0000`,
+one contiguous 1 MB per channel. **That is not the mapping the design uses.**
+
+`hardware/src/axi_L2_interleaver.sv`, instantiated per group at
+`mempool_group_floonoc_wrapper.sv:216`, sits between the group's AXI master and
+its chimney and scrambles the address *before* the SAM sees it:
+
+```
+LSBConstantBits = clog2(L2BankBeWidth * Interleave) = clog2(64*16) = 10
+ScrambleBits    = clog2(NumL2Banks)                 = 4
+scramble        = addr[ScrambleBits+LSBConstantBits-1 : LSBConstantBits] = addr[13:10]
+```
+
+It lifts `addr[13:10]` into the MSBs so that the SAM's 1 MB block decode selects
+**bank `addr[13:10]`** — i.e. 1 KB-granular striping across all 16 banks.
+
+### Why those bits: the L1/L2 co-design
+
+`addr[13:10]` is the **group** field of the L1 word-interleave
+(`byte|bank|tile|group` = bits 13:0). Three things are deliberately aligned:
+
+| | |
+|---|---|
+| L1 word-interleave | group = `addr[13:10]` |
+| L2 bank interleave | bank = `addr[13:10]` |
+| `DmaRegionWidth` (`idma_distributed_midend`) | `NumBanksPerGroup*4` = **1024 B** |
+
+So `idma_distributed_midend` gives group G exactly the 1 KB chunks with
+`addr[13:10] == G`, and those live in **L2 bank G**. Every group's DMA reads its
+own L2 channel, 1:1, by construction — no software placement needed, and a
+contiguous buffer automatically spreads across all 16 channels.
+
+Both preload paths implement the same striping, which is how this can be checked
+without a simulation: `mempool_tb.sv:496` (`getSramCTRLInfo`) for QuestaSim, and
+the 4-argument `MemArea(..., AXI_WIDTH_INTERLEAVED)` at
+`hardware/tb/verilator/mempool_main/mempool_tb_verilator.cc:45` for Verilator.
+
+### Consequence for the ladder — a new blocker
+
+`ScrambleBits = clog2(NumL2Banks)` while the L1 group field is
+`clog2(NumGroups)` bits. At 4×4 both are 4 and the correspondence is exact. Above
+that they cannot match: 8×8 has 64 groups (6 bits) but at most 32 channels
+(5 bits, §12), so the 1:1 group→bank property **breaks** and pairs of groups share
+a bank. Nothing currently checks `NumL2Banks` against `NumGroups`.
+
+This is the same perimeter-versus-area limit as §12, now with a mechanism: it is
+not merely that bandwidth per core falls, but that the group↔channel affinity the
+DMA path is built around stops being expressible.
