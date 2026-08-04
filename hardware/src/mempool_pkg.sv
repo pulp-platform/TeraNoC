@@ -18,7 +18,7 @@ package mempool_pkg;
   localparam integer unsigned NumCoresPerTile         = `ifdef NUM_CORES_PER_TILE `NUM_CORES_PER_TILE `else 0 `endif;
   localparam integer unsigned NumDivsqrtPerTile       = `ifdef NUM_DIVSQRT_PER_TILE `NUM_DIVSQRT_PER_TILE `else (snitch_pkg::XDIVSQRT) `endif;
   localparam integer unsigned NumGroups               = `ifdef NUM_GROUPS `NUM_GROUPS `else 0 `endif;
-  localparam integer unsigned MAX_NumGroups           = 16;
+  localparam integer unsigned MAX_NumGroups           = 64;
   localparam integer unsigned RemoteGroupLatencyCycle = `ifdef REMOTE_GROUP_LATENCY_CYCLES `REMOTE_GROUP_LATENCY_CYCLES `else 7 `endif;
   localparam integer unsigned NumTiles                = NumCores / NumCoresPerTile;
   localparam integer unsigned NumTilesPerGroup        = NumTiles / NumGroups;

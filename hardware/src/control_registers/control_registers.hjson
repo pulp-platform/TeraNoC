@@ -20,7 +20,7 @@
     { name: "MAX_NumGroups",
       desc: "Maximum number of groups that we support in any configuration",
       type: "int",
-      default: "16"
+      default: "64"
     }
   ],
   regwidth: 32
