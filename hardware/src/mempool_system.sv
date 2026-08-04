@@ -39,6 +39,16 @@ module mempool_system
    *  AXI  *
    *********/
 
+  // NOTE: this one localparam serves two unrelated roles, which coincide only at
+  // 4x4 and diverge at every larger mesh:
+  //   (a) the number of perimeter AXI attachment points on the cluster boundary
+  //       -- geometrically 2*(NumX+NumY), which is 16 for a 4x4 mesh;
+  //   (b) the number of L2 channels, since gen_l2_adapters below drives
+  //       bank_*[i] from axi_l2_req[i], strictly 1:1 by index.
+  // Both are 16 today because NumGroups, 2*(NumX+NumY) and l2_banks all happen to
+  // be 16. Splitting (a) from (b) is Phase 3 work; until then the equality is
+  // asserted at the bottom of this file so a mismatch fails loudly instead of
+  // indexing past the bank arrays.
   localparam NumAXIMasters = NumGroups;
   localparam NumAXISlaves  = 3; // control regs, bootrom and the external mst ports
   localparam NumSoCRules   = NumAXISlaves - 1;
@@ -1069,5 +1079,15 @@ module mempool_system
   // From MemPool to the Host
   assign mst_req_o                 = axi_periph_req[External];
   assign axi_periph_resp[External] = mst_resp_i;
+
+  /**************************************
+   *  L2 / perimeter sizing elaboration  *
+   **************************************/
+  // gen_l2_adapters drives bank_*[i] from axi_l2_req[i], strictly 1:1, so the
+  // number of AXI masters and the number of L2 banks must be equal. At 32 groups
+  // this silently indexed 16..31 into 16-entry bank arrays (51 Verilator SELRANGE
+  // warnings, and Verilator still exits 0). Fail at elaboration instead.
+  if (NumAXIMasters != NumL2Banks)
+    $error("[mempool_system] NumAXIMasters != NumL2Banks -- the L2 adapters are wired 1:1 by index. Set l2_banks to match the AXI master count, or decouple the L2 channel mapping (see docs/scaleup/mesh_plan.md).");
 
 endmodule : mempool_system
