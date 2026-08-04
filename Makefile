@@ -309,6 +309,10 @@ REG_OUTDIR      = $(ROOT_DIR)/hardware/src/control_registers
 .PHONY: update-regs
 update-regs:
 	$(REGTOOL_PYTHON) $(REGTOOL) -r -t $(REG_OUTDIR) $(REG_HJSON)
+# The same register map is mirrored in C for the runtime. Emit it from the SAME
+# hjson: regenerating only the RTL would let the two drift silently -- software
+# would keep writing wake_up_group at the offset a wider wake_up_tile now owns.
+	$(REGTOOL_PYTHON) $(REGTOOL) -D $(REG_HJSON) > $(ROOT_DIR)/software/runtime/control_registers.h
 
 # Helper targets
 .PHONY: clean format apps

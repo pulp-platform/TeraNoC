@@ -77,6 +77,11 @@ package mempool_pkg;
   // L2
   localparam integer unsigned L2Size           = `ifdef L2_SIZE `L2_SIZE `else 0 `endif; // [B]
   localparam integer unsigned NumL2Banks       = `ifdef L2_BANKS `L2_BANKS `else 1 `endif;
+  // Off-cluster AXI channels on the mesh perimeter. Equal to the L2 bank count,
+  // since gen_l2_adapters wires master i to bank i. This is NOT NumGroups: the
+  // perimeter holds 2*(NumX+NumY) attachment points while there are NumX*NumY
+  // groups, and those coincide only at 4x4. See docs/scaleup/mesh_plan.md 12.
+  localparam integer unsigned NumL2Channels   = NumL2Banks;
   localparam integer unsigned L2BankSize       = L2Size / NumL2Banks;
   localparam integer unsigned L2BankWidth      = AxiDataWidth;
   localparam integer unsigned L2BankBeWidth    = L2BankWidth/8;

@@ -49,7 +49,7 @@ module mempool_system
   // be 16. Splitting (a) from (b) is Phase 3 work; until then the equality is
   // asserted at the bottom of this file so a mismatch fails loudly instead of
   // indexing past the bank arrays.
-  localparam NumAXIMasters = NumGroups;
+  localparam NumAXIMasters = NumL2Channels;
   localparam NumAXISlaves  = 3; // control regs, bootrom and the external mst ports
   localparam NumSoCRules   = NumAXISlaves - 1;
 
@@ -1087,8 +1087,23 @@ module mempool_system
   // number of AXI masters and the number of L2 banks must be equal. At 32 groups
   // this silently indexed 16..31 into 16-entry bank arrays (51 Verilator SELRANGE
   // warnings, and Verilator still exits 0). Fail at elaboration instead.
-  if (NumAXIMasters != NumL2Banks)
-    $error("[mempool_system] NumAXIMasters != NumL2Banks -- the L2 adapters are wired 1:1 by index. Set l2_banks to match the AXI master count, or decouple the L2 channel mapping (see docs/scaleup/mesh_plan.md).");
+  // Perimeter capacity. One channel per group is possible only at 4x4, where
+  // NumGroups happens to equal 2*(NumX+NumY); everywhere else channels are shared
+  // and this is an inequality, not an equality.
+  if (NumL2Channels > 2 * (NumX + NumY))
+    $error("[mempool_system] NumL2Channels exceeds the perimeter capacity 2*(NumX+NumY) -- there are not enough attachment points to place them (see docs/scaleup/mesh_plan.md section 12).");
+
+  // The channel count selects a bit field (ScrambleBits = clog2(NumL2Banks)), so
+  // it has to be a power of two; perimeter capacity is therefore rounded DOWN.
+  if (NumL2Channels & (NumL2Channels - 1))
+    $error("[mempool_system] NumL2Channels must be a power of two -- ScrambleBits = clog2(NumL2Banks) selects a bit field.");
+
+  // Groups must divide evenly over channels, by a power-of-two factor, so that
+  // bank = group >> log2(share) stays a bit-field select (mesh_plan.md 14).
+  if (NumGroups % NumL2Channels != 0)
+    $error("[mempool_system] NumGroups is not a multiple of NumL2Channels -- groups cannot be shared evenly across L2 channels.");
+  if ((NumGroups / NumL2Channels) & ((NumGroups / NumL2Channels) - 1))
+    $error("[mempool_system] the group-per-channel sharing factor must be a power of two, so that bank = group >> log2(share) is a bit-field select.");
 
   // The cluster wrapper assigns perimeter channels with formulas that are only
   // injective when the channel count equals the perimeter capacity. At 4x8, for
@@ -1115,7 +1130,13 @@ module mempool_system
   if (L2LsbConstBits + L2ScrambleBits != GroupFieldLsb + $clog2(NumGroups))
     $error("[mempool_system] the L2 bank field does not align with the L1 group field -- set axi_width_interleaved = 16 * num_groups / l2_banks (see docs/scaleup/mesh_plan.md section 14).");
 
-  if (NumAXIMasters != 2 * (NumX + NumY))
-    $error("[mempool_system] NumAXIMasters != 2*(NumX+NumY) -- the perimeter channel assignment in the cluster wrapper would alias two attachment points onto one channel. The perimeter mapping needs deriving before this mesh size can be built (see docs/scaleup/mesh_plan.md section 12).");
+  // The perimeter placement now comes from perimeter_map_pkg, which assigns each
+  // channel a distinct attachment point by construction, so the aliasing this
+  // used to guard against cannot arise from the index arithmetic any more. What
+  // still has to hold is that the generated map was built for THIS mesh.
+  if (perimeter_map_pkg::NumMeshX != NumX || perimeter_map_pkg::NumMeshY != NumY)
+    $error("[mempool_system] perimeter_map_pkg was generated for a different mesh -- rerun `make update-floonoc` (it regenerates the perimeter map from num_x/num_groups).");
+  if (perimeter_map_pkg::NumL2Channels != NumL2Channels)
+    $error("[mempool_system] perimeter_map_pkg channel count disagrees with l2_banks -- regenerate the perimeter map.");
 
 endmodule : mempool_system

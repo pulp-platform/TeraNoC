@@ -18,7 +18,7 @@ module mempool_cluster_floonoc_wrapper
   parameter logic [31:0]   BootAddr      = 32'h0000_0000,
   // Dependent parameters. DO NOT CHANGE!
   parameter int unsigned   NumDMAReq     = NumGroups * NumDmasPerGroup,
-  parameter int unsigned   NumAXIMasters = NumGroups * NumAXIMastersPerGroup
+  parameter int unsigned   NumAXIMasters  = NumL2Channels
 ) (
   // Clock and reset
   input  logic                         clk_i,
