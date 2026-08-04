@@ -785,18 +785,68 @@ The group field widens from 4 to 6 bits (`addr[15:10]`), moving everything above
 
 | # | step | gate |
 |---|---|---|
-| B1 | Derive the `16384` stride in `arch.ld.c` from the defines (§3.7) | 4×4 link map unchanged |
-| B2 | Same literal in `gemm_autotune.py:162` | tuner agrees with 4×4 measurements |
-| B3 | Re-check `group_barrier_word=240` and the L1 truncation at 16 MB | barrier microbenchmark |
+| B1 | Derive the `16384` stride in `arch.ld.c` from the defines (§3.7) | ✅ byte-identical ELF at 4×4 (`1c524f9`) |
+| B2 | Same literal in `gemm_autotune.py:162` | ✅ folded into B1; tuner still reports 3.61 MB at 4×4 |
+| B3 | Re-check `group_barrier_word=240` and the L1 truncation at 16 MB | ✅ analytically (below); barrier microbenchmark still owed |
 | B4 | `hello_world` at 1024 cores, CMS armed | boots, 0 scoreboard warnings |
+
+**B3 result.** `group_barrier_word = 240` needs no change. The window is placed at
+words `[240, 240+barriers_per_group)` of a `clog2(L1_BANK_SIZE/4) = 8`-bit word
+field, and *both* of those are invariant under group scaling: the word field is
+fixed by the bank size, and barriers-per-group is cores-per-group, held at 16 at
+every rung. Only the stride changes, which B1 now derives.
+
+| | barriers/group | window words | usable L1 |
+|---|---|---|---|
+| 16 groups | 16 | 240–255 of 0–255 | 3.75 of 4 MB |
+| 64 groups | 16 | 240–255 of 0–255 | 15.00 of 16 MB |
+
+This is arithmetic, not a measurement — the barrier microbenchmark is still owed
+under B4. Worth the care: data landing in this window is how a 512³ matmul wedged
+before.
 
 ### Phase C — make 8×8 run the kernel
 
 | # | step | gate |
 |---|---|---|
-| C1 | Shape ladder: min legal `M = num_groups × KERNEL_SIZE` = **512** | `gemm_autotune.py` accepts |
+| C1 | Shape ladder: min legal `M = num_groups × KERNEL_SIZE` = **512** | ✅ tuner accepts `512×1024×512`, 5.00 of 14.86 MB |
 | C2 | Regenerate matmul data; re-derive the MSHR knobs for the new shape | build succeeds |
 | C3 | Run the matmul | completes, 0 errors |
+
+**C2 pre-analysis — which MSHR knobs actually move.** `config/terapool_spatz4_fpu_8x8.mk`
+inherits every `group_mshr_*` value verbatim from the 4×4 config, and `1ff73c9`
+tuned those empirically against a specific address layout. That layout changes at
+8×8, so the question is whether the tuning still selects the same bits.
+
+`BankHash = 3` reconstructs a linear word address and field-selects from it
+(`mempool_group_mshr.sv:330`):
+
+```
+word_addr = [ bank_row | group | tile 7:4 | bank_in_tile 3:0 ]
+```
+
+The group field's **LSB is pinned at bit 8** — `BankInTileW + TileIdBits = 4 + 4`,
+both invariant because banks/tile and tiles/group do not change. Only its *width*
+grows (`GroupBits = idx_width(NumGroups)`, 4 → 6), pushing `bank_row` up by 2.
+So the two tuned shifts diverge:
+
+| path | shift | selects at 4×4 | selects at 8×8 | |
+|---|---|---|---|---|
+| burst | `BankSelShiftBurst = 7` | `{group[1:0], tile[3]}` | `{group[1:0], tile[3]}` | **invariant** |
+| single | `BankSelShiftSingle = 9` | `{bank_row[0], group[3:1]}` | `{group[4:1]}` | **changes** |
+
+The burst selection sits entirely below the group field's growth point, so it is
+bit-for-bit the same function at both sizes — and burst is the matmul's dominant
+traffic (B-tile loads), so that tuning transfers for free. The single path swaps a
+`bank_row` bit for a group bit; not obviously worse (more group entropy, and both
+variants drop `group[0]`, aliasing groups 2k/2k+1), but untested.
+
+Still open, and *not* answered by the above:
+- `group_mshr_num = 64` is a **latency-coverage** quantity, not a demand one. Demand
+  per group is invariant (16 cores), but the mesh diameter goes 6 → 14 hops, so
+  round-trip latency roughly doubles and Little's law says covering the same
+  bandwidth wants ~2× the outstanding entries. Undersizing this is the documented
+  route to a simulation deadlock, so this is the knob to watch first at C3.
 
 ### Phase D — measure
 
