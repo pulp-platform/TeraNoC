@@ -262,9 +262,31 @@ $(info FLOO_DIR: $(FLOO_DIR))
 install-floogen:
 	$(MAKE) -C $(FLOO_DIR) install-floogen
 
+# Per-router IdTable routing tables for the AXI/L2 network. floogen does not emit
+# usable ones: `gen_router_tables` covers SUBORDINATE endpoints only (so responses
+# to the manager-only groups would be unroutable), and it derives routes from
+# nx.shortest_path, whose turn model is neither XY nor YX and can therefore
+# deadlock. gen_floo_route_tables.py computes strictly XY dimension-ordered tables
+# and verifies every (router, destination) pair before emitting.
+# It imports floogen, so it must run under the interpreter floogen is installed in:
+# take it from floogen's own shebang. `cut -c3-` strips the "#!" -- do NOT use a sed
+# expression containing '#', which make reads as the start of a comment and which
+# leaves the $(shell ...) call unterminated.
+FLOOGEN_PYTHON ?= $(shell head -1 "$$(command -v floogen)" 2>/dev/null | cut -c3-)
+ifeq ($(strip $(FLOOGEN_PYTHON)),)
+FLOOGEN_PYTHON := python3
+endif
+FLOO_RT_GEN = $(ROOT_DIR)/hardware/scripts/gen_floo_route_tables.py
+# Turn model for the AXI/L2 network. `shortest` reproduces the historical
+# source-routed paths exactly (measured cycle-identical); `xy` is acyclic by
+# construction and roughly halves the rules per router but costs ~1.24% here.
+# Both are gated on the generator's channel-dependency-graph acyclicity check.
+FLOO_TURN_MODEL ?= shortest
+
 update-floonoc: $(FLOO_NOC)
-$(FLOO_NOC): install-floogen $(FLOO_CFG)
+$(FLOO_NOC): install-floogen $(FLOO_CFG) $(FLOO_RT_GEN)
 	floogen -c $(FLOO_CFG) -o $(FLOO_GEN_OUTDIR) --only-pkg
+	$(FLOOGEN_PYTHON) $(FLOO_RT_GEN) -c $(FLOO_CFG) -o $(FLOO_GEN_OUTDIR) --turn-model $(FLOO_TURN_MODEL)
 
 # Helper targets
 .PHONY: clean format apps

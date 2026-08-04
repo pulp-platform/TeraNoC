@@ -294,7 +294,6 @@ module terapool_cluster_floonoc_wrapper
           .scan_data_o        (/* Unconnected */),
           .group_id_i         (group_id_t'({group_id.x, group_id.y})),
           .floo_id_i          (id_t'(GroupX0Y0 + x*NumY + y)),
-          .route_table_i      (floo_terapool_noc_pkg::RoutingTables[GroupX0Y0 + x*NumY + y]),
           // TCDM Router interface
           .floo_tcdm_req_o    (floo_tcdm_req_out[x][y]),
           .floo_tcdm_rsp_o    (floo_tcdm_rsp_out[x][y]),
@@ -331,7 +330,6 @@ module terapool_cluster_floonoc_wrapper
           .scan_data_o        (/* Unconnected */),
           .group_id_i         (group_id_t'({group_id.x, group_id.y})),
           .floo_id_i          (id_t'(GroupX0Y0 + x*NumY + y)),
-          .route_table_i      (floo_terapool_noc_pkg::RoutingTables[GroupX0Y0 + x*NumY + y]),
           // TCDM Router interface
           .floo_tcdm_req_o    (floo_tcdm_req_out[x][y]),
           .floo_tcdm_rsp_o    (floo_tcdm_rsp_out[x][y]),

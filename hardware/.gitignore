@@ -15,4 +15,10 @@ results*
 log/
 plots*
 obj_dir
-generated
+generated/*
+
+# The AXI/L2 route table is safety-critical -- its deadlock-freedom depends on the
+# turn model and on nx tie-breaking -- so it is TRACKED: a silent routing change
+# must show up in a diff. Note this needs `generated/*` above, not `generated`:
+# git cannot re-include a file inside an ignored DIRECTORY.
+!generated/floo_terapool_route_table_pkg.sv

@@ -59,6 +59,7 @@ sources:
   - hardware/src/mempool_group_barrier.sv
   - hardware/src/mempool_group.sv
   - hardware/generated/floo_terapool_noc_pkg.sv
+  - hardware/generated/floo_terapool_route_table_pkg.sv
   - hardware/src/mempool_group_floonoc_wrapper.sv
   # Level 3
   - hardware/src/mempool_cluster_floonoc_wrapper.sv

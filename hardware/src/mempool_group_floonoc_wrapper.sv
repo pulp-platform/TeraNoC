@@ -29,7 +29,6 @@ module mempool_group_floonoc_wrapper
   // Group ID
   input  logic              [idx_width(NumGroups)-1:0]  group_id_i,
   input  id_t                                           floo_id_i,
-  input  route_t            [NumEndpoints-1:0]          route_table_i,
 
   // TCDM Router interface
   output floo_tcdm_req_if_t [West:North]                floo_tcdm_req_o,
@@ -1001,7 +1000,7 @@ floo_nw_chimney #(
   .id_t                (id_t                                    ),
   .rob_idx_t           (rob_idx_t                               ),
   .route_t             (route_t                                 ),
-  .dst_t               (route_t                                 ),
+  .dst_t               (id_t                                 ),
   .hdr_t               (hdr_t                                   ),
   .sam_rule_t          (sam_rule_t                              ),
   .Sam                 (Sam                                     ),
@@ -1030,7 +1029,6 @@ floo_nw_chimney #(
   .axi_wide_out_req_o   (                                       ),
   .axi_wide_out_rsp_i   ('0                                     ),
   .id_i                 (floo_id_i                              ),
-  .route_table_i,
   .floo_req_o           (floo_axi_req_in[Eject]                 ),
   .floo_rsp_o           (floo_axi_rsp_in[Eject]                 ),
   .floo_wide_o          (floo_axi_wide_in[Eject]                ),
@@ -1043,6 +1041,11 @@ floo_nw_chimney #(
 // AXI FlooNoC Rouer //
 // ----------------- //
 
+// IdTable routing: the router steers on the destination endpoint id using a
+// per-router rule table. The table is generated (XY dimension-ordered, verified
+// deadlock-free) by hardware/scripts/gen_floo_route_tables.py -- see
+// floo_terapool_route_table_pkg. Indexing by group_xy_id mirrors how the TCDM
+// routers above take routing_table_pkg::RoutingTables.
 floo_nw_router #(
   .AxiCfgN      ( AxiCfgN                     ),
   .AxiCfgW      ( AxiCfgW                     ),
@@ -1055,13 +1058,14 @@ floo_nw_router #(
   .floo_req_t   ( floo_req_t                  ),
   .floo_rsp_t   ( floo_rsp_t                  ),
   .floo_wide_t  ( floo_wide_t                 ),
-  .NumAddrRules (1                            )
+  .NumAddrRules ( floo_terapool_route_table_pkg::MaxNumRules    ),
+  .addr_rule_t  ( floo_terapool_route_table_pkg::floo_id_rule_t )
 ) i_floo_narrow_wide_router (
   .clk_i,
   .rst_ni,
   .test_enable_i  ( testmode_i                ),
-  .id_i           ( '0                        ),
-  .id_route_map_i ( '0                        ),
+  .id_i           ( floo_id_i                 ),
+  .id_route_map_i ( floo_terapool_route_table_pkg::RouterIdMaps[group_xy_id.x][group_xy_id.y] ),
   .floo_req_i     ( floo_axi_req_in           ),
   .floo_rsp_i     ( floo_axi_rsp_in           ),
   .floo_req_o     ( floo_axi_req_out          ),

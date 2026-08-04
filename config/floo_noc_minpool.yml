@@ -7,7 +7,7 @@ description: "Terapool AXI NoC"
 network_type: "narrow-wide"
 
 routing:
-  route_algo: "SRC"
+  route_algo: "ID"
   use_id_table: true
 
 protocols:
