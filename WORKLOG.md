@@ -4863,3 +4863,42 @@ show advancing cycles, growing CMS counts and retiring traces are now left unbou
 poisoning its library; `compile.tcl` depends on `find {src,tb,deps}`, so edited sources
 silently trigger a re-`vlog`. Force it out with `rm <build>/compile.tcl`. The elaboration
 guard caught the mismatch both times, which is exactly what it exists for.
+
+## 2026-08-05 21:50 — first 8x8 kernel-phase measurements (matmul mid-run)
+
+`group_merge_profiling` is already `?= 1` in both terapool configs; the output goes to
+`<build>/group_merge_profiling/*.log` every 10k cycles, NOT to the transcript (an earlier
+note here claiming it was disabled was wrong — it was grepped in the wrong place).
+
+**Merge efficiency, all 64 groups, uniform including the far corner:**
+
+```
+util group 61  avg_req_expired=2.095  avg_record_expired=1.804  avg_unique_tile_expired=2.004
+util group 63  avg_req_expired=1.951  avg_record_expired=1.700  avg_unique_tile_expired=1.863
+```
+
+~1.95-2.1 requests merged per MSHR entry from ~1.9 distinct tiles. The *sharing set* is 4
+(`split_m_count` at M=2048), so the window captures about half of it. That is the drift
+the kernel comment describes: cores sharing a `p_start` coalesce only if they issue inside
+the merge window and they separate over the long n sweep. The measured ~2 is the number to
+quote; the 4-vs-2 gap is what `GBAR_PLOOP` exists to close.
+
+**Response direction is the constraint** (`[BP] delta`, g=0 t=0, kernel phase):
+
+```
+bank_req : hsk=336 stall=0   util=0.0210 stall_rate=0.0000
+bank_resp: hsk=336 stall=505 util=0.0210 stall_rate=0.6005
+```
+
+The request path never stalls; the response path stalls 60% of active cycles. Consistent
+with `[LP]` showing `mst_resp` at 4x `mst_req` (burst beats) and with the response-bandwidth
+ceiling already documented for this design.
+
+**Traffic is healthy**: `req=2,958,902 resp=2,542,666 inflight=20,616 orphan=0 dup_alloc=0`
+at cyc 128k, one core carrying 64 outstanding requests.
+
+**Simulation rate**: 23.6 cyc/s during the serial setup phase (1 core active) dropped to
+3.3 cyc/s once all 1024 cores entered the kernel. That is the workload, not contention --
+the run holds 96.7% of a core on a 96-core box at load 29. ~490k cycles total => ~30 h.
+Measuring the rate needs a window longer than 1000/rate seconds, since the log only prints
+at 1000-cycle boundaries; a 90 s sample gave a spurious 11.1 cyc/s.
