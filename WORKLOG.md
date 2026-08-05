@@ -4760,3 +4760,54 @@ silently picked up the 8x8 ELF from the shared output path produced a plausible
 instructions proved the bootrom was fine). Lanes now carry per-config ELFs and every
 gate checks the exit code. Note `preload=` must be a MAKE ARGUMENT: passed through
 `env` it is an environment variable, which loses to the makefile's `preload :=`.
+
+## 2026-08-05 11:40 — 8x8 after the gateway fix: an instruction-fetch stall, not a wake-up bug
+
+The `PeriphHbmChannel` fix is **confirmed complete**. A `WAKEUP_PROBE` in
+`ctrl_registers.sv` shows the wake-up write landing identically at both sizes:
+
+```
+4x4:  t=2030  wake_up write q=0xffffffff  NumCores=256    t=2032  wake_up_o popcount=256
+8x8:  t=2030  wake_up write q=0xffffffff  NumCores=1024   t=2032  wake_up_o popcount=1024
+```
+
+Same cycle, full fan-out. The peripheral write path, the SAM, the decode and the
+64-group fan-out are all correct.
+
+**Two hypotheses tested and killed**, both by probe rather than argument:
+
+1. *The peripheral WRITE does not land.* Disproved above.
+2. *A wake-up race: cores asleep when the pulse fires bank no pending count*
+   (`snitch.sv:454`: `wake_up_d = (wake_up_sync_i && !wfi_q) ? wake_up_q+1 : wake_up_q`),
+   so late cores sleep forever. Plausible, and wrong: a `[WFI-SLEEP]`/`[WFI-WAKE]` probe
+   gives **1024 sleeps and 1024 wakes at 8x8, zero cores left asleep**, and zero
+   `[Missed wake-up]` reports anywhere.
+
+**What is actually happening.** The sleep/wake timeline separates the two sizes cleanly:
+
+| | sleeps | CMS req |
+|---|---|---|
+| 4x4 | 256 @ bootrom, then 255 @ `800001a8`, 256 @ `80001564`, 44 @ `800014d0` | 3187 -> 3235 -> 3310, growing |
+| 8x8 | **1024 @ bootrom only**, never again | **577, 577, 577, frozen** |
+
+At 8x8 every core wakes at cycle ~1000, runs ~400 cycles on what is already in its
+icache, then stalls permanently: it never reaches another `wfi`, never issues a data
+request, and produces nothing for a further 144,000 cycles. Not asleep, not slow --
+**stalled on instruction fetch**. Consistent with 0 of 64 groups showing remote traffic
+while 16 of 16 do at 4x4.
+
+**Why the fetch path is the suspect.** `.text` sits at `0x8000_0000`, and the L2 bank is
+`addr[11 +: ScrambleBits]`, so it maps to **bank 0 -- channel 0 at West(0,0)**. Every
+group's icache refill converges on that one channel: 16 groups at 4x4, **64 at 8x8**,
+with the farthest group (63, at mesh corner (7,7)) **14 hops** away. Ruled out as cause:
+the AXI id width, which is `$clog2(NumSystemXbarMasters) + AxiTileIdWidth` with
+`NumSystemXbarMasters = 1` -- constant, 2 bits at both sizes.
+
+An `[L2PROBE]` counting req/gnt/rsp per L2 channel is running at both sizes to show
+whether channel 0 is servicing, starving, or deadlocked.
+
+**Methodological note.** My "cores stopped at cycle 1400" reading came from traces of a
+run I had *killed*; the buffered tail was lost, so the last-flushed PC was mistaken for
+the last executed one. The live CMS/BYP sampling (taken while the run was up) was sound
+and is what the conclusion rests on. Trace files from a killed simulation are only valid
+up to the last flush.
