@@ -603,6 +603,25 @@ simc: clean-dasm compile
 	$(questa_cmd) vsim -c -voptargs=$(questa_voptargs) -wlf $(questa_wlf) $(questa_args) $(library).$(top_level) -do "log -r *" -do "run -a"
 	./scripts/return_status.sh $(buildpath)/transcript
 
+# Headless simulation WITHOUT full-visibility elaboration or whole-design logging.
+#
+# simc asks vopt for +acc (which suppresses most optimisation so every signal stays
+# addressable) and then logs the entire hierarchy with "log -r *". That is the right
+# default at 256 cores, where you usually want the waveform. It does not survive the
+# scale-up: at 1024 cores vopt alone did not finish in 60 minutes, and a full "log -r *"
+# over 1024 cores would produce a WLF too large to be useful anyway.
+#
+# This target drops both. Use it for "does it elaborate, boot and finish?" runs. The TB
+# instrumentation ([LP], [BP], [CMS], [GroupMerge], [UART]) all report through $display,
+# so it survives here untouched -- only waveform visibility is given up. Use simc when
+# you actually need to look at signals.
+.PHONY: simc-lean
+simc-lean: clean-dasm compile
+	cd $(buildpath) && \
+	ulimit -n $(sim_ulimit_n) 2>/dev/null || true; \
+	$(questa_cmd) vsim -c $(questa_args) $(library).$(top_level) -do "run -a"
+	./scripts/return_status.sh $(buildpath)/transcript
+
 # 	$(questa_cmd) vsim -c $(questa_args) $(library).$(top_level) -do "run -a"
 # 	$(questa_cmd) vsim -c -voptargs=$(questa_voptargs) -wlf $(questa_wlf) $(questa_args) $(library).$(top_level) -do "log -r *" -do "run -a"
 
