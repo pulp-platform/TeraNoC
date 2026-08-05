@@ -4811,3 +4811,55 @@ run I had *killed*; the buffered tail was lost, so the last-flushed PC was mista
 the last executed one. The live CMS/BYP sampling (taken while the run was up) was sound
 and is what the conclusion rests on. Trace files from a killed simulation are only valid
 up to the last flush.
+
+## 2026-08-05 21:10 — 8x8 runs: the L2 bank-field fix, and a Verilator --hierarchical wall
+
+**The 8x8 blocker was a one-bit address misalignment.** `axi_L2_interleaver` places the
+bank field at `addr[31-MSBConstantBits -: ScrambleBits]`, `MSBConstantBits =
+32 - clog2(L2Size)`. The SAM gives each channel 1 MB, so L2Size must be
+`l2_banks * 1 MB`. The 8x8 flavor doubled `l2_banks` to 32 but kept `l2_size` at 16 MB,
+so the field landed at `addr[23:19]` where the SAM wanted `addr[24:20]`. Reads for
+channels >= 2 decoded to the wrong endpoint, never reached the L2 and never returned;
+every core stalled on the first fetch past the second 2 KB stripe. 4x4 is accidentally
+correct (16 MB / 16 = 1 MB) — the same species of coincidence as `PeriphHbmChannel = 5`.
+Fixed by deriving `l2_size`, with an elaboration guard (`74c2c5a`).
+
+Verified after the fix: 5 L2 channels served with `req == rsp`, group AXI balanced at
+`ar=66 r=66` (was frozen at `ar=23 r=19`), all 64 groups active, 1024 cores in the kernel.
+4x4 regression unchanged at 471254 cycles.
+
+**How the chase went** — each step killed a hypothesis rather than confirming a guess:
+wake-up write lands (not the periph gateway) -> 1024 sleeps = 1024 wakes (not a wake-up
+race) -> `fifo_dep` 2->8 byte-identical (not head-of-line, so NOT the documented 5.5
+deadlock) -> L2 `req == rsp` (L2 healthy) -> group emits ARs that never return (not the RO
+cache) -> interleaver bit arithmetic. Three of those were my own hypotheses.
+
+**Matmul now running at 8x8**: `2048x512x512`, chosen so merge degree =
+`M/(G*kernel_size)` stays at 4 — the value the shipping `group_mshr_*` knobs are tuned
+for. The minimum legal `M = 512` collapses the degree to 1 and benchmarks the MSHR idle.
+Iso-work-per-core with the 4x4 arm (`512x512x512`), 524288 MAC/core each, so FLOPs and
+FPU util compare directly. Work split confirmed in-run: `m 0..8`, `p 0..128`.
+
+**Verilator does not build a working 8x8 model.** The binary links (1690 MB vs 456 MB at
+4x4) and then segfaults in the first `initial` block:
+
+```
+#0 VerilatedModule::name (this=0x40)
+#1 Vmempool_tb_verilator__Syms::name (this=0x0)     <- symbol table NULL
+#2 ..._initial__TOP
+```
+
+The generated code calls `..._protectlib_create_TOP(VL_SFORMATF_NX("%N...",
+vlSymsp->name()))` once per group — 16 calls at 4x4, 64 at 8x8 — and `vlSymsp` is null
+there. That is Verilator 4.228 `--hierarchical` codegen, not the RTL: QuestaSim runs the
+identical design, and it fails with `ulimit -s unlimited` so it is not a stack limit.
+Options: drop `--hierarchical` (removes the failing construct; larger monolithic compile)
+or move to the 5.006/5.020 installed on this host.
+
+**Process notes.** (a) A `timeout` is for detecting hangs, not for bounding long-but-healthy
+runs — a 5 h cap killed a clean hello_world at 211/1024 when it needed ~24 h. Runs that
+show advancing cycles, growing CMS counts and retiring traces are now left unbounded.
+(b) That run's cleanup trap restored the 4x4 packages while another build was mid-`vlog`,
+poisoning its library; `compile.tcl` depends on `find {src,tb,deps}`, so edited sources
+silently trigger a re-`vlog`. Force it out with `rm <build>/compile.tcl`. The elaboration
+guard caught the mismatch both times, which is exactly what it exists for.
