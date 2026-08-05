@@ -21,6 +21,15 @@ package perimeter_map_pkg;
   // Value used where a (x, y, direction) triple is not an attachment point.
   localparam int unsigned NoChannel     = 16;
 
+  // The one L2 channel whose chimney hangs off the periph router, alongside
+  // `periphs` and `host` -- i.e. the gateway to the bootrom and the control
+  // registers. mempool_system.sv special-cases this index. It is a property of
+  // the placement, not a constant: 5 at 4x4, 13 at 8x8. Hardcoding 4x4's value
+  // routes every peripheral access to a router that is not carrying the
+  // peripherals, and the bootrom then never sees a request -- every core reads X
+  // at its first fetch.
+  localparam int unsigned PeriphHbmChannel = 5;
+
   typedef logic [7:0] perim_ch_t;
 
   // PACKED, like routing_table_pkg::RoutingTables -- an unpacked localparam array

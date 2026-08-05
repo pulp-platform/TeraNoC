@@ -4694,3 +4694,69 @@ and parallelises the runs.
 that is also true of the failure. "0 errors" is true of a process killed mid-run;
 `%Error|Error:|FAILED` does not match a missing binary. Gate on the exit code, and
 make the failure modes explicit in the check.
+
+## 2026-08-05 09:20 — the 8x8 boot failure: a hardcoded peripheral gateway
+
+**Symptom.** 8x8 elaborated cleanly (0 errors) but did not boot: 46.7 million
+illegal-instruction reports across all 1024 cores, every one at `PC 0xA000_0000`
+with `Data: xxxxxxxx`, from cycle 0, core 0 included.
+
+**Two wrong hypotheses first**, both recorded because the second was expensive:
+
+1. *Stale binary.* `hello_world` was built 07-28, before A4 moved every control
+   register above 0x48 by 192 bytes; the A4 script had predicted exactly this
+   failure ("cores would simply not wake, with no error anywhere"). It WAS stale and
+   was rebuilt -- and the failure was bit-identical. Flagged as unconfirmed at the
+   time precisely because both 4x4 runs used the same stale binary and passed.
+2. *Route tables.* Every router in both meshes carries a rule to `periphs_ni`
+   (16 rules at 4x4, 64 at 8x8). Routing was never the problem.
+
+**Root cause.** `mempool_system.sv` special-cases exactly one AXI master: that L2
+channel's chimney does not attach to a mesh router but joins a 4-port
+`periph_router` carrying `periphs_ni` and `host_ni` -- the gateway to the bootrom
+and the control registers. It hardcoded `if (x == 5)` / `Hbm5` / `axi_mst_req[5]`.
+
+But WHICH channel shares the periph router's perimeter point is a property of the
+placement, and `gen_perimeter_map.py --emit-yml` derives it: the periph point is
+South(0,0), and the channel that lands there is 5 at 4x4 but **13 at 8x8**. So the
+generated routing steered peripheral traffic to channel 13's node while the periph
+router sat at channel 5's. The bootrom never saw a request; its address register is
+only loaded on `req_i`, so it stayed unreset and `rdata_o` read X. The bootrom
+cannot otherwise emit X -- `rdata_o = (addr_q < RomSize) ? mem[addr_q] : '0` -- which
+is what made the mechanism identifiable.
+
+**Fix.** `gen_perimeter_map.py` emits `PeriphHbmChannel` into `perimeter_map_pkg.sv`;
+the RTL uses it for the loop guard, the AXI index and the endpoint id
+(`Hbm0 + PeriphHbmChannel`), plus a range guard. One helper, `periph_channel()`,
+feeds both the package and the yml so the two emitters cannot drift again. The
+misleading instance name `hbm_ni_15` (wired to channel 5) became `periph_hbm_ni`.
+
+**Also fixed:** `--check` printed `ch13 -> group13`. At share > 1 a channel serves
+several groups (`gid // share`), so c13 actually serves g26 and g27 -- it was
+labelling the channel index as the group and measuring from the wrong coordinate.
+The optimiser's own metric was always correct (it iterates the real `served` sets),
+so the 104-hop 8x8 figure stands; only the printout lied.
+
+**Gate — 4x4 regression, PASS.** `PeriphHbmChannel` regenerates to 5, the same value
+the literal had, so the change is a no-op at 4x4:
+
+```
+make exit=0  preload=hello_4x4.elf  errors: 0  illegal insn: 0
+UART: 256 of 256   CMS warns: 0   cycles: 471254
+```
+
+The generated yml is byte-identical to HEAD, confirming the refactor did not change
+`emit_yml`'s output.
+
+**Not comparable:** 471254 vs the 610030 measured earlier the same day. That run used
+the stale 07-28 binary; this one is a freshly built 4x4 ELF carrying A4's register map
+and B1's derived stride. The delta is software, not RTL. **471254 is the 4x4 baseline.**
+
+**Process lesson, three instances in one session.** Every false result came from a
+check that was also true of the failure: "0 errors" is true of a vopt killed by
+timeout; `%Error|Error:|FAILED` does not match a missing binary; and a 4x4 run that
+silently picked up the 8x8 ELF from the shared output path produced a plausible
+1.9M-cycle hang that looked like an RTL regression (it was not -- 0 illegal
+instructions proved the bootrom was fine). Lanes now carry per-config ELFs and every
+gate checks the exit code. Note `preload=` must be a MAKE ARGUMENT: passed through
+`env` it is an environment variable, which loses to the makefile's `preload :=`.

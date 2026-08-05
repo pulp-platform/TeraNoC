@@ -118,8 +118,15 @@ module mempool_system
      floo_rsp_t  [NumAXIMasters-1:0] floo_axi_rsp_out;
      floo_wide_t [NumAXIMasters-1:0] floo_axi_wide_out;
 
+     // The channel that shares its perimeter point with the periph router carries the
+     // peripherals, the bootrom and the host. WHICH channel that is falls out of the
+     // perimeter placement -- 5 at 4x4 but 13 at 8x8 -- so it cannot be a literal:
+     // hardcoding 4x4's value routes every peripheral access to a router that is not
+     // carrying the peripherals, the bootrom never sees a request, and every core reads
+     // X at its first fetch. gen_perimeter_map.py emits the same value into the yml it
+     // generates, so the RTL and the routing tables cannot drift apart.
      for (genvar x = 0; x < NumAXIMasters; x++) begin : gen_cluster_axi_chimney
-        if (x == 5) begin
+        if (x == perimeter_map_pkg::PeriphHbmChannel) begin
           floo_req_t  [3:0] periph_router_req_in;
           floo_rsp_t  [3:0] periph_router_rsp_out;
           floo_req_t  [3:0] periph_router_req_out;
@@ -187,7 +194,7 @@ module mempool_system
             .floo_req_t           ( floo_req_t                    ),
             .floo_rsp_t           ( floo_rsp_t                    ),
             .floo_wide_t          ( floo_wide_t                   )
-          ) hbm_ni_15 (
+          ) periph_hbm_ni (
             .clk_i,
             .rst_ni,
             .test_enable_i        ( '0                            ),
@@ -198,9 +205,9 @@ module mempool_system
             .axi_narrow_out_rsp_i ( '0                            ),
             .axi_wide_in_req_i    ( '0                            ),
             .axi_wide_in_rsp_o    (                               ),
-            .axi_wide_out_req_o   ( axi_mst_req[5]                ),
-            .axi_wide_out_rsp_i   ( axi_mst_resp[5]               ),
-            .id_i                 ( id_t'(Hbm5)                   ),
+            .axi_wide_out_req_o   ( axi_mst_req[perimeter_map_pkg::PeriphHbmChannel]  ),
+            .axi_wide_out_rsp_i   ( axi_mst_resp[perimeter_map_pkg::PeriphHbmChannel] ),
+            .id_i                 ( id_t'(Hbm0 + perimeter_map_pkg::PeriphHbmChannel) ),
             .floo_req_o           ( periph_router_req_in[1]       ),
             .floo_rsp_i           ( periph_router_rsp_out[1]      ),
             .floo_wide_o          ( periph_router_wide_in[1]      ),
@@ -1122,6 +1129,11 @@ module mempool_system
   // If they do not, L2 channel G stops serving group G and the whole DMA path
   // loses its group-to-channel affinity -- silently, since every address still
   // decodes to some bank. See docs/scaleup/mesh_plan.md sections 13 and 14.
+  if (perimeter_map_pkg::PeriphHbmChannel >= NumAXIMasters)
+    $error("[mempool_system] perimeter_map_pkg::PeriphHbmChannel (%0d) is not a valid AXI ",
+           "master index (NumAXIMasters = %0d). Regenerate the perimeter map for this mesh.",
+           perimeter_map_pkg::PeriphHbmChannel, NumAXIMasters);
+
   localparam int unsigned GroupFieldLsb  = ByteOffset + $clog2(NumBanksPerTile)
                                                       + $clog2(NumTilesPerGroup);
   localparam int unsigned L2LsbConstBits = $clog2(L2BankBeWidth * Interleave);
