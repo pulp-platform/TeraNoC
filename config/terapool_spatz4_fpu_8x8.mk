@@ -383,7 +383,12 @@ axi_masters_per_group ?= 1
 dmas_per_group ?= 1 # Burst Length = 16
 
 # L2 Banks/Channels
-l2_size               ?= 16777216  # 1000000
+# The L2 SAM gives every channel 1 MB (gen_perimeter_map.py --emit-yml), so the total
+# MUST be l2_banks * 1 MB. axi_L2_interleaver places the bank field at
+# addr[31-MSBConstantBits -: ScrambleBits] with MSBConstantBits = 32 - clog2(l2_size);
+# if l2_size does not span every channel the bank field lands one bit low and reads for
+# the upper channels decode to the wrong endpoint, never reach the L2, and never return.
+l2_size               ?= $(shell echo $$((1048576 * $(l2_banks))))  # l2_banks * 1 MB
 l2_banks              ?= 32
 # L2 interleave granularity, in 64 B beats.
 #
