@@ -4963,3 +4963,45 @@ lane-cycles per period, plus per-group max/min to expose imbalance. Gated on
 iteration an L2 round trip -- ~65k cycles of a ~102k-cycle run, i.e. **~60% of the whole
 simulation** producing data nothing reads when the verify is off. Verified gone from
 .text in the rebuilt ELF.
+
+## 2026-08-06 10:30 — CORRECTION: the assume was NOT the cause of the VCS early stop
+
+The previous entry claimed the `assume property` + bare `$finish()` in
+`snitch_axi_to_cache.sv:574` explained VCS terminating every 1024-core run. **It does
+not.** Replacing it with a named assert that only reports:
+
+  - the assert fires **0 times**, so the property never fails;
+  - VCS still terminates early -- now at cyc 32,199 instead of 101,860.
+
+The fix is still correct on its own terms (an `assume` is a constraint and must never
+end a simulation, and VCS evaluates assumes where QuestaSim does not), but it was not
+the cause and should not have been presented as confirmed.
+
+**What the evidence actually says.** The stop point *scales with program progress*:
+101,860 with the verify-on ELF, 32,199 with the no-verify ELF -- the difference is
+exactly the removed checksum copy. So it is tied to a program event, not a fixed cycle
+or a timeout. The run ends **mid-execution**: `[CMS FINAL] STILL_INFLIGHT ... age=1`
+shows requests outstanding at the stop. Only `final` blocks print before `$finish`; no
+`[EOC]` appears even with `+vcs+flush+all`, in the stdout log or the `-l` transcript.
+And the only remaining `$finish` in the 425-file compiled set is `mempool_tb.sv:465`,
+whose immediately-preceding `$display` would print. That contradiction is unresolved.
+
+Worth noting for whoever picks this up: `mempool_tb.sv:466-467` is dead code
+(`fetch_en = 1'b1;` *after* `$finish(0)`), which suggests the EOC block has been
+restructured at some point.
+
+**Status: VCS is correct and fast but not yet usable for unattended full-length runs.**
+Bit-identical results to QuestaSim at every sampled cycle through 101,000, 3.32x faster
+in the kernel phase, full instrumentation -- but it stops early for an unidentified
+reason. QuestaSim shows no such behaviour and remains the reference.
+
+**Confirmed and useful regardless:** gating the checksum copy on `MATMUL_VERIFY` takes
+the 8x8 matmul from **101,860 to 32,199 cycles, a 68% reduction** (the earlier ~60%
+estimate was low). That is the benchmark-run saving, measured end to end.
+
+**FPU utilisation** is now being taken on QuestaSim instead, using the no-verify ELF so
+the whole run is 32k cycles. The probe itself needed a fix after its first build: a
+hierarchical reference may not index a generate-block instance array (`gen_tiles[t]`)
+with a procedural variable -- that passes `vlogan` and fails elaboration with XMRE.
+Every reference now sits in a genvar loop. Lesson: VCS analysis passing is not
+elaboration passing.

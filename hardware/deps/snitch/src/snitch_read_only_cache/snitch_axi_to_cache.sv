@@ -570,8 +570,13 @@ module axi_burst_splitter_table #(
 
   `ifndef VERILATOR
   // pragma translate_off
-  assume property (@(posedge clk_i) idq_oup_gnt |-> idq_oup_valid)
-    else begin $warning("Invalid output at ID queue, read not granted!"); $finish(); end
+  // An `assume` is a constraint, not a checker -- it must not terminate a simulation.
+  // VCS evaluates assumes by default and this $finish() (bare, so no diagnostic banner and
+  // exit status 0) silently killed every 1024-core run at the same cycle, immediately after
+  // the barrier release when all cores hit the RO-cache -> L2 bridge at once. QuestaSim does
+  // not act on assumes, so it never surfaced there. Report, do not exit.
+  idq_oup_handshake: assert property (@(posedge clk_i) idq_oup_gnt |-> idq_oup_valid)
+    else $error("[snitch_axi_to_cache] %m: ID-queue output not valid while granted");
   // pragma translate_on
   `endif
 
