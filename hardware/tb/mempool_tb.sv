@@ -788,6 +788,15 @@ module mempool_tb;
  *************************************/
 `include "tb_noc_bottleneck_profiling.svh"
 
+/*****************************************************
+* Spatz VFU/FPU utilisation, reported per period so  *
+* it is readable mid-run. Disable with               *
+* +define+FPU_UTIL_DISABLE.                          *
+*****************************************************/
+`ifndef FPU_UTIL_DISABLE
+`include "tb_fpu_util.svh"
+`endif
+
 /****************************************************
  * Per-flit NoC Request/Response Event Tracer       *
  * Emits noc_trace/events.csv; analyze with          *

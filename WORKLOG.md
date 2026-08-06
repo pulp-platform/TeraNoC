@@ -4902,3 +4902,64 @@ at cyc 128k, one core carrying 64 outstanding requests.
 the run holds 96.7% of a core on a 96-core box at load 29. ~490k cycles total => ~30 h.
 Measuring the rate needs a window longer than 1000/rate seconds, since the log only prints
 at 1000-cycle boundaries; a 90 s sample gave a spurious 11.1 cyc/s.
+
+## 2026-08-06 09:00 — VCS: 3.3x faster, results identical, and it found two real defects
+
+**VCS 2024.09 now runs the 1024-core design.** Phase-matched against QuestaSim on the
+same ELF:
+
+| | kernel cyc/s | build | instrumentation | results |
+|---|---|---|---|---|
+| VCS | **10.96** | 38 min | full | bit-identical |
+| QuestaSim | 3.3 | 50-60 min lean, 4h37m with +acc | full | reference |
+| Verilator 4.228 | -- | -- | none | unusable at 8x8 |
+
+"Identical" is measured, not assumed: CMS `req`/`resp`/`inflight` match exactly at cyc
+2000, 6000, 12000, 20000, 40000, 60000, 80000, 90000, 100000 and 101000. An earlier 7x
+speed claim was a phase mismatch (VCS still in the 1-core setup phase, where both do
+~23 cyc/s); the 3.32x above is like-for-like in the 1024-core kernel phase.
+
+**Three defects VCS surfaced that QuestaSim's leniency hid:**
+
+1. *Zero-width route table (ours).* Under IdTable routing `RouteCfg.NumRoutes` is 0, so
+   `route_t [NumRoutes-1:0]` has bound 32'hFFFFFFFF. Clamped (`74c2c5a`, `2f67de1`).
+2. *Illegal driver combination.* A `= 0` declaration initializer on a variable an
+   `always_ff` also writes, in mempool_group_barrier.sv. Fixed (`2f67de1`).
+3. **`assume property` with a bare `$finish()`** in
+   `snitch_axi_to_cache.sv:574` (the RO-cache -> L2 icache refill bridge):
+
+   ```
+   assume property (@(posedge clk_i) idq_oup_gnt |-> idq_oup_valid)
+     else begin $warning(...); $finish(); end
+   ```
+
+   This silently terminated **every** 1024-core VCS run at exactly cyc 101,860 -- bare
+   `$finish()` prints no banner and exits 0, so it looked like a clean completion. It is
+   an `assume`, which VCS evaluates in simulation and QuestaSim does not, which is why
+   only VCS stopped. Changed to a named `assert` that reports without exiting: a
+   constraint must never kill a simulation.
+
+   **Open question worth answering:** if that property genuinely fails, there is an
+   ID-queue handshake violation in the icache refill path that only 1024 cores expose and
+   that QuestaSim has never reported. The rebuild will show whether the assert fires.
+
+**Diagnostic trail, for the method.** The cause took three wrong turns: I read the clean
+`$finish` as "the program completed" (no -- no `[EOC]`), then as "VCS diverges" (no --
+counters identical), then blamed output buffering (no -- `+vcs+flush+all` changed
+nothing). What settled it was enumerating every `$finish` in the compiled file set. A
+first attempt at that scan reported "none found" because the file list I extracted from
+compilevcs.sh kept the literal `$ROOT` prefix, so the existence test failed silently on
+all 425 entries -- a null result that looked like evidence.
+
+**New: `hardware/tb/tb_fpu_util.svh`** -- periodic Spatz VFU utilisation, so FPU util is
+readable mid-run instead of only from the final cycle count. Samples `fpu_busy_q` (one
+bit per lane, N_FPU per core) every cycle and reports busy lane-cycles over available
+lane-cycles per period, plus per-group max/min to expose imbalance. Gated on
+`csr_trace_any_global` so it covers the benchmark region only. Disable with
+`+define+FPU_UTIL_DISABLE`.
+
+**Also:** `MATMUL_VERIFY` now gates the `gemm_checksum -> r` copy, not just
+`verify_matrix()`. That copy is a serial 2048-iteration loop run by core 0 alone, each
+iteration an L2 round trip -- ~65k cycles of a ~102k-cycle run, i.e. **~60% of the whole
+simulation** producing data nothing reads when the verify is off. Verified gone from
+.text in the rebuilt ELF.

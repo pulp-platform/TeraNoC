@@ -47,6 +47,19 @@
 #include <string.h>
 
 #include "data/data_gemm.h"
+
+// Device-side result verification. Default OFF: verify_matrix() sums each row of C on the
+// scalar FP path and wedges core 0 (see the note at the call site). -DMATMUL_VERIFY=1 for
+// a debug run.
+//
+// Defined HERE, not at the call site, because it also gates the gemm_checksum -> r copy in
+// setup. That copy exists only to stage checksums for verify_matrix: a serial M-iteration
+// loop run by core 0 alone, each iteration paying an L2 round trip (~32 cyc). At M=2048
+// that is ~65k cycles of a ~102k-cycle run -- most of the simulation -- producing data
+// nothing reads when the verify is off.
+#ifndef MATMUL_VERIFY
+#define MATMUL_VERIFY 0
+#endif
 #include "kernel/sp-fmatmul.c"
 #include "printf.h"
 #ifdef MEMPOOL
@@ -304,8 +317,10 @@ int main() {
     // Copy matrices A and B from DRAM to TCDM
     dma_memcpy_blocking(a, gemm_A_dram, (gemm_l.M * gemm_l.N) * sizeof(float));
     dma_memcpy_blocking(b, gemm_B_dram, (gemm_l.N * gemm_l.P) * sizeof(float));
-    // Initialize reference checksums
+#if MATMUL_VERIFY
+    // Reference checksums, read only by verify_matrix().
     init_matrix(r, gemm_checksum, 0, 1, gemm_l.M);
+#endif
   }
   #else
   // Alternative: each core copies a portion (non-DMA version)
@@ -313,9 +328,11 @@ int main() {
               (cid + 1) * (gemm_l.M / active_cores), gemm_l.N);
   init_matrix(b, gemm_B_dram, cid * (gemm_l.N / active_cores),
               (cid + 1) * (gemm_l.N / active_cores), gemm_l.P);
+#if MATMUL_VERIFY
   if (cid == 0) {
     init_matrix(r, gemm_checksum, 0, 1, gemm_l.M);
   }
+#endif
   #endif
 
   // Print status message from core 0
@@ -494,9 +511,6 @@ int main() {
   // verify_matrix as a per-element ULP integer compare (lw + integer ops; |c_int - golden_int|
   // < ULP_TOL), which never touches the FP path. Exact-bit compare is too strict (device is
   // legitimately ~4.3e-4 off, a relative error -> ULP distance is the right tolerance model).
-#ifndef MATMUL_VERIFY
-#define MATMUL_VERIFY 0   // 0 = skip device verify (avoids the FP-path wedge; see note above)
-#endif
 #if MATMUL_VERIFY
   if (cid == 0) {
     uint32_t nfail = 0, last_row = 0, sum_bits = 0, chk_bits = 0;
