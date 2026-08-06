@@ -1,5 +1,57 @@
+diff --git a/hardware/deps/floo_noc/hw/floo_axi_chimney.sv b/hardware/deps/floo_noc/hw/floo_axi_chimney.sv
+index fb83098..951a2ca 100644
+--- a/hardware/deps/floo_noc/hw/floo_axi_chimney.sv
++++ b/hardware/deps/floo_noc/hw/floo_axi_chimney.sv
+@@ -73,7 +73,7 @@ module floo_axi_chimney #(
+   /// Coordinates/ID of the current tile
+   input  id_t id_i,
+   /// Routing table for the current tile
+-  input  route_t [RouteCfg.NumRoutes-1:0] route_table_i,
++  input  route_t [(RouteCfg.NumRoutes > 0 ? RouteCfg.NumRoutes : 1)-1:0] route_table_i,
+   /// Output links to NoC
+   output floo_req_t floo_req_o,
+   output floo_rsp_t floo_rsp_o,
+diff --git a/hardware/deps/floo_noc/hw/floo_nw_chimney.sv b/hardware/deps/floo_noc/hw/floo_nw_chimney.sv
+index 4ba4508..3e8ce0e 100644
+--- a/hardware/deps/floo_noc/hw/floo_nw_chimney.sv
++++ b/hardware/deps/floo_noc/hw/floo_nw_chimney.sv
+@@ -94,7 +94,7 @@ module floo_nw_chimney #(
+   /// Coordinates/ID of the current tile
+   input  id_t id_i,
+   /// Routing table for the current tile
+-  input  route_t [RouteCfg.NumRoutes-1:0] route_table_i,
++  input  route_t [(RouteCfg.NumRoutes > 0 ? RouteCfg.NumRoutes : 1)-1:0] route_table_i,
+   /// Output links to NoC
+   output floo_req_t   floo_req_o,
+   output floo_rsp_t   floo_rsp_o,
+diff --git a/hardware/deps/floo_noc/hw/floo_nw_vc_chimney.sv b/hardware/deps/floo_noc/hw/floo_nw_vc_chimney.sv
+index 4a3d8ce..98adda4 100644
+--- a/hardware/deps/floo_noc/hw/floo_nw_vc_chimney.sv
++++ b/hardware/deps/floo_noc/hw/floo_nw_vc_chimney.sv
+@@ -121,7 +121,7 @@ module floo_nw_vc_chimney #(
+   /// Coordinates/ID of the current tile
+   input  id_t id_i,
+   /// Routing table for the current tile
+-  input  route_t [RouteCfg.NumRoutes-1:0] route_table_i,
++  input  route_t [(RouteCfg.NumRoutes > 0 ? RouteCfg.NumRoutes : 1)-1:0] route_table_i,
+   /// Route map used by lookahead routing.
+   /// (only used if `RouteCfg.RouteAlgo == IdTable`)
+   input  addr_rule_t [NumAddrRules-1:0] id_route_map_i,
+diff --git a/hardware/deps/floo_noc/hw/floo_route_comp.sv b/hardware/deps/floo_noc/hw/floo_route_comp.sv
+index 966f3c2..86599e8 100644
+--- a/hardware/deps/floo_noc/hw/floo_route_comp.sv
++++ b/hardware/deps/floo_noc/hw/floo_route_comp.sv
+@@ -25,7 +25,7 @@ module floo_route_comp
+   input  id_t   id_i,
+   input  addr_t addr_i,
+   input  addr_rule_t [RouteCfg.NumSamRules-1:0] addr_map_i,
+-  input  route_t [RouteCfg.NumRoutes-1:0] route_table_i,
++  input  route_t [(RouteCfg.NumRoutes > 0 ? RouteCfg.NumRoutes : 1)-1:0] route_table_i,
+   output route_t route_o,
+   output id_t id_o
+ );
 diff --git a/hardware/deps/floo_noc/hw/floo_router.sv b/hardware/deps/floo_noc/hw/floo_router.sv
-index b1e3695..2521e7f 100644
+index b1e3695..63bce99 100644
 --- a/hardware/deps/floo_noc/hw/floo_router.sv
 +++ b/hardware/deps/floo_noc/hw/floo_router.sv
 @@ -27,7 +27,8 @@ module floo_router
@@ -8,7 +60,7 @@ index b1e3695..2521e7f 100644
    parameter bit          XYRouteOpt       = 1'b1,
 -  parameter bit          NoLoopback       = 1'b1
 +  parameter bit          NoLoopback       = 1'b1,
-+  parameter bit          NoInputAssert    = 1'b0
++  parameter bit          NoInputAssert    = 1'b1
  ) (
    input  logic                                       clk_i,
    input  logic                                       rst_ni,

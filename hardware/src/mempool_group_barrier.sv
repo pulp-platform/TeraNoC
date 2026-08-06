@@ -211,8 +211,15 @@ module mempool_group_barrier #(
   assign wd_fire_o = wd_fire_q;
 
   // pragma translate_off
-  int unsigned dbg_arrive_cnt = 0, dbg_release_cnt = 0, dbg_wd_cnt = 0;
+  // No declaration initializers: a `= 0` on a variable that an always_ff also writes is a
+  // second procedural driver. QuestaSim tolerates it, VCS rejects it (ICPD_INIT), and the
+  // LRM is on VCS's side. Reset in the always_ff instead, which is also what makes the
+  // counters restart correctly across a reset rather than only at time 0.
+  int unsigned dbg_arrive_cnt, dbg_release_cnt, dbg_wd_cnt;
   always_ff @(posedge clk_i) begin
+    if (!rst_ni) begin
+      dbg_arrive_cnt <= 0; dbg_release_cnt <= 0; dbg_wd_cnt <= 0;
+    end
     if (rst_ni && req_valid_i && req_ready_o && req_op_i == OP_ARRIVE) dbg_arrive_cnt  <= dbg_arrive_cnt + 1;
     if (rst_ni && rel_fire)                                            dbg_release_cnt <= dbg_release_cnt + 1;
     // A watchdog fire means this barrier did NOT synchronize: it timed out and released only the

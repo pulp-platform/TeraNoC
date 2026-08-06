@@ -107,7 +107,18 @@ questa_args += -suppress vsim-12070
 # ============================================================================
 # VCS Options
 # ============================================================================
-vlogan_args += -assert svaext +v2k -override_timescale=1ns/1ps -kdb
+# -kdb builds the Verdi knowledge database during analysis. Only the debug flow
+# (mempool_simv, opened in Verdi) ever reads it; mempool_simvopt never does, so for a
+# headless run it is pure analysis cost. Drop it with `vcs_kdb=`.
+vcs_kdb ?= -kdb
+vlogan_args += -assert svaext +v2k -override_timescale=1ns/1ps $(vcs_kdb)
+# Parallel C compilation of the generated model. VCS is serial by default and the
+# generated C dominates elaboration at 1024 cores. Override with vcs_jobs=N.
+vcs_jobs ?= 16
+ifdef app
+  # Parity with questa_args (+APP): TB code keyed on the application name needs this.
+  vcs_args += +APP=$(app)$(app_suf)
+endif
 ifdef preload
   vcs_args += +PRELOAD=$(preload)
 endif
@@ -657,12 +668,12 @@ $(buildpath)/compilevcs.sh: $(bender) $(config_mk) Makefile $(MEMPOOL_DIR)/Bende
 compile_vcs_simv: update-floogen elabvcs $(buildpath)/mempool_simv
 $(buildpath)/mempool_simv: $(buildpath)/compilevcs.sh $(buildpath)/$(dpi_library)/mempool_vcs_dpi.so
 	cd $(buildpath) && \
-	$(vcs_cmd) vcs -full64 $(top_level) -cc $(CC) -cpp $(CXX) -ld $(CXX) $(dpi_library)/mempool_vcs_dpi.so $(vcs_config) -debug_access+all -kdb -assert disable_cover -o mempool_simv
+	$(vcs_cmd) vcs -full64 -j$(vcs_jobs) $(top_level) -cc $(CC) -cpp $(CXX) -ld $(CXX) $(dpi_library)/mempool_vcs_dpi.so $(vcs_config) -debug_access+all -kdb -assert disable_cover -o mempool_simv
 
 compile_vcs_simvopt: update-floogen elabvcs $(buildpath)/mempool_simvopt
 $(buildpath)/mempool_simvopt: $(buildpath)/compilevcs.sh $(buildpath)/$(dpi_library)/mempool_vcs_dpi.so
 	cd $(buildpath) && \
-	$(vcs_cmd) vcs -full64 $(top_level) -cc $(CC) -cpp $(CXX) -ld $(CXX) $(dpi_library)/mempool_vcs_dpi.so $(vcs_config) -assert disable_cover -o mempool_simvopt
+	$(vcs_cmd) vcs -full64 -j$(vcs_jobs) $(top_level) -cc $(CC) -cpp $(CXX) -ld $(CXX) $(dpi_library)/mempool_vcs_dpi.so $(vcs_config) -assert disable_cover -o mempool_simvopt
 
 # Simulation
 simvcs: compile_vcs_simv
