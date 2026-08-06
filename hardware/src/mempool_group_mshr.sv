@@ -2316,10 +2316,28 @@ module mempool_group_mshr
   // pragma translate_on
 
   // Main combinational control: request merge/alloc, response capture, and drain
+`ifndef TARGET_SYNTHESIS
+  // Duplicate-response-beat detection. The CHECK stays combinational (it must see the
+  // within-cycle accumulation of beat_seen across tiles/ports), but the REPORT must not
+  // be: an always_comb re-evaluates as its inputs settle, and $fatal is not
+  // glitch-tolerant, so reporting inline fires on transient intermediate values of
+  // resp_capture_fire / resp_mshr_id / resp_capture_beat_offset. VCS and QuestaSim
+  // schedule those evaluations differently, which is why the inline $fatal killed every
+  // VCS run (cyc 101860 verify-on, 32199 no-verify) while QuestaSim ran the identical
+  // RTL past the same point reporting no violation. Sampling at the clock edge sees
+  // only settled values, so a real duplicate still fires and a glitch does not.
+  logic        dup_beat_detected;
+  int unsigned dup_beat_mshr, dup_beat_beat, dup_beat_meta;
+`endif
+
   always_comb begin
     int unsigned merge_new_idx;
     // Defaults
     mshr_d = mshr_q;
+`ifndef TARGET_SYNTHESIS
+    dup_beat_detected = 1'b0;
+    dup_beat_mshr = 0; dup_beat_beat = 0; dup_beat_meta = 0;
+`endif
     mshr_d_valid = mshr_q_valid;
     victim_rr_d = victim_rr_q;
 
@@ -2709,12 +2727,14 @@ module mempool_group_mshr
     for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
       for (int port_i = 1; port_i < NumRemoteRespPortsPerTile; port_i++) begin
         if (resp_capture_fire[tile_i][port_i]) begin
+`ifndef TARGET_SYNTHESIS
           if (mshr_d[resp_mshr_id[tile_i][port_i]].beat_seen[resp_capture_beat_offset[tile_i][port_i]]) begin
-            $fatal(1, "MSHR duplicate response beat: mshr=%0d beat=%0d meta=%0d",
-                   resp_mshr_id[tile_i][port_i],
-                   resp_capture_beat_offset[tile_i][port_i],
-                   resp_in[tile_i][port_i].rdata.meta_id);
+            dup_beat_detected = 1'b1;
+            dup_beat_mshr     = resp_mshr_id[tile_i][port_i];
+            dup_beat_beat     = resp_capture_beat_offset[tile_i][port_i];
+            dup_beat_meta     = resp_in[tile_i][port_i].rdata.meta_id;
           end
+`endif
           mshr_d[resp_mshr_id[tile_i][port_i]].resp_buf[resp_push_ptr[resp_mshr_id[tile_i][port_i]]] =
               resp_in[tile_i][port_i];
           mshr_d[resp_mshr_id[tile_i][port_i]].resp_buf_valid[resp_push_ptr[resp_mshr_id[tile_i][port_i]]] =
@@ -4077,5 +4097,15 @@ module mempool_group_mshr
   endgenerate
   `endif
   // pragma translate_on
+
+`ifndef TARGET_SYNTHESIS
+  // Report a duplicate beat once per cycle, on settled values. See the note at the
+  // declaration for why this cannot live inside the always_comb that detects it.
+  always_ff @(posedge clk_i) begin
+    if (rst_ni && dup_beat_detected)
+      $fatal(1, "MSHR duplicate response beat: mshr=%0d beat=%0d meta=%0d",
+             dup_beat_mshr, dup_beat_beat, dup_beat_meta);
+  end
+`endif
 
 endmodule : mempool_group_mshr

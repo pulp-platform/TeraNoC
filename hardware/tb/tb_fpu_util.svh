@@ -10,8 +10,12 @@
 //
 // which is the fraction of available FPU issue slots that were occupied.
 //
-// Gated on csr_trace_any_global like the other probes, so the numbers cover the
-// benchmark region the software marks and not the boot/DMA setup around it.
+// Reports EVERY period, tagged "pre" or "bench" by whether csr_trace_any_global is
+// high. The other gated probes ([LP], [BP]) stay silent until the software marks the
+// benchmark region, which on this workload is long after boot, DMA and several
+// 1024-core barriers -- too late to be useful for watching a run in flight. The
+// per-period figure here is therefore always-on; the "cum" field is the
+// benchmark-region-only cumulative, which is the number to quote as THE utilisation.
 //
 // NOTE on structure: every hierarchical reference sits inside a genvar loop.
 // Generate-block instance arrays (gen_tiles[t], gen_cores[c]) may only be indexed
@@ -57,6 +61,7 @@
   int unsigned fu_grp_cum  [NumGroups];   // busy lane-cycles per group
   int unsigned fu_grp_prev [NumGroups];
   int unsigned fu_busy_cum, fu_busy_prev;
+  int unsigned fu_raw_cum,  fu_raw_prev;
   int unsigned fu_active_cyc, fu_active_prev;
   int unsigned fu_cycle;
   logic        fu_active;
@@ -66,20 +71,21 @@
   // fu_busy_bits is a plain array now, so a procedural sum over it is legal.
   always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-      fu_cycle <= 0; fu_busy_cum <= 0; fu_active_cyc <= 0;
+      fu_cycle <= 0; fu_busy_cum <= 0; fu_active_cyc <= 0; fu_raw_cum <= 0;
       for (int g = 0; g < NumGroups; g++) fu_grp_cum[g] <= 0;
     end else begin
+      automatic int unsigned tot = 0;
       fu_cycle <= fu_cycle + 1;
-      if (fu_active) begin
-        automatic int unsigned tot = 0;
-        for (int g = 0; g < NumGroups; g++) begin
-          automatic int unsigned n = 0;
-          for (int t = 0; t < NumTilesPerGroup; t++)
-            for (int c = 0; c < NumCoresPerTile; c++)
-              n += $countones(fu_busy_bits[g][t][c]);
-          fu_grp_cum[g] <= fu_grp_cum[g] + n;
-          tot += n;
-        end
+      for (int g = 0; g < NumGroups; g++) begin
+        automatic int unsigned n = 0;
+        for (int t = 0; t < NumTilesPerGroup; t++)
+          for (int c = 0; c < NumCoresPerTile; c++)
+            n += $countones(fu_busy_bits[g][t][c]);
+        fu_grp_cum[g] <= fu_grp_cum[g] + n;   // always-on, so per-group data exists pre-benchmark
+        tot += n;
+      end
+      fu_raw_cum <= fu_raw_cum + tot;         // always-on
+      if (fu_active) begin                    // benchmark-region only
         fu_busy_cum   <= fu_busy_cum + tot;
         fu_active_cyc <= fu_active_cyc + 1;
       end
@@ -89,8 +95,8 @@
   task automatic fu_report(input string tag);
     int unsigned d_busy, d_cyc, g_max, g_min, g_max_id, g_min_id, dg;
     real         util_p, util_c, gu_max, gu_min;
-    d_busy = fu_busy_cum   - fu_busy_prev;
-    d_cyc  = fu_active_cyc - fu_active_prev;
+    d_busy = fu_raw_cum - fu_raw_prev;                 // this period, always-on
+    d_cyc  = `FPU_UTIL_PERIOD;
     util_p = (d_cyc > 0)         ? 100.0*d_busy     /($itor(d_cyc)*FU_Lanes)         : 0.0;
     util_c = (fu_active_cyc > 0) ? 100.0*fu_busy_cum/($itor(fu_active_cyc)*FU_Lanes) : 0.0;
     g_max = 0; g_min = 32'hFFFFFFFF; g_max_id = 0; g_min_id = 0;
@@ -104,14 +110,18 @@
     $display("[FPU] %s cyc=%0d util=%.2f%% cum=%.2f%% busy=%0d/%0d lane-cyc  grp_max=%.1f%%(g%0d) grp_min=%.1f%%(g%0d)",
              tag, fu_cycle, util_p, util_c, d_busy, d_cyc*FU_Lanes,
              gu_max, g_max_id, gu_min, g_min_id);
+    fu_raw_prev    = fu_raw_cum;
     fu_busy_prev   = fu_busy_cum;
     fu_active_prev = fu_active_cyc;
     for (int g = 0; g < NumGroups; g++) fu_grp_prev[g] = fu_grp_cum[g];
   endtask
 
+  // Report EVERY period, not only inside the benchmark region: the point of this probe is
+  // to see utilisation while the run is in flight, and on this workload the benchmark
+  // region does not open until well after boot, DMA and several 1024-core barriers.
   always @(posedge clk) begin
-    if (rst_n && (fu_cycle % `FPU_UTIL_PERIOD) == 0 && fu_active)
-      fu_report("delta");
+    if (rst_n && (fu_cycle % `FPU_UTIL_PERIOD) == 0)
+      fu_report(fu_active ? "bench" : "pre   ");
   end
 
   final begin
