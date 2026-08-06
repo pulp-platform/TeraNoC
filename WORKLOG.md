@@ -5005,3 +5005,457 @@ hierarchical reference may not index a generate-block instance array (`gen_tiles
 with a procedural variable -- that passes `vlogan` and fails elaboration with XMRE.
 Every reference now sits in a genvar loop. Lesson: VCS analysis passing is not
 elaboration passing.
+
+---
+
+## 2026-08-06 -- 8x8 benchmark was measuring HALF the machine: 32-bit group wake-up mask
+
+**Purpose.** Report FPU utilisation for the 1024-core scale-up. The periodic FPU probe
+reported `grp_min=0.0%` pinned to g32 over consecutive periods, which turned out not to
+be a probe artefact.
+
+**Finding.** In the *timed* region of the 8x8 matmul, only groups 0-31 (512 of 1024
+cores) execute. Groups 32-63 do zero floating-point work. Confirmed by two independent
+probes reading two different signals on the same run:
+
+| cycles       | g0-31    | g32-63   | phase                          |
+|--------------|----------|----------|--------------------------------|
+| 0 - 32k      | 0        | 0        | boot / DMA / copy              |
+| 32k - 54k    | ~1.07 M  | ~1.23 M  | I$ warm-up: ALL 64 groups work |
+| 56k+         | ~1.72 M  | **0**    | TIMED REGION: half the machine |
+
+(busy FPU-lane-cycles, from `trace_fpu_fleet.log`, which logs per-group counts every
+cycle via `i_vfu.is_fpu_busy` -- a different signal from the `gen_fpu.fpu_busy_q` the
+periodic probe samples. Both agree.)
+
+Harts 512-1023 stop retiring at cyc 55,175, parked at `0x800028c0`, the `amoadd.w`
+inside `mempool_log_partial_barrier`.
+
+**Root cause.** `software/runtime/synchronization.c:217`
+
+```c
+wake_up_group(((1U << (group_end - group_init)) - 1) << group_init);
+```
+
+For a single group this is `1U << group_init`, and it compiles to a *runtime* shift:
+
+```asm
+8000296c:  sll  a0,a0,a3     # << group_init
+80002970:  sw   a0,264(a4)   # -> 0x40000108 = wake_up_group_reg
+```
+
+RV32 `SLL` uses only `rs2[4:0]`, so `group_init` 32..63 wraps to 0..31. Groups 32-63
+therefore wake groups 0-31 **instead of themselves**: they never wake, and they inject
+*spurious* wakes into groups 0-31.
+
+The limit is in hardware too -- `ctrl_registers.sv` indexes the 32-bit
+`ctrl_reg2hw.wake_up_group.q[i]` with `i < NumGroups` (64):
+
+```systemverilog
+if (ctrl_reg2hw.wake_up_group.q <= {NumGroups{1'b1}}) begin
+  for (int i = 0; i < NumGroups; i = i + 1)
+    wake_up_o[NumCoresPerGroup*i +: NumCoresPerGroup] = {NumCoresPerGroup{...q[i]}};
+```
+
+**The group wake-up path cannot address more than 32 groups, in software or hardware.**
+The comment above the call site in the kernel says "correct for all 16 groups" -- it was
+written when this machine had 16.
+
+**Second-order hazard.** In this barrier a core that is not the last arriver calls
+`mempool_wfi()` and then *returns*. A spurious wake releases it past a barrier that never
+completed. So groups 0-31 were not merely doing extra work -- their barriers were being
+released early by groups 32-63. Results from the affected runs are suspect, and
+`MATMUL_VERIFY=0` means nothing would have flagged it.
+
+**Reached only via `COLDSTART_GROUP_SYNC`** (default **1**), the first statement inside
+the timed iteration. `GROUP_BARRIER` / `GBAR_PLOOP` are undefined and compile out.
+`mempool_barrier()` uses `wake_up_all()` and is safe at any group count.
+
+**Fix applied (unblock).** Rebuilt with `EXTRA_DEFINES="-DCOLDSTART_GROUP_SYNC=0"`; the
+call site is dead-code eliminated (zero references in the ELF). This is the documented
+Phase-0 *baseline* (unaligned) configuration, so it is a legitimate measurement point.
+ELF `hardware/matmul_8x8_fixed.elf`, md5 `f4dc958387be`, built with `-DNUM_CORES=1024
+-DNUM_GROUPS=64`.
+
+**Proper fix (not done).** Widen the group wake-up to 64 bits -- either a second
+`wake_up_group_hi` register or a 2-word field -- in `ctrl_registers` and `runtime.h`,
+and fix the shift. There is no safe software-only workaround: `wake_up_all()` cannot
+substitute, because a spurious wake breaks this barrier's semantics (above).
+
+**Invalidates.** Every 8x8 FPU-utilisation and FLOPs number taken before this: the
+~25-29% figures were measured with 512 of 1024 cores idle in the timed region. They are
+a lower bound on a half-idle machine, not a 1024-core result.
+
+**Status: root-caused and unblocked; corrected run being launched. The proper 64-group
+wake-up fix is still open.**
+
+### Proper fix: 64-group wake-up (software only -- the hardware was already capable)
+
+**Implementation.** The group-mask register is 32 bit and cannot be widened without
+regenerating the reg file, but it turned out not to be needed: `wake_up_tile` is declared
+`count: "MAX_NumGroups"` in `control_registers.hjson`, so the hardware instantiates **64**
+tile-mask registers, contiguous at `0x8 .. 0x104` (stride 4), one per group. Waking all
+`NUM_TILES_PER_GROUP` tiles of group *g* wakes that whole group, with no 32-bit group
+index anywhere in the path.
+
+The limitation was purely in C. `runtime.h` declared a separate pointer for groups 0-7
+only, and `wake_up_tile()` dispatched on a `switch` whose `default:` wrote
+`wake_up_tile_g0_reg` -- so **every group above 7 silently woke group 0**. That is the
+"wake_up_tile groups-8..15 bug" the kernel comment refers to; it was a missing pointer
+declaration, not a hardware limit.
+
+1. `software/runtime/runtime.h` -- replaced the 8 per-group pointers and the `switch`
+   with one base pointer and an indexed store, reaching all 64 groups:
+   ```c
+   static uint32_t volatile *wake_up_tile_reg = ... WAKE_UP_TILE_0_REG_OFFSET);
+   static inline void wake_up_tile(uint32_t group_id, uint32_t tile_mask) {
+     wake_up_tile_reg[group_id] = tile_mask;
+   }
+   ```
+2. `software/runtime/synchronization.c` -- the group branch keeps the single-store fast
+   path when `group_end <= 32` (so every <=32-group config, including 4x4, is unchanged),
+   and otherwise wakes each group through its own tile register.
+
+**Verified in the generated code** (`matmul_8x8_wakefix.elf`, built with the barrier
+*enabled* so the repaired path is live):
+- `0x80002968` -- old fast path (`sll` + store to `0x40000108`) retained for `<=32` groups
+- `0x800029e4` -- new path: `slli` (g*4) over base `0x40000008` with a `bltu` loop back,
+  one indexed store per group
+- `0x800029ac` -- the tile branch now uses the indexed base too
+
+Builds clean at `-Wall -Wextra -Wconversion`.
+
+**Not yet validated in RTL simulation** -- deliberately not committed until it is.
+
+**Process note.** A `./mempool_simvopt -h` "sanity check" does not print help and exit:
+the VCS binary *starts simulating*. It ran for 8 minutes in `build_vcs5` writing
+`trace_fpu_fleet.log` concurrently with the real run, interleaving two independent
+simulations into one file. Killed the stray, wiped the traces and restarted. Lesson: never
+"sanity check" a simulation binary by running it, and give every run its own directory.
+
+**Build-matrix check while validating the fix** (all pre-existing, none caused by the
+runtime change -- `arch.ld.c` has no `#include`, so linker-script generation cannot
+depend on `runtime.h`/`synchronization.c`):
+
+| config | result |
+|---|---|
+| `terapool_spatz4_fpu_8x8` | builds clean, `-Wall -Wextra -Wconversion` |
+| `terapool_spatz4_fpu` (4x4) | `region 'l1' overflowed by 5654528 bytes` -- the tree's matmul data is currently generated for the 8x8 shape (2048x512x512) and does not fit a 256-core L1. Regenerate data for the 4x4 shape before using this arm. |
+| `mempool` (non-Spatz) | `arch.ld:2: syntax error` -- `-DGROUP_BARRIER_WORD=` is **empty**: only the terapool/Spatz configs set `group_barrier_word`, so `arch.ld.c`'s L1-length expression expands to `(( * (...)))`. Its `-DNUM_BANKS=` is also an overflowed value. Non-Spatz configs cannot link on this branch. |
+
+Not fixed here -- out of scope for the scale-up measurement, and changing config defaults
+could move behaviour elsewhere. Recorded so the next person does not read either failure
+as a regression from the wake-up fix.
+
+**Confirmed on three independent runs.** QuestaSim (`build_qfpu`), VCS (`build_vcs3/4`)
+and the interactive GUI run (`build_2`) all show the same shape: warm-up with all 64
+groups, then the timed region with g32-63 flat at zero.
+
+```
+build_2 (GUI)   100000-119999   44% / 66% of FP in upper half   <- warm-up
+                120000-129999    0% (g32-63 = 2076 ~ 0)         <- timed region
+```
+
+The GUI run reaches FP ~68k cycles later than the VCS/Questa runs because it preloads
+the pre-`MATMUL_VERIFY`-gating ELF, whose checksum copy costs ~69.7k cycles -- the same
+delta measured earlier (101,860 -> 32,199). Consistent, not a second anomaly.
+
+**Analysis trap worth recording.** Both times this finding was nearly missed, the cause
+was aggregating across a phase boundary: first the *cumulative* `[BYP]` per-group
+counters (which include boot/DMA/barriers and so look uniform even when a group has been
+idle for thousands of cycles), then a single average over `cyc>=100000` in build_2 (which
+mixes the all-active warm-up with the half-idle timed region and reports a healthy "40%
+upper"). Per-phase bucketing shows the truth in both cases; a single mean hides it.
+
+### 4x4 baseline recovered from existing runs (no new simulation needed)
+
+Scanned every `build_*/trace_fpu_fleet.log` for usable FP data. Most are all-zero (the
+probe was not reading in those builds -- including the completed 471,254-cycle `build_f4`
+and the 101,860-cycle `build_vcs`, so neither is usable for utilisation). Two 4x4 runs
+*do* have data, and they give the baseline arm of the scale-up comparison directly:
+
+| run | shape | timed cycles | FPU util | % of peak | flop/cyc (peak 2048) |
+|---|---|---|---|---|---|
+| `build_1` | 512x256x512 | 79,086 | **87.8%** | 82.9% | 1697 |
+| `build_3` | 256x512x256 | 34,679 | **95.0%** | 94.5% | 1935 |
+
+Both show 16/16 groups active, as expected: at 16 groups every index is < 32, so the
+group wake-up shift is well defined and the bug cannot occur. **The 4x4 results are
+unaffected by it**, and the 4x4 471,254-cycle wall-clock baseline still stands.
+
+The two metrics cross-check: 87.8% of cores busy against 82.9% of ideal FMA throughput
+implies ~94% issue efficiency while busy, which is the expected relationship (a core
+counts as busy without necessarily retiring N_FPU FMAs that cycle).
+
+Utilisation here is taken over the last `timer` cycles of the FP-active window, since the
+warm-up pass precedes the timed kernel; `build_1`'s FP window exceeds its timer by 8,283
+cycles, consistent with the warm-up.
+
+**This is the number the 8x8 arm has to be compared against: ~83-95% of FPU peak.** The
+pre-fix 8x8 runs sat at 54% of the *working half* (27% of all 1024 cores), so closing the
+gap is what the corrected run has to demonstrate.
+
+### Latent hardware issue (documented, NOT changed)
+
+`hardware/src/ctrl_registers.sv:173-177` reads the 32-bit group-mask register with a loop
+bound of `NumGroups`:
+
+```systemverilog
+if (ctrl_reg2hw.wake_up_group.q <= {NumGroups{1'b1}}) begin
+  for (int i = 0; i < NumGroups; i = i + 1)
+    wake_up_o[NumCoresPerGroup*i +: NumCoresPerGroup] = {NumCoresPerGroup{...q[i]}};
+```
+
+At `NumGroups = 64` this bit-selects `q[32..63]` out of a 32-bit vector on *every*
+`wake_up_group` write, including legitimate ones for low groups. Observed behaviour is
+"those groups simply never wake", i.e. the select reads as 0. Also `{NumGroups{1'b1}}` is
+64 bits against a 32-bit `q`, so the guard is always true and never actually clamps.
+
+Deliberately not changed: the software fix routes every >32-group wake through
+`wake_up_tile`, so this path is no longer used above 32 groups, and an unvalidated RTL
+edit would not help the measurement in flight (it would also need a ~40 min rebuild to
+take effect). If the group-mask path is ever wanted at >32 groups, the register must be
+widened -- guarding the loop alone only makes the truncation explicit, it does not make
+groups 32-63 reachable through that register.
+
+### Host-side test of the wake logic caught a second bug -- in the fix itself
+
+Modelled both the old and new selection logic on the host (`/tmp/claude-620771/
+wake_logic_test.c`), emulating RV32 `SLL` (shift amount = `rs2[4:0]`) explicitly, and
+asserted *which groups actually get woken* for every single-group barrier and a set of
+multi-group ranges. The first run failed:
+
+```
+groups [ 0,32): OLD WRONG  NEW WRONG   old woke: NOTHING
+```
+
+There are **two** independent shift limits, and the first fix only handled one:
+- `<< group_init` wraps for `group_init >= 32`  (the original bug)
+- `1U << gwidth` wraps for a span of **exactly 32 groups**: it becomes `1U << 0 = 1`, so
+  `mask = 1 - 1 = 0` and **nothing at all is woken**
+
+The second is also present in the original code. It is unreachable at 4x4 (max span 16)
+but reachable at 8x8 via a 512-core barrier. Condition corrected at both call sites to
+`group_end <= 32 && gwidth < 32`; re-test passes every case.
+
+The test also quantifies the original defect: **32 of 64 single-group barriers were
+broken**, each waking `g-32` instead of `g`.
+
+**The in-flight VCS9 validation is unaffected.** It uses `COLDSTART_GROUP_SYNC=1`, i.e.
+`num_cores_barrier == cores_per_group`, so every barrier is a *single* group: `gwidth = 1`,
+where the old and new conditions agree. The 32-span path is never taken by this kernel, so
+VCS9 still validates the substantive fix (indexed `wake_up_tile`, per-group waking above
+32) and was left running rather than restarted for a difference this workload cannot
+observe. ELF for the record: `matmul_8x8_wakefix2.elf`, md5 `0cb58f5d1811`.
+
+Lesson: a fix for an off-by-boundary shift needs the *other* operand checked too. The
+cheap host model found it in seconds; the RTL run would not have, because the matmul
+never spans 32 groups.
+
+### VCS vs QuestaSim: cycle-exact agreement on FPU activity
+
+Same ELF, same window (cyc 57000-61000), two simulators:
+
+```
+QuestaSim (build_qfpu)  g0-31=1106111  g32-63=0  util=27.00% of 1024 cores
+VCS       (build_vcs3)  g0-31=1106111  g32-63=0  util=27.00%
+```
+
+Busy-core counts match on every individual cycle sampled, not merely in aggregate. This
+(a) rules out the half-idle result being a simulator artefact -- both engines produce
+`g32-63 = 0` independently -- and (b) confirms VCS is a sound substitute for QuestaSim
+for this measurement, which is what makes the 3.32x speed-up usable rather than merely
+fast.
+
+Confirmations of the bug now stand at five, by independent means: QuestaSim, VCS, the
+interactive GUI run, the compiled `sll`/`0x40000108` disassembly, and the host-side logic
+model (which additionally found the 32-span variant).
+
+### Re-checking findings that predate the bug discovery
+
+**CMS `STUCK_REQ` (14,311 at 1024 cores) is NOT the wake-up bug.** Distribution over time:
+
+```
+cycles          g0-31   g32-63   phase
+     0-9999       378      751   boot/DMA
+ 10000-29999        0        0   boot/DMA
+ 30000-39999     2870     9564   warm-up start   <- 87% of all warnings
+ 40000-49999       67      681   warm-up
+ 50000+             0        0   TIMED REGION
+```
+
+They cluster where all 1024 cores are released from a full barrier simultaneously and hit
+memory at once, and vanish before the timed region -- whereas the wake-up bug only parks
+cores from ~cyc 55k. The original "barrier contention" attribution stands.
+
+Two things fall out:
+
+1. **A separate topology finding.** The upper half sees **3.4x** more stuck requests
+   (9,564 vs 2,870) under identical conditions. Groups 32-63 are mesh columns x=4..7, the
+   far side from the periph/HBM attachment (`PeriphHbmChannel = 13`). Worth investigating
+   on its own for the scale-up; unrelated to the wake-up bug.
+2. **The zero in the timed region is an artefact, not health.** With 512 cores parked,
+   timed-region contention is artificially suppressed. The corrected run may show stuck
+   requests there that this run structurally could not produce.
+
+Still to re-derive from the corrected run: `bank_resp` stall rate (the 60%-vs-0% figure was
+measured on half-idle traffic) and the merge-efficiency 1.95-2.1 window.
+
+**Correction to the above: the topology explanation for the 3.4x asymmetry is WRONG.**
+
+I suggested groups 32-63 suffer because they are "the far side from the periph/HBM
+attachment". Measured from the generated perimeter map, that is false:
+
+```
+  groups  0-31: 32 groups, 52 total hops, avg 1.62, max 6
+  groups 32-63: 32 groups, 52 total hops, avg 1.62, max 5
+  -> hop distance to L2 is BALANCED between halves
+```
+
+Each of the 32 L2 channels serves exactly 2 groups, and total hop distance is identical
+per half. The relationship is if anything inverted: the *lower* half holds the worst-case
+group (6 hops, `ch13 -> South(0,0)`, which is also the shared `PeriphHbmChannel`) and yet
+sees 3.4x FEWER stuck requests.
+
+**So the 3.4x STUCK_REQ asymmetry is unexplained and remains open.** Distance to L2 and
+per-channel group count are both ruled out. Candidates not yet tested: address-map
+interaction with the widened group field at 64 groups, routing (XY is not symmetric under
+a diagonal swap), and startup ordering out of the mass barrier release. Worth measuring on
+the corrected run before theorising further -- the counts above come from a run where half
+the machine was parked from cyc 55k, so even the baseline may shift.
+
+## FIX CONFIRMED IN RTL SIMULATION (VCS9, barrier enabled)
+
+`matmul_8x8_wakefix.elf` = `COLDSTART_GROUP_SYNC=1`, i.e. the per-group
+`mempool_log_partial_barrier` is live and exercised. Timed region opened at cyc 54,000.
+
+```
+[FPU] bench cyc=55000 util=37.21% cum=26.33%  grp_max=51.1%(g50)  grp_min=18.9%(g63)
+[FPU] bench cyc=56000 util=36.19% cum=29.83%  grp_max=47.7%(g6)   grp_min=27.8%(g59)
+
+timed region, 2255 cycles:  g0-31=435248  g32-63=403965  (48.1% upper)
+groups with ZERO FP: 0  -- ALL 64 GROUPS COMPUTING
+```
+
+Against the broken ELF at the equivalent point in its own timed region:
+
+```
+[FPU] bench cyc=57000  grp_min=0.0%(g32)
+[FPU] bench cyc=58000  grp_min=0.0%(g32)     <- pinned; upper half dead for the whole region
+```
+
+`grp_min` is no longer pinned to zero: it sits at 18.9% on **g63** and 27.8% on **g59** --
+the highest-numbered groups, precisely those the repaired indexed `wake_up_tile` path is
+meant to reach and which the 32-bit group mask could never address. VCS8 (barrier removed)
+independently shows the same all-64-groups behaviour, so the result does not depend on the
+fix being correct -- it is corroborated by a run that bypasses the barrier entirely.
+
+### Second result: the 8x8 is contention-bound, not core-bound (PRELIMINARY)
+
+| | busy lane-cyc / 1000 cyc | util of 4096 lanes |
+|---|---|---|
+| broken (512 cores working) | 1,204,364 | 29.40% |
+| fixed (1024 cores working) | 1,482,464 | 36.19% |
+
+**Doubling the working cores yields only ~1.23x more FP throughput.** Per-core efficiency
+falls from ~58% of the active half's lanes to ~36% across all lanes. If this holds to the
+end of the run it is the headline scale-up finding -- far more important than the bug --
+and it is consistent with the unexplained 3.4x stuck-request asymmetry being a real
+contention effect.
+
+Marked PRELIMINARY: sampled 1-2k cycles into the timed region while still ramping. Judge on
+`[FPU FINAL]`, the SW timer and the SW-computed utilisation at run end.
+
+### Where the 8x8 contention is: the response path (PRELIMINARY, from the live run)
+
+`[BP]` aggregated over VCS8's timed region so far:
+
+```
+stage        handshakes      stalls        idle     util%   stall%
+bank_resp       350,681   1,155,639  76,497,904    0.45%   76.72%
+bank_req        351,216     208,913  77,444,095    0.45%   37.30%
+stage         2,502,145     230,926  75,271,153    3.21%    8.45%
+```
+
+**The response path stalls on 77% of attempts**, against 37% for requests -- and the banks
+themselves are **98% idle**. Low occupancy with a high stall rate is not bank-bandwidth
+saturation; it points at a shared resource downstream of the banks (response ports / NoC
+response channels). This matches the previously recorded per-core burst-response ceiling
+(~2 words/cyc from the MSHR 1-beat-per-entry drain and 2 usable resp ports), and it is
+worse here than the ~60% seen under 4x4-era conditions.
+
+**Root of it: the 8x8 config never scaled the response path.** Every NoC/MSHR knob in
+`config/terapool_spatz4_fpu_8x8.mk` is byte-identical to the 4x4 file, while the mesh grew
+4x (16->64 groups, 256->1024 cores):
+
+```
+channel_config_mode := baseline   ->  noc_resp_channel_num = 2
+noc_router_remapping = 0 ; noc_port_hash = 7 ; group_mshr_num = 64
+```
+
+`group_mshr_num = 64` is defensible -- the MSHR is source-side and each group still has 16
+cores, so per-group pressure is unchanged. `noc_resp_channel_num = 2` is not: response
+traffic per link rises with mesh size.
+
+**Lever available now:** `channel_config_mode := enhanced` takes `noc_resp_channel_num`
+2 -> 3 (and gives reads a dedicated req channel rather than widening req). A previous
+analysis suggested 4 response channels are needed for a 4x improvement, so 3 may be
+partial -- but it is the knob the profile argues for and it needs no RTL change.
+
+Caveats: sampled early in the timed region; `enhanced` also restructures the req channels,
+so it is a trade rather than a pure win and must be measured, not assumed. Re-derive from
+`[BP]` at run end before acting.
+
+### Phase-aligned throughput comparison (offset 1000-5000 into each run's OWN timed region)
+
+| run | total FP (core-cyc) | upper | zero-FP groups | util of 1024 |
+|---|---|---|---|---|
+| BROKEN (QFPU) | 1,106,111 | 0.0% | 32/64 | 27.00% |
+| BROKEN (VCS6) | 1,106,111 | 0.0% | 32/64 | 27.00% |
+| FIXED, barrier removed (VCS8) | 1,199,068 | 48.6% | 0/64 | 29.27% |
+| FIXED, barrier live (VCS9) | **1,362,615** | 47.3% | 0/64 | **33.26%** |
+
+1. **The fix is worth +8% (no barrier) to +23% (barrier live)** in FP throughput.
+2. **The alignment barrier is itself worth ~14%** (1,362,615 vs 1,199,068). `COLDSTART_GROUP_SYNC`
+   exists to align cores so their first bursts land in the MSHR merge window; that benefit is
+   measurable here for the first time, because until now the barrier parked half the machine
+   instead of aligning it. The knob was never conceptually broken -- it was unreachable.
+3. **Contention result stands**: 2x the working cores yields 1.23x the FP work.
+
+The two broken runs agreeing to the digit is a sanity check on the method.
+
+**METHODOLOGICAL NEAR-MISS -- worth remembering.** Comparing the *same absolute cycles*
+(57000-61000) gave:
+
+```
+FIXED(VCS8)   g0-31=482938  g32-63=443855  total= 926793  util=22.62%
+BROKEN(QFPU)  g0-31=1106111 g32-63=0       total=1106111  util=27.00%
+```
+
+i.e. the fixed run appears to do LESS work and would read as "the fix made it slower". The
+artefact: the two runs' timed regions open 3,000 cycles apart (VCS8 at 53,000, QFPU at
+56,000), so equal absolute cycles are unequal kernel phases. This is the third instance of
+the same trap in this investigation (cumulative `[BYP]` counters; the `cyc>=100000` average
+in build_2; now this). **Always align to the phase boundary, never to the wall clock.**
+
+### VCS10: response-channel A/B launched
+
+`channel_config_mode=enhanced` overrides the config file's `:=` assignment from the make
+command line (verified with `make -n` before committing 42 min to the build). Confirmed
+compiled in:
+
+| build | resp channels | req channels |
+|---|---|---|
+| `build_vcs4/5` (baseline) | `NOC_RESP_CHANNEL_NUM=2` | `RDWR=2` |
+| `build_e8` (enhanced) | **`NOC_RESP_CHANNEL_NUM=3`** | `RD=1, RDWR=1`, `USE_NARROW_REQ_CHANNEL` |
+
+Same ELF as VCS8 (`matmul_8x8_fixed.elf`), so the HW config is the only variable. Build 42
+min, run started 16:23. `--resp-ch` in the Makefile belongs to the `noc-vis` target only, so
+no floogen regeneration was needed -- a plain recompile suffices.
+
+This is a genuine trade: `enhanced` narrows the request path (rdwr 2->1 plus a dedicated
+read channel) while `bank_req` already stalls 37.3%. It may not be a net win; that is the
+point of measuring it.
+
+Three 8x8 runs now in flight (VCS8 baseline / VCS9 barrier+fix / VCS10 enhanced), all with
+the wake-up fix effective, all ~9 h from the full-kernel numbers.

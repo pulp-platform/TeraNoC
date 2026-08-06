@@ -214,7 +214,26 @@ void mempool_log_partial_barrier(uint32_t step, uint32_t core_id,
         } else if (num_cores_barrier >= num_cores_per_group) {
           uint32_t volatile group_init = core_init / num_cores_per_group;
           uint32_t volatile group_end = core_end / num_cores_per_group;
-          wake_up_group(((1U << (group_end - group_init)) - 1) << group_init);
+          uint32_t gwidth = group_end - group_init;
+          // Both shifts must be < 32 to be defined: `1U << gwidth` overflows for a
+          // barrier spanning exactly 32 groups (it wraps to 1, so the mask becomes 0
+          // and NOTHING is woken), and `<< group_init` wraps for group_init >= 32.
+          if (group_end <= 32 && gwidth < 32) {
+            wake_up_group(((1U << gwidth) - 1) << group_init);
+          } else {
+            // The group-mask register is only 32 bit wide, so groups >= 32 cannot be
+            // addressed through it. `1U << g` is undefined for g >= 32 as well: RV32
+            // SLL uses only rs2[4:0], so the shift WRAPS -- group 32 would wake group
+            // 0 and never wake itself, hanging its own cores while spuriously
+            // releasing another group's barrier. Wake each group through its own
+            // wake_up_tile register instead; the hardware provides one per group for
+            // all MAX_NumGroups (64) of them.
+            uint32_t tile_mask = (NUM_TILES_PER_GROUP >= 32)
+                                     ? 0xFFFFFFFFu
+                                     : ((1U << NUM_TILES_PER_GROUP) - 1);
+            for (uint32_t g = group_init; g < group_end; ++g)
+              wake_up_tile(g, tile_mask);
+          }
         } else if (num_cores_barrier >= num_cores_per_tile) {
           uint32_t volatile tile_init = core_init / num_cores_per_tile;
           uint32_t volatile tile_end = core_end / num_cores_per_tile;
@@ -293,7 +312,21 @@ void mempool_partial_barrier(uint32_t volatile core_id,
       uint32_t volatile group_init = core_init / num_cores_per_group;
       uint32_t volatile group_end = core_end / num_cores_per_group;
       if (group_end - group_init > 0) {
-        wake_up_group(((1U << (group_end - group_init)) - 1) << group_init);
+        uint32_t gwidth = group_end - group_init;
+        // Same two shift limits as in mempool_log_partial_barrier: `1U << gwidth` is
+        // undefined at a 32-group span and `<< group_init` at group_init >= 32.
+        if (group_end <= 32 && gwidth < 32) {
+          wake_up_group(((1U << gwidth) - 1) << group_init);
+        } else {
+          // Same 32-bit group-mask limit as in mempool_log_partial_barrier: `1U << g`
+          // wraps for g >= 32 on RV32, waking the wrong group. Use the per-group
+          // wake_up_tile registers, of which the hardware has MAX_NumGroups.
+          uint32_t tile_mask = (NUM_TILES_PER_GROUP >= 32)
+                                   ? 0xFFFFFFFFu
+                                   : ((1U << NUM_TILES_PER_GROUP) - 1);
+          for (uint32_t g = group_init; g < group_end; ++g)
+            wake_up_tile(g, tile_mask);
+        }
         core_init += num_cores_per_group * (group_end - group_init);
       }
     }

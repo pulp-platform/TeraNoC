@@ -22,30 +22,14 @@ static uint32_t volatile *wake_up_group_reg =
     (uint32_t volatile *)(CONTROL_REGISTER_OFFSET +
                           CONTROL_REGISTERS_WAKE_UP_GROUP_REG_OFFSET);
 
-static uint32_t volatile *wake_up_tile_g0_reg =
+// One 32-bit tile-mask register per group. The hardware instantiates MAX_NumGroups
+// (64) of them, contiguous from WAKE_UP_TILE_0 with a 4-byte stride (0x8 .. 0x104),
+// so the array is indexed directly. The previous code declared a separate pointer per
+// group but only for groups 0-7, and wake_up_tile()'s switch sent every group above 7
+// to group 0 -- silently waking the wrong cores on any config with >8 groups.
+static uint32_t volatile *wake_up_tile_reg =
     (uint32_t volatile *)(CONTROL_REGISTER_OFFSET +
                           CONTROL_REGISTERS_WAKE_UP_TILE_0_REG_OFFSET);
-static uint32_t volatile *wake_up_tile_g1_reg =
-    (uint32_t volatile *)(CONTROL_REGISTER_OFFSET +
-                          CONTROL_REGISTERS_WAKE_UP_TILE_1_REG_OFFSET);
-static uint32_t volatile *wake_up_tile_g2_reg =
-    (uint32_t volatile *)(CONTROL_REGISTER_OFFSET +
-                          CONTROL_REGISTERS_WAKE_UP_TILE_2_REG_OFFSET);
-static uint32_t volatile *wake_up_tile_g3_reg =
-    (uint32_t volatile *)(CONTROL_REGISTER_OFFSET +
-                          CONTROL_REGISTERS_WAKE_UP_TILE_3_REG_OFFSET);
-static uint32_t volatile *wake_up_tile_g4_reg =
-    (uint32_t volatile *)(CONTROL_REGISTER_OFFSET +
-                          CONTROL_REGISTERS_WAKE_UP_TILE_4_REG_OFFSET);
-static uint32_t volatile *wake_up_tile_g5_reg =
-    (uint32_t volatile *)(CONTROL_REGISTER_OFFSET +
-                          CONTROL_REGISTERS_WAKE_UP_TILE_5_REG_OFFSET);
-static uint32_t volatile *wake_up_tile_g6_reg =
-    (uint32_t volatile *)(CONTROL_REGISTER_OFFSET +
-                          CONTROL_REGISTERS_WAKE_UP_TILE_6_REG_OFFSET);
-static uint32_t volatile *wake_up_tile_g7_reg =
-    (uint32_t volatile *)(CONTROL_REGISTER_OFFSET +
-                          CONTROL_REGISTERS_WAKE_UP_TILE_7_REG_OFFSET);
 
 static uint32_t volatile *wake_up_stride_reg =
     (uint32_t volatile *)(CONTROL_REGISTER_OFFSET +
@@ -175,37 +159,11 @@ static inline void wake_up_group(uint32_t group_mask) {
 }
 static inline void wake_up_all_group() { wake_up_group((uint32_t)-1); }
 
+// Wake the tiles selected by tile_mask inside group group_id. Valid for every group
+// the hardware instantiates (MAX_NumGroups = 64); the registers are a contiguous
+// array, so this is a single indexed store.
 static inline void wake_up_tile(uint32_t group_id, uint32_t tile_mask) {
-
-  switch (group_id) {
-  case 0:
-    *wake_up_tile_g0_reg = tile_mask;
-    break;
-  case 1:
-    *wake_up_tile_g1_reg = tile_mask;
-    break;
-  case 2:
-    *wake_up_tile_g2_reg = tile_mask;
-    break;
-  case 3:
-    *wake_up_tile_g3_reg = tile_mask;
-    break;
-  case 4:
-    *wake_up_tile_g4_reg = tile_mask;
-    break;
-  case 5:
-    *wake_up_tile_g5_reg = tile_mask;
-    break;
-  case 6:
-    *wake_up_tile_g6_reg = tile_mask;
-    break;
-  case 7:
-    *wake_up_tile_g7_reg = tile_mask;
-    break;
-  default:
-    *wake_up_tile_g0_reg = tile_mask;
-    break;
-  }
+  wake_up_tile_reg[group_id] = tile_mask;
 }
 
 static inline void set_wake_up_stride(uint32_t stride) {
