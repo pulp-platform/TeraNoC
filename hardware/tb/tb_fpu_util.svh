@@ -98,6 +98,21 @@
   longint unsigned fu_to_cum,  fu_to_prev;    // summed across all groups
   longint unsigned fu_bfb_cum, fu_bfb_prev;
 
+  // PER-GROUP previous values, so [MSHRG] can report a per-group delta. The summed
+  // fu_to_cum/fu_bfb_cum above answer "how much MSHR pressure is there"; these answer "WHICH
+  // GROUPS have it", which is the question the aggregate cannot. Both source arrays are already
+  // wired per group above -- the aggregate just adds them up before anyone sees them.
+  // `int unsigned`, not `logic [31:0]`: 2-state types default to 0, 4-state to X, and an X here
+  // would make the very first [MSHRG] delta print as x rather than a number. fu_grp_prev above
+  // is declared the same way for the same reason.
+  //
+  // Like the aggregate fu_to_prev/fu_bfb_prev, these start at 0 while the RTL counters they
+  // track are free-running from reset, so the FIRST reported delta is the absolute count rather
+  // than a period delta. That matches the existing aggregate behaviour exactly; the first line
+  // of a run is not a period measurement in either case.
+  int unsigned fu_to_grp_prev  [NumGroups];
+  int unsigned fu_bfb_grp_prev [NumGroups];
+
   // --------------------------------------------------------------------------
   // PROBE 2: intra-group CORE PROGRESS SPREAD.
   //
@@ -343,6 +358,26 @@
         gs = {gs, $sformatf((g == 0) ? "%0d" : ",%0d", fu_grp_cum[g] - fu_grp_prev[g])};
       $display("[FPUG] %s cyc=%0d denom=%0d busy=%s", tag, fu_cycle, d_cyc*FU_PerGrpLane, gs);
     end
+
+    // [MSHRG] -- the same treatment for MSHR pressure. The [FPU] line reports mshr_timeout and
+    // bankfull_bypass summed over every group, which tells you how much pressure exists but not
+    // WHERE. Per-group deltas identify the groups whose MSHR bank saturates -- the ones that lose
+    // coalescing and fall behind, which is the MSHR-side view of the inter-group progress spread.
+    //
+    // Both source arrays are free-running 32-bit counters per group, so the subtraction below
+    // wraps correctly without a widening cast: at 32 bits an overflow between two consecutive
+    // reports would need ~4.3e9 events in one period, which is not reachable.
+    //
+    // MUST stay ahead of the prev update below, exactly as [FPUG] must.
+    begin
+      automatic string ts = "";
+      automatic string bs = "";
+      for (int g = 0; g < NumGroups; g++) begin
+        ts = {ts, $sformatf((g == 0) ? "%0d" : ",%0d", fu_mshr_timeout[g] - fu_to_grp_prev[g])};
+        bs = {bs, $sformatf((g == 0) ? "%0d" : ",%0d", fu_bankfull_byp[g] - fu_bfb_grp_prev[g])};
+      end
+      $display("[MSHRG] %s cyc=%0d timeout=%s bypass=%s", tag, fu_cycle, ts, bs);
+    end
 `endif
     fu_raw_prev    = fu_raw_cum;
     fu_busy_prev   = fu_busy_cum;
@@ -355,6 +390,10 @@
       for (int t = 0; t < NumTilesPerGroup; t++)
         for (int c = 0; c < NumCoresPerTile; c++) fu_core_prev[g][t][c] = fu_core_cum[g][t][c];
     for (int g = 0; g < NumGroups; g++) fu_grp_prev[g] = fu_grp_cum[g];
+    for (int g = 0; g < NumGroups; g++) begin
+      fu_to_grp_prev[g]  = fu_mshr_timeout[g];
+      fu_bfb_grp_prev[g] = fu_bankfull_byp[g];
+    end
   endtask
 
   // Report EVERY period, not only inside the benchmark region: the point of this probe is
