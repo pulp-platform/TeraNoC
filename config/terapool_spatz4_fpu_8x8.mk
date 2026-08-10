@@ -191,7 +191,7 @@ group_mshr_hold_window   ?= 0
 # A 0 window = that class issues its fetch the same cycle (no hold). (The uniform
 # value above only applies to a class that has no override.)
 group_mshr_hold_window_single ?= 0
-group_mshr_hold_window_burst  ?= 255
+group_mshr_hold_window_burst  ?= 1023
 # Early-release subscriber target: a held entry issues its fetch as soon as this many
 # requesters have merged into it. Legal range [2, group_mshr_merge_reqs].
 group_mshr_hold_subs     ?= 2
@@ -335,7 +335,7 @@ group_mshr_resp_hold_probe ?= 1000
 # Reuses the hold_cnt field (mutually exclusive states), so no extra flops; only its width grows to
 # cover the larger of the two windows. Required whenever group_mshr_resp_wait_subs_single=1 or
 # group_mshr_cache_reclaimable=0, since both remove the release paths that used to bound the wait.
-group_mshr_serve_timeout ?= 255
+group_mshr_serve_timeout ?= 1023
 
 # Same-address request arriving in the SAME CYCLE as that entry's response.
 # 1 = STALL and retry (default). 0 = legacy, which allocated a SECOND entry for the same address.
