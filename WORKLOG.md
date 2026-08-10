@@ -5459,3 +5459,2572 @@ point of measuring it.
 
 Three 8x8 runs now in flight (VCS8 baseline / VCS9 barrier+fix / VCS10 enhanced), all with
 the wake-up fix effective, all ~9 h from the full-kernel numbers.
+
+### Broken-config baseline, converged (QFPU final, before shutdown)
+
+```
+[FPU] delta cyc=87000  cum=30.12%  grp_max=97.4%(g17)  grp_min=0.0%(g32)
+[FPU] delta cyc=88000  cum=30.12%  grp_max=93.4%(g24)  grp_min=0.0%(g32)
+[FPU] delta cyc=89000  cum=30.08%  grp_max=98.4%(g21)  grp_min=0.0%(g32)
+```
+
+**g32 pinned at exactly 0.0% for 32,000 consecutive cycles** (57,000 -> 89,000): the bug was
+sustained for the whole timed region, not a transient. Converged utilisation of the broken
+config: **30.08% of 1024 cores**, i.e. ~60% of the 512 cores that actually ran.
+
+`grp_max = 98.4%` is the important number: **individual groups do reach 98% FPU
+utilisation**, so the FPUs are not inherently starved -- a well-fed group saturates. The
+ceiling is work distribution and response-path contention, not FPU capability. This makes
+the VCS10 response-channel A/B the right next experiment rather than anything FPU-side.
+
+### Housekeeping (2026-08-06 16:27)
+
+Fix committed as `45baf9e`. Stopped the three broken-ELF runs (VCS6 `build_vcs3`, VCS7
+`build_vcs4`, QFPU `build_qfpu`); kept the three corrected 1024-core runs (VCS8
+`build_vcs5`, VCS9 `build_vcs6`, VCS10 `build_e8`), which have been running with the fix
+since 13:34/16:23. Left alone: the interactive GUI in `build_2` (still on the broken ELF --
+user's session, waveforms may be wanted), `build_f8` hello_world (uses `wake_up_all`, never
+affected), and all multi-day `vsimk` sessions belonging to other work.
+
+### Correction: COLDSTART_GROUP_SYNC=0 is a DEGRADED config, not a neutral control
+
+User's point, and it is right: **vector stores are never coalesced** -- the group MSHR
+handles LOADS only -- so each core's stores to C go out individually and complete at
+bank-contention-dependent times. Cores within a group therefore **drift apart across the
+store phase**, and by the next iteration's first B-burst they have missed each other's
+~68-cycle merge window. `COLDSTART_GROUP_SYNC` is what pulls them back together. Running
+with it off does not measure the design; it measures the design with its coalescing
+defeated.
+
+I had set `COLDSTART=0` on VCS8/VCS10 deliberately: at the time the wake-up fix was
+unvalidated, and compiling the barrier out gave a run that could not be affected by a
+mistake in my own fix. That was sound as a control, but VCS9 has since validated the fix
+with the barrier live, so the justification expired and I left the degraded config running.
+
+**Consequence: the VCS10 response-channel A/B was compromised.** VCS10 (enhanced) and VCS8
+(baseline) both run `COLDSTART=0`, i.e. the drifting regime, which produces more
+uncoalesced response traffic than the aligned design does -- plausibly *inflating* the
+apparent value of a third response channel.
+
+**VCS12 launched** to close the matrix (enhanced RTL from `build_e8`, no rebuild needed --
+only the ELF differs):
+
+|                        | COLDSTART=0 (drifting) | COLDSTART=1 (aligned) |
+|------------------------|------------------------|-----------------------|
+| resp_ch=2 (baseline)   | VCS8                   | VCS9                  |
+| resp_ch=3 (enhanced)   | VCS10                  | **VCS12**             |
+
+**VCS9 vs VCS12 is the A/B that matters.** VCS8/VCS10 stays as the drifting-regime
+comparison, and the difference between the two A/Bs quantifies how much core alignment
+changes the response-channel conclusion.
+
+**Lesson:** a control introduced to isolate an unvalidated change must be retired once the
+change is validated, otherwise it silently becomes a confound. I kept reporting VCS8 as
+"the baseline measurement" after its reason for existing had gone.
+
+### The 3rd response channel is NOT usable by burst traffic (user's question, confirmed in RTL)
+
+`mempool_group_mshr.sv:2963` states the port-selection law:
+
+```
+map_resp_port_id(sub_reqs[s].port_id)  (single)   or   1+(beat_offset&1)  (PD2 burst)
+```
+
+| traffic | port selection | reaches port 3? |
+|---|---|---|
+| single / scalar responses | `((req_port-1) % (NumRemoteRespPortsPerTile-1)) + 1` | **yes** |
+| burst responses (ParityDrain) | `1 + (beat_offset & 1)` -> 1 or 2 only | **never** |
+
+The guard block (`:111`) is explicit: *"the parity datapath is hardwired for 2 beats/cycle
+and needs both usable resp ports [2:1]"*, and `group_mshr_drain_beats` is `$error`-guarded
+to 1 or 2 -- it is a parity scheme, inherently 2-way.
+
+sp-fmatmul is dominated by vector burst loads, so **the traffic that matters cannot use the
+third channel at all**.
+
+**This explains the anomaly in the VCS10 A/B.** The response stall rate barely moved
+(76.72% -> 76.21%) while throughput rose 38.6%. That is exactly the signature of a wider
+*link* with an unchanged *drain*: the extra channel relieved mesh-link contention and
+offloaded scalar responses onto port 3, but each port's burst drain is as congested as
+before.
+
+**Consequence for how to read the running A/Bs:** VCS10/VCS12/VCS13 measure *"what does a
+3rd NoC link buy given a 2-wide burst drain"*, NOT *"what does a 3-wide response path
+buy"*. The real headroom is larger and `noc_resp_channel_num` alone cannot reach it.
+
+**To actually use N response channels for bursts** (RTL work, not a knob): generalise
+`1+(b&1)` to `1 + (b % (NumRemoteRespPortsPerTile-1))`, apply the matching `core_id` retag,
+and extend the TwinROB0 receive side from 2 to N. Given the response path is the
+first-order 1024-core bottleneck (76% stall, banks 98% idle), this looks like the highest-
+value RTL change for the scale-up.
+
+### NoC response-channel fairness (user's question) -- resp_ch=3 is unevenly loaded
+
+**Correction to the previous entry.** The ParityDrain `1+(b&1)` law is the *final delivery*
+hop (MSHR -> requesting core), NOT the NoC channel selection. The NoC channel is chosen at
+the **slave** tile -- the bank that owns the data -- in `mempool_tile.sv`. The previous
+entry answered the wrong stage for this question.
+
+**Router remapping is OFF in every running build**, contrary to assumption:
+
+```
+build_2-GUI / VCS8 / VCS9 / VCS10:  NOC_ROUTER_REMAPPING=0   NOC_PORT_HASH=7
+config/terapool_spatz4_fpu_8x8.mk:  noc_router_remapping ?= 0
+```
+
+so `gen_resp_remapping` (`mempool_group_floonoc_wrapper.sv:576`, requires 2 or 3) is
+bypassed. Only `NocPortHash` spreads anything.
+
+**The two configs take different selection branches.** `NumRemoteReqPortsPerTile = 1 + Rd +
+(RdWr + Wr)` = **3** for both (baseline `1+0+2`, enhanced `1+1+1`); resp ports are 3 vs 4:
+
+- **resp_ch=2 -> req == resp -> round-robin** (`mempool_tile.sv:562`):
+  `port_offset = (resp_rr_q + b) % 2`, temporal + spatial, both enabled at hash=7. **Fair.**
+- **resp_ch=3 -> req < resp -> payload hash** (`mempool_tile.sv:588`):
+  `hash_width = clog2(3)+2 = 4`; `hash_binning_step = 16/3 = 5` (integer division).
+  Cascade yields `0-4 -> ch0`, `5-9 -> ch1`, `10-15 -> ch2`:
+
+  | channel | share |
+  |---|---|
+  | 0 | 5/16 = 31.25% |
+  | 1 | 5/16 = 31.25% |
+  | 2 | **6/16 = 37.5%** |
+
+  **One channel carries 20% more.** Structural: 16 bins do not divide by 3.
+
+**Consequence:** the `resp_ch=3` arms are handicapped twice -- unfair 31/31/37 split *and*
+resp router remapping disabled -- so the measured **+38.6%** is a floor, not a ceiling.
+
+Cheap follow-ups, neither needing the ParityDrain rework: (a) `noc_router_remapping=2` to
+enable the bypassed resp remapping stage; (b) fix the binning to divide evenly (e.g. widen
+the hash so `1<<hash_width` is a multiple of `NumRemoteRespPortsPerTile-1`, or use a true
+modulo instead of a truncated-step cascade).
+
+---
+
+## 2026-08-07 04:10 — MSHR probe first data: the hold-window backfire is NOT reproduced
+
+**Purpose.** The extended `[FPU]` probe (`hardware/tb/tb_fpu_util.svh`) adds two per-period
+counters so the open question "why does a longer hold window help?" can be answered from a
+mechanism rather than from wall-clock:
+
+- `mshr_issue_timeout_cnt_dbg` -- hold windows that expired and issued on the timeout
+  instead of on reaching their subscriber target.
+- `req_bankfull_bypass_cnt_dbg` -- requests that bypassed the MSHR because no way was free.
+
+**Implementation.** `docs/scaleup/fpu_util_per_period.md` regenerator extended to collect
+probe rows from the *whole* run rather than only the benchmark region, plus a matched-cycle
+P255-vs-P511 diff block. The probe builds are slower than the plain ones and have not yet
+opened their benchmark region, so the only data available is the boot/DMA phase; comparing
+raw per-run totals there is invalid because the runs have reached different cycle counts.
+
+**Result.** P255 vs P511 over the 5 periods both have reached (cyc 33000..37000):
+
+| counter | P255 (hold=255) | P511 (hold=511) | change |
+|---|---:|---:|---:|
+| `mshr_timeout` | 1857 | 800 | **-57%** |
+| `bankfull_bypass` | 55385 | 54926 | **-1%** |
+
+The earlier W-sweep (`project_hold_the_fetch_result`) concluded a longer window backfires
+because held entries keep ways occupied, pushing later leaders into the bypass path. That
+mechanism predicts `bankfull_bypass` RISES with the window. It does not -- timeouts more
+than halve while bypass is flat. The longer window is absorbing requests into existing
+entries instead of forcing new allocations, so merging is paying for its own capacity.
+
+**Status.** Directional only. This is the DMA-fill phase, whose access pattern is not the
+matmul's B-broadcast, so the merge opportunity is not the same one. Verdict deferred until
+P255/P511 reach their benchmark regions. The absolute bypass rate (~11k per 1000 cycles
+across 64 groups, ~170 per group) is high in both arms and worth explaining on its own.
+
+**Also.** Test A reached its epilogue at offset 42k: `grp_min` collapses 17% -> 5.4 -> 2.5
+-> 1.2% while `[LP]` `mst_resp` halves and `slv_req` doubles -- loads drying up, stores
+rising. A's compute-phase figure is the ~63% `cum` through period 41; the tail must be
+excluded when comparing against runs still mid-compute.
+
+---
+
+## 2026-08-07 04:30 — live utilisation dashboard + retraction of the "A is in its epilogue" call
+
+**Purpose.** Turn the per-period utilisation data into something scannable across all 20
+configurations at once, and keep it current without hand-editing.
+
+**Implementation.** `gen_util_artifact.py` renders a self-contained page from the run logs
+(scope overlay with per-family selection, small multiples for all 20 runs on shared axes,
+equal-N ranking, MSHR counter tables). `watch_util_artifact.sh` regenerates it every 10 min
+and emits an event only when the picture moves materially -- ranking order changes, +12
+periods, a run opens its benchmark region or stops writing -- so republishes track news
+rather than a timer. Published at
+https://claude.ai/code/artifact/0addc571-20b4-4099-aae7-e0617f22147b
+
+**Correction.** The earlier entry called A's offset-42k dip the epilogue, on `grp_min`
+collapsing 17 -> 5.4 -> 2.5 -> 1.2% with `[LP]` `mst_resp` halving and `slv_req` doubling.
+That was premature. A has recovered: util 28.0 -> 34.1%, `mst_resp` 91k -> 105k,
+`slv_req` 22.7k -> 15.6k, `grp_min` back to 5.8%. Checking the same signature across the
+other runs shows it is not diagnostic at all -- C, D, E and F all dip below 6% `grp_min`
+transiently with no drain (E has 9 such periods scattered through a flat ~30% stretch).
+
+The dips are **store-heavy phases**: loads fall and stores rise together. The periodic
+shallow troughs and this deeper one are probably the same mechanism at different amplitude.
+Nothing yet separates "store phase" from "run ending" automatically, so the dashboard
+deliberately marks neither -- a structural device has to encode something true.
+
+**Consequence for the numbers.** A's ~63% remains its compute-phase figure, but it should
+no longer be described as final; A is still running and still oscillating.
+
+---
+
+## 2026-08-07 06:15 — probe reaches the matmul: the hold-window question is answered
+
+**Purpose.** The boot/DMA-phase probe numbers were explicitly labelled directional-only.
+P255 has now opened its benchmark region, so the counters can be read in the workload they
+were meant to characterise.
+
+**Result — the ratio inverts.** P255, first two clean benchmark periods:
+
+| offset | util | `mshr_timeout` | `bankfull_bypass` |
+|---:|---:|---:|---:|
+| 1000 | 36.1% | 1798 | 512 |
+| 2000 | 38.5% | 3791 | 188 |
+
+In boot/DMA, `bankfull_bypass` outran `mshr_timeout` by 22-69x. In the matmul it reverses:
+timeouts reach ~3800 per 1000 cycles (~60 per group) while bypass collapses to 188.
+
+**Mechanism for the 511-vs-255 result (2.13x).** At hold=255 the window expires before merge
+partners arrive, continuously, and ways are almost never full -- there is spare MSHR capacity
+going unused. Lengthening the window costs nothing and recovers merges previously abandoned
+on timeout. This also predicts 1023 should improve further; the A^-F^ arms already test it.
+
+It further confirms the earlier W-sweep's "held entries occupy ways and push leaders into
+bypass" mechanism does not operate here: bypass is not the binding constraint in this phase,
+it is nearly absent.
+
+**Status -- PARTIALLY RETRACTED 2026-08-07 06:50.** The bypass half of this entry was read
+from two periods of a signal that turns out to be extremely volatile. P255's full
+benchmark-region series is:
+
+```
+timeout:   103  1798  3791  4031  4494     <- rises, then plateaus ~4500
+bankfull:  1019  512   188   779  2626     <- swings 14x between adjacent periods
+```
+
+Quoting "bypass collapses to 188" took the two lowest consecutive points as the level. That
+is the same two-period windowing error catalogued in `docs/scaleup/README.md`, made here
+after flagging it elsewhere.
+
+**Survives:** matmul-phase timeouts (~4500 per 1000 cycles) far exceed boot-phase
+(~231-701). Large, steady, well-sampled -- still supports "at hold=255 the window expires
+before merge partners arrive".
+
+**Does not survive:** any claim that bypass is absent in the matmul, or about which
+direction bypass moves with the hold window. When P511 opened, the single shared period gave
+timeout -63% but bankfull **+99%** -- the direction the original W-sweep predicted and the
+opposite of the boot-phase inference. With n=1 against a 14x period-to-period swing that is
+not evidence either way. The way-capacity question is OPEN; it needs ~20 matched periods.
+
+## 2026-08-07 06:15 — the ~40k regime break is the kernel, not a config
+
+Runs A, B and E all drop out of their early plateau at nearly the same point in their OWN
+timed regions -- B and E at offset 39000, A at ~42000 -- across three different request/
+response configurations. B is recovering with the same shape A did (27 -> 36% util with
+`grp_min` climbing 0 -> 12).
+
+Correcting the previous entry, which framed this as possibly specific to A's `rd0+rdwr2`
+split: it is not. It is a workload phase every config passes through.
+
+C, F and D show no break under a 65%-of-plateau test only because their plateaus are low
+enough that the same absolute drop does not clear the threshold -- the detector is crude,
+not evidence that they are immune. It also mis-fires on A's own ramp.
+
+**Consequence for the ranking.** The equal-N window is now wide enough to sweep every run
+through its own break, so single-number means increasingly average two regimes and describe
+neither. The matched-pair table (each pair at its own N) is the trustworthy read; A's
+headline figure has already slid 64.1 -> 61.6% from this effect alone, with no run changing.
+
+---
+
+## 2026-08-07 06:05 — the second regime is permanent, and it changes the campaign's ratios
+
+**Purpose.** Establish whether the ~40k-offset break is a transient dip or a lasting change
+of operating point. This qualifies every ratio measured so far, all of which come
+predominantly from the pre-break window.
+
+**Result.** Four of the five 511 arms break and then plateau, none recovers:
+
+| run | pre-break | post-break plateau | retained | post-break periods |
+|---|---:|---:|---:|---:|
+| A | 64.2% | 45.5% | 71% | 15 |
+| B | 63.0% | 35.9% | 57% | 12 |
+| E | 57.0% | 33.3% | 58% | **24** |
+| F | 55.6% | ~38.5% | 69% | (break missed by a 2pp threshold) |
+| C | 45.8% | -- | -- | no break |
+
+**E is decisive**: 24,000 cycles in the second regime, flat (first half 31.9%, second half
+33.2%). The shape is identical in all cases -- sharp drop, partial recovery over ~6 periods,
+then a hard plateau at 57-71% of the pre-break level, with `grp_max` pinned at 99-100%
+throughout. One group saturated continuously while the mean sits far below it is a
+work-distribution asymmetry, not a bandwidth ceiling and not a global stall.
+
+**Self-correction.** A crude first-half/second-half test labelled A and B "recovering". That
+is an artifact of averaging the deep initial dip into the first half; reading the series
+directly (A `42 43 43 45 45 46 45 46 46`, B `34 36 36 36 36 36 36`) both are flat, like E.
+
+**Consequence for every ratio in this campaign.** The comparisons do not survive the break
+unchanged:
+
+- A vs B **pre**-break: 64.2 / 63.0 = **1.02x** (near-tied)
+- A vs B **post**-break: 45.5 / 35.9 = **1.27x**
+
+A's advantage over B more than doubles in the second regime. Any configuration
+recommendation resting on the pre-break window is made on the easier half of the workload.
+Ratios should be quoted per-regime until the mechanism is understood.
+
+**Not automated.** No break detector is added to the dashboard. That is the same fragile
+heuristic removed on 2026-08-07 04:30, and the threshold version already mislabelled F
+(missed its break by 2pp) and mislabelled A's ramp as a break. The small multiples show
+both regimes plainly; a reader can see what a detector keeps getting wrong.
+
+**Open.** Why the break happens, why C alone is exempt, and whether it is a fixed position
+in the kernel or a config-dependent one. C being the slowest non-D arm and the only one
+without a break is suggestive but unresolved -- by work done (periods x util) C had already
+exceeded A's pre-break total without breaking, so "fixed kernel position" does not fit
+cleanly.
+
+---
+
+## 2026-08-07 06:25 — mechanism: the 255 arms never let a group saturate, and that is why they never break
+
+**Purpose.** Tie together three separate observations -- the 2.13x hold-window result, the
+probe's timeout counters, and the second regime -- into one account.
+
+**Result.** Group saturation splits the sweep cleanly along the hold window:
+
+| run | hold | mean | `grp_max` median | p90 | saturating | break |
+|---|---:|---:|---:|---:|:---:|---|
+| A | 511 | 58.2% | 99.0% | 99.9% | yes | ~42k |
+| B | 511 | 55.2% | 99.9% | 100.0% | yes | 39k |
+| C | 511 | 44.4% | 99.6% | 99.9% | yes | none |
+| E | 511 | 47.3% | 99.8% | 100.0% | yes | 39k |
+| F | 511 | 47.9% | 100.0% | 100.0% | yes | ~40k |
+| D | 511 | 15.2% | 23.2% | 31.5% | **no** | none |
+| v9 | 255 | 26.9% | 32.8% | 42.0% | **no** | none |
+| v8 | 255 | 26.5% | 32.0% | 41.5% | **no** | none |
+| v10 | 255 | 31.1% | 38.1% | 45.2% | **no** | none |
+| v12 | 255 | 31.8% | 39.1% | 83.4% | **no** | none |
+
+**No group in any 255 run ever saturates** -- best group 32-39% median, whole machine flat at
+27-32%, no break in 148 periods. Every 511 arm has some group at 99-100% essentially always.
+This is a qualitative difference in operating mode, not a quantitative one.
+
+**Account.** At hold=255 the MSHR times out ~4500 times per 1000 cycles (probe, 2026-08-07
+06:15), so requests issue unmerged and every group is throttled by the same mechanism at the
+same rate; none can pull ahead. At 511 merging completes, groups run at their own rate, and
+the fastest reach 100%. **The break is the cost of that freedom**: only saturating configs
+break. Once groups are no longer uniformly throttled they diverge, and partway through the
+kernel the distribution goes lopsided -- one group pinned at 100% while the mean falls to
+57-71% of its former level. The 255 arms are immune because they were never allowed to
+diverge.
+
+**Consequence for direction.** 511 remains clearly better in absolute terms (58% vs 27%),
+but the mechanism behind the 2.13x is "stop throttling everything uniformly", and the second
+regime is the imbalance that throttling was masking. The next lever is therefore probably
+**not** a longer hold window but whatever rebalances work once groups are free to diverge.
+The 1023 and 2047 arms will discriminate: more window should either help (merging still
+incomplete at 511) or deepen the imbalance (freedom is already the constraint).
+
+**Outlier worth keeping.** D is hold=511 but does NOT saturate (23% median) and does not
+break -- consistent with its single request channel binding before merging ever does. D is
+the control showing that saturation follows from effective merging, not from the hold
+parameter itself.
+
+---
+
+## 2026-08-07 07:40 — the 4th response channel reverses sign across the regime boundary
+
+**Purpose.** The ranking swapped F above E. Checked whether that was another window artifact
+(as the C'-induced N collapse was) or a real effect.
+
+**Result — real, and it overturns a headline finding.** F (resp4) vs E (resp3), 1rdwr,
+matched at 72 equal periods:
+
+| window | n | E (resp3) | F (resp4) | F/E |
+|---|---:|---:|---:|---:|
+| pre-break (<39k) | 38 | 57.0% | 52.5% | **0.92x** -- hurts |
+| post-break (>=39k) | 34 | 32.7% | 39.2% | **1.20x** -- helps |
+| full matched | 72 | 45.5% | 46.3% | 1.02x -- reads as no effect |
+
+Not noise: F leads E at **all eight** of the last matched offsets, by 3-7 pp.
+
+The previously recorded verdict ("4th response channel ~0, slightly negative") came from the
+pre-break window. The full-window number, 1.02x, is the average of a -8% and a +20% that
+nearly cancel -- the worst of the three answers, because it reads as "no effect" while
+hiding two large opposite ones.
+
+**Consistent with the saturation mechanism** (2026-08-07 06:25): post-break the machine is
+imbalance-limited with one group pinned at 100% and others starved, and extra response
+bandwidth is what lets the starved groups catch up. Pre-break, with all groups running well,
+a 4th channel only splits bandwidth more finely -- and ParityDrain caps delivery at two ports
+regardless -- so it costs a little.
+
+**General consequence.** Every ratio in this campaign was computed either inside the first
+regime or across a window spanning both. Two are now known to reverse or double:
+
+- A vs B: **1.02x** pre-break, **1.27x** post-break
+- F vs E: **0.92x** pre-break, **1.20x** post-break
+
+Single-number verdicts on this workload are unreliable by construction. Ratios must be
+quoted per-regime, and any config recommendation should say which regime it optimises.
+
+---
+
+## 2026-08-07 08:15 — located the permanent util drop: p-iteration boundary, but NOT sync cost
+
+**Purpose.** User asked which part of the C kernel causes the big util drop that never
+recovers, suspecting the per-p-iteration group sync ("sync overhead", as seen at 4x4).
+
+**Kernel geometry** (M=2048 N=512 P=512, 64 groups x 16 cores, KERNEL_SIZE=8, vlen=512):
+`dim_group`=32, `split_m_count`=4, `split_p_count`=4 -> each core owns **8 rows x 128
+columns**, `gvl`=32 (e32,m2) -> **exactly 4 outer p iterations**, each preceded by
+`GBAR_SYNC_PLOOP` (`kernel/sp-fmatmul.c:14-18`). The m loop runs ONCE per p iteration
+(m_end-m_start == kernel_size), so a p iteration = one n sweep of 512 + the C store.
+
+**Location confirmed -- the user is right.** The drop coincides with a one-time C write-back
+burst at offset 44-47k, i.e. the p1->p2 boundary:
+
+```
+offset  util   mst_req  mst_resp  slv_req  resp/req
+39000  72.2%    52304    210707    13551    4.03
+44000  28.0%    35712     91049    22687    2.55   <== C stores
+48000  42.4%    33020    124061    11569    3.76
+```
+
+Correcting the earlier entry that read the ~10k oscillations as p boundaries: there are only
+4 boundaries in the whole kernel, ~47k apart at iteration-1 speed. The 10k oscillation is a
+different, still-unexplained phenomenon.
+
+**But the sync is present and firing, so it is not the cost.** Verified both halves:
+- SW: `GBAR_PLOOP` defaults 1; the built ELF has the barrier address computation at the head
+  of `matmul_8xVL` (`csrr mhartid` -> `(tile+1)%16` targeting).
+- RTL: `GROUP_BARRIER_OFF` is NOT defined in the build -> `mempool_group.sv:37` gives
+  `EnableGroupBarrier = 1'b1`.
+The group-wide barrier re-aligns all 16 cores at every p boundary and util still does not
+recover. Adding more synchronisation cannot fix this.
+
+**Why it cannot recover (best-supported account).** Post-break everything scales by the same
+0.62: util 72->45%, mst_req 52k->32k, mst_resp 210k->130k, with `resp/req` unchanged at 4.0.
+Less traffic, not more -> not NoC congestion. Compute and memory issue falling together is
+the signature of rising effective LATENCY (throughput ~ MLP/latency, MLP capped by the
+VLSU). Merge degree degrades 3.8 -> 3.4 (`slv_req/mst_req` 0.26 -> 0.29).
+
+The mechanism is already in the source comment at `sp-fmatmul.c:50-52`: the rendezvous aligns
+cores at the INSTRUCTION level but cannot fix downstream emission skew (residual VLSU drain +
+ROB alloc walk). The C-store phase leaves each core carrying a different amount of VLSU
+drain, so iteration 1 -- the only one starting from a uniform cold state -- is the anomaly,
+and every later iteration runs drifted. No barrier can reconstruct a cold start.
+
+**Not proven.** Merge degree only degrades 11%; that 11% amplifying to a 38% throughput loss
+via latency is consistent with the data but not demonstrated by it.
+
+**Ruled out:** L1 capacity (16 MB = 64 groups x 16 tiles x 4 banks x 1024 words; working set
+A 4MB + B 1MB + C 4MB = 9 MB fits), and NoC congestion (traffic falls, bursts stay at 4.0).
+
+**Two experiments offered to the user, NOT started** (they cost machine time and the fleet is
+at 26 sims):
+1. `EXTRA_DEFINES=-DGBAR_PLOOP=0` -- unchanged drop => barrier irrelevant, store drift is the
+   whole story; worse drop => barrier partially working.
+2. `group_merge_profiling=1` -> `[GroupMerge]` per-period merge rate, replacing the
+   `slv_req/mst_req` proxy, to separate merge-degree loss from latency.
+
+---
+
+## 2026-08-07 08:35 — MSHR counters, benchmark region: way capacity is what breaks at 255
+
+**Purpose.** The probe's `mshr_issue_timeout_cnt` / `req_bankfull_bypass_cnt` now have real
+benchmark-region data (15+ matched periods, not the 5 noisy boot-phase ones).
+
+**Result — three hold windows, IDENTICAL config (rd0+rdwr2 / resp2), matched over N=15:**
+
+| hold | util | `mshr_timeout`/1k | `bankfull_bypass`/1k | vs 255 |
+|---:|---:|---:|---:|---:|
+| 255 | 32.0% | 3174 | **9154** | 1.00x |
+| 511 | 58.6% | 883 | **257** | **1.83x** |
+| 1023 | 59.0% | 277 | **155** | 1.84x |
+
+**1. A longer window COLLAPSES way pressure rather than raising it.** `bankfull_bypass` falls
+97% from 255 to 511. This is the direct opposite of the original W-sweep's mechanism (held
+entries occupy ways -> later leaders bypass). At 255 entries time out before merge partners
+arrive, each request allocates its own entry, and entry volume saturates the ways; longer
+windows mean fewer entries for the same work.
+
+**2. The benefit is fully captured at 511.** 511 -> 1023 is **+0.7%** util. Both counters keep
+improving (timeout 883->277, bypass 257->155) but utilisation does not follow, because
+neither binds any more at 511. **Predicts the 2047 arms show no gain** -- they will test this
+directly.
+
+**3. 255 is a runaway, not merely slower.** Its per-period `bankfull_bypass` climbs
+monotonically 512 -> 2626 -> 9102 -> 21783 while util sags: bypassed requests do not merge,
+so they generate more traffic, filling more ways, causing more bypasses. At 511/1023 the
+counter stays flat and low. A qualitative difference in stability, not just magnitude.
+
+**CORRECTION to the 08:00 entry.** That entry said "way capacity never binds on this
+workload", from `mshr_no_free = 0` across test A's whole run. True **at 511** -- and false at
+255, where bypass runs at 9154 per 1000 cycles. The claim was scoped to one hold window and
+stated as if it covered the workload. Correct statement: capacity binds severely at 255 and
+essentially never at 511 or above. (`mshr_no_free` and `req_bankfull_bypass_cnt` remain
+different counters; both agree at 511.)
+
+This also retires the "directional only" caveat carried since 06:15 -- the benchmark-region
+numbers are 15 matched periods with a 97% effect, not 5 periods of a 14x-swinging signal.
+
+---
+
+## 2026-08-07 09:10 — boot-phase counters are non-predictive (confirmed), and 2047 slows the un-mergeable phase
+
+**1. The boot/DMA caveat is now proven, not just asserted.** Matched absolute cycles,
+identical config (rd0+rdwr2/resp2), four hold windows, all four still pre-benchmark:
+
+| hold | `mshr_timeout` | `bankfull_bypass` |
+|---:|---:|---:|
+| 255 | 34534 | **184531** |
+| 511 | 15531 | **184895** |
+| 1023 | 9740 | **185055** |
+| 2047 | 6954 | **180585** |
+
+Timeouts fall monotonically, but **bypass is identical within 2% across an 8x range of hold
+window** -- where the BENCHMARK region shows a 97% drop from 255 to 511. During DMA fill
+there are no merge partners to wait for, so bypass is set by the traffic pattern, not by the
+window. The window only matters where merging is possible. Every conclusion drawn from
+boot-phase counters (2026-08-07 04:10 onward) was correctly labelled directional-only; this
+is why that mattered.
+
+**2. A long window measurably slows the un-mergeable phase.** A* (2047) reached cyc 60000
+without opening its benchmark region; A (511) opened at 57000. The boot tail shows the cause:
+
+```
+cyc     511 to/bf      1023 to/bf     2047 to/bf
+56000     0 /    2       69 /   95     353 / 2927
+58000   665 / 1019        5 /   26     354 / 1986
+60000   750 /   56        0 /  846     259 / 1628
+```
+
+By 56-60k the 511 and 1023 runs have finished DMA and gone quiet while 2047 still churns at
+~350 timeouts and ~2000 bypasses per 1k. At 2047 an entry holds a way for up to 2047 cycles
+waiting for partners that never arrive during DMA, so the phase serialises.
+
+This is the ORIGINAL W-sweep mechanism (held entries occupy ways -> bypass) finally appearing
+-- just not where it was looked for. It costs exactly where there is nothing to merge. Taken
+with 511 -> 1023 yielding only +0.7% util, it is a real argument that 2047 is past the useful
+point. The benchmark-region result will confirm or refute.
+
+**Inconsistency noted:** `RESP_HOLD_PROBE` is enabled in the 1023 and 2047 builds but not the
+511 ones (it comes from the config defaults, not from the launcher). `$display`-only, so it
+cannot affect DUT timing or any utilisation comparison, but it bloats logs (A* 32 MB vs P511
+8 MB) and costs wall-clock. Relevant only if comparing simulation SPEED across families.
+
+---
+
+## 2026-08-07 09:30 — the 2047 arms are confounded: serve_timeout stalls the SCALAR path
+
+**Symptom.** All six 2047 arms passed their reference benchmark-opening cycles with
+`bench=0` (A* 12k late, E* 12k, C* 7k), and FPU activity was DECAYING rather than ramping
+(A* 0.83 -> 0.37%, E* 0.48 -> 0.07%, counters collapsing to single digits).
+
+**Not a hang.** `inflight` drains steadily (A*: 5487 -> 960 over 7k cycles); boot is
+progressing ~2-3x slower than at 511.
+
+**Diagnosis.** Every stuck request is `bl=1` -- a SCALAR single-word load (2000/2000
+sampled) -- and their ages cluster at **1344-1875, all just under 2047**. They are waiting
+out `serve_timeout`.
+
+`group_mshr_serve_timeout` governs an entry's release from RESP_HOLD/CACHED **regardless of
+burst length**, so a scalar load landing on a waiting entry pays the full timeout. During
+boot (icache warmup, stack, scalar init) there is no merge partner, so essentially every
+scalar load pays 2047 cycles.
+
+**The two knobs have different blast radii, and the sweep conflated them:**
+
+| knob | scope |
+|---|---|
+| `group_mshr_hold_window_burst` | BURST allocations only -- what the ladder is about |
+| `group_mshr_serve_timeout` | EVERY entry's release, including scalar hits |
+
+Both were set to 2047 because that is what the 511 and 1023 configs did, and the ladder was
+clean up to that point. At 2047 the serve_timeout crosses into a regime where the scalar
+penalty dominates, so **A*-F* confound "longer burst window" with "much longer scalar
+stall"**. Their benchmark-region numbers will measure "2047 on both knobs" -- a real
+configuration, but NOT a clean answer to "does a longer burst window help?".
+
+Note this also reframes the 09:10 entry: the boot slowdown attributed there to "a long window
+costs where there is nothing to merge" is specifically a `serve_timeout` scalar effect, not a
+`hold_window_burst` effect. The conclusion (long windows hurt un-mergeable phases) stands;
+the attribution to the wrong knob does not.
+
+**Clean ladder point still missing:** `hold_window_burst=2047` with `serve_timeout=511`.
+Offered to the user, NOT started (fleet is at 27 sims).
+
+---
+
+## 2026-08-07 10:35 — 2047 helps a LOT on D (2.35x): the useful hold window is config-dependent
+
+**First readable 2047 result, and it contradicts the prediction.** D config (1rdwr / resp2),
+matched over 19 benchmark periods:
+
+| hold | util | `grp_max` | `timeout`/1k | `bypass`/1k | vs 511 |
+|---:|---:|---:|---:|---:|---:|
+| 511 | 16.3% | 30.2% | -- | -- | 1.00x |
+| 1023 | 28.5% | 85.3% | 1050 | 160 | **1.75x** |
+| 2047 | **38.2%** | 81.0% | 208 | 139 | **2.35x** |
+
+Not a ramp artefact: 2047 pulls ahead from offset 5k and holds 38-54% while 511 sits flat at
+13-16% across all 19 slots.
+
+**The prediction was wrong and the reason is instructive.** 09:10 and 08:35 predicted 2047
+would be flat-to-negative, from (a) the 511 -> 1023 step being only +0.7% and (b) the boot
+phase showing long windows serialising un-mergeable traffic. Both were reasoning from the
+**A config**. D behaves completely differently.
+
+**CORRECTION to 2026-08-07 06:25.** That entry called D "the control showing that saturation
+follows from effective merging, not from the hold parameter itself", attributing its
+non-saturation to the single request channel binding before merging ever could. **Wrong.**
+At 1023 D's `grp_max` jumps 30% -> 85%; at 2047 its utilisation reaches 2.35x the 511
+baseline. D was never request-channel-limited -- it was merge-limited and sat much FURTHER
+from the merge threshold than the other configs, so it needed a far longer window to cross
+it. (This was flagged as a possibility when D^ first opened, and it has now held at 20+
+periods rather than 10 ramp periods.)
+
+**General consequence: there is no single optimal hold window.** It is config-dependent:
+
+- A (rd0+rdwr2/resp2): saturates at 511, gains +0.7% at 1023, nothing beyond.
+- D (1rdwr/resp2): still climbing at 2047, 2.35x and not yet flat.
+
+The discriminator is measurable: `mshr_timeout` rate at a given window says how merge-starved
+a config still is. At 1023, D shows **1050** timeouts/1k versus A's **280** -- D is still
+starved at a window where A is already done. That counter, not a global constant, should pick
+the knob.
+
+**Caveat unchanged:** `serve_timeout` is also 2047 here, so this measures "2047 on both
+knobs". D's gain is large and monotone so the burst window is the plausible driver, but
+separating them still needs the `hold_window_burst=2047, serve_timeout=511` run.
+
+---
+
+## 2026-08-07 11:35 — full per-config hold-window ladder: 1023 is the general optimum, D the exception
+
+Each config matched at its OWN equal N (period 0 dropped):
+
+| config | N | 511 | 1023 | 2047 | best |
+|---|---:|---:|---:|---:|---|
+| A (rd0+rdwr2/r2) | 18 | 60.3% | 61.0% | 52.0% | 1023 |
+| B (rd1+rdwr1/r3) | 14 | 59.5% | 66.6% | 57.1% | 1023 |
+| C (rd1+rdwr1/r2) | 19 | 43.9% | **60.1%** | 49.5% | 1023 (**1.37x**) |
+| **D (1rdwr/r2)** | **29** | 17.0% | 30.1% | **39.7%** | **2047 (2.33x)** |
+| E (1rdwr/r3) | 19 | 55.6% | 53.2% | 50.9% | 511 |
+| F (1rdwr/r4) | 16 | 51.0% | **66.7%** | 53.9% | 1023 (**1.31x**) |
+
+**Five of six peak at 1023 and lose ground at 2047. Only D keeps climbing.** 1023 is the
+general optimum; 2047 overshoots for everything except the config furthest from its merge
+threshold.
+
+**This further narrows the 08:35 conclusion.** That entry said "the benefit is fully captured
+at 511, 511 -> 1023 is only +0.7%" -- true for A, but C gains **1.37x** and F **1.31x** at
+1023. Three of six configs gain meaningfully at a window where A is flat. The A-only reading
+understated 1023 twice over: first by missing D's continued climb, now by missing C and F.
+
+**Status.** Only D (N=29) clears the 20-period bar. A, C, E are at 18-19 and B, F at 14-16 --
+the range that has produced repeated wrong calls this session. The 2047 column also carries
+the `serve_timeout` scalar confound throughout, which plausibly explains the five losses at
+2047 without implicating the burst window. Treat D as established, the rest as provisional
+until ~25 periods.
+
+---
+
+## 2026-08-07 12:05 — ROOT CAUSE of the permanent util drop: the HW group barrier releases one core per cycle
+
+**Question (user).** Why does GB0 (barrier ablated) show higher util, and why does util drop
+after the first p-iteration sync and never recover?
+
+**Answer: the two are the same defect.**
+
+### The barrier serialises its release
+
+`mempool_group_barrier.sv:159-171` picks the LOWEST set responder each cycle and clears one
+bit per cycle:
+
+```systemverilog
+for (int unsigned c = 0; c < NumCoresPerGroup; c++)
+  if (!rel_have && rel_rem_q[c]) begin rel_have = 1'b1; rel_target = IniW'(c); end
+...
+if (rel_fire) rel_rem_d[rel_target] = 1'b0;      // ONE core per cycle
+```
+
+The module header says so explicitly ("fires the held responses ... one per cycle"). A
+16-core group is therefore released over **16 cycles in fixed ascending core order**.
+
+**That skew equals the window it exists to hit.** `sp-fmatmul.c:50-52` puts the effective
+merge window at ~10-15 cycles. The barrier injects a 15-cycle staircase while trying to
+align cores into a 10-15 cycle window -- it cannot succeed by construction.
+
+Same defect shape as the icache RO-cache (`snitch_axi_to_cache` unrolls its N-hot idmask one
+bit/cycle, +1 cyc/tile staircase, 15 cyc/group, fixed ascending order). Worth grepping for
+other N-hot-unrolled release paths.
+
+### Why iteration 1 is fast and 2+ are not: DIFFERENT release mechanisms
+
+| iteration | release path | skew |
+|---|---|---|
+| 1 | `COLDSTART_GROUP_SYNC` -> `mempool_log_partial_barrier` -> `wake_up_group(mask)`, a single masked register write | **broadcast, 0 cycles** |
+| 2+ | `GBAR_SYNC_PLOOP` -> HW group barrier, one held-load response per cycle | **15 cycles** |
+
+Iteration 1 resumes all 16 cores on the same cycle; their first B-bursts land in one merge
+window; coalescing works -> ~72%. Every later p iteration restarts spread over 16 cycles,
+bursts miss each other's windows -> ~45%. **It never recovers because nothing restores a
+broadcast release** -- the only broadcast in the timed region is the one-time cold start.
+
+### Why GB0 is faster
+
+No staircase re-imposed at each boundary; cores keep their drifted alignment, which is
+tighter than a deterministic 15-cycle spread. Matches GB0 hitting 72.6% at offset 6k where A
+needed until 9k.
+
+### Fix
+
+Release all `arrived` cores in ONE cycle. `resp_ini_addr_o` is per-initiator, so the
+serialisation is a datapath choice, not a protocol constraint -- broadcasting would make the
+HW barrier behave like `wake_up_group`. Contained change in `mempool_group_barrier.sv`.
+Offered to the user, NOT implemented (needs rebuild + run).
+
+**Supersedes** the 08:15 entry's "best-supported account" (residual VLSU drain / ROB alloc
+skew). That was the documented hypothesis from the source comment; the actual mechanism is
+the barrier's own release datapath, which is both larger and fully deterministic. The 08:15
+entry's negative findings stand (not merge degree -- only 14%; not way capacity --
+`mshr_no_free`=0; not NoC congestion -- traffic falls).
+
+---
+
+## 2026-08-07 12:30 — GB0 hits 89.9%, the campaign record: the barrier caps the WHOLE run, not just iterations 2+
+
+A (GBAR_PLOOP=1) vs GB0 (ablated), identical RTL, only the `#define` differs:
+
+| offset | A | GB0 | delta |
+|---:|---:|---:|---:|
+| 6000 | 66.2% | 72.6% | +6.5 |
+| 7000 | 70.4% | **88.3%** | +17.8 |
+| 8000 | 67.7% | **89.9%** | +22.2 |
+| 9000 | 72.1% | **88.3%** | +16.2 |
+
+**89.9% is the highest utilisation in the campaign** (previous best B' 82.8%; 4x4 reference
+96.8%). `grp_min` is also higher throughout (20-26% vs 16-21%) -- the LAGGING groups improve
+too, exactly what removing a fixed ascending-order release staircase should do.
+
+**CORRECTION to the 12:05 entry.** That entry framed the barrier as explaining why iterations
+2+ are slow while iteration 1 is fast. Incomplete: `GBAR_SYNC_PLOOP` sits at the top of
+EVERY p iteration including the first, so A pays the staircase in iteration 1 as well. The
+barrier costs ~20 pp *within* iteration 1, before the permanent drop is reached. COLDSTART's
+broadcast gets A to 72%; without the staircase on top, GB0 reaches 90%.
+
+The barrier is therefore worse than estimated: it caps the entire run, not just the tail.
+
+**Status.** 9 matched periods, still ramp (A later oscillates 53-73%; GB0 will have its own
+oscillation). The equal-N 1.143x understates the steady-state gap because slots 4k-5k favour
+A. GB0 has not yet reached the ~44k break it was launched to test.
+
+---
+
+## 2026-08-07 13:10 — IMPLEMENTED: single-cycle broadcast release for the group barrier
+
+**Change.** `mempool_group_barrier.sv` gains `rel_vec_o` -- a per-core valid vector asserting
+every remaining responder in the SAME cycle, each bit clearing on its own handshake. The LIC
+response port now carries config ACKs only. `mempool_group.sv` merges the release into each
+tile's EXISTING response bundle:
+
+```systemverilog
+assign tcdm_master_resp_valid[0][t] = bar_rel_vec[t] | master_local_resp_valid[t];
+assign tcdm_master_resp[0][t].rdata = bar_rel_vec[t] ? bar_rel_rdata[t] : master_local_resp_rdata[t];
+assign master_local_resp_ready[t]   = tcdm_master_resp_ready[0][t] & ~bar_rel_vec[t];
+```
+
+**Cost: one 2:1 mux per tile + a 16-bit vector. NO new crossbar ports** (the user's
+constraint). This works because the release is a dummy load writeback carrying only
+meta_id/core_id -- it never needed the LIC's routing, only its wires. Gated by
+`EnableBarrierBcast` (default on, `-DGROUP_BARRIER_BCAST_OFF` reverts).
+
+**Disk.** The existing `snitch_trace`/`spatz_trace` knobs could NOT disable the big tracers:
+both are `(csr_trace_q || DEFINE)`, so software starting the benchmark region re-enables them
+-- the origin of 609 GB / 67 GB/h. Added `TRACE_FORCE_OFF` in `spatz_mempool_cc.sv`
+suppressing both regardless of the CSR. With `+notracer` (NoC tracer, RUNTIME plusarg, no
+rebuild) and `-DV4M_ENABLE=1'b0`, the new arms write essentially only their transcript.
+`[FPU]`/`[LP]`/`[BP]`/`[GroupMerge]` unaffected.
+
+**8 arms launched** (`run_bcast_all.sh`):
+
+| arm | hold | cfg | purpose |
+|---|---:|---|---|
+| **X-A511N** | 511 | A | **CONTROL**: `BCAST_OFF`, must reproduce test A |
+| X-A511 | 511 | A | vs A (58.8%) and GB0 (90%) |
+| X-A1023 | 1023 | A | vs A^ |
+| X-B1023, X-C1023 | 1023 | B, C | best window for those configs |
+| X-D2047 | 2047 | D | D's best window |
+| X-E1023, X-F1023 | 1023 | E, F | |
+
+X-A511N is the load-bearing one: if the control reproduces A, the RTL change is inert when
+disabled and every difference in the other seven is the broadcast release alone.
+
+**Verible note:** it reports 150 syntax errors on the UNMODIFIED `mempool_group.sv` (it cannot
+expand `\`STRUCT_VECT`), so its error count is not a usable check for this file. The VCS build
+is the real gate.
+
+---
+
+## 2026-08-07 13:45 — GB0 is VOLATILE, not uniformly better: early support for the user's prediction
+
+**User's prediction (13:30):** GB0's advantage comes from p-iteration 1 (COLDSTART-aligned, no
+staircase); by iteration 2 it should be WORSE than A, because it has nothing at all to
+re-align cores while A at least bounds skew to 16 cycles.
+
+**First evidence, and it arrived inside iteration 1:**
+
+```
+offset   A util   GB0 util   delta
+ 12000    64.1%     81.8%    +17.8
+ 13000    54.4%     68.8%    +14.4
+ 14000    52.9%     60.3%     +7.4
+ 15000    60.9%     57.6%     -3.3   <- GB0 BELOW A
+ 16000    63.9%     65.3%     +1.4
+```
+
+Through the trough **GB0 fell 25.3 pp from its peak while A fell 8.5 pp**. The advantage
+collapsed from +18 to negative, then partially recovered. Without any rendezvous GB0 has
+nothing to arrest divergence when the workload perturbs it; A's staircase is a poor rendezvous
+but it IS one, and it bounds the damage.
+
+**CORRECTIONS to the 12:30 and 13:30 entries.**
+- "GB0 tracks A's oscillation while sitting ~17 pp above it throughout" -- the *throughout* is
+  false. It converges and crosses in the trough.
+- I read GB0's flat grp spread over offsets 6k-12k as evidence against drift. That window was
+  simply the stable part of the iteration; the spread metric is also inter-GROUP, not the
+  intra-group core skew the barrier actually controls.
+
+**Not yet the real test.** This is the ~10k intra-iteration oscillation at offset 15k, not the
+p1->p2 boundary at ~44k. Same class of perturbation, smaller. Cumulative still favours GB0
+(65.4% vs 56.7%, 1.15x).
+
+**If the pattern holds at 44k**, it establishes that *some* rendezvous beats none -- making the
+broadcast fix the only configuration that gets both bounded divergence AND no 15-cycle
+penalty. That is the hypothesis the 8 X-arms test directly.
+
+---
+
+## 2026-08-07 14:20 — RETRACTION: the merge-window mechanism for the barrier cost is WRONG
+
+**User's challenge:** how can a 15-cycle release staircase cause a ~20 pp performance drop?
+
+**The arithmetic says it cannot.** `GBAR_SYNC_PLOOP` fires 4x per kernel (once per p
+iteration). 4 x 15 = **60 cycles** against a ~270,000-cycle kernel = 0.02%. No direct-cost
+story works.
+
+**And the amplification story I proposed is contradicted by data.** The claim (12:05, 12:30)
+was that the staircase pushes cores outside the ~10-15 cyc MSHR merge window, collapsing
+coalescing for the whole iteration. That predicts a large merge-degree gap between A and GB0.
+Measured from `group_merge_profiling`:
+
+| interval | A reqs | A degree | GB0 reqs | GB0 degree | ratio |
+|---|---:|---:|---:|---:|---:|
+| 60k->70k | 234449 | 4.97 | 268537 | 5.32 | 1.07x |
+| 50k->60k | 49900 | 3.68 | 62334 | 3.42 | 0.93x |
+| 40k->50k | 104485 | 1.61 | 116548 | 1.59 | 0.98x |
+
+**Merge degree is the same within 7%, and moves the wrong way in 2 of 3 intervals.** GB0's
+higher request count is a consequence of running faster, not a cause.
+
+**What survives:** removing `GBAR_SYNC_PLOOP` is worth ~18 pp in iteration 1 (measured,
+reproducible). It is NOT explained by barrier latency and NOT by coalescing.
+
+**What I do not know:** `GBAR_PLOOP=0` removes THREE things per iteration -- the release
+staircase, the `sfence.vma` request-sent fence, and the `fence.i` -- and changes code layout,
+which matters when icache stall is 10-23% of wall-clock. No evidence isolates them.
+
+**The discriminator is already running.** X-A511N has the full barrier code (both fences, same
+layout) with only the release reverted to the staircase (`BCAST_OFF`); X-A511 is identical but
+broadcasts:
+
+| outcome | conclusion |
+|---|---|
+| X-A511N ~ A and X-A511 ~ GB0 | the staircase IS the cause |
+| X-A511N ~ X-A511 ~ A, both < GB0 | the cost is the FENCES or code layout, not the release |
+| X-A511 in between | both contribute |
+
+Note the RTL fix remains worth having regardless -- a 16-cycle serialised release is a real
+defect -- but its performance value is now unproven, and the 12:05/12:30 entries overstated
+the case.
+
+---
+
+## 2026-08-07 14:30 — all 8 barrier-fix arms running; TRACE_FORCE_OFF validated
+
+**8 arms built (47-58 min) and started 14:08-14:19.** Every define verified from the built
+`compilevcs.sh`: `GROUP_BARRIER_BCAST_OFF` on **exactly one** arm (X-A511N, the control),
+`TRACE_FORCE_OFF` on all eight, per-arm hold windows and channel counts correct. Fleet is now
+35 simulations.
+
+**TRACE_FORCE_OFF works -- and the obvious check was misleading.** File COUNTS match an old
+arm exactly (3072 trace_spatz + 1024 trace_hart), because `$fopen` creates them at time zero
+regardless. What matters is the writes:
+
+| | trace_spatz | trace_hart | growth |
+|---|---:|---:|---|
+| X-D2047 (new) | 12.6 MB | **0.0 MB** | **+0.00 / +0.00 GB/h** |
+| build_h511 (old) | 667.9 MB | 18709 MB | +1.18 / +2.39 GB/h |
+
+Confirmed the gate is really compiled: `TraceForceOff` x3 in the source, `TRACE_FORCE_OFF` in
+`compilevcs.sh`, and bender resolves spatz to **`working_dir/spatz`** (the Bender.local path
+override) not `deps/spatz` -- worth checking explicitly, since an earlier finding in this
+project was invalidated by reading a non-compiled copy of a Spatz file.
+
+**Consequence:** the 168 GB/h burn is entirely the 27 pre-existing runs, which cannot be
+retrofitted. The 8 new arms add ~0. The disk problem now shrinks as old runs finish instead of
+growing as new ones start.
+
+**Disk state:** 1326 GB free after the trace_spatz_* reclaim (574.7 GB, measured by st_blocks
+and confirmed by `df`: 857 GB -> 1.4 TB). Auto-reclaim now covers noc_trace + trace_spatz_*,
+triggers below 850 GB. `trace_hart_*.dasm` (325 GB) retained by user choice -- it carries the
+per-core timing for an intra-group skew measurement.
+
+---
+
+## 2026-08-07 15:05 — WHY the 4th response channel is worth ~0: ParityDrain only ever uses 2 ports
+
+**Measured response-port split (last `[LP]` delta):**
+
+| run | resp ch | split |
+|---|---:|---|
+| D | 2 | **92.0% / 8.0%** |
+| E | 3 | 53.3% / 37.5% / **9.2%** |
+| F | 4 | 56.8% / 38.3% / **2.3% / 2.5%** |
+
+**In F, response ports 3 and 4 carry 4.8% of all traffic between them.**
+
+**Confirmed in RTL** (`mempool_group_mshr.sv:102-104`): "beat b of ANY burst entry leaves on
+resp port **1+(b&1)**". Burst beats therefore reach ONLY ports 1 and 2 whatever
+`noc_resp_channel_num` is; higher ports receive non-burst singles only. Line 111 states the
+datapath is "hardwired for 2 beats/cycle". This is the design, not a defect -- but its
+CONSEQUENCE was never connected to the sweep result.
+
+**This explains a result the campaign measured but never explained** -- "4th response channel
+~0" (2026-08-07, F vs E). It is not contention or bandwidth: the hardware never sends burst
+beats there. It also gives the regime-dependence a mechanism: F's +1.20x post-break is the
+extra port absorbing SINGLE responses, which matters precisely when the machine is
+imbalance-limited and stragglers issue scalar traffic.
+
+**Reframes D.** At resp2 the parity law degenerates to 92/8 -- D runs on effectively ONE
+response port. That is a better account of D being the worst config (15% util) than the
+"single request channel binds first" story from 06:25, and it fits D needing hold=2047 to
+reach 38%: response-starved, not request-starved.
+
+**Caveats.** A, B, C predate the multi-port `[LP]` change and have no split data, so the
+pattern rests on D/E/F. Port indexing at resp2 (why 92/8 rather than ~50/50) is not yet
+traced.
+
+**Actionable:** widening the law to something like `1 + (b % (NumRespPorts-1))` would let
+resp3/resp4 carry bursts. Potentially larger than the barrier fix -- B vs C already showed
+**1.34x** for the one extra channel that IS used. Separate change; NOT started.
+
+---
+
+## 2026-08-07 15:40 — what an ACTUAL epilogue looks like (E), vs the store-phase dip I mistook for one
+
+E (1rdwr/resp3) at 160 periods is draining, and the signature is unambiguous:
+
+```
+cyc      util   gmax    gmin
+219000  17.9%  91.6%   0.0%
+220000  17.1%  27.6%   0.0%   <- gmax COLLAPSES
+221000  15.5%  28.7%   0.0%
+```
+
+Three things co-occur, none of which held for A's offset-42k dip:
+- `grp_min` **exactly 0.0% for 12 consecutive periods** -- groups with no FP work at all.
+- **`grp_max` collapses 91.6% -> 27.6%**. Even the busiest group runs dry. In A's dip `grp_max`
+  stayed pinned at 99-100% throughout.
+- Utilisation in **monotone decline** (22.6 -> 15.5% over 12 periods), not an oscillation.
+
+Falling `resp_per_req` (4.06 -> 2.72) fits: fewer burst loads as the kernel drains.
+
+**PARTIALLY RETRACTED 15:55.** "Monotone decline" was wrong: E bottomed at 15.5% and rose for
+four straight periods (15.5 -> 15.5 -> 16.7 -> 17.1 -> 17.3%). I called a trend on 12 points
+that happened to slope down.
+
+What DID hold, and is now stronger: `grp_max` has stayed collapsed at **27-29% for six
+consecutive periods** (from 91-99%), with `grp_min` exactly 0.0%. That is a stable new
+operating point where NO group exceeds 30% -- not a drain and not a transient.
+
+So E is in a **third regime**, not necessarily an epilogue: the same class of sustained step
+down as A's break, except here even the LEADER is capped, which is what made it look like a
+drain. Offering `grp_max` collapse as "the discriminator" from one case was the same
+over-generalisation that produced the epilogue-marker mistake at 04:30. One case is not a
+discriminator.
+
+**Consequence for E's numbers:** overall mean 36.1%, last-10 mean 19.4%. Its equal-N ranking
+figure is now contaminated by the drain and will keep sliding. E's matched-pair rows should be
+read over pre-drain periods only.
+
+Not re-adding an automatic marker to the dashboard yet -- one clean case is not enough to
+justify a heuristic that mislabelled four runs last time. Revisit when a second run drains.
+
+---
+
+## 2026-08-07 16:25 — barrier-fix control VALIDATES; broadcast arm also bit-identical so far
+
+First benchmark period of the barrier-fix arms:
+
+```
+A         opens=57000 util=8.70% cum=11.09% busy=356148 gmax=44.2%(g3) gmin=0.0%(g22)
+X-A511N   opens=57000 util=8.70% cum=11.09% busy=356148 gmax=44.2%(g3) gmin=0.0%(g22)
+X-A511    opens=57000 util=8.70% cum=11.09% busy=356148 gmax=44.2%(g3) gmin=0.0%(g22)
+X-A1023   opens=60000 util=4.71% cum= 7.88% busy=193048 gmax=27.9%(g3) gmin=0.0%(g18)
+A^        opens=60000 util=4.71% cum= 7.88% busy=193048 gmax=27.9%(g3) gmin=0.0%(g18)
+```
+
+**X-A511N (BCAST_OFF) is bit-identical to A.** The RTL change is provably INERT when disabled
+-- `EnableBarrierBcast=0` reproduces the original behaviour exactly. That is the precondition
+for interpreting anything in the other seven arms, and it holds.
+
+**X-A511 (broadcast ACTIVE) is ALSO bit-identical**, as is X-A1023 vs A^. Two readings, not
+yet separable:
+
+1. The barrier has not fired yet -- at benchmark offset 0 the cores were just released by the
+   COLDSTART software barrier; `GBAR_SYNC_PLOOP` fires at the top of the first p iteration,
+   possibly some periods later. Identical first periods would then be expected.
+2. The broadcast release changes nothing measurable -- in which case the ~18 pp GB0 gap is
+   entirely the fences or code layout, and the RTL work does not move the needle.
+
+**Discriminator:** whether X-A511 and X-A511N stay identical past the first p boundary. If
+they diverge there, the release matters. If they track each other all the way while both sit
+~18 pp below GB0, the cost was never the staircase.
+
+One period cannot separate these; waiting for ~10 before drawing anything.
+
+---
+
+## 2026-08-07 17:00 — DISPROVEN: the release staircase is NOT the cost. Six pairs bit-identical.
+
+**Result.** Every barrier-fix arm is bit-identical to its no-fix twin, exact busy lane-cycle
+counts, across four configs and three hold windows:
+
+| arm | twin | matched periods | result |
+|---|---|---:|---|
+| X-A511N | A | 5 | bit-identical |
+| X-A511 | A | 4 | bit-identical |
+| X-A1023 | A^ | 5 | bit-identical |
+| X-D2047 | D* | 3 | bit-identical |
+| X-E1023 | E^ | 3 | bit-identical |
+| X-B1023 | B^ | 2 | bit-identical |
+
+**The fix is genuinely in the build.** Verified end-to-end: RTL edited 12:45, built 13:20;
+`rel_vec_o` present in the compiled source; both modified files in `compilevcs.sh`;
+`GROUP_BARRIER_BCAST_OFF` absent from X-A511 and present 35x in X-A511N; parameter passed
+(`.EnableBcast(EnableBarrierBcast)`, line 493); `rel_vec_o` (506) and `rel_ready_i` (507)
+both connected; the per-tile mux consumes `bar_rel_vec` (313-317); tie-off present (535).
+
+**Conclusion.** If the release had gone 16 cycles -> 1, something would perturb. Nothing does.
+Combined with GB0 (removing the whole barrier construct moves 18 pp), the discriminator set at
+14:20 resolves to **outcome 2: the cost is the `sfence.vma` / `fence.i` fences or code layout,
+NOT the release staircase.**
+
+**The user's original challenge (13:50) was right and for the right reason** -- 15 cycles x 4
+firings cannot buy 20 pp. Now measured, not argued.
+
+**This DISPROVES the 12:05 root-cause entry**, which the 14:20 entry only hedged as
+"unproven". A 16-cycle serialised release IS a real defect in a rendezvous primitive, and the
+RTL fix is correct and provably inert when disabled -- but attributing the 18 pp to it was
+wrong.
+
+**Next experiment (offered, NOT started):** an ELF with `GBAR_PLOOP=1` but the two fences
+removed from `gbar_sync()`, keeping the held load. Isolates fences from barrier in software
+only, reusing an existing simulator exactly as GB0 did -- ~15 min, no rebuild.
+
+---
+
+## 2026-08-07 18:05 — CONFIRMED at the pre-set threshold: 8/8 pairs bit-identical, 69 matched periods
+
+| arm | twin | N | result |
+|---|---|---:|---|
+| X-A511N | A | 10 | bit-identical |
+| X-A511 | A | 9 | bit-identical |
+| X-A1023 | A^ | 10 | bit-identical |
+| X-D2047 | D* | 11 | bit-identical |
+| X-E1023 | E^ | 9 | bit-identical |
+| X-B1023 | B^ | 7 | bit-identical |
+| X-C1023 | C^ | 7 | bit-identical |
+| X-F1023 | F^ | 6 | bit-identical |
+
+69 matched periods, 4 configs, 3 hold windows, exact on busy lane-cycles. This was the
+~10-period threshold set at 16:25 before looking; it confirms rather than softens the 17:00
+disproof.
+
+**Barrier thread, final state:**
+
+| claim | status |
+|---|---|
+| 16-cycle serialised release exists in `mempool_group_barrier.sv` | TRUE (read from RTL) |
+| It costs ~18 pp on sp-fmatmul | **DISPROVEN** (8/8 identical) |
+| The RTL fix is correct and inert when disabled | TRUE (X-A511N == A) |
+| The ~18 pp is the fences or code layout | UNTESTED -- the remaining candidate |
+
+**Process lesson.** The user's arithmetic challenge (4 firings x 15 cycles vs a 270,000-cycle
+kernel = 0.02%) was decisive and should have been run BEFORE writing the 12:05 root-cause
+entry, not after being asked. A confirmed RTL defect plus a correlated 20 pp measurement is
+not a mechanism; the order-of-magnitude check is what separates them, and it is cheap.
+
+**Still open:** fence-isolation ELF (`GBAR_PLOOP=1`, fences removed from `gbar_sync()`,
+held load kept) -- same ELF-swap trick as GB0, no rebuild, ~15 min. NOT started.
+
+---
+
+## 2026-08-07 19:40 — the drift that matters is INTER-GROUP (4x), not intra-group (0.14%)
+
+**User's idea:** count retired instructions per core from the benchmark start; compare within
+and across groups to measure drift. Implemented as PROBE 3. Before rebuilding, the assumption
+was checked empirically against the retained `trace_hart_*.dasm` files.
+
+**Assumption holds intra-group, with one systematic exception:**
+
+```
+hart 0x001-0x00f   55,513 - 55,591     spread 78 instructions (0.14%)
+hart 0x000         58,698              +3,185
+```
+
+15 of 16 cores agree to **78 instructions**. The outlier is **core 0 of each group** (group 1
+tile 0 = 57,830; group 5 tile 0 = 58,739) -- `gbar_setup` runs only on
+`(cid % cores_per_group)==0`. A constant setup offset, not drift; exclude tile 0 or tolerate
+a known baseline.
+
+**Inter-group is 4x, and this is the finding:**
+
+```
+group  0  58,698     group 33  47,876
+group  5  58,739     group 63  35,584
+group  1  57,830     group 50  15,217
+                     group 17  14,654   <- 4.0x less work than group 0
+```
+
+**75% spread.** Same wall-clock, quarter the instructions.
+
+**It is the same ratio as `grp_max` ~99-100% / `grp_min` ~15-20%** reported all session. What
+was read as INSTANTANEOUS utilisation imbalance is CUMULATIVE divergence: the low groups are
+not momentarily idle, they are permanently far behind.
+
+**Reframes the alignment question.** The p-loop barrier synchronises WITHIN a group -- where
+cores are already aligned to 0.14%. It cannot touch the 4x spread BETWEEN groups, because the
+group barrier is per-group by construction. The intra-group alignment theorised about all
+session is already near-perfect; the imbalance that matters is inter-group and entirely
+unmanaged. This is the more likely home of the 18 pp than anything intra-group.
+
+**On `fpu_busy` as an ungated alternative (user):** correct, and PROBE 2 already works that
+way (`fu_core_cum` accumulates unconditionally, ~0 before the kernel). Instruction count adds
+scalar progress -- a core spinning at a barrier shows zero `fpu_busy` but still advances its
+PC. Different questions; keep both.
+
+## 2026-08-08 — quarter-load experiment (16 of 64 groups active)
+
+**Purpose.** Separate "the 8x8 hardware/NoC degrades" from "the 8x8 workload
+scaling degrades". User's idea. Also re-tests the group barrier with 16 fully
+populated groups (avoids the >32-group wake-up path entirely).
+
+**Implementation.**
+- `main.c`: added `ACTIVE_GROUP_DIV` (default 1 = no-op), `active_groups =
+  NUM_GROUPS / ACTIVE_GROUP_DIV`. The surrounding scaffolding (`active_cores`,
+  `is_core_active` guarding lines 370/387/402/416, unconditional
+  `mempool_barrier(num_cores)`) already existed, so inactive cores already fall
+  through the barriers correctly -- no other source change needed.
+- Data regenerated at M=512 (`script/gen_data.py --cfg` with M:512). Needed:
+  M=2048 with 16 groups would give each core 8 rows x 512 cols = 4x the per-core
+  work (~57 h run). M=512 gives 8 rows x 128 cols -- byte-identical per-core work
+  to the full 1024-core runs, ~180k cycles.
+- Built with `EXTRA_DEFINES=-DACTIVE_GROUP_DIV=4` -> `hardware/matmul_quarter.elf`
+  (2.2 MB vs 5.35 MB).
+
+**Tree restored.** gen_data.py writes `data/data_gemm.h` IN PLACE, and the build
+overwrites `software/bin/.../sp-fmatmul-opt-burst-merge` -- both were restored.
+Verified: restored ELF is 5352096 bytes with main at 80000e08, and a full `-D`
+disassembly diff against the pre-edit dump shows ONE differing line, in
+`.debug_info` (line-number shift from the 9 added comment lines). Not loaded, not
+executed => the ACTIVE_GROUP_DIV edit is functionally inert. (md5 differs for the
+same debug-info reason; md5 alone would have been misleading here.)
+
+**Run.** build_quarter, simv symlinked from build_h511 (= VCS11 = A/511, the
+comparison baseline). No RTL rebuild.
+
+**Result (validation).** Work-split printf confirms the arithmetic:
+`N, P, m_start, m_end, p_start, p_end = 512, 512, 0, 8, 0, 128` -> 8 rows x 128
+columns per core, byte-identical per-core work to the full 1024-core runs. err=0.
+
+CMS WARN fires (1066 by cyc 10k) but is BENIGN -- baselines emit far more
+(VCS11 12224, GBAR0 8694, A1023 212270). The warnings are STUCK_REQ from
+group-31 cores (hart 0x1f0, INACTIVE under DIV=4) on addr 0x00381000 = bank_row
+224 / group 16 / tile 0, a normal data address, age ~1070. Inactive cores still
+run the common startup path including mempool_barrier(num_cores); 1024 cores
+serialising on one shared location parks requests >1000 cyc by construction.
+
+NOTE for analysis: the DMA phase is 1/4 the size, so this run opens its
+benchmark region EARLIER than cyc 57,000. Compare at benchmark-RELATIVE offsets,
+never absolute cycles.
+
+**Result (perf).** pending.
+
+**Status.** running. NOT a "4x4 equivalent" -- the L1 address interleave is
+hardware, so the 16 active groups still fetch 3/4 of their data from groups with
+no active cores. It tests congestion-limitation and barrier behaviour, nothing
+about 4x4 parity. True 4x4 parity would need arch.ld.c restricted to
+bits[13:12]==0, and even then groups 0-15 are a 2x8 mesh strip (group index =
+NumY*gx+gy), not a 4x4 block.
+
+## 2026-08-08 — .dasm reclaim (user: "go with opt1")
+
+**Situation.** 435 GB free (94 % used) and falling ~10-25 GB/h. The auto-reclaim
+was healthy (~22 GB/pass, well above its 5 GB escalation floor) but only swept
+noc_trace + trace_spatz_*. The two untouched consumers had grown to 1.2 TB of GUI
+waveforms (unreclaimable while the 4 GUI sims hold them open) and 756 GB of
+per-core .dasm.
+
+**Action.** Truncated all .dasm. 48,640 files, every one of them open by a live
+sim, so all were TRUNCATED and none unlinked -- rm would have freed nothing since
+the writer keeps the inode and keeps filling it.
+
+**Result.** 756.7 GB freed in 206 s. Free space 435 GB -> 1,142 GB (94 % -> 84 %).
+No run stopped, disturbed, or errored; all 46 still report err=0.
+
+**Made durable.** Added `t.endswith('.dasm')` to the auto-reclaim's live-file
+sweep so it cannot silently regrow, and corrected the reclaim message, which
+still said "noc_trace files".
+
+**Restarted the loop rather than editing under it.** The running instance was
+executing the old code and bash reads scripts incrementally by byte offset, so an
+in-place edit of a live script can make it resume at a wrong position. Stopped
+the old monitor, validated the new script (bash -n plus a compile() of the
+extracted python heredoc), and started a fresh one.
+
+**What was given up.** Only the historical per-core traces. Everything analytical
+that needed them is already extracted -- barrier arrival cycles, the 541-vs-
+156,576 intra/inter-group measurement, the matmul_8xVL live-PC identification --
+and re-deriving would need a rerun regardless, since every sim is long past those
+windows.
+
+## 2026-08-08 — quarter-load retraction + grp_max spread finding
+
+**Purpose.** Routine monitoring showed the quarter-load run (QTR) sitting at util
+1.65-2.01% raw with grp_min=0.0% on an *active* group. Checked whether that was the
+end-of-kernel drain the doc had already concluded it was.
+
+**Implementation.** Sampled the QTR [FPU] trajectory across its whole run and the same
+grp_max/grp_min fields on XA1023 and IR2 through their collapses. No RTL or SW change;
+read-only log analysis. Doc + dashboard updated.
+
+**Result.**
+
+1. RETRACTED: QTR's decline is a straggler tail, not a drain. It bottomed at ~7% per
+   active core and has held flat there 162,000 cycles (longer than its healthy phase),
+   still retiring MACs (72.3% done at cyc 180k -> 86.7% at 380k). The "ran its ENTIRE
+   kernel at 57-69%" and "+15.5 pp whole-kernel" claims are withdrawn; the latter was
+   measured at offset 150k, inside the healthy phase. Fourth window-too-short call on
+   this campaign.
+
+2. NEW: grp_max is pinned at ~100% through every collapse sampled -- XA1023 (util
+   40.6-51.3%, grp_max 92.5-100%), IR2 (util 52.9-75.7%, grp_max 99-100%), QTR
+   (util 12.7-55.0%, grp_max 94.8-99.6%). The mean falls 30-45 pp; the max never
+   moves. Rules out any fabric-wide shared ceiling as the cause and bounds what the
+   channel-width / remap / hash sweep can buy: those arms move grp_min only.
+
+3. The two loads are different imbalances: full load is rate skew (grp_min 5-7%, work
+   remains), quarter tail is completion skew (grp_min exactly 0.0%, work exhausted).
+   Earlier framing of QTR as direct evidence for the full-load thesis conflated them.
+
+**Status.** Docs (docs/scaleup/fpu_util_per_period.md) and the dashboard artifact both
+updated. All 46 runs still live, err=0.
+
+## 2026-08-08 — group utilisation is rotation, not a fixed slow set
+
+**Purpose.** Follow-up to the grp_max finding: are the high- and low-utilisation
+groups always the same set, or does the pattern move over time?
+
+**Implementation.** Read-only. (1) Tracked the identity of grp_max/grp_min per period
+across all runs. (2) Split g0's idlest-share by phase at util=20%. (3) Rebuilt the
+FULL 64-group distribution from [BP] kind=bank_resp handshakes summed per group over
+41 periods of XA1023's active phase, and measured per-group rank stability.
+
+**Result.**
+
+1. Fully dynamic. Mean per-group rank std-dev 17.9 (18.5 = pure shuffle); 0/64 groups
+   with std-dev < 5; total work over the 40k window max/min = 1.36x. Instantaneous
+   spread is 100% vs 5%, integrated spread is 1.36x. Corroborated by the extremes:
+   55/64 groups ever busiest in XA1023, 64/64 ever idlest in v9.
+
+2. CORRECTS the earlier g0 claim from the same day. "g0 idlest in 44-71% of periods"
+   is a tail artifact: 0-1% of active periods vs 92-99% of tail periods. g0 finishes
+   first and then sits at zero. No structurally disadvantaged group exists.
+
+3. SCOPED the grp_max claim: pinned ~100% DURING the collapse; falls to 26-29% in the
+   post-collapse tail; never reaches 99% at all in the hold=255 runs.
+
+4. Two spread regimes, selected by the MSHR hold window. Controlled pair v9(255) vs
+   vcs11(511), identical otherwise: 511 peaks 71% then collapses to ~13%; 255 stays a
+   flat 26-32% and never collapses. Equal-N 28.1 vs 26.1 -- 255 trades the peak for
+   stability, it does not fix the collapse.
+
+**Open / flagged.** Tension with the recorded inter-group-imbalance thesis (barrier
+arrival 541 -> 156,576) which is arrival timing, not work rate. 1.36x over 40k cycles
+does not obviously yield a 156k arrival spread. Flagged in the doc; thesis should not
+be quoted as settled until closed.
+
+**Status.** docs/scaleup/fpu_util_per_period.md + memory updated. All 46 runs live,
+err=0. No RTL/SW/config changes.
+
+## 2026-08-08 — split x remapping 2x2 completed (BR2 reached its collapse)
+
+**Purpose.** BR2 (B split + noc_router_remapping=2, hold 1023) passed the offset where
+its control collapsed, making the comparison legitimate and closing the 2x2 against
+A^/B^/IR2.
+
+**Implementation.** Read-only comparison at matched benchmark offsets.
+
+**Result.** Plateau (mean util, offsets 28-36k): A/remap0 73.1, A/remap2 85.2,
+B/remap0 73.2, B/remap2 77.3. Without remapping the splits are indistinguishable —
+the A-vs-B difference is entirely an interaction with remapping, which is worth 3x
+more on the A split (+12.1 vs +4.1 pp). At the trough the sign inverts: remapping
+costs A 2.3 pp of floor and buys B 8.7 pp. BR2 onset offset 37k vs IR2 38k (same
+event), depth 27.6 vs 52.9 (25 pp deeper), recovery under way but not yet comparable.
+
+**Caveat recorded.** A^ swings 20 pp across the plateau window, so +12.1 is the least
+certain number in the table.
+
+**Status.** docs/scaleup/fpu_util_per_period.md updated. All 46 runs live, err=0.
+
+## 2026-08-09 — BR2 settled: B split + remap=2 is the worst 2x2 cell
+
+**Purpose.** BR2's recovery flattened (43.1% at offsets 50k/51k/52k), making the shape
+comparison against IR2 legitimate.
+
+**Result.** A split beats B split at remap=2 on plateau (85.2 vs 77.3), trough (52.9 vs
+27.6) and recovery (72.6 vs 41.5, 9-period window). Permanent loss from pre- to
+post-collapse plateau: IR2 -10.2 pp, BR2 -35.4 pp — 3.5x worse. Onset timing matches
+(offset 38k vs 37k), so remapping does not delay the collapse on either split; the
+damage is entirely in the recovery.
+
+**Guidance.** With remapping on, use the A split. At remap=0 the splits are
+indistinguishable (73.1 vs 73.2 over 409 periods), so the B split's only effect is to
+waste the remapping.
+
+**Status.** docs/scaleup/fpu_util_per_period.md updated. BR2 has served its purpose;
+the cell needs no longer run. All 46 runs live, err=0. FG511 (per-group [FPUG] probe)
+still building.
+
+## 2026-08-09 — Probe 3 live: intra drift flat, inter drift grows 10x in 7k cycles
+
+**Purpose.** Answer whether the core-drift analysis has produced anything usable.
+
+**Implementation.** Read-only. Found that the [FPUG] rebuild also pulled in Probe 3
+(insn_drift), which is present in current tb_fpu_util.svh but in none of the 46 older
+builds. Analysed FG511's 8 benchmark periods.
+
+**Result.** intra-group retired-instruction drift is FLAT at ~32-38 (worst group 59-73);
+inter-group drift grows 63 -> 617 (10x) over 7,000 cycles while work per core grows 7.5x,
+so inter drift as a share of work rises 3.3% -> 4.3%. The group barrier holds cores
+within a group and nothing holds groups together — measured directly, in retired
+instructions, on a live run rather than inferred from truncated .dasm traces.
+
+Also reconciles the rotation-vs-imbalance tension: rotation is instantaneous rate,
+drift is the integral; a group can take turns being busiest while cumulatively falling
+behind. Both stand.
+
+**Caveats recorded.** 8 periods, one run, pre-collapse. core_spread (cycles) is too
+noisy to use for this; insn drift is the right instrument.
+
+**Status.** docs/scaleup/fpu_util_per_period.md updated. FG511 reaches its collapse
+window (offset 44,000) in ~36 periods, which discriminates drift-as-cause from
+drift-as-symptom. All runs live, err=0.
+
+## 2026-08-09 — disk: 101 GB recovered from a deleted-but-open WLF; prune option retracted
+
+**Purpose.** Free disk without stopping any productive run. Auto-reclaim yield had decayed
+to ~23 GB/pass and the post-reclaim floor was drifting down ~5 GB/cycle.
+
+**Retracted first.** An earlier option ("prune old build dirs, ~85 GB") was an estimate, not
+a measurement, and is WRONG: every build_* dir is held open by a running process (checked via
+/proc/PID/cwd and open fds). Prunable total is 0 GB. Three dirs are additionally symlink
+TARGETS for other builds (build_fpug511, build_h511, build_pa511) — deleting those would kill
+live runs even though they look idle.
+
+**What the check actually found.** 507 GB in DELETED-but-still-open files, invisible to du
+because the inode is unlinked but the space stays charged until the holder exits:
+  pid 806316   100.9 GB  build_s1_4/vsim.wlf        (this tree, Jul 26, cwd also deleted)
+  pid 3822811  406.1 GB  TeraNoC_ori/.../vsim.wlf   (OTHER TREE — not touched)
+plus ~26 GB of deleted noc_trace/events.csv held by four live runs.
+
+**Action, on the user's explicit instruction.** Killed pid 806316 after re-verifying identity
+(cmdline is vsimk, cwd is build_s1_4 in this tree, holds the expected deleted WLF, pid is not
+in any tracked *.pid file). Ignored SIGTERM, needed SIGKILL; parent vish already gone.
+Recovered exactly as predicted: 732 GB -> 832 GB free. Fleet intact afterwards — 57 sim
+processes, 9 GUI sessions, build_2 unaffected.
+
+**Left alone.** pid 3822811 (406 GB) is in TeraNoC_ori, covered by the standing rule that
+other trees' processes are not to be touched. It remains the largest recoverable item.
+
+**Method worth reusing.** `du` cannot see deleted-but-open space. To find it:
+  for p in $(pgrep -u $UID -f 'vsimk|simv'); do ls -l /proc/$p/fd | grep '(deleted)'; done
+and size each with `stat -Lc %s /proc/$p/fd/<fd>`.
+
+## 2026-08-09 — disk: 512 GB total recovered; TeraNoC_ori GUI session killed with data rescued
+
+**Second kill, on the user's explicit instruction.** pid 3822811 — a parked QuestaSim GUI
+session in TeraNoC_ori/TeraNoC_spatz (terapool_spatz4_fpu, sp-fmatmul-opt), started Jul 28,
+idle 11 days (0 CPU jiffies over a 10 s sample), holding a DELETED 406 GB vsim.wlf. Unlike
+pid 806316 it was ATTACHED — pts/42 alive, parent vish alive, X display forwarded — i.e.
+somebody's live session, not an orphan. Killed only after the user confirmed.
+
+**Data rescue BEFORE the kill — the part that matters for next time.** Its build_3 directory
+was already gone from the filesystem; all 280 non-WLF files existed ONLY as deleted-but-open
+descriptors and would have been destroyed permanently by the kill. Copied 279 files (5.2 GB,
+0 failures) out via /proc/PID/fd to
+  TeraNoC_ori/TeraNoC_spatz/hardware/build_3_rescued/
+including trace_fpu_fleet.log (26 MB, the [FPU] series) and the full per-core .dasm set
+(278 files, hart 0 = 103 MB), plus the console stdout from /tmp/VSOUTv3SLKh. There was NO
+QuestaSim `transcript` among the open fds — it had been closed and went with the directory;
+the stdout capture is the nearest equivalent.
+
+**Result.** 732 GB -> 832 GB (first kill) -> 1,244 GB free. Fleet intact: 55 sims, 6 GUI
+sessions, all err=0, both wanted GUI waveform runs kept. ~5 days of headroom at ~100 GB/h.
+
+**Measurement gotcha, cost me a wrong statement.** df 3 s after the kill still read 840 GB and
+I reported "only 5 GB freed". The kernel releases a 406 GB unlinked file's blocks
+ASYNCHRONOUSLY; it settled at 1,244 GB moments later. Wait and re-measure before concluding a
+large unlink did not work.
+
+## 2026-08-09 — QUARTER finished: first completed run, whole-kernel 17.60 % per active core
+
+**Result.** [FPU FINAL] busy=144,504,632 / 3,283,939,328 lane-cycles over 801,743
+benchmark cycles = 4.40 % of the full 1024-core fleet, 17.60 % per ACTIVE core.
+
+**Significance.** QTR's cum read 63.6 % at offset 150,000 (healthy phase) and the doc
+once recorded that as a whole-kernel figure. True whole-kernel is 17.60 % — the
+healthy-phase number overstated it 3.6x. Confirms the straggler-tail retraction and
+establishes the rule: a cum quoted before a run ends is an upper bound, not a result.
+
+**Work-done metric calibrated for the first time.** At completion it must read 100 %;
+it reads 107.7 % (excess 10,286,904 lane-cycles = non-MAC FPU work: epilogue,
+writeback, setup FP). That breaks the +-5 % tolerance set earlier today. Correction is
+NOT applied fleet-wide — 7.7 % is measured on the quarter-load arm and may not transfer
+to full-load runs. Every "% done" is an upper bound with ~8 % headroom; re-calibrate per
+config as arms finish.
+
+**Status.** 45 headless arms + 5 per-group arms still running, err=0. QTR's monitor
+completed and is retired.
+
+## 2026-08-09 — TESTE completes; per-core throughput is invariant to fleet size
+
+**Purpose.** Get a second whole-kernel number so the plateau-vs-throughput question
+rests on more than one completed run.
+
+**Implementation.** No RTL change. Analysis only, plus a new "Runs that actually
+finished" panel in the dashboard generator (`gen_util_artifact.py`) that scans every
+arm's log for `[FPU FINAL]` and derives active cores from `UTIL_SCALE`, so it will pick
+up VCS11 and any later finisher without editing.
+
+**Result.**
+
+    run     active cores   benchmark cycles   whole-kernel        plateau
+    TESTE      1024            801,263        17.66%              34.4%
+    QTR         256            801,743         4.40% fleet        65.0%
+                                              17.60% per core
+
+Per-core work is byte-identical (both print `m 0..8 x p 0..128`). The two differ by
+0.06% in completion time with the quarter-load run marginally slower, so **aggregate
+NoC load is not what limits per-core rate**. QTR is not handicapped by its group draw
+— its active groups are the fastest 16 of 64 in the matching full-load run (83.6% vs
+59.4%; 1 of the 21 slow groups). The control cuts load but not distance, so a
+locality-limited explanation survives and a bandwidth-limited one does not.
+
+The work-done over-read is +7.7% (QTR) and +8.0% (TESTE) — transferable across a 4x
+fleet-size and 4x problem-size difference, so that column can be divided by ~1.08
+rather than read as an upper bound. Earlier caution that it might not transfer is
+withdrawn.
+
+**Correction.** `[FPU] bench cyc=` is an *absolute* count and the benchmark opens at
+cyc=56,000 on these builds. An earlier status report read FGGB0's absolute 87,000 as a
+benchmark offset and called the barrier-ablation test ready; it is at offset 31,000,
+13 periods short. The pre-barrier baseline is now measured over 31 periods instead of
+17 and firmed to d_intra = -3.7 (was -2.9).
+
+**Status.** Doc updated (`docs/scaleup/fpu_util_per_period.md`), dashboard republished.
+VCS11 at bench 846 would be the third completed run and the first full-load repeat.
+
+## 2026-08-09 — A completes: the plateau ranking has a confirmed inversion
+
+**Purpose.** Get a second full-load completion so the plateau-vs-throughput question is
+settled by measurement rather than by trend.
+
+**Result.** A finished at 866,235 benchmark cycles / 16.52% whole-kernel.
+
+    arm  rank  plateau   benchmark cycles   whole-kernel
+    E       7    34.7%            801,263         17.66%
+    A       3    46.9%            866,235         16.52%
+
+**A is 8.1% slower than E on a plateau 36% higher.** Same kernel, same load, both
+completed — not a bound, not a trend. The equal-N ranking's third-place arm is worse at
+finishing the kernel than its seventh-place arm.
+
+Ten of the eleven arms already past E's cycle count rank *below* E, so the ranking is
+right about those; the damage is one entry near the top, which is the worst place for
+it since that is where a "configuration to keep" would be chosen from.
+
+**Correction.** The work-done over-read is +7.7 / +8.0 / +9.2% across the three
+completions, a 1.5 pp band — not the 0.3 pp two points suggested. Divisor ~1.083 with
+about +/-0.8 pp residual. The earlier "divide by ~1.08" claim is revised, not withdrawn.
+
+**Also.** `gen_util_artifact.py` gained a completed-runs panel and a warning box above
+the ranking listing arms already beaten by a finisher; both are computed, so later
+completions appear without an edit. Two bugs found and fixed while building it: a
+line-by-line substring scan over 48 multi-GB logs (now gated on a `[UART]` prefix test,
+112 s -> normal) and a mangled `UART_RE` that could never match.
+
+**Status.** Doc and dashboard updated and republished. GBAR0's barrier ablation is
+recorded as unresolved — +16.8 pp mid-window, but decaying across every later window,
+which is exactly the profile this entry shows to be untrustworthy.
+
+## 2026-08-09 — 4x4 performance regression check: CONFIRMED, 3.5x slower
+
+**Purpose.** The 8x8 scale-up campaign changed a lot of RTL. Does the current tree still
+reach the utilisation the 4x4 configuration used to? A performance-bug check, not a sweep.
+
+**Method.** Stock `terapool_spatz4_fpu` (256 cores / 16 groups), shape **256x512x256** —
+the documented high-utilisation point. No knob overrides: the point is to measure the
+shipped 4x4 configuration on today's RTL.
+
+    reference (2026-08-01, 22-shape GEMM sweep)   94.1% util, 34,821 cycles
+    current tree, 7 benchmark periods             ~34-35% util, flat
+
+**Interim result: a large shortfall, and it is not an instrument artifact.** The same
+`[FPU]` probe reads 90.9% on 8x8 FGGB0 and 87.2% on FGIR2, so it has no trouble reading
+high. The work split is correct (`dim_group` 16, `split_m_count` 2, 8 p-splits, all 256
+cores active, denominator 1,024,000 lane-cycles), so this is not a degenerate config.
+
+**The failure mode differs from the 8x8 collapse.** At 4x4 the distribution is TIGHT --
+grp_max 42%, grp_min 29%, all 16 groups uniformly slow. That is the signature of a shared
+bottleneck, not the dispersion the 8x8 work has been chasing (grp_max ~100%, grp_min ~5%).
+Normalised per group, `bankfull_bypass` is **143 per group per 1000 cyc at 4x4 vs 46 at
+8x8 — 3x higher**, which points at MSHR bank saturation.
+
+**A hypothesis raised and KILLED on dates.** The 4x4 config ships
+`group_mshr_hold_window_burst=255` while 8x8 ships 1023, and hold=255 is the campaign's
+"narrow regime" (tight spread, flat ~26-32%) -- an appealing explanation. It is wrong:
+`1ff73c9` set 255 on **2026-07-31 22:50**, and the 94.1% sweep is **2026-08-01**. The
+reference was measured with hold=255 already in place. Not the cause.
+
+**So the regression window is Aug 1 -> Aug 9**: 20 commits plus five uncommitted RTL
+files (`mempool_group_barrier.sv` +73, `mempool_group.sv` +71, `mempool_system.sv` +39,
+`mempool_tile_rw_demux.sv` +22, `ctrl_registers.sv` +16). The uncommitted barrier-broadcast
+work is the top suspect: largest, most recent, and developed/validated only at 8x8. Weak
+supporting signal -- the barrier probe reads `bar_max=40` at 4x4 but **0** on all three
+8x8 arms including non-ablated FG511 (semantics not yet established; noted, not
+interpreted).
+
+**Pending: the cycle count**, which is instrument-independent and therefore decisive.
+Parity = finishing near cyc 48,700 (kernel opened at ~14,000; reference 34,821 cycles).
+
+**Next step if confirmed:** bisect. One build is ~10 min at 4x4, and the most informative
+first split is HEAD-without-uncommitted-changes vs the current tree -- it halves the
+suspect space in a single build. Use a git worktree so the live 8x8 campaign's tree is
+untouched.
+
+**Tree hygiene during this work** (all shared state restored, verified):
+`gen_data.py` hardcodes `data/data_gemm.h`, so the 8x8 shape was backed up, the 4x4 shape
+generated, the ELF built and saved to `hardware/matmul_4x4_256x512x256.elf`, and the 8x8
+shape restored. The shared `software/bin/` ELF was rebuilt back to the 8x8 shape. The
+three `hardware/generated/*.sv` mesh packages were regenerated to 4x4 for the build and
+restored to 8x8 by a trap on build exit.
+
+**CLAUDE.md corrected.** It claimed `floo_terapool_noc_pkg.sv` is "already committed and
+valid for all flavors". Both halves are false -- it is untracked, and it encodes the mesh
+(`GroupX1Y0` = NumY: 8 at 8x8, 4 at 4x4). Skipping floogen across a mesh change fails at
+elaboration with `perimeter_map_pkg was generated for a different mesh`, which cost one
+wasted build here. Also noted: floogen needs `verible-verilog-format` on PATH, and the
+host's python3.9 is too old (a python3.11 venv works).
+
+### 4x4 regression: suspect list narrowed before the bisect (same session)
+
+Ruled out without spending a build:
+
+| candidate | why it is out |
+|---|---|
+| `group_mshr_hold_window_burst=255` | `1ff73c9` set it 2026-07-31 22:50; the 94.1% reference is 2026-08-01, so it was already in place |
+| `4971762` L2-interleave derivation | its own comment: "At 4x4 there is one channel per group, so this is 16 and nothing changes" |
+| barrier-broadcast sizing | the only group-count symbols in the uncommitted diff are `NumTilesPerGroup`, which is **16 at both meshes** |
+| barrier on the hot path | `bar_rel` fired once (+16) in the first benchmark period and has been +0 for every period since |
+
+Prime suspects, both **2026-08-03**, both after the reference, both touching what the
+counters implicate (`bankfull_bypass` 3x higher per group than at 8x8):
+
+- **`56a59b4` mempool_group_mshr: replace three serial chains on the critical path with
+  parallel selection** — a rewrite of MSHR selection.
+- **`67cc357` mempool_group: reserve a group-barrier word window and stop data aliasing
+  it** — adds a check on EVERY intra-group different-tile access, re-routing any whose
+  word field falls in the reserved window. A uniform per-access cost would slow all 16
+  groups equally, which matches the observed tight distribution (grp_max 42 / grp_min 29).
+  Its L1 truncation to 3.75 MB looks harmless: the dataset is 1.25 MB.
+
+**Bisect design note.** `67cc357` also changed `software/runtime/arch.ld.c`,
+`runtime.mk` and the matmul kernel. The 4x4 ELF under test was built from today's
+software, so the regression may be software-side. A bisect must move RTL and software
+together or it will chase the wrong half.
+
+### 4x4 regression: RESULT — 3.5x slower than the 2026-08-01 reference
+
+    [UART] The execution took 121848 cycles.
+    [FPU FINAL] busy=35,975,228 of 124,400,640 lane-cycles over 121,485 benchmark cycles
+                -> util=28.92%   (1024 lanes = 256 cores x 4 FPU)
+
+                        reference (2026-08-01)     today     ratio
+    benchmark cycles                34,821       121,485     3.49x
+    FPU utilisation                   94.1%        28.92%    3.25x
+
+**The current tree takes 3.5x as long for the same kernel on the same configuration.**
+The two ratios agree (3.49x on cycles, 3.25x on utilisation) — they measure the same
+thing from opposite ends, so this is not an artifact of either metric.
+
+**The work is correct; only the time is wrong.** Work-done reads **107.2%** of the
+33,554,432 MACs, inside the +6..+19% band the eight 8x8 completions show. The kernel did
+the right arithmetic. Combined with the correct work split (all 256 cores, `dim_group`
+16, 2 m-splits x 8 p-splits), this is a slowdown and not a miscount or a broken workload.
+
+**Ruled out** (details in the entry above): the instrument (same probe reads 90.9% on
+8x8), the hold-window retune (predates the reference by 8 hours), fabric-wide dispersion
+(the distribution is TIGHT — grp_max 38 / grp_min 28, all 16 groups uniformly slowed,
+which is a shared-resource signature, not the 8x8 collapse pattern), and the
+barrier-broadcast work (`NumTilesPerGroup` is 16 at both meshes; `bar_rel` fired once in
+the entire run).
+
+**Leading indicator:** `bankfull_bypass` runs **210 per group per 1000 cycles against 46
+at 8x8 — 4.6x higher**, pointing at MSHR bank saturation. (An earlier note in this file
+said 3x; that came from a single early period. The steady-state figure is 4.6x.)
+
+**Regression window Aug 1 -> Aug 9.** Two suspects, both 2026-08-03, both touching what
+the counters implicate:
+
+- `56a59b4` mempool_group_mshr: replace three serial chains on the critical path with
+  parallel selection — a rewrite of MSHR selection.
+- `67cc357` mempool_group: reserve a group-barrier word window — adds a check on EVERY
+  intra-group different-tile access. A uniform per-access cost matches the uniform
+  slowdown exactly.
+
+**Next step: bisect.** ~10 min per 4x4 build. Move RTL and software together — `67cc357`
+also changed `arch.ld.c`, `runtime.mk` and the matmul kernel, so an RTL-only bisect would
+chase the wrong half. Use a git worktree to keep the live 8x8 campaign's tree untouched,
+and remember `hardware/generated/*.sv` must be regenerated for 4x4 and restored after
+(see the corrected CLAUDE.md note).
+
+**Tree state after this work: clean.** `data_gemm.h` back to 2048x512x512, shared ELF
+rebuilt to the 8x8 shape, the three mesh packages restored to 8x8 by the build trap
+(verified `NumMeshX = 8`). The 4x4 ELF is preserved at
+`hardware/matmul_4x4_256x512x256.elf` and the build at `hardware/build_4x4reg/`.
+
+## 2026-08-10 — CRITICAL: the group barrier has never worked at 8x8 (address-field bug)
+
+**Found by the user from the build_4 waveform**, then confirmed against the RTL and the
+whole campaign's telemetry. This invalidates the premise of much of the 8x8 sweep.
+
+### Root cause: one hardcoded shift
+
+`software/apps/spatz_apps/sp-fmatmul-opt-burst-merge/kernel/sp-fmatmul.c:97`
+
+    return ((GBAR_BASE_WORD + s) << 14) | (gbar_tgt_tile() << 6);
+
+`<<14` is the **16-group** constant. The word field sits above group|tile|bank|byte, so it
+moves when the group field widens:
+
+                            4x4 (16 grp)     8x8 (64 grp)
+    byte                    [1:0]            [1:0]
+    bank  (16/tile)         [5:2]            [5:2]
+    tile  (16/group)        [9:6]            [9:6]
+    GROUP                   [13:10]          [15:10]     <- 2 bits wider
+    word field starts at    bit 14           bit 16      <- SW still uses 14
+
+### Three consequences at 8x8, all verified
+
+1. **The barrier never engages.** The word field reads **60**, never 240-255, so the
+   re-route at `mempool_group.sv:348` never fires. The access leaves as an ordinary
+   remote load. **Evidence: `bar_rel = 0` and `bar_max = 0` in every period of all eight
+   8x8 arms checked** (FG511, FG1023, FGIR2, A, E, v10, PA511, IREMAP2). The 4x4 run
+   built today — same RTL, same software, correct field width — fires normally
+   (`bar_rel` non-zero, `bar_max = 40`).
+2. **15 of 20 (group, s) pairs target a REMOTE group.** `gbar_tgt_tile()` returns
+   `(hid & 0xF0) | tile`, carrying only `group[3:0]`; bits [15:14] of the group field
+   instead receive the word value's low 2 bits. Local only when
+   `(240+s)&3 == own_group>>4`. Targeted group = `((240+s)&3)<<4 | (own_group & 0xF)`.
+3. **Those addresses land inside live data.** `arch.ld.c` (correctly) truncates l1 at
+   `240 * 65536 = 0xF00000`; the barrier accesses go to `0x3C0000`, far below it. So
+   `gbar_setup()`'s stores to `b+4`/`b+8` write into the matmul working set — a
+   CORRECTNESS bug, masked because `MATMUL_VERIFY=0`.
+
+### The bug class was already known and fixed — in the other file
+
+`software/runtime/arch.ld.c` carries this comment and a derived stride:
+
+    /* This was written as the literal 16384, which is only correct while NUM_GROUPS is
+     * 16 -- the group field widens with the mesh (6 bits at 64 groups), moving the word
+     * field up with it. ... 16 groups -> 16384, 64 groups -> 65536. */
+    #define WORD_STRIDE (4 * BANKS_PER_TILE * NUM_TILES_PER_GROUP * NUM_GROUPS)
+
+The linker was fixed; `sp-fmatmul.c` was missed. Same constant, same root cause.
+
+### Why it produces the observed damage (the user's chain, confirmed)
+
+16 cores issue barrier loads at consecutive `tile<<6` addresses -> one MSHR bank ->
+4 ways allocate, 12 take `bankfull_bypass`. The 4 allocated are scalar entries with
+`sub_reqs_num < HoldSubsSingle=4`, so they sit in `MSHR_RESP_HOLD` for the full
+`serve_timeout` (1023 cycles, `mempool_group_mshr.sv:2756`); the 12 bypassed return
+immediately. A ~1000-cycle intra-group split, manufactured once per p-iteration, that
+nothing later re-synchronises — the group barrier that was supposed to close it is the
+very thing creating it.
+
+### What this means for the campaign's conclusions
+
+Every 8x8 result was measured with a silently dead barrier:
+
+- The "fixed slow set" being **config-dependent and not topological** now has a
+  mechanism: victim groups are selected by `((240+s)&3)<<4 | own_group&0xF`, a function
+  of the barrier struct index, not of mesh position.
+- The GBAR_PLOOP ablation arms (GBAR0/FGGB0/PGB0) compared "barrier on" against "barrier
+  off" when **both were effectively off** — they measured the cost of *issuing the dead
+  barrier's remote loads*, not of synchronising. The +16.8 pp mid-window and the 3.8 sd
+  intra-drift divergence must be re-read in that light.
+- The plateau/throughput inversion (r = +0.82, eight completions) is a real measurement
+  and stands on its own, but the *hardware* it characterises had a broken barrier.
+
+### Fix
+
+Derive the shift as `arch.ld.c` does, rather than hardcoding 14. Re-run one 4x4 (must
+stay bit-identical — 4x4 is already correct) and one 8x8 arm (expect `bar_rel > 0` for
+the first time, and a utilisation change). NOT yet applied — awaiting the go-ahead.
+
+### Fix CONFIRMED IN SIMULATION — the barrier fires at 8x8 (2026-08-10, 01:4x)
+
+First runtime evidence that the address fix works, from the relaunched fleet:
+
+    NEW (fixed kernel)   bar_rel=+8  bar_spread=21.8  bar_max=32   fpug1023, fpug511
+                         bar_rel=+7  bar_spread=22.6  bar_max=32   ihash0
+
+    OLD fleet, every distinct bar_rel value ever emitted by ANY arm:
+                         bar_rel=+0
+
+`+0` was not merely typical of the old fleet — it is the ONLY value it ever produced, in
+every arm and every period. The new fleet produces real releases with a ~22-cycle arrival
+spread. Firing occurs in the PRE-benchmark phase (cyc 32,000), as expected: `gbar_setup()`
+and the cold-start syncs run during warm-up, before the benchmark opens at ~56,000.
+
+Performance impact is NOT yet known — that needs the benchmark window. Note the open
+question this does not answer: the 4x4 regression (3.5x vs a pre-barrier reference)
+suggests a *working* barrier may be expensive, so a functioning barrier at 8x8 could make
+these arms slower than the dead-barrier ones. The old fleet, still running, is the control.
+
+### Fixed-barrier fleet: first paired data — the MECHANISM is confirmed (2026-08-10, ~04:00)
+
+Five arms with 3-6 benchmark periods each, paired against their dead-barrier twins. The
+pairing is authoritative, not name-matched: `twin_map.json` is built from the original
+generator's RUNS table (which carries the build dir per arm) plus live processes' stdout
+redirects, covering all 36 arms with 0 unpaired.
+
+    arm         n   NEW util  OLD util     d     NEW to/bf   OLD to/bf
+    fpug511     3    35.77%    34.58%   +1.19      181/0      606/546
+    ihash0      3    24.03%    28.04%   -4.00        5/0      172/634
+    pc1023      3    26.48%    28.38%   -1.90        0/0      221/862
+    xa511       6    42.42%    45.11%   -2.69      375/0      753/254
+    xa511n      5    42.77%    41.28%   +1.49      354/0      711/301
+
+**`bankfull_bypass` is ZERO in all five fixed arms**, against 254-862 in every twin. Five
+for five. This is exactly the mechanism the user derived from the build_4 waveform: the
+barrier's 16 same-group loads were leaving as REMOTE loads at consecutive addresses,
+hashing to one MSHR bank, filling its 4 ways and forcing the remaining 12 to bypass. With
+the address fixed they never leave the group and the bypasses vanish.
+
+**`mshr_timeout` falls 50-95% but not to zero** (606->181, 172->5, 221->0, 753->375,
+711->354). Consistent: those are scalar entries parked in MSHR_RESP_HOLD awaiting a
+subscriber target. Fewer stray remote barrier loads means fewer such entries; ordinary
+data loads still produce some.
+
+**Utilisation is NOT yet a result.** Mean -1.18 pp with sd 2.17 over five arms of 3-6
+periods; three arms negative, two positive. Read as "no detectable difference yet".
+
+**What it does rule out:** nothing resembling the 3.5x cost that the 4x4 regression
+suggested a working barrier might carry. An effect that size would be visible already
+rather than scattering about zero. The 4x4 regression therefore still needs its own
+explanation -- the barrier-cost hypothesis is weakened, not confirmed.
+
+### CORRECTION at 8 paired arms: bankfull_bypass does NOT always go to zero
+
+An earlier entry today said `bankfull_bypass` is "ZERO in all five fixed arms ... five for
+five". True of that sample, over-generalised. At eight paired arms it is **5 of 8**, and
+one arm moves sharply the OTHER way:
+
+    arm         n  NEWutil  OLDutil      d  NEWto  OLDto  NEWbf  OLDbf
+    fpug1023    4   39.74%   31.31%  +8.43      0    215      0    663
+    p511        4   40.56%   37.27%  +3.29    320    654      0    383
+    pc1023      4   32.39%   30.28%  +2.11      0    213      0    598
+    xa511n      7   50.15%   48.62%  +1.52    397    798      0    242
+    fpug511     5   40.82%   41.28%  -0.47    336    711      0    301
+    ihash0      5   29.56%   31.15%  -1.59     12    200      0    366
+    xa511       7   46.12%   48.62%  -2.50    434    798      0    242
+    p255        4   32.61%   37.34%  -4.73   2350   3207   1986    493   <-- 4x MORE
+
+**The exception is mechanistic, not noise.** p255 is the hold-255 arm, and sp-fmatmul.c's
+own comment predicts it: the barrier's "synchronized launches CREATE the MSHR
+bank-pressure spikes that cause bypasses". With a working barrier the cores genuinely
+launch together, and a 255-cycle hold window cannot absorb the resulting burst.
+
+So the correct statement is two-sided: the fix removes bypasses caused by **stray remote
+barrier loads** (5 arms -> 0), and can ADD bypasses caused by **genuine synchronisation**
+when the hold window is too small to buffer the aligned burst. That interacts directly
+with the hold-window result from the dead-barrier fleet (255 was fastest there) -- 255 may
+not remain the best choice once the barrier actually synchronises.
+
+Utilisation across 8 paired arms: mean **+0.76 pp**, sd 3.80, range -4.73..+8.43. It moved
+from -1.18 (5 arms) to +0.76 (8 arms), which is itself the reason not to have trusted the
+earlier figure. Still variance-dominated at 4-7 periods per arm.
+
+### Benchmark-phase MSHR counters, 15 paired arms (2026-08-10)
+
+Per 1000 cycles, opening period dropped, equal periods per pair, same simv on both sides:
+
+    arm           n |     mshr_timeout      |    bankfull_bypass
+                    |   NEW    OLD     d%   |   NEW    OLD     d%
+    xa511        10 |   526    859    -39   |     2    225    -99
+    ihash0        9 |    40    256    -84   |     0    224   -100
+    xa511n        9 |   422    846    -50   |     8    226    -97
+    fpug511       8 |   473    831    -43   |     1    232   -100
+    fpug1023      7 |     0    221   -100   |     0    340   -100
+    b1023         6 |     0    219   -100   |     0    497   -100
+    xd2047        6 |     0    129   -100   |     0    478   -100
+    c1023         5 |     0    218   -100   |     0    456   -100
+    d1023         5 |   244    584    -58   |   167    281    -41
+    bremap2       4 |     0    156   -100   |     0   1746   -100
+    e2047         4 |     0    131   -100   |     0    826   -100
+    fpug255       3 |  1376   2794    -51   |   519    350    +48
+
+    fleet mean   bankfull_bypass  46 vs 533  (-91%)   zero in 10/15 arms
+                 mshr_timeout    205 vs 483  (-58%)   zero in  7/15 arms
+
+This is the quantitative confirmation of the waveform diagnosis: with the barrier's 16
+same-group loads no longer leaving as REMOTE loads at consecutive addresses, the MSHR bank
+they were saturating is no longer saturated.
+
+**Two arms do not follow, and both are mechanistic.**
+
+  * `fpug255` -- bypasses UP 48% (350 -> 519), the only arm that worsens. Hold 255 is too
+    small to absorb a genuinely synchronised burst, so the now-working barrier CREATES bank
+    pressure the dead one could not. `p255` (since retired) showed the same before the trim,
+    so this is a property of the hold window, not a fluke. Directly threatens the
+    dead-barrier fleet's "hold 255 is fastest" result, which was measured with cores never
+    synchronising.
+  * `d1023` -- only -41%, and mshr_timeout stays at 244. It is the `rd0+rdwr1` single-channel
+    split, i.e. the least request bandwidth available to absorb any residual burst.
+
+**Caveat on the per-arm percentages:** n ranges 1-10 periods. The fleet aggregate (-91% over
+15 arms) is solid; individual d% at n<=4 (bremap2, e2047, fpug255, a2047, b2047, xe1023) are
+not. Utilisation remains variance-dominated and is NOT reported as a result here.
+
+## 2026-08-10 — RESULT: the barrier fix is worth ~+5 pp FPU utilisation
+
+15 paired arms, 5-14 benchmark periods each, same simv on both sides, opening period dropped:
+
+    arm           n  NEWutil  OLDutil    Δpp   NEWbf   OLDbf
+    e2047         6   50.68%   34.79% +15.89       0    1059
+    b2047         5   48.30%   35.78% +12.52       0    1241
+    xe1023        5   48.89%   39.60%  +9.29       0     471
+    a2047         7   43.45%   34.83%  +8.62       0     693
+    d1023        10   33.17%   26.18%  +6.99     185     151
+    xa511n       12   64.67%   58.74%  +5.93      13     228
+    c1023         8   53.54%   48.38%  +5.15       0     273
+    b1023         8   64.46%   60.13%  +4.34       0     373
+    fpug1023      9   55.86%   51.92%  +3.94       0     258
+    bremap2       6   61.13%   57.61%  +3.52       0    1119
+    ihash0       14   44.33%   41.28%  +3.06       3     203
+    xa511        14   59.65%   58.81%  +0.84       7     240
+    xd2047       12   32.53%   32.16%  +0.38       0     224
+    fpug511      10   54.89%   55.78%  -0.89       2     225
+    fpug255       8   31.01%   32.41%  -1.41    2190    2440
+
+    mean +5.21 pp   sd 4.71   sem 1.22   -> |mean| > 2*sem, distinguishable from zero
+    13 of 15 arms positive
+    bankfull_bypass  NEW 160  OLD 613  (-74%), zero in 9/15
+
+**The gains track the damage.** Arms whose twins had the most bypasses gain most (e2047 +15.9
+with old bf 1059; b2047 +12.5 with 1241; bremap2 +3.5 with 1119). Long hold windows suffered
+most from the stray remote barrier loads and recover most.
+
+**How the estimate moved, and why the earlier ones were not reported as results:**
+
+    5 arms,  3-6 periods   -1.18 pp   (sd 2.17)
+    8 arms,  4-7 periods   +0.76 pp   (sd 3.80)
+    15 arms, 5-14 periods  +5.21 pp   (sem 1.22)  <- first value larger than its own error
+
+Opening periods are startup-dominated and drag the mean down; the effect only separates once
+arms accumulate ~10 periods.
+
+**CORRECTION — the fpug255/p255 "bypasses increase" claim is WITHDRAWN.** An earlier entry
+today reported fpug255 bypasses up 48% (350 -> 519) at n=3 and attributed it mechanistically
+to hold-255 being unable to absorb a synchronised burst, citing the kernel's own comment. At
+n=8 the same arm reads 2190 vs 2440, i.e. **-10%**. The sign reversed. What survives: fpug255
+remains the fleet's outlier by absolute bypass count and is one of only two arms not gaining
+utilisation. What does not: any claim that the fix makes hold-255 worse.
+
+### CORRECTION: the +5.21 pp figure was not converged — it is now +10.50 and still rising
+
+The entry above reports the fix as worth "~+5 pp" and that number was pushed as a result.
+It was premature. The estimate has moved monotonically upward every time more data arrived:
+
+    5 arms,  3-6 periods    -1.18 pp
+    8 arms,  4-7 periods    +0.76 pp
+    15 arms, 5-14 periods   +5.21 pp   <- reported as a result
+    22 arms, 5-24 periods  +10.50 pp   sd 7.88, sem 1.68, positive in 20/22
+
+**Why it rises:** opening benchmark periods are startup-dominated and drag every arm's mean
+down. As arms accumulate periods the mean climbs. This mechanism was already noted in the
+entry above -- and the number was quoted anyway. The estimate will keep rising until arms
+reach steady state, so no point estimate is safe until then.
+
+**Correct statement for now:** the fix helps substantially and consistently (20 of 22 arms
+positive), magnitude NOT yet settled, currently ~+10 pp and still trending up. The
+defensible claims are the sign and the consistency, not the value.
+
+**Barrier cost, the one clean measurement:** fpug511 (ON) vs fpuggb0 (OFF), identical simv,
+GBAR_PLOOP the only difference -- **-6.83 pp** over 8 matched periods (sem 2.23, OFF ahead in
+6/7). Also young; same caution applies.
+
+**A hypothesis raised and REJECTED in the same breath.** Two arms (e2047, fpug511) appeared
+to fit "net gain = bypass damage removed - a constant ~6.8 pp barrier cost". Tested across
+20 arms: correlation between implied gain and the twin's bypass rate is **r = -0.26** --
+no relationship, wrong sign. The apparent fit was coincidence in a 2-point sample.
+
+**Methodology note:** `fpuggb0`'s delta against its "old twin" is exactly +0.00 because both
+run the SAME `matmul_gbar0.elf` on the SAME simv -- a self-comparison. That is a determinism
+check passing, not evidence about barriers, and it must be excluded from fleet statistics.
+
+### Outlier audit: every campaign number re-checked against the median
+
+Prompted by the GBAR0-vs-A ablation, where mean and median DISAGREE IN SIGN. All
+per-period utilisation figures in this campaign were means; means are not safe on this
+metric because a stalled period can swing util by 50 pp.
+
+| comparison | mean | median | verdict |
+|---|---|---|---|
+| fix vs old twin, 22 arms | +10.56 pp | +10.46 pp | **ROBUST** -- 0/22 arms disagree in sign |
+| barrier ON vs OFF (fixed, 8 periods) | -8.10 pp | -6.74 pp | **ROBUST** -- ON ahead 1/8; drop the biggest outlier, still -6.80 |
+| GBAR0 vs A (old fleet, 588 periods) | +1.27 pp | **-4.90 pp** | **FRAGILE -- SIGN FLIPS, do not use the mean** |
+
+**GBAR0 vs A in detail.** 10 periods of 588 supply 52% of the total delta (largest +53.8 pp).
+Distribution p25 -5.39 / p75 +6.71 / max +53.76; GBAR0 ahead in only 158/588 periods.
+Correct reading: the dead barrier is slightly BETTER than no barrier in the typical period
+(-4.90 pp median) and catastrophically worse in ~2% of periods. That bimodality is itself the
+signature of the bug -- the rare periods are where the MSHR bank-full pileup actually bites.
+A single mean hides exactly the effect being looked for.
+
+**Rule going forward:** report median alongside mean for any per-period utilisation claim, and
+treat a mean/median sign disagreement as "no result yet". Cheap to compute, and it just caught
+a stated conclusion pointing the wrong way.
+
+### CORRECTION 2: +10.50 pp is confounded with measurement window; who benefits is the real result
+
+The entry above reports +10.50 pp as the current fleet figure. It is not comparable across
+arms. Each arm was averaged over its OWN window (n = 5..40 periods), and:
+
+    correlation(window length n, measured delta) over 22 arms:  r = -0.69
+      arms n=5-9  :  7 arms, +18.78 pp
+      arms n=10-19: 12 arms,  +8.53 pp
+      arms n=20+  :  3 arms,  +0.25 pp
+
+**Why the window matters so much:** the kernel's utilisation DECAYS steeply. From the now-
+completed A/h511 run (866,235 cyc, whole-kernel util 16.52%), per-decile util is
+53.3 / 36.8 / 14.3 / 13.3 / 13.4 / 13.4 / 12.7 / 7.2 / 1.8 / 0.2 %, with 15% of the kernel
+below 1% util. A 5-period window sits in decile 1 (~53%); a 40-period window spans the
+collapse. Averaging arms measured over different windows averages different kernel phases.
+
+**Decomposing it properly** (delta at each arm's first 5 periods vs at its full window):
+
+| group | arms | delta @5 | delta @full |
+|---|---|---|---|
+| arms that benefit | 17 | +7.90 | +13.82 |
+| arms that do NOT  |  5 | -1.66 | +0.00 |
+
+Two facts, both the opposite of my first reading:
+1. For benefiting arms the gain **GROWS** with window (+7.9 -> +13.8), so the common-window
+   +5.73 pp UNDERSTATES the fix rather than debunking it.
+2. The -0.69 correlation is **selection**: the 5 non-benefiting arms (d511, fpug255, fpug511,
+   ihash0, xa511) happen to be the fastest, so they dominate the high-n bucket.
+
+**A config signature I checked and REJECTED.** All 5 non-benefiting arms are `resp=2, remap=0`
+-- but so are 8 arms that DO benefit (13 arms have that config). Not a discriminator.
+
+**A trend that survives window-matching.** Response channels, at the common 5-period window:
+resp=2 -> +3.96, resp=3 -> +6.44, resp=4 -> +15.99 pp. Monotone, and it holds at both windows,
+but resp=4 is only 2 arms -- directional, not sized.
+
+**Honest state of the fix's value:** benefits 17 of 22 arms, harms none (worst is -0.86),
+magnitude between roughly +6 and +14 pp depending on window, and NOT yet expressible as a
+single number. Whole-kernel completions on the fixed fleet are what will settle it; none yet.
+
+**Methodological rule added:** never average a per-period metric across arms with unequal
+window lengths. Match the window first, and report n alongside every delta.
+
+### 4x4 regression: prime suspect identified; ablation DEFERRED on a shared-ELF hazard
+
+**Timeline puts 67cc357 in the frame.** The 4x4 regression (121,485 cyc / 28.92% today vs the
+documented 34,821 cyc / 94.1%) is a like-for-like comparison -- same shape (256x512x256), same
+stock `terapool_spatz4_fpu`, and the 4x4 barrier is genuinely LIVE today (`bar_rel=+16`,
+`bar_max=40`; `<<14` is correct at 16 groups, which is why only 8x8 was broken). Git dates:
+
+    2026-07-30  8cc561d  barrier SW (GBAR_PLOOP) enters sp-fmatmul.c
+    2026-08-01           the 94.1% / 34,821 reference is measured
+    2026-08-03  67cc357  RTL reserves the barrier word window, stops data aliasing it
+
+So the reference ran **with barrier software but before the RTL word window existed**.
+`67cc357` is therefore a change in barrier behaviour that postdates the reference -- the
+leading suspect, ahead of 56a59b4 (MSHR selection rewrite, same era).
+
+**The decisive test is one cheap run, not a bisect:** 4x4 with `GBAR_PLOOP=0` on today's RTL.
+Recovers ~94% => the barrier is the whole 3.49x. Stays ~29% => an RTL regression independent
+of it. `build_4x4reg`'s simv and `matmul_4x4_256x512x256.elf` both survive, so it needs NO RTL
+rebuild and none of the mesh-package hazard.
+
+**DEFERRED -- and this is a hazard worth recording.** The test needs a `GBAR_PLOOP=0` ELF built
+at `config=terapool_spatz4_fpu`, and the software build has **no output-path override**:
+`hardware/Makefile:85` resolves `preload := "$(app_path)/$(app)"`, i.e. the single shared
+`software/bin/apps/spatz_apps/sp-fmatmul-opt-burst-merge`. Four `make sim` GUI runs are live,
+and **build_2 (the user's gbar511r2 waveform run) is still at `Time: 0 ps`** -- design loading,
+DPI libs, has NOT yet read its ELF, and its command line preloads that exact shared path.
+Rebuilding it now would have handed the user's run a 4x4 barrier-ablated binary. No crash, no
+error -- just a GUI run quietly showing the wrong workload for hours.
+
+Monitor armed to fire the moment build_2 emits its first `[FPU] bench` line (proof the ELF is
+consumed), after which the rebuild is safe. Ablation runs then.
+
+**Generalised rule:** `software/bin` is global and every sim preloads from it by that one path.
+Before ANY software rebuild, check for sims that have not yet reached time 0 -- a sim that is
+still elaborating will pick up whatever ELF is on disk when it finally loads. "It's only a
+software build" is exactly the assumption that makes this dangerous.
+
+### CORRECTION 3 (final for today): the right metric is cumulative util at EQUAL PROGRESS
+
+Two further errors in the entries above, both found by checking rather than by new data.
+
+**(a) "Cumulative util removes the window confound" -- WRONG as first measured.** Switching from
+per-period mean to cumulative utilisation (a ratio of sums, so outlier-immune) appeared to drop
+the confound from r=-0.69 to r=-0.14. That -0.14 was correlated against ABSOLUTE CYCLE, which is
+not a measure of progress: **the benchmark opens anywhere from ~52,000 to ~83,000 cycles**
+depending on the arm, so absolute cycle conflates boot time with work done. Against periods
+since benchmark open -- the correct yardstick -- cumulative util correlates **-0.67**, i.e. the
+confound was essentially unchanged. corr(absolute cycle, periods) is only +0.66, which is why
+the two disagreed and what exposed the error.
+
+**(b) The remaining correlation is NOT a confound -- it is the result.** Fixing the yardstick at
+period 7 for every arm, the gain STILL correlates -0.65 with arm speed. That cannot be a
+measurement artifact once progress is held constant. It means: **the arms that were already
+fastest benefit least from the fix**, which is mechanistically sensible -- the fix removes stray
+remote loads and bank-full bypass, and a fast arm had little of that damage to remove.
+
+**The three numbers, and which to use:**
+
+| method | value | status |
+|---|---|---|
+| per-period mean, each arm's own window | +11.03 pp | confounded (r=-0.69 with window) AND outlier-prone |
+| cumulative util, each arm's own depth | +10.77 pp | outlier-immune but still confounded (r=-0.67) |
+| **cumulative util @ equal progress (period 7)** | **+6.05 pp** | **use this** -- median +4.02, sem 1.44, positive 18/21 |
+
+**+6.05 pp is a LOWER bound.** K=7 is set by the least-advanced arm, so it measures only the
+benchmark opening, and the per-arm gains grow with depth. Expect it to rise as K ratchets up.
+
+**Metric rule for this campaign:** cumulative utilisation compared at equal periods-since-
+benchmark-open. Per-period means are unsafe (outliers), own-depth comparisons are unsafe
+(unequal windows), and absolute cycle is not progress (variable benchmark start).
+
+### Barrier cost on the correct metric, and a mechanism refuted twice
+
+**Barrier cost = -7.77 pp**, cumulative utilisation at equal progress (period 11),
+fpug511 (ON) vs fpuggb0 (OFF) -- same simv, GBAR_PLOOP the only difference. The trajectory is
+**monotone**, which is what makes it credible:
+
+    p1 -2.33  p2 -2.64  p3 -4.94  p4 -3.54  p5 -2.96
+    p6 -3.44  p7 -4.99  p8 -6.18  p9 -6.98  p10 -7.77
+
+The barrier falls further behind every period; the cost is not a fixed overhead but grows.
+(Per-period method on the same pair read -9.63 mean / -10.46 median -- same sign, overstated.)
+
+**It reconciles the fleet number as bookkeeping.** net = damage_removed - barrier_cost. For
+fpug511: damage_removed ~ +7.7, barrier ~ -7.8, net ~ 0 -- which is exactly why that arm sits in
+the "no benefit" group. Fleet-wide: +6.05 net = ~13.8 damage removed - 7.77 barrier.
+
+**But the mechanism behind `damage_removed` is REFUTED, now twice.** Hypothesis: an arm gains in
+proportion to the bank-full-bypass damage the fix removes.
+  * attempt 1 (per-period metric, constant 6.83 cost): r = -0.26
+  * attempt 2 (cumulative @ equal progress, measured 7.77 cost): **r = +0.03** over 19 arms
+`fpug255` is decisive against it: 2,262 bypass/1k cycles, **3x any other arm**, yet the smallest
+implied gain (8.16). Bypass count is NOT the damage proxy. Do not resurrect this without a
+different predictor.
+
+**What does predict the gain: arm speed, r = -0.65 at equal progress.** The arms that were
+already fastest benefit least. That survives holding progress constant, so it is a property of
+the arms rather than the measurement -- currently the most useful structure in the data, and the
+right starting point for a mechanism.
+
+### MECHANISM FOUND: the fix's value scales with the MSHR hold window (serve_timeout)
+
+The predictor of how much an arm gains from the barrier fix is **`group_mshr_serve_timeout` /
+`group_mshr_hold_window_burst`**, measured on cumulative util at equal progress (period 8):
+
+| hold | arms | mean gain | range |
+|---|---|---|---|
+| 255  | 1 | +0.39  | +0.4 .. +0.4 |
+| 511  | 6 | +1.94  | -0.3 .. +7.5 |
+| 1023 | 9 | +7.48  | +1.5 .. +16.0 |
+| 2047 | 6 | **+15.62** | +2.2 .. +25.9 |
+
+**corr(hold, gain) = +0.71**, monotone across all four levels.
+
+**This is exactly the documented damage mechanism, and it closes the loop.** A broken barrier
+sends 16 cores at consecutive addresses into one MSHR bank; 4 ways allocate and 12 bypass. The
+bypassed ones return immediately, while the 4 allocated are scalar entries below
+`HoldSubsSingle`, so they park in `MSHR_RESP_HOLD` for the **full serve_timeout**. The drift per
+p-iteration is therefore proportional to serve_timeout -- so the longer the hold window, the more
+damage the dead barrier did, and the more the fix recovers.
+
+**It also explains why the bypass-COUNT model failed twice** (r=-0.26, then +0.03). The damage is
+not "how many requests bypassed" but "how long the non-bypassed ones were held". `fpug255` --
+2,262 bypass/1k cycles, 3x any other arm, yet the smallest gain -- is the decisive case: highest
+bypass count, shortest hold window, least damage. Count and duration point opposite ways.
+
+**Two predictors checked and rejected:**
+  * baseline (pre-fix) utilisation: corr = **+0.12**, nothing.
+  * simulation speed (periods reached): corr = -0.68, but this is largely the hold window in
+    disguise -- corr(hold, periods) = -0.44, since longer holds mean more MSHR activity and a
+    slower simulator.
+
+**CAVEAT, stated because the obvious conclusion is wrong.** Speed is NOT fully explained by hold:
+**partial corr(periods, gain | hold) = -0.59**, still substantial. So two partially-independent
+predictors exist; only the hold window has a mechanism behind it. The residual speed effect is
+unexplained and should not be attributed to hold.
+
+**Practical consequence:** the shipped `terapool_spatz4_fpu` uses `group_mshr_num=64` with the
+hold window at its default -- any tuning of serve_timeout upward makes a WORKING barrier more
+important, not less. The dead barrier was most damaging exactly where the MSHR was tuned most
+aggressively.
+
+### Which knobs predict the fix's value: hold + resp, R^2 = 0.71
+
+Multi-predictor check on cumulative util at equal progress (period 8, 22 arms):
+
+| predictor | raw corr | partial, given hold |
+|---|---|---|
+| `group_mshr_serve_timeout` (hold) | **+0.71** | — |
+| `noc_resp_channel_num` (resp) | **+0.64** | **+0.64** (unchanged -> independent) |
+| `noc_router_remapping` | +0.10 | +0.20 |
+| `noc_port_hash` | +0.19 | +0.23 |
+| simulation speed | -0.68 | -0.59 |
+
+**hold and resp are two INDEPENDENT predictors** -- resp's correlation is completely unchanged
+when hold is controlled for, and no knob pair exceeds |0.35| collinearity. Both are
+mechanistically sensible: hold sets how long stray remote loads park in `MSHR_RESP_HOLD` (how
+much damage the dead barrier did), resp sets how fast recovered bandwidth converts back into
+FPU utilisation. `remap` and `hash` are noise.
+
+**The earlier "unexplained speed effect" is mostly resolved.** Its partial falls -0.68 -> -0.59
+(given hold) -> **-0.45** (given hold AND resp), and in variance terms it is small:
+
+    R^2 from hold + resp        = 0.71
+    R^2 adding simulation speed = 0.77   (+0.06)
+
+So simulation speed is largely a composite proxy for the two config knobs -- more hold and more
+resp channels mean more RTL activity and a slower simulator. It is not exactly zero, but its
+marginal explanatory power is 6 points, not a separate phenomenon. Correcting the earlier
+WORKLOG note that called it "a second, unexplained effect": it is mostly the same effect seen
+through a proxy.
+
+**Tuning consequence:** the fix's benefit is largest exactly at aggressive MSHR tuning
+(hold 2047) and wide response paths (resp 4) -- i.e. the configs the campaign most wants to
+run. Conversely, results from hold-255/resp-2 arms understate the fix by construction.
+
+### 4x4 ablation (preliminary): the barrier is NOT the regression; bisect target narrowed to one commit
+
+**Preliminary result at 31% (period 37 of ~121), NOT final.** Barrier ON vs OFF on identical
+RTL, 256x512x256, cumulative util at equal progress:
+
+    p5  ON 33.71  OFF 35.23  (+1.52)      p25 ON 33.68  OFF 33.40  (-0.28)
+    p15 ON 33.67  OFF 33.91  (+0.24)      p35 ON 33.57  OFF 33.15  (-0.42)
+
+Both curves are FLAT near 33% while the reference to explain is **94.1%**. Removing the barrier
+entirely recovers essentially nothing (-0.41 pp at p37), and OFF is not trending upward.
+**So the 3.49x regression is an RTL change, not the barrier** -- which contradicts the case I
+built from the git dates, where 67cc357 looked like the prime suspect.
+
+**The search space is small.** Only 13 commits touch RTL since the 2026-08-01 reference, and
+most are 8x8 SCALE-UP PLUMBING that should be no-ops at 4x4 (`MAX_NumGroups` to 64, L2 channel
+count split from group count, `group_xy_id_t` sizing, perimeter channel derivation, AXI/L2 id
+routing). Filtering to commits that can change 4x4 hot-path behaviour leaves three:
+
+| commit | date | why it is / is not a suspect |
+|---|---|---|
+| **56a59b4** mempool_group_mshr: replace three serial chains with parallel selection | 08-03 | **PRIME** -- the only substantive functional change to the MSHR datapath |
+| 67cc357 mempool_group: barrier word window | 08-03 | now unlikely: the ablation shows the barrier costs ~nothing at 4x4 |
+| 6562a2a mshr: report duplicate beats from a clocked block | 08-06 | assertion *reporting* only; no datapath effect expected |
+
+**Cheapest decisive test is NOT a bisect.** A 13-commit bisect is ~4 steps x (50 min build +
+~3 h run) = ~16 h. Testing `56a59b4` directly -- build at its parent, same 4x4 flavour, same
+ELF -- answers it in ONE build+run (~4 h). Only if that comes back clean is a bisect warranted.
+
+NOT STARTED: this is a multi-hour machine commitment and the ablation has not finished. Waiting
+for the completion before spending it, and the preliminary read above may still move.
+
+### CORRECTION: the 4x4 "94.1% vs 28.92% = 3.25x" figure mixes two DIFFERENT utilisation metrics
+
+Prompted by the user asking whether the util computation is right for 4x4. The computation is
+correct; the COMPARISON was not.
+
+**The TB counter is correct at 4x4.** `tb_fpu_util.svh` computes
+`busy FPU-lane-cycles / (period * NumCores * N_FPU)`, config-derived, and the reported
+denominators confirm it scales: 1,024,000 per 1000-cyc period at 4x4 (1024 lanes = 256 cores x
+4 FPU) vs 4,096,000 at 8x8. No 4x4 scaling bug.
+
+**But the 94.1% reference was measured a different way.** The 2026-08-01 sweep entry states:
+`Utilization = 2*M*N*P / cycles / 2048` -- useful FLOPs over peak, NOT FPU-busy cycles.
+
+| | metric | 256x512x256 |
+|---|---|---|
+| reference (2026-08-01) | 2*M*N*P / cycles / 2048 | **94.10%** @ 34,821 cyc |
+| today, same formula | 2*M*N*P / cycles / 2048 | **26.97%** @ 121,485 cyc |
+| today, TB `[FPU]` counter | busy lane-cyc / (cyc*cores*NFPU) | 28.92% (+1.95 pp) |
+
+The TB number sits ~2 pp higher because an FPU can be busy without retiring useful FLOPs
+(pipeline fill/drain), so the two are NOT interchangeable.
+
+**What changes:**
+* `3.49x` (cycles 34,821 -> 121,485) is CORRECT and metric-independent. Keep it.
+* On the reference's own metric the util shortfall is ALSO exactly 3.49x -- necessarily, since
+  that metric is proportional to 1/cycles with FLOPs and peak fixed.
+* **`3.25x` (94.1 / 28.92) is WRONG** -- a cross-metric ratio that understates the regression
+  by giving today a more generous numerator. Do not quote it. (It appears at WORKLOG line
+  ~7085 in the regression table; superseded here.)
+
+**Unaffected:** the 4x4 barrier ablation compares TB-util to TB-util within one metric, so its
+conclusion (barrier is not the regression) stands. All 8x8 fleet numbers are TB-vs-TB too.
+
+**Rule:** never ratio a `[FPU]` TB utilisation against a documented pre-campaign utilisation
+without checking how the latter was defined. When in doubt compare CYCLES -- metric-free.
+
+### RESOLVED: there is NO 4x4 RTL regression. It was a config mismatch I introduced.
+
+**User's call, and it was right:** "there has to be something wrong with the 4x4 config."
+
+**What happened.** The 4x4 regression run used **stock `terapool_spatz4_fpu`**, whose MSHR knobs
+are tuned for **512x512x512**. The shape I ran is **256x512x256**, whose sharing degrees are
+different. The correct values are commented out directly above the active ones in the config:
+
+| knob | stock (512^3) | needed for 256x512x256 | |
+|---|---|---|---|
+| `group_mshr_merge_reqs` | 4 | **8** | under-provisioned 2x |
+| `group_mshr_hold_subs_single` | 4 | **8** | under-provisioned 2x |
+| `group_mshr_hold_subs_burst` | 4 | **2** | over |
+| `group_mshr_bank_shift_burst` | 7 | **5** | wrong (clog2(P/split_p_count)=clog2(32)) |
+| `group_mshr_bank_shift_single` | 9 | 9 | correct |
+
+Confirmed by `scripts/gemm_autotune.py -M 256 -N 512 -P 256`, which prints these and warns:
+"leaving it at 4 caps utilization at ~24% regardless of N."
+
+**The numbers were already documented.** The 2026-08-01 sweep entry states that at
+`merge_reqs=4` the shapes split bimodally with ZERO overlap: correctly-provisioned 50.4-87.1%,
+**under-provisioned 20.8-28.2%**, with "the M=256 family flat at **22.7-26.1%**". Today's run
+reads **26.97%** -- top of that band. And the retuning gain is documented as **2.21-3.61x** for
+A-limited shapes; my measured ratio is **3.49x**, inside that range.
+
+**So: the 94.1% reference was the RETUNED arm; I compared it against a stock-config run.**
+Not a regression. Nothing to bisect.
+
+**Withdrawn as a result of this:**
+* "4x4 is 3.49x slower on today's RTL" -- it is 3.49x slower *with the wrong knobs for the shape*.
+* `56a59b4` (MSHR parallel selection) as prime suspect, and the whole planned bisect. No evidence
+  of any RTL regression remains.
+* The git-date argument that put `67cc357` in the frame. The ablation had already contradicted it;
+  this explains why there was nothing there to find.
+
+**Still valid:** the barrier ablation compares ON vs OFF at identical (mis-provisioned) knobs, so
+its internal comparison holds -- it just cannot be read against the 94.1% reference. It is left
+running for the 4x4 barrier-cost datapoint.
+
+**LESSON.** Before quoting any documented reference number, check what CONFIG produced it, not
+just the shape and flavour name. The sweep that produced 94.1% explicitly retuned per shape; the
+flavour file ships one shape's tuning with the others commented out, so "stock flavour + same
+shape" is NOT the same experiment. `scripts/gemm_autotune.py` exists precisely for this and would
+have answered it in one command -- run it whenever a GEMM shape changes.
+
+### Early utilisation predicts a SLOWER finish (r = +0.78 on completions)
+
+The plateau-vs-throughput warning was previously based on plateau windows. It can now be
+measured directly against **completions**, which is far stronger evidence:
+
+    corr(cumulative util at period 17, completion cycles) = +0.78   over 11 full-load completions
+
+Positive = higher early utilisation went with MORE cycles to finish.
+
+    vcsBfix  69.84% @p17 -> 857,236 cyc        vcs12  36.62% @p17 -> 552,669 cyc  (FASTEST)
+    vcs11    56.66%      -> 866,235            vcs10  36.24%      -> 557,963
+    vcsE     53.57%      -> 801,263            vcs8   28.54%      -> 658,216
+
+The two fastest arms had among the LOWEST early utilisation; the highest-util arm finished near
+the bottom. Mechanism: total work is fixed and completion is set by the SLOWEST group, so a high
+early *average* is consistent with fast groups draining their slices and then idling on
+stragglers. Utilisation measures how busy the FPUs are, not how quickly the kernel ends.
+
+**Consequence for the current reading of the fixed fleet.** At equal progress the two
+`noc_router_remapping=2` arms lead the field (85.4% vs 59.7% for remap=0), and that survives
+matching on hold and resp (+12 to +32 pp). It is a real utilisation effect. It is NOT yet
+evidence that remap=2 is FASTER -- in this fleet that signal has historically inverted.
+
+**Same caveat applies to the +10.9 pp barrier-fix delta.** It is a utilisation delta measured at
+equal progress, much better founded (21/22 arms, outlier-robust metric), but still not a
+throughput claim until arms complete.
+
+**Cheapest decisive test:** let ONE remap=2 arm run to completion and compare its cycle count
+against vcs12's 552,669 -- rather than waiting on all 23.
+
+### CONFIRMED BY EXPERIMENT: no 4x4 RTL regression. Today's tree reproduces 94.1% exactly.
+
+Built `terapool_spatz4_fpu_gemm256x512x256` (derived flavour; only the four shape-dependent MSHR
+knobs differ from stock) and re-ran 256x512x256 on the SAME RTL and the SAME ELF.
+
+    cum util 94.14%   vs the 2026-08-01 reference of 94.1%   -> match to 0.04 pp
+
+Averaged over cyc 15,000-20,000, same RTL, only the knobs differing:
+
+| | stock (512^3 tuning) | shape-tuned |
+|---|---|---|
+| cumulative util | 30.9% | **88.7%** |
+| `mshr_timeout` per 1k cyc | 922 | **0** |
+| `bankfull_bypass` per 1k cyc | 2,099 | **0** |
+| group spread (max-min) | 10.5 pp | 6.5 pp |
+
+**Mechanism, cleanly demonstrated.** With `merge_reqs=4` where the shape needs 8, requests that
+find no merge slot bypass the MSHR entirely (2,099/1k cyc) and allocated entries ride out
+`serve_timeout` waiting for subscribers that cannot arrive (922/1k cyc). Provision correctly and
+**both counters go to exactly zero**. Verified the build differs from stock in EXACTLY four
+defines and nothing else.
+
+**FULLY WITHDRAWN:** the 3.49x regression; `56a59b4` and `67cc357` as suspects; the planned
+~16 h bisect. There was no RTL defect at any point.
+
+**The tell I walked past twice.** `mshr_timeout=+803` and `bankfull_bypass=+2792` were sitting in
+the reg4x4 summary from the start. Those are PROVISIONING counters -- they say "the MSHR cannot
+hold what this shape asks of it" -- not regression symptoms. I read them as background twice
+while building a case from commit dates instead. Same failure mode as the `bar_rel=0` episode:
+a counter screaming at me, read as scenery.
+
+**RULE:** when a run underperforms, read the MSHR counters BEFORE the git log. Non-zero
+`mshr_timeout`/`bankfull_bypass` at steady state means the config does not fit the shape --
+run `scripts/gemm_autotune.py` before suspecting the RTL.
+
+### Checked: the 8x8 fleet IS correctly provisioned (and why the first check said otherwise)
+
+After the 4x4 config-mismatch finding, the obvious next question is whether the 8x8 fleet has the
+same defect. It does not.
+
+`scripts/gemm_autotune.py -M 2048 -N 512 -P 512 --num-groups 64 --num-cores 1024`:
+
+    dim_group=32  split_m_count=4  split_p_count=4        L1 9.00 MB of 14.86 MB usable
+    bank_shift_single 9 | bank_shift_burst 7 | bank_burst_bits 1
+    hold_subs_single  4 | hold_subs_burst  4 | merge_reqs 4
+
+The live 8x8 arms build with exactly these (verified from `build_cfix/compilevcs.sh`). **All six
+match.** So the 16-27% whole-kernel utilisations at 8x8 are REAL, not a provisioning artifact,
+and the +10.6 pp barrier-fix delta is measured against a correctly-configured baseline.
+
+**Why the first check looked alarming.** Run without `--num-groups`, the autotuner assumes the
+default 16-group machine and reports merge_reqs=**16**, hold_subs_burst=**16**, shift_burst=**9**
+for the same shape -- wildly different from the fleet's 4/4/7. The sharing degrees derive from
+`dim_group = M / num_groups`, so at 16 groups 2048x512x512 gives split_m=16/split_p=1 (B shared
+16 ways) while at 64 groups it gives 4/4. It also flagged "L1 9.00 MB of 3.61 MB usable", i.e. the
+shape does not even fit a 4x4 machine -- the tell that the wrong config was being used.
+
+**RULE:** always pass `--num-groups`/`--num-cores` to the autotuner. The same GEMM shape needs
+DIFFERENT knobs on different machine sizes, and the default is the 4x4 machine. An implausible
+"usable L1" line is the quickest sign the wrong machine was assumed.
+
+### 4x4 barrier ablation COMPLETED: the barrier PAYS FOR ITSELF at 16 groups
+
+Both arms finished, so this is a completion-cycle result -- metric-free, no window or outlier
+caveats. Identical RTL, identical knobs, identical ELF shape; `GBAR_PLOOP` the only difference:
+
+    barrier ON    121,485 cycles   util 28.92%
+    barrier OFF   124,692 cycles   util 28.13%
+    -> removing the barrier costs +3,207 cycles (+2.6%)
+
+Workload check: cycles x util is 3.51M for both (0.2% apart), so they are comparable.
+
+**Scale-dependent inversion.** At 4x4 (16 groups) the barrier is worth +2.6% in completion time.
+At 8x8 (64 groups) a working barrier costs **-7.77 pp** of cumulative utilisation (fpug511 ON vs
+fpuggb0 OFF). Same barrier, four times the participants: the rendezvous waits on the slowest of
+64 groups instead of 16, and the tail grows with the count. This is consistent with the fixed
+spatial slow set at 8x8 -- with 21 persistently slow groups, every barrier pays their latency.
+
+**Caveats.** (a) This pair ran on the SHAPE-MISMATCHED knobs, so it measures the barrier under
+MSHR contention rather than at the shape's proper operating point -- worth repeating on the tuned
+config if the barrier's cost matters for a decision. (b) The 8x8 figure is still a utilisation
+delta, not completion cycles; the two are not directly comparable until 8x8 arms complete.
+
+**Bearing on the fix:** none negative. The 8x8 barrier fix removes stray remote loads worth
++10.8 pp; the barrier it enables costs -7.77 pp there. At 4x4 the barrier is simply free.
+
+### The scale-up loss is a GROUP-ALIGNMENT problem, not a core or kernel problem
+
+Per-group progress (cumulative busy lane-cycles against the equal share each group owes) now
+covers both mesh sizes. Final-slice spread between the fastest and slowest group:
+
+| arm | groups | spread |
+|---|---|---|
+| 4x4 shape-tuned | 16 | **0.7 pp** |
+| 4x4 stock knobs (mis-provisioned) | 16 | 1.7 pp |
+| 4x4 barrier OFF | 16 | 2.9 pp |
+| 8x8 FG255 | 64 | 5.7 pp |
+| 8x8 FGGB0 | 64 | 59.2 pp |
+| 8x8 FGIR2 | 64 | 73.4 pp |
+| 8x8 FG511 | 64 | **87.2 pp** |
+
+**At 16 groups the machine stays in lockstep no matter what.** Mis-provision the MSHR, remove the
+barrier entirely -- the worst 4x4 spread is still 2.9 pp. At 64 groups it fans out to 87 pp, with
+one group finished (111.6%) while another sits at 24.5%.
+
+**So the cores and the kernel are not what degrades at scale.** The tuned 4x4 runs at 99% FPU
+utilisation with 0.7 pp spread -- near-peak, essentially perfect balance. The loss appears between
+16 and 64 groups, and since total work is fixed and the kernel ends with the SLOWEST group, the
+spread IS the loss. A 60-87 pp spread means most of the machine idles waiting on stragglers.
+
+This ties together several findings that previously looked separate:
+* utilisation anticorrelates with completion (r=+0.78) -- high average, bad tail
+* the fixed spatial slow set (21 of 64 groups persistently slow)
+* the barrier's scale-dependent cost (+2.6% at 4x4, -7.77 pp at 8x8): a rendezvous across 64
+  groups waits on that tail every iteration, across 16 it does not
+* FG255's 5.7 pp spread against FG511's 87.2 -- the hold window drives alignment, not just util
+
+**Where to look next:** what makes 21 of 64 groups persistently slow. That is the spread's source,
+and closing it is worth more than any utilisation knob -- the 4x4 result shows the machine reaches
+99% when the groups stay together.
+
+### GBAR0 COMPLETED: the dead barrier cost 14.1% of throughput at 8x8
+
+First completion-vs-completion barrier measurement at 8x8. Both arms are PRE-fix fleet, same
+simv, differing only in whether the barrier code is compiled in:
+
+    vcs11 (A/h511)  barrier code RUNS but addresses are broken   866,235 cyc / 16.52%
+    GBAR0           barrier compiled out (GBAR_PLOOP=0)          743,851 cyc / 19.32%
+    -> removing the DEAD barrier is worth 122,384 cycles = 14.1%
+
+That is the throughput cost of the address bug itself: executing barrier ops that synchronise
+nothing, while generating stray remote loads that pile into one MSHR bank.
+
+**Resolves an ambiguity I could not settle earlier.** On per-period utilisation this same pair
+read mean **+1.27 pp** (GBAR0 better) but median **-4.90 pp** (GBAR0 worse) -- a sign flip that
+made me declare the comparison unusable. The completion says GBAR0 is decisively better, so the
+MEAN was right and the median misleading here. The caution was still correct methodology; what
+resolved it was a completion, not a better statistic.
+
+**The util-vs-throughput anticorrelation holds** with the new point: corr(early cum util @p17,
+completion cycles) = **+0.71** over 12 comparable completions (was +0.78 over 11). GBAR0 is
+itself a case in point -- 2nd-highest early utilisation (65.40%) yet only 5th fastest to finish.
+
+**Completion table, 12 comparable full-load arms:**
+
+    12      552,669  26.82%     GBAR0   743,851  19.32%     Cfix   830,105  17.28%
+    10      557,963  26.58%     13      801,080  17.58%     F      857,017  16.24%
+    8       658,216  23.66%     E       801,263  17.66%     Bfix   857,236  16.42%
+    9       661,490  23.57%     14      811,339  17.78%     11     866,235  16.52%
+
+**Still missing:** no FIXED-fleet arm has completed, so the fix's +11.4 pp remains a utilisation
+result. The number to beat is vcs12's 552,669 cycles.
+
+### The simulator is DETERMINISTIC -- and that creates a double-counting hazard
+
+`vcsP511` completed at **866,235 cycles / 16.52%** -- identical to `vcs11` to the digit.
+Investigated: `build_h511` and `build_p511` have **identical 97-define sets** (empty diff, not
+just the MSHR subset) and run the same ELF. Distinct log files, distinct processes, same result.
+
+**Two conclusions:**
+
+1. **The simulator is deterministic.** Same config + same ELF -> bit-identical completion. That
+   is a strong validation of every A/B in this campaign: any difference between two arms is
+   caused by the variable under test, never by run-to-run noise. It also means a "repeat the run"
+   sanity check buys nothing -- the only way to probe robustness is to vary something.
+2. **Duplicate configs must not be counted twice.** Both arms in a completion ranking or a
+   correlation would double-weight that configuration. Added a dedupe guard to the dashboard's
+   completion ranking: identical cycle counts collapse to one entry, with the twin named.
+
+This is the third instance of the same class of error in this campaign, and the pattern is worth
+naming: **`fpuggb0` vs its "twin"** (same ELF, same simv -> exact +0.00 delta, excluded from the
+fleet statistic), **`vcsQUARTER`** (quarter matrix, cycles not comparable -> excluded by workload
+fingerprint), and now **`P511`/`h511`**. In each case the guard is the same idea: before
+aggregating runs, check they are actually independent observations of different things.
+
+The r=+0.71 util-vs-completion correlation was computed before P511 finished, so it is unaffected;
+future recomputations will use the deduped set.
+
+### 4x4 CLOSED BY COMPLETION: today's RTL is 0.55% FASTER than the 2026-08-01 reference
+
+The shape-tuned 4x4 run finished. Same RTL, same ELF, same shape as the reference; only the four
+shape-dependent MSHR knobs differ from stock.
+
+    reference 2026-08-01     34,821 cyc   94.10%  (metric: 2MNP/cycles/2048)
+    today, shape-matched     34,629 cyc   94.63%  (same metric)
+                                          95.33%  (TB busy-lane-cycle counter)
+    today, stock knobs      121,485 cyc   26.97%
+
+    CYCLES: -192 = today is 0.55% FASTER.  Correcting the knobs recovers 3.51x,
+    exactly the 3.49x "regression" that was reported.
+
+The simulator is deterministic (proven independently: build_h511 and build_p511 have identical
+97-define sets and completed bit-identically at 866,235 cyc), so 192 cycles is a REAL difference,
+not run-to-run variance.
+
+**Definitively: no RTL regression exists, and never did.** The entire 3.49x was a config mismatch
+I introduced by running 256x512x256 on a flavour tuned for 512x512x512.
+
+**Everything withdrawn stays withdrawn:** the regression itself, `56a59b4` and `67cc357` as
+suspects, and the ~16 h bisect. The cost of the error was one 10-minute build plus a 1.5 h run to
+disprove it -- cheap only because the user questioned the config instead of accepting the
+regression narrative.
+
+**Final 4x4 picture, all three arms completed:**
+
+| arm | knobs | barrier | cycles | util |
+|---|---|---|---|---|
+| shape-tuned | matched | ON | **34,629** | 94.63% (FLOPs metric) |
+| stock | 512^3 | ON | 121,485 | 26.97% |
+| stock | 512^3 | OFF | 124,692 | 26.28% (FLOPs metric) |
+
+Provisioning is worth **3.51x**; the barrier is worth **+2.6%** (and is a net benefit at 16
+groups, unlike 8x8 where it costs -7.77 pp of utilisation).
+
+### The BCAST experiment is also nullified by the dead barrier
+
+`vcsXA511N` and `vcsXA511` both completed at **866,235 cyc / 16.52%** -- bit-identical to each
+other and to `vcs11`/`vcsP511`. Define comparison:
+
+    build_xa511  vs build_h511 : differs ONLY in tracing (SNITCH_TRACE, TRACE_FORCE_OFF,
+                                 V4M_ENABLE) -- no behavioural effect, so identical is expected
+    build_xa511n vs build_h511 : same tracing deltas PLUS  +define+GROUP_BARRIER_BCAST_OFF
+
+So `XA511N` vs `XA511` isolates `GROUP_BARRIER_BCAST_OFF` as the single functional difference,
+and the two runs are identical to the cycle.
+
+**Interpretation -- the distinction matters.** This does NOT show the knob is inert. It shows the
+knob was **untested**: at 8x8 pre-fix the barrier never fired (bar_rel=0 in every instrumented
+8x8 arm), so a barrier-broadcast knob has nothing to act on. These logs predate the bar_rel probe
+entirely, so the field is absent rather than zero.
+
+**Consequence: the whole BCAST batch is void for its stated purpose** -- XA511N, XA511, XA1023,
+XB1023, XC1023, XD2047, XE1023, XF1023. Any conclusion about barrier broadcast release drawn from
+them is meaningless, exactly as with the GBAR_PLOOP ablation arms. They remain valid as ordinary
+config arms (their non-barrier knobs do vary), just not for the broadcast question.
+
+**Third experiment invalidated by this one bug**, after the GBAR_PLOOP ablation and the whole 8x8
+utilisation campaign. When re-running the broadcast question, do it on the FIXED kernel and verify
+`bar_rel > 0` before trusting any comparison.
