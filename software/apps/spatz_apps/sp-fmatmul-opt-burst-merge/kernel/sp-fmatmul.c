@@ -89,12 +89,36 @@
 #error "GROUP_BARRIER_WORD not defined: build via the app Makefile so runtime.mk supplies it."
 #endif
 #define GBAR_BASE_WORD ((uint32_t)GROUP_BARRIER_WORD)
-static inline uint32_t gbar_tgt_tile(void) {                 // a same-group tile != own
-  uint32_t hid; asm volatile("csrr %0, mhartid" : "=r"(hid));
-  return (hid & 0xF0u) | (((hid & 0xFu) + 1u) & 0xFu);
-}
+// Byte-address strides of the L1 word-interleave fields. The barrier address is
+// word|group|tile|bank|byte, so every field's position depends on the widths BELOW it:
+//
+//     byte(4) | bank(BanksPerTile) | tile(TilesPerGroup) | group(NumGroups) | word
+//
+// DERIVED, never hardcoded. These were previously written as the literals `<<14` (word)
+// and `<<6` (tile) with the group carried by `hid & 0xF0`, all of which are correct ONLY
+// at 16 groups. The group field widens with the mesh (4 bits at 16 groups, 6 at 64) and
+// pushes the word field up with it, so at 8x8 the old form put the word value's low 2 bits
+// INSIDE the group field: every barrier op addressed word 60 (never in the barrier window
+// [240,256), so the HW re-route at mempool_group.sv never fired) and 3 of every 4 landed in
+// a REMOTE group. The barrier was a silent no-op at 8x8 -- `bar_rel` was 0 in every period
+// of every 8x8 run. software/runtime/arch.ld.c already derives the same stride for the
+// linker window; this is the matching derivation on the access side. Keep the two in sync.
+#define GBAR_BANKS_PER_TILE (N_FU * BANKING_FACTOR * NUM_CORES_PER_TILE)
+#define GBAR_TILE_STRIDE    (4u * (uint32_t)GBAR_BANKS_PER_TILE)
+#define GBAR_GROUP_STRIDE   (GBAR_TILE_STRIDE * (uint32_t)NUM_TILES_PER_GROUP)
+#define GBAR_WORD_STRIDE    (GBAR_GROUP_STRIDE * (uint32_t)NUM_GROUPS)
 static inline uint32_t gbar_base(uint32_t s) {               // byte addr: word=base+s, tile, bank0
-  return ((GBAR_BASE_WORD + s) << 14) | (gbar_tgt_tile() << 6);
+  uint32_t hid; asm volatile("csrr %0, mhartid" : "=r"(hid));
+  // hartid packs group above tile; recover both instead of masking a fixed bit width, so
+  // the group survives at any NumGroups (the old `hid & 0xF0u` dropped group[5:4] at 64).
+  uint32_t tile = hid % (uint32_t)NUM_TILES_PER_GROUP;
+  uint32_t grp  = hid / (uint32_t)NUM_TILES_PER_GROUP;
+  // MUST be a different tile in the SAME group: a same-tile address is TCDM_LOCAL and never
+  // reaches the group crossbar, so it would never see the barrier port.
+  uint32_t tgt  = (tile + 1u) % (uint32_t)NUM_TILES_PER_GROUP;
+  return (GBAR_BASE_WORD + s) * GBAR_WORD_STRIDE
+       + grp * GBAR_GROUP_STRIDE
+       + tgt * GBAR_TILE_STRIDE;
 }
 static inline void gbar_setup(uint32_t s, uint32_t target, uint32_t mask) {
   uint32_t b = gbar_base(s);
