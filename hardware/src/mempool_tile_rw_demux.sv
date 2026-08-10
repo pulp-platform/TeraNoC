@@ -75,10 +75,28 @@ module mempool_tile_rw_demux
     // ------     ------   -> w    High   5 ]
 
     if ((NumRdRemoteReqPortsPerTile > 0) || (NumWrRemoteReqPortsPerTile > 0)) begin
+      // Type-based routing: reads may use any read-capable port (rd-only OR rdwr), writes
+      // any write-capable port (rdwr OR wr-only).
+      //
+      // Spread with (c + req_rr_q), not c alone. `c` is the core index WITHIN the tile, so
+      // on any NumCoresPerTile==1 config (every Spatz flavour) `c % N` is a no-op and every
+      // read pins to one port while every write pins to another -- the channel split then
+      // just mirrors the workload's read:write ratio (measured 80/20 on sp-fmatmul) instead
+      // of balancing. Adding the round-robin pointer restores temporal spreading while
+      // keeping the original spatial spreading for multi-core tiles. Same spatial+temporal
+      // pattern the response side already uses (mempool_tile.sv: resp_rr_q + b).
+      // req_rr_q is declared and advanced unconditionally above, so no new state is needed.
+      localparam int unsigned NumRdCapablePorts =
+        (NumRdRemoteReqPortsPerTile + NumRdWrRemoteReqPortsPerTile) > 0 ?
+        (NumRdRemoteReqPortsPerTile + NumRdWrRemoteReqPortsPerTile) : 1;
+      localparam int unsigned NumWrCapablePorts =
+        (NumWideRemoteReqPortsPerTile > 0) ? NumWideRemoteReqPortsPerTile : 1;
+
       assign remote_req_interco_tgt_sel_o[c] = group_id_is_local[c] ? 0 :
                                               ~(remote_req_interco_wen_i[c] | remote_req_interco_amoen_i[c]) ?
-                                               (1 + (c % (NumRdRemoteReqPortsPerTile + NumRdWrRemoteReqPortsPerTile))) :
-                                               (1 + NumRdRemoteReqPortsPerTile + (c % (NumWideRemoteReqPortsPerTile)));
+                                               (1 + ((c + req_rr_q) % NumRdCapablePorts)) :
+                                               (1 + NumRdRemoteReqPortsPerTile +
+                                                ((c + req_rr_q) % NumWrCapablePorts));
 
     end else if (NocPortHash[0] && (NumRemoteReqPortsPerTile > 2)) begin
       // Round-robin port spreading: each remote request uses the current
