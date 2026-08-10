@@ -41,6 +41,18 @@
 // --report-unoptflat
 
 // Build the model hierarchical. For MinPool, a non-hierarchical model might be faster
+// Build the model hierarchical.
+//
+// MEASURED 2026-08-06, do not drop this without re-measuring: without it, verilating the
+// 1024-core model reached 790 GB RSS (52% of a 1511 GB machine) after 2h53m and had not
+// emitted a single .cpp -- the hierarchical build emits 11704 files in ~22 min. It had to
+// be killed to protect concurrent simulations from the OOM killer.
+//
+// The 8x8 hierarchical model does link (1690 MB) but then segfaults: the per-group
+// protectlib create call dereferences a null vlSymsp in the first initial block (64 calls
+// at 8x8 vs 16 at 4x4). That is Verilator 4.228 codegen -- QuestaSim runs the same design,
+// and it fails with ulimit -s unlimited so it is not a stack limit. The fix is Verilator
+// 5.006/5.020 (installed on this host), NOT dropping --hierarchical.
 --hierarchical
 
 // Flush streams after each $display. The timing impact is usually nonmeasurable

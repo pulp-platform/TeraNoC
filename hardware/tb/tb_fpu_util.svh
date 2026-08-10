@@ -66,6 +66,122 @@
   int unsigned fu_cycle;
   logic        fu_active;
 
+  // --------------------------------------------------------------------------
+  // MSHR health counters, reported as PER-PERIOD DELTAS alongside utilisation.
+  //   mshr_issue_timeout_cnt_dbg : hold window expired (hold_cnt hit 0) -- the entry
+  //     issued on the timeout rather than on reaching its subscriber target. A rising
+  //     rate means the hold window is too long for the merge opportunity actually there.
+  //   req_bankfull_bypass_cnt_dbg: request bypassed the MSHR because no way was free.
+  //     This is the way-capacity backfire an earlier hold-window sweep blamed for its
+  //     net-negative result, so it is the counter that tells us whether a longer window
+  //     is buying merges or just occupying ways.
+  // Both are free-running 32-bit counters per group; deltas scope them to a period.
+  // Hierarchical refs sit inside genvar loops (a procedural index into a generate-block
+  // instance array passes analysis and fails elaboration with XMRE).
+  // --------------------------------------------------------------------------
+  logic [31:0] fu_mshr_timeout [NumGroups];
+  logic [31:0] fu_bankfull_byp [NumGroups];
+
+  generate
+    for (genvar gx = 0; gx < NumX; gx++) begin : gen_fu_mshr_gx
+      for (genvar gy = 0; gy < NumY; gy++) begin : gen_fu_mshr_gy
+        assign fu_mshr_timeout[NumY*gx+gy] =
+          dut.i_mempool_cluster.gen_groups_x[gx].gen_groups_y[gy]
+             .gen_rtl_group.i_group.i_mempool_group.gen_group_mshr.i_group_mshr.mshr_issue_timeout_cnt_dbg;
+        assign fu_bankfull_byp[NumY*gx+gy] =
+          dut.i_mempool_cluster.gen_groups_x[gx].gen_groups_y[gy]
+             .gen_rtl_group.i_group.i_mempool_group.gen_group_mshr.i_group_mshr.req_bankfull_bypass_cnt_dbg;
+      end
+    end
+  endgenerate
+
+  longint unsigned fu_to_cum,  fu_to_prev;    // summed across all groups
+  longint unsigned fu_bfb_cum, fu_bfb_prev;
+
+  // --------------------------------------------------------------------------
+  // PROBE 2: intra-group CORE PROGRESS SPREAD.
+  //
+  // grp_max/grp_min compare GROUPS. They say nothing about how far apart the 16 cores WITHIN a
+  // group have drifted -- which is the quantity that decides whether their B-bursts land in the
+  // same MSHR merge window. The per-core busy bits are already collected above; this just stops
+  // throwing the detail away.
+  //
+  // Per period, per group: spread = (busiest core's cycles) - (idlest core's cycles). A group
+  // running in lockstep has spread ~0; one that has drifted shows a large spread. Reported as
+  // the mean over groups and the worst single group.
+  // --------------------------------------------------------------------------
+  int unsigned fu_core_cum [NumGroups][NumTilesPerGroup][NumCoresPerTile];
+  int unsigned fu_core_prev[NumGroups][NumTilesPerGroup][NumCoresPerTile];
+
+  // --------------------------------------------------------------------------
+  // PROBE 3: per-core RETIRED-INSTRUCTION counter (user's idea, 2026-08-07).
+  //
+  // Strictly better than PROBE 2 for the alignment question. Busy-FPU-cycles conflate two
+  // things -- a core can be busy without progressing (spinning) or progressing without FPU
+  // work (scalar sections). Retired instructions measure PROGRAM POSITION: two cores with the
+  // same count are at the same instruction. Every core in a group runs the same loop structure
+  // (only m_start/p_start differ), so at any moment aligned cores should have near-identical
+  // counts, and the spread IS the drift.
+  //
+  // Counting starts when csr_trace_any_global rises (the benchmark region), so the counters
+  // measure the timed kernel only.
+  //
+  // Three views come out of it:
+  //   intra-group spread : drift between the 16 cores of a group -- what the p-loop barrier
+  //                        exists to control, and what decides whether B-bursts share a merge
+  //                        window.
+  //   inter-group spread : drift between groups -- which NO barrier controls (the group
+  //                        barrier is per-group), so it is unmanaged by construction.
+  //   spread right after a release : the residual skew a barrier failed to remove.
+  // --------------------------------------------------------------------------
+  logic        fu_retire [NumGroups][NumTilesPerGroup][NumCoresPerTile];
+  int unsigned fu_insn_cum [NumGroups][NumTilesPerGroup][NumCoresPerTile];
+
+  generate
+    for (genvar gx = 0; gx < NumX; gx++) begin : gen_fu_ret_gx
+      for (genvar gy = 0; gy < NumY; gy++) begin : gen_fu_ret_gy
+        for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_fu_ret_t
+          for (genvar c = 0; c < NumCoresPerTile; c++) begin : gen_fu_ret_c
+            // Any of the four retire paths counts as one instruction leaving the core.
+            // retire_p is a post-increment writeback that accompanies another retire, so it is
+            // deliberately EXCLUDED to avoid double-counting a single instruction.
+            assign fu_retire[NumY*gx+gy][t][c] =
+              dut.i_mempool_cluster.gen_groups_x[gx].gen_groups_y[gy]
+                 .gen_rtl_group.i_group.i_mempool_group
+                 .gen_tiles[t].i_tile.gen_cores[c].gen_mempool_cc.riscv_core.i_snitch.retire_i
+            | dut.i_mempool_cluster.gen_groups_x[gx].gen_groups_y[gy]
+                 .gen_rtl_group.i_group.i_mempool_group
+                 .gen_tiles[t].i_tile.gen_cores[c].gen_mempool_cc.riscv_core.i_snitch.retire_load
+            | dut.i_mempool_cluster.gen_groups_x[gx].gen_groups_y[gy]
+                 .gen_rtl_group.i_group.i_mempool_group
+                 .gen_tiles[t].i_tile.gen_cores[c].gen_mempool_cc.riscv_core.i_snitch.retire_acc;
+          end
+        end
+      end
+    end
+  endgenerate
+
+  // PROBE 1 readback: barrier arrival spread, summed over all groups.
+  logic [31:0] fu_bar_sum [NumGroups];
+  logic [31:0] fu_bar_cnt [NumGroups];
+  logic [15:0] fu_bar_max [NumGroups];
+  generate
+    for (genvar gx = 0; gx < NumX; gx++) begin : gen_fu_bar_gx
+      for (genvar gy = 0; gy < NumY; gy++) begin : gen_fu_bar_gy
+        assign fu_bar_sum[NumY*gx+gy] =
+          dut.i_mempool_cluster.gen_groups_x[gx].gen_groups_y[gy]
+             .gen_rtl_group.i_group.i_mempool_group.gen_group_barrier.i_group_barrier.bar_spread_sum_dbg;
+        assign fu_bar_cnt[NumY*gx+gy] =
+          dut.i_mempool_cluster.gen_groups_x[gx].gen_groups_y[gy]
+             .gen_rtl_group.i_group.i_mempool_group.gen_group_barrier.i_group_barrier.bar_release_cnt_dbg;
+        assign fu_bar_max[NumY*gx+gy] =
+          dut.i_mempool_cluster.gen_groups_x[gx].gen_groups_y[gy]
+             .gen_rtl_group.i_group.i_mempool_group.gen_group_barrier.i_group_barrier.bar_spread_max_dbg;
+      end
+    end
+  endgenerate
+  longint unsigned fu_bsum_cum, fu_bsum_prev, fu_bcnt_cum, fu_bcnt_prev;
+
   assign fu_active = csr_trace_any_global;
 
   // fu_busy_bits is a plain array now, so a procedural sum over it is legal.
@@ -73,18 +189,32 @@
     if (!rst_n) begin
       fu_cycle <= 0; fu_busy_cum <= 0; fu_active_cyc <= 0; fu_raw_cum <= 0;
       for (int g = 0; g < NumGroups; g++) fu_grp_cum[g] <= 0;
+      for (int g = 0; g < NumGroups; g++)
+        for (int t = 0; t < NumTilesPerGroup; t++)
+          for (int c = 0; c < NumCoresPerTile; c++) begin
+            fu_core_cum[g][t][c] <= 0; fu_insn_cum[g][t][c] <= 0;
+          end
     end else begin
       automatic int unsigned tot = 0;
       fu_cycle <= fu_cycle + 1;
       for (int g = 0; g < NumGroups; g++) begin
         automatic int unsigned n = 0;
         for (int t = 0; t < NumTilesPerGroup; t++)
-          for (int c = 0; c < NumCoresPerTile; c++)
+          for (int c = 0; c < NumCoresPerTile; c++) begin
+            fu_core_cum[g][t][c] <= fu_core_cum[g][t][c] + $countones(fu_busy_bits[g][t][c]);
             n += $countones(fu_busy_bits[g][t][c]);
+          end
         fu_grp_cum[g] <= fu_grp_cum[g] + n;   // always-on, so per-group data exists pre-benchmark
         tot += n;
       end
       fu_raw_cum <= fu_raw_cum + tot;         // always-on
+      // PROBE 3: retired instructions, benchmark region only (the user's "start the counter
+      // when the benchmark starts" -- so the counts are directly comparable across cores).
+      if (fu_active)
+        for (int g = 0; g < NumGroups; g++)
+          for (int t = 0; t < NumTilesPerGroup; t++)
+            for (int c = 0; c < NumCoresPerTile; c++)
+              if (fu_retire[g][t][c]) fu_insn_cum[g][t][c] <= fu_insn_cum[g][t][c] + 1;
       if (fu_active) begin                    // benchmark-region only
         fu_busy_cum   <= fu_busy_cum + tot;
         fu_active_cyc <= fu_active_cyc + 1;
@@ -95,6 +225,20 @@
   task automatic fu_report(input string tag);
     int unsigned d_busy, d_cyc, g_max, g_min, g_max_id, g_min_id, dg;
     real         util_p, util_c, gu_max, gu_min;
+    longint unsigned d_to, d_bfb, d_bsum, d_bcnt;
+    real             core_spread_avg, bar_spread_avg;
+    int unsigned     core_spread_max, core_spread_g, bar_max_any;
+    real             insn_intra_avg;
+    int unsigned     insn_intra_max, insn_intra_g, insn_inter, insn_total;
+    // Sum the free-running per-group counters, then delta against the last report.
+    fu_to_cum  = 0;
+    fu_bfb_cum = 0;
+    for (int g = 0; g < NumGroups; g++) begin
+      fu_to_cum  = fu_to_cum  + longint'(fu_mshr_timeout[g]);
+      fu_bfb_cum = fu_bfb_cum + longint'(fu_bankfull_byp[g]);
+    end
+    d_to  = fu_to_cum  - fu_to_prev;
+    d_bfb = fu_bfb_cum - fu_bfb_prev;
     d_busy = fu_raw_cum - fu_raw_prev;                 // this period, always-on
     d_cyc  = `FPU_UTIL_PERIOD;
     util_p = (d_cyc > 0)         ? 100.0*d_busy     /($itor(d_cyc)*FU_Lanes)         : 0.0;
@@ -107,12 +251,109 @@
     end
     gu_max = (d_cyc > 0) ? 100.0*g_max/($itor(d_cyc)*FU_PerGrpLane) : 0.0;
     gu_min = (d_cyc > 0) ? 100.0*g_min/($itor(d_cyc)*FU_PerGrpLane) : 0.0;
-    $display("[FPU] %s cyc=%0d util=%.2f%% cum=%.2f%% busy=%0d/%0d lane-cyc  grp_max=%.1f%%(g%0d) grp_min=%.1f%%(g%0d)",
+    // PROBE 2: intra-group core spread, this period. For each group, the busiest core's
+    // cycles minus the idlest core's. Mean over groups + worst single group.
+    begin
+      automatic int unsigned sp_sum = 0, sp_worst = 0, sp_worst_g = 0;
+      for (int g = 0; g < NumGroups; g++) begin
+        automatic int unsigned cmax = 0, cmin = 32'hFFFFFFFF, dc;
+        for (int t = 0; t < NumTilesPerGroup; t++)
+          for (int c = 0; c < NumCoresPerTile; c++) begin
+            dc = fu_core_cum[g][t][c] - fu_core_prev[g][t][c];
+            if (dc > cmax) cmax = dc;
+            if (dc < cmin) cmin = dc;
+          end
+        sp_sum += (cmax - cmin);
+        if ((cmax - cmin) > sp_worst) begin sp_worst = cmax - cmin; sp_worst_g = g; end
+      end
+      core_spread_avg = real'(sp_sum) / real'(NumGroups);
+      core_spread_max = sp_worst; core_spread_g = sp_worst_g;
+    end
+    // PROBE 3: retired-instruction drift. Two views, exactly as proposed:
+    //   intra = max-min ACROSS THE 16 CORES OF A GROUP, averaged over groups, and the worst group
+    //   inter = max-min ACROSS GROUP TOTALS (no barrier controls this -- the group barrier is
+    //           per-group, so inter-group drift is unmanaged by construction)
+    begin
+      automatic int unsigned isum = 0, iworst = 0, iworst_g = 0;
+      automatic int unsigned gtot_max = 0, gtot_min = 32'hFFFFFFFF;
+      for (int g = 0; g < NumGroups; g++) begin
+        automatic int unsigned imax = 0, imin = 32'hFFFFFFFF, gtot = 0;
+        for (int t = 0; t < NumTilesPerGroup; t++)
+          for (int c = 0; c < NumCoresPerTile; c++) begin
+            automatic int unsigned v = fu_insn_cum[g][t][c];
+            if (v > imax) imax = v;
+            if (v < imin) imin = v;
+            gtot += v;
+          end
+        isum += (imax - imin);
+        if ((imax - imin) > iworst) begin iworst = imax - imin; iworst_g = g; end
+        if (gtot > gtot_max) gtot_max = gtot;
+        if (gtot < gtot_min) gtot_min = gtot;
+      end
+      insn_intra_avg  = real'(isum) / real'(NumGroups);
+      insn_intra_max  = iworst; insn_intra_g = iworst_g;
+      // per-core equivalent so intra and inter are on the same scale
+      insn_inter      = (gtot_max - gtot_min) / (NumTilesPerGroup*NumCoresPerTile);
+      insn_total      = gtot_max;
+    end
+    // PROBE 1: barrier arrival spread (cycles between first and last arrival), averaged over
+    // every release in this period across all groups.
+    fu_bsum_cum = 0; fu_bcnt_cum = 0;
+    for (int g = 0; g < NumGroups; g++) begin
+      fu_bsum_cum += longint'(fu_bar_sum[g]);
+      fu_bcnt_cum += longint'(fu_bar_cnt[g]);
+    end
+    d_bsum = fu_bsum_cum - fu_bsum_prev;
+    d_bcnt = fu_bcnt_cum - fu_bcnt_prev;
+    bar_spread_avg = (d_bcnt > 0) ? real'(d_bsum)/real'(d_bcnt) : 0.0;
+    bar_max_any = 0;
+    for (int g = 0; g < NumGroups; g++) if (fu_bar_max[g] > bar_max_any) bar_max_any = fu_bar_max[g];
+
+    $display("[FPU] %s cyc=%0d util=%.2f%% cum=%.2f%% busy=%0d/%0d lane-cyc  grp_max=%.1f%%(g%0d) grp_min=%.1f%%(g%0d)  mshr_timeout=+%0d bankfull_bypass=+%0d  core_spread=%.0f/%0d(g%0d)  bar_rel=+%0d bar_spread=%.1f bar_max=%0d  insn_drift_intra=%.0f/%0d(g%0d) inter=%0d insn_max=%0d",
              tag, fu_cycle, util_p, util_c, d_busy, d_cyc*FU_Lanes,
-             gu_max, g_max_id, gu_min, g_min_id);
+             gu_max, g_max_id, gu_min, g_min_id, d_to, d_bfb,
+             core_spread_avg, core_spread_max, core_spread_g,
+             d_bcnt, bar_spread_avg, bar_max_any,
+             insn_intra_avg, insn_intra_max, insn_intra_g, insn_inter, insn_total);
+`ifndef FPU_PER_GROUP_DISABLE
+    // PER-GROUP UTILISATION, ALL GROUPS, EVERY PERIOD.
+    //
+    // grp_max/grp_min above report only the two extremes. They cannot distinguish a group
+    // that is persistently slow from one that merely happens to be slowest this period, and
+    // that distinction decides whether the 8x8 utilisation collapse is a fixed set of starved
+    // groups or every group taking turns. fu_grp_cum[] already holds the answer for all 64
+    // groups; until now it was thrown away at the end of this task.
+    //
+    // Emitted as RAW busy lane-cycles plus the per-group denominator rather than a percentage,
+    // so a consumer normalises exactly as gu_max/gu_min do and nothing is lost to rounding:
+    //     util_g = 100.0 * busy[g] / denom
+    // One line per period, ~64 short integers -- a few hundred bytes, negligible next to the
+    // rest of the log. Compile out with +define+FPU_PER_GROUP_DISABLE.
+    //
+    // MUST stay ahead of the fu_grp_prev update below, which destroys the delta.
+    //
+    // Cosmetic quirk, verified in the first FG511 output and left alone deliberately: the
+    // ternary picks between "%0d" and ",%0d", and SV pads the shorter string literal to the
+    // wider one, so field 0 prints with a leading space ("busy= 0,0,..."). Harmless -- any
+    // int()/atoi() strips it -- and NOT worth an 81-minute rebuild to make pretty. Do not
+    // "fix" it in isolation either: the runs must stay format-identical to each other.
+    begin
+      automatic string gs = "";
+      for (int g = 0; g < NumGroups; g++)
+        gs = {gs, $sformatf((g == 0) ? "%0d" : ",%0d", fu_grp_cum[g] - fu_grp_prev[g])};
+      $display("[FPUG] %s cyc=%0d denom=%0d busy=%s", tag, fu_cycle, d_cyc*FU_PerGrpLane, gs);
+    end
+`endif
     fu_raw_prev    = fu_raw_cum;
     fu_busy_prev   = fu_busy_cum;
     fu_active_prev = fu_active_cyc;
+    fu_to_prev     = fu_to_cum;
+    fu_bfb_prev    = fu_bfb_cum;
+    fu_bsum_prev   = fu_bsum_cum;
+    fu_bcnt_prev   = fu_bcnt_cum;
+    for (int g = 0; g < NumGroups; g++)
+      for (int t = 0; t < NumTilesPerGroup; t++)
+        for (int c = 0; c < NumCoresPerTile; c++) fu_core_prev[g][t][c] = fu_core_cum[g][t][c];
     for (int g = 0; g < NumGroups; g++) fu_grp_prev[g] = fu_grp_cum[g];
   endtask
 
