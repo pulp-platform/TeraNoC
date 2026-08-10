@@ -668,6 +668,36 @@ module mempool_system
   logic          [NumL2Banks-1:0]   bank_we;
   axi_data_t     [NumL2Banks-1:0]   bank_rdata;
 
+`ifdef WAKEUP_PROBE
+  // Is the L2 servicing requests? Counters live entirely in one always_ff (an `initial`
+  // block plus always_ff assignment is two drivers -- vopt-7061 -- which is what broke
+  // the first attempt at this probe).
+  integer l2_req_cnt [NumAXIMasters];
+  integer l2_rsp_cnt [NumAXIMasters];
+  integer l2_probe_cyc;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      l2_probe_cyc <= 0;
+      for (int k = 0; k < NumAXIMasters; k++) begin
+        l2_req_cnt[k] <= 0;
+        l2_rsp_cnt[k] <= 0;
+      end
+    end else begin
+      l2_probe_cyc <= l2_probe_cyc + 1;
+      for (int k = 0; k < NumAXIMasters; k++) begin
+        if (mem_req[k] && mem_gnt[k]) l2_req_cnt[k] <= l2_req_cnt[k] + 1;
+        if (mem_rvalid[k])            l2_rsp_cnt[k] <= l2_rsp_cnt[k] + 1;
+      end
+      if (l2_probe_cyc % 2000 == 0) begin
+        $write("[L2PROBE] cyc=%0d", l2_probe_cyc);
+        for (int k = 0; k < NumAXIMasters; k++)
+          if (l2_req_cnt[k] != 0) $write("  ch%0d:%0d/%0d", k, l2_req_cnt[k], l2_rsp_cnt[k]);
+        $write("\n");
+      end
+    end
+  end
+`endif
+
   for (genvar i = 0; i < NumAXIMasters; i++) begin : gen_l2_adapters
     axi2mem #(
       .axi_req_t    (axi_tile_req_t ),
@@ -1133,6 +1163,15 @@ module mempool_system
     $error("[mempool_system] perimeter_map_pkg::PeriphHbmChannel (%0d) is not a valid AXI ",
            "master index (NumAXIMasters = %0d). Regenerate the perimeter map for this mesh.",
            perimeter_map_pkg::PeriphHbmChannel, NumAXIMasters);
+
+  // The interleaver's bank field must land where the SAM expects it. The SAM gives each
+  // L2 channel 1 MB, so L2Size must be NumL2Banks * 1 MB; otherwise MSBConstantBits
+  // (= 32 - clog2(L2Size)) shifts the bank field and the upper channels become
+  // unreachable -- requests are issued, decode to the wrong endpoint, and never return.
+  if (L2Size != NumL2Banks * (1 << 20))
+    $error("[mempool_system] L2Size (%0d) must be NumL2Banks (%0d) * 1 MB = %0d, or the ",
+           "interleaver's bank field will not align with the SAM.",
+           L2Size, NumL2Banks, NumL2Banks * (1 << 20));
 
   localparam int unsigned GroupFieldLsb  = ByteOffset + $clog2(NumBanksPerTile)
                                                       + $clog2(NumTilesPerGroup);

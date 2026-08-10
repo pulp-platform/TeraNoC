@@ -2501,6 +2501,17 @@ module snitch
     if (!rst_i && illegal_inst && inst_valid_o && inst_ready_i) begin
       $display("[Illegal Instruction Core %0d] PC: %h Data: %h", hart_id_i, inst_addr_o, inst_data_i);
     end
+`ifdef WAKEUP_PROBE
+    // Temporary: which cores actually sleep, and are they ever released? A core that is
+    // ASLEEP when a wake-up pulse arrives banks NO pending count (wake_up_d only
+    // increments when !wfi_q), so if it later reaches another wfi it sleeps with nothing
+    // to release it. That asymmetry is benign at 4x4 but not obviously so at 1024 cores,
+    // where the boot skew is far wider.
+    if (!rst_i && wfi_d && !wfi_q)
+      $display("[WFI-SLEEP] hart %0d cycle %0d pc %h pending %0d", hart_id_i, cycle_q, inst_addr_o, wake_up_q);
+    if (!rst_i && !wfi_d && wfi_q)
+      $display("[WFI-WAKE ] hart %0d cycle %0d", hart_id_i, cycle_q);
+`endif
     if (!rst_i && wake_up_sync_i && &wake_up_q) begin
       $display("[Missed wake-up Core %0d] Cycle: %d, Time: %t", hart_id_i, cycle_q, $time);
     end

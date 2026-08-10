@@ -133,6 +133,22 @@ module ctrl_registers
     end
   end
 
+  // Temporary diagnostic (WAKEUP_PROBE): does a wake-up write reach the control
+  // registers at all? At 8x8 every core sleeps forever in mempool_barrier_init's
+  // wfi, which happens iff wake_up_all()'s store to 0x4000_0000 never lands.
+`ifdef WAKEUP_PROBE
+  always_ff @(posedge clk_i) begin
+    if (ctrl_reg2hw.wake_up.qe)
+      $display("[WAKEUP] t=%0t  wake_up write q=0x%0h  NumCores=%0d", $time,
+               ctrl_reg2hw.wake_up.q, NumCores);
+    if (ctrl_reg2hw.wake_up_group.qe)
+      $display("[WAKEUP] t=%0t  wake_up_group write q=0x%0h", $time,
+               ctrl_reg2hw.wake_up_group.q);
+    if (|wake_up_o)
+      $display("[WAKEUP] t=%0t  wake_up_o asserted, popcount=%0d", $time, $countones(wake_up_o));
+  end
+`endif
+
   always_comb begin
     wake_up_o = '0;
     // converts 32-bit core wake-up into a 'NumCores'-bit mask
