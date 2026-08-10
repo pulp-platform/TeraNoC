@@ -41,6 +41,20 @@ module mempool_group_barrier #(
   // skew turned every group barrier into a 1024-cycle penalty that synchronized nothing). Use W > 0
   // only as a deadlock escape while debugging, never as the normal mode.
   parameter int unsigned WatchdogLimit    = 0,
+  // Single-cycle BROADCAST release (default on).
+  //
+  // The legacy path drives releases out of resp_ini_addr_o, which the LIC routes to ONE master
+  // per cycle -- so a 16-core group was released over 16 cycles in fixed ascending core order.
+  // That staircase is as wide as the MSHR merge window it exists to hit (~10-15 cyc, see
+  // sp-fmatmul.c), so the barrier could not align cores by construction: measured ~20 pp of FPU
+  // utilisation (A 72% vs the same build with the barrier ablated 90%).
+  //
+  // With Bcast the release instead leaves on rel_vec_o, a per-core valid vector that
+  // mempool_group muxes directly into each tile's EXISTING response bundle -- no extra LIC
+  // port. Each bit clears on its own handshake, so the common case is one cycle and a tile
+  // whose response port is momentarily busy just retries. Config-write ACKs keep using the LIC
+  // port (they are rare and one-at-a-time by nature).
+  parameter bit          EnableBcast      = 1'b1,
   // Derived (do not override)
   parameter int unsigned IniW    = $clog2(NumCoresPerGroup),
   parameter int unsigned StructW = (NumBarriers > 1) ? $clog2(NumBarriers) : 1,
@@ -62,6 +76,11 @@ module mempool_group_barrier #(
   output logic [IniW-1:0]             resp_ini_addr_o,
   output logic                        resp_wen_o,
   input  logic                        resp_ready_i,
+  // Broadcast release (EnableBcast): one valid bit per core, all asserted together. The
+  // instantiator supplies the rdata (echoed meta_id/core_id, indexed by core) and the per-core
+  // ready. Tied to '0 when EnableBcast = 0.
+  output logic [NumCoresPerGroup-1:0] rel_vec_o,
+  input  logic [NumCoresPerGroup-1:0] rel_ready_i,
   // Stats: sticky per-struct watchdog-fired flag (expected 0 on a correct run).
   output logic [NumBarriers-1:0]      wd_fire_o
 );
@@ -88,6 +107,19 @@ module mempool_group_barrier #(
   // snitch_lsu invalid_resp_id). arrived_q == mask_q on every normal (ready) release, so this is
   // behaviourally identical there; it only changes the force-release path.
   logic [NumBarriers-1:0][NumCoresPerGroup-1:0]  arrived_q, arrived_d;
+
+  // ---- PROBE 1: barrier ARRIVAL SPREAD (simulation only) --------------------
+  // The span between the FIRST and LAST core reaching a rendezvous -- i.e. how misaligned the
+  // group already is when it arrives. This is the quantity the whole "are the cores aligned?"
+  // question turns on, and nothing in the design measured it: grp_max/grp_min in the FPU probe
+  // are per-GROUP aggregates and say nothing about skew WITHIN a group.
+  //   age_q[s]   : cycles since this struct's first arrival (0 while count_q == 0)
+  //   spread_*   : free-running accumulators, read hierarchically by the TB like the MSHR's
+  //                *_cnt_dbg counters. Deltas between TB samples scope them to a period.
+  logic [NumBarriers-1:0][15:0] age_q, age_d;
+  logic [31:0]                  bar_spread_sum_dbg, bar_spread_sum_d;   // sum of spreads
+  logic [31:0]                  bar_release_cnt_dbg, bar_release_cnt_d; // releases counted
+  logic [15:0]                  bar_spread_max_dbg, bar_spread_max_d;   // worst seen
   logic                                          ack_pend_q, ack_pend_d; // config-write ack pending
   logic [IniW-1:0]                              ack_ini_q,  ack_ini_d;
 
@@ -155,20 +187,44 @@ module mempool_group_barrier #(
     for (int unsigned s = 0; s < NumBarriers; s++)
       if (!pick_valid && ready_other[s]) begin pick_valid = 1'b1; pick_struct = StructW'(s); end
 
-    // release datapath: lowest set responder of the releasing struct
+    // release datapath: lowest set responder of the releasing struct (legacy path only)
     rel_have = 1'b0; rel_target = '0;
     for (int unsigned c = 0; c < NumCoresPerGroup; c++)
       if (!rel_have && rel_rem_q[c]) begin rel_have = 1'b1; rel_target = IniW'(c); end
 
-    // response: config-write ACK has priority over a release (acks are rare/setup)
-    resp_valid_o    = ack_pend_q || (releasing_q && rel_have);
+    // BROADCAST release: every remaining responder in the same cycle. Held off while a
+    // config ACK is in flight so the two never contend for a tile's response port.
+    rel_vec_o = '0;
+    if (EnableBcast && releasing_q && !ack_pend_q) rel_vec_o = rel_rem_q;
+
+    // response: config-write ACK has priority over a release (acks are rare/setup).
+    // With Bcast the LIC port carries ACKs only; releases leave on rel_vec_o.
+    resp_valid_o    = ack_pend_q || (!EnableBcast && releasing_q && rel_have);
     resp_wen_o      = ack_pend_q;                       // 1 = write ack, 0 = read release
     resp_ini_addr_o = ack_pend_q ? ack_ini_q : rel_target;
 
     ack_fire = ack_pend_q && resp_ready_i;
-    rel_fire = !ack_pend_q && releasing_q && rel_have && resp_ready_i;
+    rel_fire = 1'b0;
     if (ack_fire) ack_pend_d = 1'b0;
-    if (rel_fire) rel_rem_d[rel_target] = 1'b0;
+    if (EnableBcast) begin
+      // Per-core handshake: clear each bit as its own tile accepts. rel_rem_d reaching '0 is
+      // what the FSM below uses to finish the round, exactly as in the legacy path.
+      for (int unsigned c = 0; c < NumCoresPerGroup; c++)
+        if (rel_vec_o[c] && rel_ready_i[c]) rel_rem_d[c] = 1'b0;
+    end else begin
+      rel_fire = !ack_pend_q && releasing_q && rel_have && resp_ready_i;
+      if (rel_fire) rel_rem_d[rel_target] = 1'b0;
+    end
+
+    // PROBE 1: age each struct that has at least one arrival; capture the span when the
+    // release is picked (that is the cycle the last arrival completed the target).
+    bar_spread_sum_d  = bar_spread_sum_dbg;
+    bar_release_cnt_d = bar_release_cnt_dbg;
+    bar_spread_max_d  = bar_spread_max_dbg;
+    for (int unsigned s = 0; s < NumBarriers; s++) begin
+      age_d[s] = (count_d[s] == '0) ? 16'd0
+               : (age_q[s] != 16'hFFFF) ? (age_q[s] + 16'd1) : age_q[s];
+    end
 
     // next-state of the release FSM
     if (releasing_q && (rel_rem_d != '0)) begin
@@ -181,6 +237,10 @@ module mempool_group_barrier #(
       if (pick_valid) begin
         releasing_d  = 1'b1;
         rel_struct_d = pick_struct;
+        // Span from first arrival to the cycle the rendezvous completed.
+        bar_spread_sum_d  = bar_spread_sum_dbg + 32'(age_q[pick_struct]);
+        bar_release_cnt_d = bar_release_cnt_dbg + 32'd1;
+        if (age_q[pick_struct] > bar_spread_max_dbg) bar_spread_max_d = age_q[pick_struct];
         // Release exactly the cores that arrived. arrived_d (not _q) so a core arriving in this
         // very cycle is included -- otherwise it would wait out another full watchdog window.
         // pick_struct != rel_struct_q (ready_other excludes the releasing struct), so the clear
@@ -196,11 +256,14 @@ module mempool_group_barrier #(
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       target_q <= '0; mask_q <= '0; count_q <= '0;
+      age_q <= '0; bar_spread_sum_dbg <= '0; bar_release_cnt_dbg <= '0; bar_spread_max_dbg <= '0;
       wd_q <= {NumBarriers{WdW'(WatchdogLimit)}}; wd_fire_q <= '0;
       releasing_q <= 1'b0; rel_struct_q <= '0; rel_rem_q <= '0; arrived_q <= '0;
       ack_pend_q <= 1'b0; ack_ini_q <= '0;
     end else begin
       target_q <= target_d; mask_q <= mask_d; count_q <= count_d;
+      age_q <= age_d; bar_spread_sum_dbg <= bar_spread_sum_d;
+      bar_release_cnt_dbg <= bar_release_cnt_d; bar_spread_max_dbg <= bar_spread_max_d;
       wd_q <= wd_d; wd_fire_q <= wd_fire_d;
       releasing_q <= releasing_d; rel_struct_q <= rel_struct_d; rel_rem_q <= rel_rem_d;
       arrived_q <= arrived_d;

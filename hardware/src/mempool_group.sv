@@ -37,6 +37,11 @@ module mempool_group
   parameter bit          EnableGroupBarrier   = 1'b1,
 `endif
   parameter int unsigned NumGroupBarriers     = NumCoresPerGroup,
+  // Single-cycle broadcast release for the group barrier (see mempool_group_barrier).
+  // Default ON -- the legacy one-core-per-cycle release cost ~20 pp of FPU utilisation.
+  // -DGROUP_BARRIER_BCAST_OFF restores the old staircase for A/B measurement.
+  parameter bit          EnableBarrierBcast   =
+    `ifdef GROUP_BARRIER_BCAST_OFF 1'b0 `else 1'b1 `endif,
   // Group-barrier watchdog, in cycles. 0 (default) = none: the barrier waits until every `target`
   // core arrives -- the intended rendezvous semantics. A non-zero value force-releases the arrived
   // subset after that many cycles, which desynchronizes rather than synchronizes; keep it 0 unless
@@ -243,6 +248,13 @@ module mempool_group
   logic           [NumTilesPerGroup-1:0] master_local_resp_ready;
   tcdm_payload_t  [NumTilesPerGroup-1:0] master_local_resp_rdata;
   logic           [NumTilesPerGroup-1:0] master_local_resp_wen;
+
+  // Group-barrier BROADCAST release bypass (see mempool_group_barrier EnableBcast). Declared at
+  // module scope because the mux sits on the per-tile response path above, while the driver is
+  // inside the EnableGroupBarrier generate below.
+  logic           [NumTilesPerGroup-1:0] bar_rel_vec;
+  logic           [NumTilesPerGroup-1:0] bar_rel_ready;
+  tcdm_payload_t  [NumTilesPerGroup-1:0] bar_rel_rdata;
   logic           [NumTilesPerGroup-1:0] slave_local_req_valid;
   logic           [NumTilesPerGroup-1:0] slave_local_req_ready;
   tile_addr_t     [NumTilesPerGroup-1:0] slave_local_req_tgt_addr;
@@ -291,10 +303,19 @@ module mempool_group
     assign slave_local_resp_rdata[t]          = tcdm_slave_resp[0][t].rdata;
     assign slave_local_resp_wen[t]            = tcdm_slave_resp[0][t].wen;
     assign tcdm_slave_resp_ready[0][t]        = slave_local_resp_ready[t];
-    assign tcdm_master_resp_valid[0][t]       = master_local_resp_valid[t];
-    assign tcdm_master_resp[0][t].rdata       = master_local_resp_rdata[t];
-    assign tcdm_master_resp[0][t].wen         = master_local_resp_wen[t];
-    assign master_local_resp_ready[t]         = tcdm_master_resp_ready[0][t];
+    // The barrier's broadcast release is merged in HERE rather than routed through the LIC:
+    // the LIC response carries a single resp_ini_addr, so it can only release one core per
+    // cycle -- a 16-cycle staircase, wider than the ~10-15 cyc MSHR merge window the barrier
+    // exists to hit (worth ~20 pp of FPU utilisation). The release is a dummy load writeback
+    // carrying only meta_id/core_id, so merging it costs one 2:1 mux per tile and NO extra
+    // crossbar port. The barrier wins the cycle; the LIC response is held off via ready and
+    // retries next cycle (it is a normal back-pressured stream, so this is lossless).
+    assign tcdm_master_resp_valid[0][t]       = bar_rel_vec[t] | master_local_resp_valid[t];
+    assign tcdm_master_resp[0][t].rdata       = bar_rel_vec[t] ? bar_rel_rdata[t]
+                                                              : master_local_resp_rdata[t];
+    assign tcdm_master_resp[0][t].wen         = bar_rel_vec[t] ? 1'b0 : master_local_resp_wen[t];
+    assign master_local_resp_ready[t]         = tcdm_master_resp_ready[0][t] & ~bar_rel_vec[t];
+    assign bar_rel_ready[t]                   = tcdm_master_resp_ready[0][t];
     assign tcdm_slave_req_valid[0][t]         = slave_local_req_valid[t];
     assign tcdm_slave_req[0][t].tgt_addr      = slave_local_req_tgt_addr[t];
     assign tcdm_slave_req[0][t].ini_addr      = slave_local_req_ini_addr[t];
@@ -468,7 +489,8 @@ module mempool_group
     mempool_group_barrier #(
       .NumCoresPerGroup(NumTilesPerGroup   ),
       .NumBarriers     (NumGroupBarriers   ),
-      .WatchdogLimit   (GroupBarrierWdLimit)
+      .WatchdogLimit   (GroupBarrierWdLimit),
+      .EnableBcast     (EnableBarrierBcast )
     ) i_group_barrier (
       .clk_i, .rst_ni,
       .req_valid_i    (bar_req_valid      ),
@@ -481,8 +503,18 @@ module mempool_group
       .resp_ini_addr_o(bar_core_resp_ini  ),
       .resp_wen_o     (bar_core_resp_wen  ),
       .resp_ready_i   (bar_resp_ready     ),
+      .rel_vec_o      (bar_rel_vec        ),
+      .rel_ready_i    (bar_rel_ready      ),
       .wd_fire_o      (bar_wd_fire        )
     );
+
+    // Broadcast-release payload, one per core: the same echoed meta the LIC path builds, but
+    // indexed by the core being released rather than by a single resp_ini_addr.
+    for (genvar c = 0; c < NumTilesPerGroup; c++) begin : gen_bar_rel_rdata
+      assign bar_rel_rdata[c] = '{meta_id: meta_store_q[c].meta_id,
+                                  core_id: meta_store_q[c].core_id,
+                                  amo: '0, data: '0};
+    end
 
     // drive the held response / config-write ack onto the barrier port; the LIC
     // routes it to the requesting master by ini_addr. resp_wen=1 (config ack) frees
@@ -500,6 +532,8 @@ module mempool_group
     assign bar_resp_ini   = '0;
     assign bar_resp_wen   = 1'b0;
     assign bar_resp_rdata = '0;
+    assign bar_rel_vec    = '0;                 // broadcast bypass inert: mux selects the LIC
+    assign bar_rel_rdata  = '0;
   end
 
   /**************************
@@ -561,6 +595,33 @@ module mempool_group
   axi_tile_resp_t  [NumAXIMastersPerGroup-1:0] axi_mst_resp;
   axi_tile_req_t  [NumTilesPerGroup+NumDmasPerGroup-1:0] axi_slv_req;
   axi_tile_resp_t [NumTilesPerGroup+NumDmasPerGroup-1:0] axi_slv_resp;
+
+`ifdef WAKEUP_PROBE
+  // Does the group's AXI master (icache refill out of the RO cache) actually emit the
+  // read that the stalled core is waiting on? At 8x8 core 0 stalls fetching 0x800014e0,
+  // which the 2 KB L2 stripe maps to channel 2 -- a channel the L2 probe shows is never
+  // touched. Splits the remaining space: no AR emitted => the fault is inside the RO
+  // cache / axi_to_cache; AR emitted with no R => the NoC path to that endpoint.
+  integer gax_ar, gax_r, gax_cyc;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      gax_ar <= 0; gax_r <= 0; gax_cyc <= 0;
+    end else begin
+      gax_cyc <= gax_cyc + 1;
+      for (int m = 0; m < NumAXIMastersPerGroup; m++) begin
+        if (axi_mst_req[m].ar_valid && axi_mst_resp[m].ar_ready) begin
+          gax_ar <= gax_ar + 1;
+          if (axi_mst_req[m].ar.addr[31:20] != 12'h800)
+            $display("[GAX] grp %0d cyc %0d AR addr=%h (beyond channel 0/1)",
+                     group_id_i, gax_cyc, axi_mst_req[m].ar.addr);
+        end
+        if (axi_mst_resp[m].r_valid && axi_mst_req[m].r_ready) gax_r <= gax_r + 1;
+      end
+      if (gax_cyc % 4000 == 0 && group_id_i < 3)
+        $display("[GAX] grp %0d cyc %0d  ar=%0d r=%0d", group_id_i, gax_cyc, gax_ar, gax_r);
+    end
+  end
+`endif
 
   for (genvar i = 0; i < NumDmasPerGroup; i++) begin : gen_axi_slv_vec
     assign axi_slv_req[i*(NumTilesPerDma+1)+:NumTilesPerDma+1] = {axi_dma_req[i],axi_tile_req[i*NumTilesPerDma+:NumTilesPerDma]};
