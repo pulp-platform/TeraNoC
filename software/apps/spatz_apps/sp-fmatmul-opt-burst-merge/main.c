@@ -217,8 +217,18 @@ int main() {
   const uint32_t core_gid = cid % cores_per_group;   // My position within group
   const uint32_t gid = cid / cores_per_group;        // My group ID
 
-  // Determine how many cores are active in this run
-  const uint32_t active_groups = NUM_GROUPS;
+  // Determine how many cores are active in this run.
+  // ACTIVE_GROUP_DIV shrinks the active set to the FIRST NUM_GROUPS/DIV groups
+  // (cid < active_cores => gid < active_groups), leaving each active group fully
+  // populated so the per-group barrier still sees all 16 of its cores. Default 1
+  // = every group active, i.e. bit-identical to the previous behaviour.
+  // Build with EXTRA_DEFINES=-DACTIVE_GROUP_DIV=4 for the quarter-load run; that
+  // needs a matching M (M/active_groups must keep dim_group unchanged) or each
+  // core silently gets DIV x the columns.
+#ifndef ACTIVE_GROUP_DIV
+#define ACTIVE_GROUP_DIV 1
+#endif
+  const uint32_t active_groups = NUM_GROUPS / ACTIVE_GROUP_DIV;
   const uint32_t active_cores = cores_per_group * active_groups;
   const uint32_t is_core_active = cid < active_cores;
 

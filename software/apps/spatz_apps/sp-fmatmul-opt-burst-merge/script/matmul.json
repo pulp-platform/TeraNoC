@@ -6,7 +6,7 @@
 
 {
     kernel: "GEMM"
-    M: 512,
+    M: 2048,
     N: 512,
     P: 512,
     alpha: 0,
