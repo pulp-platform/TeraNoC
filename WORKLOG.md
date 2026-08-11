@@ -9186,3 +9186,31 @@ tell.
 
 Margin is real but not generous: 13 h. Anything else that starts consuming this filesystem breaks
 it, and build_1 (299 GB) + build_3 (147 GB) still hold 446 GB while writing nothing.
+
+## 2026-08-11 -- EQUIVALENCE PROVEN for the whole day's MSHR work
+
+Run A (`group_mshr_hold_prescale_w=0`, so the prescaler's deliberate quantisation is off and every
+OTHER change must be bit-exact), 4x4 tuned config, ELF hardware/matmul_4x4_256x512x256.elf:
+
+    reference: busy=33802656 of 35460096 lane-cycles over 34629 benchmark cycles -> 95.33%
+    run A    : busy=33802656 of 35460096 lane-cycles over 34629 benchmark cycles -> 95.33%
+    35 periods, 35 common, 0 differing -- ALL BIT-IDENTICAL
+    0 assertion failures, 0 [CMS WARN], 0 mshr_gate_*_no_lost_write violations
+
+Covers, in one run: the entry struct trims (7b45375), the clock gating (2668379), the probe gating
+and 12 automatic hoists (42ddb2a), the resp_buf_valid removal (7d22130), **both parallel-prefix
+drain rewrites (6c6331b)**, **the mask-based meta-overlap (90760e1)** and the signed bit-select fix
+(b83d5db).
+
+The two drain rewrites and the meta-mask are the ones that carried real risk -- they restructured
+the deepest logic in the most delicate block, with no system simulation available at the time. The
+approach that made that acceptable was to prove each transformation standalone BEFORE touching the
+RTL (25,600 vectors for the prefix encode, 629,432 for the two-stage drain2 restructure, and the
+complete 18,496-case domain for the meta-range mask). This run confirms those proofs held in situ.
+
+Worth noting separately: **zero mshr_gate_*_no_lost_write assertion failures over the whole run.**
+That is the dynamic counterpart to the static 18/18 write-coverage check -- the clock-gating enables
+provably never swallowed a write in ~35k benchmark cycles of real traffic.
+
+Entry width across the session: **272 -> 184 bits (-32.4%)**; at 64 entries x 64 groups,
+1,114,112 -> 753,664 flops.
