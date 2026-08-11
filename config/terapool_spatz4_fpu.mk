@@ -192,6 +192,18 @@ group_mshr_hold_window   ?= 0
 # value above only applies to a class that has no override.)
 group_mshr_hold_window_single ?= 0
 group_mshr_hold_window_burst  ?= 255
+# Prescaler for the hold/serve countdown, in BITS. Each entry stores its window in ticks of
+# 2**W cycles instead of cycles, so hold_cnt loses W bits and toggles 2**W times less often;
+# entry e takes its tick when the shared prescaler equals e[W-1:0], which spreads expiries
+# instead of releasing every held fetch on one grid tick. 0 = exact cycle-accurate countdown.
+#
+# Pinned here rather than left to the RTL default so it is visible in a config and lands in
+# every build's define list. `?=` because derived flavours assign before including this file.
+#
+# Measured on the 4x4 tuned config (one matched pair, one workload -- suggestive, not settled):
+#   W=0  34629 cycles   W=4  34417 cycles  (0.61% faster), and 4 bits x MshrNum fewer flops
+#   per group -- ~16.1k at 8x8. Equivalence with W=0 proven bit-exact over all 35 periods.
+group_mshr_hold_prescale_w ?= 4
 # Early-release subscriber target: a held entry issues its fetch as soon as this many
 # requesters have merged into it. Legal range [2, group_mshr_merge_reqs].
 group_mshr_hold_subs     ?= 2
