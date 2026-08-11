@@ -8684,3 +8684,69 @@ confident wrong answer:
 Both failure modes report a PROBLEM where none exists, which is the safer direction -- but a
 scary-looking false positive still costs the same review time as a real one.
 
+## 2026-08-11 -- MSHR backend: gate the probes out of synthesis, hoist the last automatics (staged)
+
+**Item 3 (gate non-synthesis logic).** Two telemetry blocks were reaching synthesis:
+
+    gen_resp_hold_probe  (82 lines)  longint rh_cyc + 32-bit debug counters + $display("[RH STUCK]")
+    gen_bypass_probe     (64 lines)  integer bp_out_cnt [NumTilesPerGroup][BpCoreN][BpMetaN]
+                                     -- an unpacked 16 x 8 x 8 array of integers, 32 kbit per group,
+                                     plus longint counters and $display("[BYP ORPHAN]")
+
+Both are gated by a VALUE knob (`group_mshr_resp_hold_probe`, `group_mshr_bypass_probe`) -- not by a
+synthesis macro -- and **both backend configs set them** (1000 and 1). So the elaborated design
+carried them as real hardware. Now wrapped in `ifndef TARGET_SYNTHESIS. Verified by compiling with
+the macro defined: 0 errors, which is also the test that nothing outside the blocks reads into them.
+
+The scan that found this is worth keeping: look for `integer`/`longint`/`real`/`string`/`$display`/
+`initial` and report the ones NOT inside an `ifndef TARGET_SYNTHESIS/VERILATOR. 87 such constructs
+exist in the file; 8 were unguarded, in exactly these two regions.
+
+**Item 1 (remove procedural automatics).** 12 remaining scratch temporaries hoisted to module-scope
+signals, leaving 7 -- all inside the two probe blocks above or under `ifndef VERILATOR, i.e. none in
+synthesised code. New signals: rsn_tag_cand, alloc_victim_rw, evict_vid/vw, cache_hit_e, replay_e/
+rt/rp/hold_done, resp_tag_cand, drain2_sel_e2.
+
+TRAP that shaped the implementation: `cand` and `hit_e` each appear in TWO different always blocks.
+Hoisting both to one signal would make the blocks alias -- and because each writes before it reads,
+that is a SILENT wrong-value bug, not a compile error (this is the same class as the alloc_slot_idx
+multiple-driver mistake earlier in this session, which vlog did catch only because the writes were
+in two always_comb blocks). One signal per (block, name); the renaming was scope-limited by
+begin/end matching, and the diff was audited for loop variables accidentally caught in a scope.
+Nine lines that the longer names pushed past the 100-column limit were rewrapped.
+
+**Status.** Staged, compile-verified in both define sets (0 errors, entry 186 synth / 250 sim).
+
+## 2026-08-11 -- Spyglass Design_Read results, and a real pragma defect it caught
+
+The backend_4x4 run finished its **Design_Read** goal at 16:30 (the lint goal is still running) and
+its report is readable now. 11 findings land in mempool_group_mshr.sv:
+
+    9 x SYNTH_89  "Initial Assignment at Declaration for (X) is ignored by synthesis"
+                  X = cand, rw, vid, vw, hit_e, e, cand, hit_e, e2
+    1 x SYNTH_78  "'final' construct is not synthesizable. Ignoring for synthesis"
+    1 x WRN_74    "translate_on specified without associated translate_off"
+
+**The 9 SYNTH_89 are exactly the 9 procedural automatics hoisted in the staged tree** -- the same
+nine names, one per site. So that cleanup was not cosmetic: synthesis DROPS the initialiser of an
+`automatic int x = <expr>;`, which is a genuine sim-vs-synth divergence, and this run is the
+independent confirmation. All nine are already gone in the staged version.
+
+**SYNTH_78 + WRN_74 were one real defect, now fixed.** The "Bank-full alloc bypass view
+(simulation-only)" block -- free-running debug counters, $display, and a `final` report -- is closed
+by a `// pragma translate_on`, but **nothing ever opened the region**. It was fully visible to
+synthesis and lint. Added the missing `// pragma translate_off`; both `final` blocks are now inside
+excluded regions and the pragma nesting balances.
+
+**The `ifndef VERILATOR guards inside that block did not help, and that is the general lesson.**
+My earlier item-3 sweep counted `!VERILATOR` as a synthesis guard and so reported the file clean. A
+synthesis or lint tool does not define VERILATOR; only `ifndef TARGET_SYNTHESIS and
+`// pragma translate_off` exclude code from it. Re-running the sweep with that corrected definition
+now reports **0** exposed simulation-only constructs -- but it reported 0 before the fix too, for
+the wrong reason. When writing a "is this excluded from synthesis?" check, enumerate the guards the
+TOOL honours, not the guards the file happens to use.
+
+Design-wide the only Errors are in vendored deps, not our RTL: 2 x ELAB_6312 (axi_demux,
+axi_demux_simple) and 4 x ErrorAnalyzeBBox (axi_xbar_unmuxed, floo_rob_wrapper, snitch_icache_lookup,
+snitch_read_only_cache).
+

@@ -566,6 +566,21 @@ module mempool_group_mshr
 
   // MSHR state (registered and next-state).
   mempool_group_mshr_t [MshrNum-1:0]                                           mshr_d;
+  // Block-local scratch values, hoisted out of the always blocks: packed signals at module
+  // scope instead of procedural automatics, so they are visible in a waveform. One signal
+  // per (block, name) -- two blocks sharing a hoisted temporary would alias, which is a
+  // silent multiple-driver bug rather than a compile error.
+  int            cache_hit_e;
+  int unsigned   alloc_victim_rw;
+  int unsigned   evict_vid;
+  int unsigned   evict_vw;
+  int unsigned   replay_e;
+  int unsigned   replay_rp;
+  int unsigned   replay_rt;
+  logic          replay_hold_done;
+  mshr_id_t      drain2_sel_e2;
+  mshr_id_t      resp_tag_cand;
+  mshr_id_t      rsn_tag_cand;
   // Clock-gate write flags, raised at the write sites themselves (see the entry register block).
   //   mshr_wr_all : the whole entry was written wholesale (allocation init, or a free clear)
   //   mshr_id_we  : a merge wrote the identity fields of one sub-request slot
@@ -1433,16 +1448,18 @@ module mempool_group_mshr
           if (RespSeenByTag) begin
             // O(1): index the tagged entry, then run the identical re-validation.
             if (resp_in[tile_i][port_i].mshr_tag != '0) begin : rsn_tag
-              automatic mshr_id_t cand =
+              rsn_tag_cand =
                   mshr_id_t'(resp_in[tile_i][port_i].mshr_tag - MshrTagWidth'(1));
-              if (mshr_q_valid[cand] &&
-                  ((mshr_q[cand].state == MSHR_WAIT_RESP) ||
-                   (mshr_q[cand].state == MSHR_DRAIN_RESP)) &&
-                  (mshr_q[cand].sub_reqs[0].tile_id == tile_group_id_t'(tile_i)) &&
-                  (mshr_q[cand].sub_reqs[0].core_id == resp_in[tile_i][port_i].rdata.core_id) &&
+              if (mshr_q_valid[rsn_tag_cand] &&
+                  ((mshr_q[rsn_tag_cand].state == MSHR_WAIT_RESP) ||
+                   (mshr_q[rsn_tag_cand].state == MSHR_DRAIN_RESP)) &&
+                  (mshr_q[rsn_tag_cand].sub_reqs[0].tile_id == tile_group_id_t'(tile_i)) &&
+                  (mshr_q[rsn_tag_cand].sub_reqs[0].core_id ==
+                       resp_in[tile_i][port_i].rdata.core_id) &&
                   ((resp_in[tile_i][port_i].rdata.meta_id -
-                    mshr_q[cand].sub_reqs[0].meta_id_base) < mshr_q[cand].burst_len)) begin
-                mshr_resp_seen_now[cand] = 1'b1;
+                      mshr_q[rsn_tag_cand].sub_reqs[0].meta_id_base) <
+                         mshr_q[rsn_tag_cand].burst_len)) begin
+                mshr_resp_seen_now[rsn_tag_cand] = 1'b1;
               end
             end
           end else begin
@@ -1637,12 +1654,13 @@ module mempool_group_mshr
       // rotates across the ways (pointer advanced by reclaim fires, see the alloc block).
       if (!bank_has_free[b] && CacheReclaimable) begin
         for (int w = 0; w < MshrWaysPerBank; w++) begin
-          automatic int unsigned rw = w;
+          alloc_victim_rw = w;
           if (CacheVictimRR) begin
-            rw = int'(victim_rr_q[b]) + w;
-            if (rw >= MshrWaysPerBank) rw = rw - MshrWaysPerBank;
+            alloc_victim_rw = int'(victim_rr_q[b]) + w;
+            if (alloc_victim_rw >= MshrWaysPerBank)
+              alloc_victim_rw = alloc_victim_rw - MshrWaysPerBank;
           end
-          e = b * MshrWaysPerBank + rw;
+          e = b * MshrWaysPerBank + alloc_victim_rw;
           if (!bank_has_free[b] &&
               EnableRespCache &&
               mshr_q_valid[e] &&
@@ -2282,6 +2300,15 @@ module mempool_group_mshr
   //   req_bankfull_bypass_cnt_dbg   : free-running count of ACCEPTED ones (fired
   //                                   handshake); take a cursor delta to scope it.
   // ------------------------------------------------------------------------
+  // pragma translate_off
+  // ^ THIS OPEN WAS MISSING. The block below is simulation-only (free-running debug
+  //   counters, $display, and a `final` report) and is closed by the `// pragma translate_on`
+  //   at the end of the `final` block -- but nothing ever opened the region, so all of it was
+  //   visible to synthesis and lint. Spyglass Design_Read flagged exactly that:
+  //     SYNTH_78  'final' construct is not synthesizable. Ignoring for synthesis
+  //     WRN_74    translate_on specified without associated translate_off
+  //   The `ifndef VERILATOR guards inside do NOT help here: a synthesis or lint tool does
+  //   not define VERILATOR, so it sees the code regardless.
   logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] req_bankfull_bypass_dbg;
   logic [31:0]                                               req_bankfull_bypass_cnt_dbg;
   logic [15:0]                                               req_bankfull_bypass_fire_cnt;
@@ -2800,11 +2827,11 @@ module mempool_group_mshr
                 // per-bank write never conflicts. /,% are shift/bit-select for the power-of-two
                 // ways-per-bank here, not a divider.
                 if (CacheVictimRR) begin
-                  automatic int unsigned vid = int'(req_alloc_found_mshr_id[tile_i][port_i]);
-                  automatic int unsigned vw  = vid % MshrWaysPerBank;
-                  if (mshr_q_valid[vid] && (mshr_q[vid].state == MSHR_CACHED)) begin
-                    victim_rr_d[vid / MshrWaysPerBank] =
-                        (vw + 1 >= MshrWaysPerBank) ? '0 : VictimPtrW'(vw + 1);
+                  evict_vid = int'(req_alloc_found_mshr_id[tile_i][port_i]);
+                  evict_vw  = evict_vid % MshrWaysPerBank;
+                  if (mshr_q_valid[evict_vid] && (mshr_q[evict_vid].state == MSHR_CACHED)) begin
+                    victim_rr_d[evict_vid / MshrWaysPerBank] =
+                        (evict_vw + 1 >= MshrWaysPerBank) ? '0 : VictimPtrW'(evict_vw + 1);
                   end
                 end
                 // Tier-b: stamp the egress NoC request with (allocated entry id + 1) so the returning
@@ -2866,24 +2893,24 @@ module mempool_group_mshr
               // Bank-scoped (3b): a store can only hit a CACHED entry in its own bank, so scan only
               // this request's MshrWaysPerBank ways; hit_e reconstructs the absolute entry id.
               for (int way_i = 0; way_i < MshrWaysPerBank; way_i++) begin
-                automatic int hit_e =
+                cache_hit_e =
                     int'(req_bank[tile_i][port_i]) * MshrWaysPerBank + way_i;
-                if (mshr_d_valid[hit_e] &&
-                    (mshr_d[hit_e].state == MSHR_CACHED) &&
+                if (mshr_d_valid[cache_hit_e] &&
+                    (mshr_d[cache_hit_e].state == MSHR_CACHED) &&
                     req_addr_hit_way[tile_i][port_i][way_i]) begin
                   // H3 fix: merge under byte-enables — a sub-word store must update only the
                   // enabled byte lanes and keep the existing cached bytes (writing the full word
                   // would corrupt the non-written bytes that a later cache-hit load would read).
                   for (int b = 0; b < $bits(req_in[tile_i][port_i].be); b++) begin
                     if (req_in[tile_i][port_i].be[b]) begin
-                      mshr_d[hit_e].resp_buf[mshr_d[hit_e].resp_buf_rd_ptr]
+                      mshr_d[cache_hit_e].resp_buf[mshr_d[cache_hit_e].resp_buf_rd_ptr]
                             .data[b*8 +: 8] =
                           req_in[tile_i][port_i].wdata.data[b*8 +: 8];
                     end
                   end
-                  mshr_d[hit_e].resp_buf_valid[mshr_d[hit_e].resp_buf_rd_ptr] = 1'b1;
-                  if (mshr_d[hit_e].resp_buf_cnt == '0) begin
-                    mshr_d[hit_e].resp_buf_cnt = RespBufCountW'(1);
+                  mshr_d[cache_hit_e].resp_buf_valid[mshr_d[cache_hit_e].resp_buf_rd_ptr] = 1'b1;
+                  if (mshr_d[cache_hit_e].resp_buf_cnt == '0) begin
+                    mshr_d[cache_hit_e].resp_buf_cnt = RespBufCountW'(1);
                   end
                 end
               end
@@ -2907,29 +2934,30 @@ module mempool_group_mshr
     // ------------------------------------------------------------
     if (HoldWindowMax != 0) begin
       for (int k = 0; k < MshrNum; k++) begin
-        automatic int unsigned e = 32'(hold_replay_rr_q) + 32'(k);
-        automatic int unsigned rt, rp;
-        automatic logic hold_done;
-        if (e >= MshrNum) e -= MshrNum;
-        if (mshr_d_valid[e] && (mshr_d[e].state == MSHR_WAIT_RESP) && !mshr_d[e].issued) begin
-          hold_done = (mshr_d[e].hold_cnt == '0) ||
-                      (mshr_d[e].sub_reqs_num >=
-                       SubReqCountW'((mshr_d[e].burst_len == BurstLenWidth'(1)) ?
+        replay_e = 32'(hold_replay_rr_q) + 32'(k);
+        if (replay_e >= MshrNum) replay_e -= MshrNum;
+        if (mshr_d_valid[replay_e] && (mshr_d[replay_e].state == MSHR_WAIT_RESP) &&
+            !mshr_d[replay_e].issued) begin
+          replay_hold_done = (mshr_d[replay_e].hold_cnt == '0) ||
+                      (mshr_d[replay_e].sub_reqs_num >=
+                       SubReqCountW'((mshr_d[replay_e].burst_len == BurstLenWidth'(1)) ?
                                      HoldSubsSingle : HoldSubsBurst));
-          rt = 32'(mshr_d[e].sub_reqs[0].tile_id);
-          rp = 32'(mshr_d[e].sub_reqs[0].port_id);
-          if (hold_done && !req_out_valid[rt][rp] && req_out_ready[rt][rp]) begin
-            req_out_valid[rt][rp]         = 1'b1;
-            req_out[rt][rp]               = '0;
-            req_out[rt][rp].wdata.meta_id = mshr_d[e].sub_reqs[0].meta_id_base;
-            req_out[rt][rp].wdata.core_id = mshr_d[e].sub_reqs[0].core_id;
-            req_out[rt][rp].wen           = 1'b0;
-            req_out[rt][rp].be            = '1;
-            req_out[rt][rp].tgt_group_id  = mshr_d[e].tgt_group_id;
-            req_out[rt][rp].tgt_addr      = mshr_d[e].base_addr;
-            req_out[rt][rp].burst_len     = mshr_d[e].burst_len;
-            req_out[rt][rp].mshr_tag      = MshrTagWidth'(e) + MshrTagWidth'(1);
-            mshr_d[e].issued              = 1'b1;
+          replay_rt = 32'(mshr_d[replay_e].sub_reqs[0].tile_id);
+          replay_rp = 32'(mshr_d[replay_e].sub_reqs[0].port_id);
+          if (replay_hold_done && !req_out_valid[replay_rt][replay_rp] &&
+              req_out_ready[replay_rt][replay_rp]) begin
+            req_out_valid[replay_rt][replay_rp]         = 1'b1;
+            req_out[replay_rt][replay_rp]               = '0;
+            req_out[replay_rt][replay_rp].wdata.meta_id = mshr_d[replay_e].sub_reqs[0].meta_id_base;
+            req_out[replay_rt][replay_rp].wdata.core_id = mshr_d[replay_e].sub_reqs[0].core_id;
+            req_out[replay_rt][replay_rp].wen           = 1'b0;
+            req_out[replay_rt][replay_rp].be            = '1;
+            req_out[replay_rt][replay_rp].tgt_group_id  = mshr_d[replay_e].tgt_group_id;
+            req_out[replay_rt][replay_rp].tgt_addr      = mshr_d[replay_e].base_addr;
+            req_out[replay_rt][replay_rp].burst_len     = mshr_d[replay_e].burst_len;
+            req_out[replay_rt][replay_rp].mshr_tag      =
+                MshrTagWidth'(replay_e) + MshrTagWidth'(1);
+            mshr_d[replay_e].issued              = 1'b1;
           end
         end
       end
@@ -2994,17 +3022,19 @@ module mempool_group_mshr
           // response falls through to the bypass path. This replaces the O(resp-ports x MshrNum) scan
           // with an O(1) index + single-entry check.
           if (resp_in[tile_i][port_i].mshr_tag != '0) begin
-            automatic mshr_id_t cand =
+            resp_tag_cand =
                 mshr_id_t'(resp_in[tile_i][port_i].mshr_tag - MshrTagWidth'(1));
-            if (mshr_q_valid[cand] &&
-                ((mshr_q[cand].state == MSHR_WAIT_RESP) ||
-                 (mshr_q[cand].state == MSHR_DRAIN_RESP)) &&
-                (mshr_q[cand].sub_reqs[0].tile_id == tile_group_id_t'(tile_i)) &&
-                (mshr_q[cand].sub_reqs[0].core_id == resp_in[tile_i][port_i].rdata.core_id) &&
+            if (mshr_q_valid[resp_tag_cand] &&
+                ((mshr_q[resp_tag_cand].state == MSHR_WAIT_RESP) ||
+                 (mshr_q[resp_tag_cand].state == MSHR_DRAIN_RESP)) &&
+                (mshr_q[resp_tag_cand].sub_reqs[0].tile_id == tile_group_id_t'(tile_i)) &&
+                (mshr_q[resp_tag_cand].sub_reqs[0].core_id ==
+                     resp_in[tile_i][port_i].rdata.core_id) &&
                 ((resp_in[tile_i][port_i].rdata.meta_id -
-                  mshr_q[cand].sub_reqs[0].meta_id_base) < mshr_q[cand].burst_len)) begin
+                    mshr_q[resp_tag_cand].sub_reqs[0].meta_id_base) <
+                       mshr_q[resp_tag_cand].burst_len)) begin
               resp_is_mshr[tile_i][port_i] = 1'b1;
-              resp_mshr_id[tile_i][port_i] = cand;
+              resp_mshr_id[tile_i][port_i] = resp_tag_cand;
             end
           end
         end
@@ -3100,24 +3130,24 @@ module mempool_group_mshr
             req_is_store[tile_i][port_i] &&
             (req_len[tile_i][port_i] == BurstLenWidth'(1))) begin
           for (int way_i = 0; way_i < MshrWaysPerBank; way_i++) begin
-            automatic int hit_e =
+            cache_hit_e =
                 int'(req_bank[tile_i][port_i]) * MshrWaysPerBank + way_i;
-            if (mshr_d_valid[hit_e] &&
-                (mshr_d[hit_e].state == MSHR_RESP_HOLD) &&
-                (mshr_d[hit_e].base_addr == req_addr_key[tile_i][port_i]) &&
-                (mshr_d[hit_e].tgt_group_id == req_in[tile_i][port_i].tgt_group_id)) begin
-              mshr_d[hit_e].state = MSHR_DRAIN_RESP;
-              mshr_d[hit_e].cacheable = 1'b0;
-              mshr_d[hit_e].beats_left = BurstLenWidth'(1);
-              mshr_d[hit_e].beat_pending = '0;
-              mshr_d[hit_e].beat_pending2 = '0;
-              mshr_d[hit_e].beat2_armed = 1'b0;
+            if (mshr_d_valid[cache_hit_e] &&
+                (mshr_d[cache_hit_e].state == MSHR_RESP_HOLD) &&
+                (mshr_d[cache_hit_e].base_addr == req_addr_key[tile_i][port_i]) &&
+                (mshr_d[cache_hit_e].tgt_group_id == req_in[tile_i][port_i].tgt_group_id)) begin
+              mshr_d[cache_hit_e].state = MSHR_DRAIN_RESP;
+              mshr_d[cache_hit_e].cacheable = 1'b0;
+              mshr_d[cache_hit_e].beats_left = BurstLenWidth'(1);
+              mshr_d[cache_hit_e].beat_pending = '0;
+              mshr_d[cache_hit_e].beat_pending2 = '0;
+              mshr_d[cache_hit_e].beat2_armed = 1'b0;
 `ifndef TARGET_SYNTHESIS
-              mshr_d[hit_e].beat_seen = '0;
-              mshr_d[hit_e].beat_seen[0] = 1'b1;
+              mshr_d[cache_hit_e].beat_seen = '0;
+              mshr_d[cache_hit_e].beat_seen[0] = 1'b1;
 `endif
 `ifndef TARGET_SYNTHESIS
-              mshr_d[hit_e].beat_done = '0;
+              mshr_d[cache_hit_e].beat_done = '0;
 `endif
             end
           end
@@ -3463,24 +3493,25 @@ module mempool_group_mshr
         for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
           for (int port_i = 1; port_i < NumRemoteRespPortsPerTile; port_i++) begin
             if (resp_sel2_valid[tile_i][port_i]) begin
-              automatic mshr_id_t e2 = resp_sel2_mshr_id[tile_i][port_i];
+              drain2_sel_e2 = resp_sel2_mshr_id[tile_i][port_i];
               resp_out_valid[tile_i][port_i] = 1'b1;
               resp_out[tile_i][port_i].wen = 1'b0;  // buffered beats are reads by construction (capture gate)
               resp_out[tile_i][port_i].rdata.data =
-                  mshr_d[e2].resp_buf[resp_rd_ptr2[e2]].data;
+                  mshr_d[drain2_sel_e2].resp_buf[resp_rd_ptr2[drain2_sel_e2]].data;
               resp_out[tile_i][port_i].rdata.core_id =
-                  mshr_d[e2].sub_reqs[resp_sel2_subreq_idx[tile_i][port_i]].core_id +
-                  tile_core_id_t'(resp_beat_offset2[e2][0]);
+                  mshr_d[drain2_sel_e2].sub_reqs[resp_sel2_subreq_idx[tile_i][port_i]].core_id +
+                  tile_core_id_t'(resp_beat_offset2[drain2_sel_e2][0]);
               resp_out[tile_i][port_i].rdata.meta_id =
-                  mshr_d[e2].sub_reqs[resp_sel2_subreq_idx[tile_i][port_i]].meta_id_base +
-                  meta_id_t'(resp_beat_offset2[e2]);
+                  mshr_d[drain2_sel_e2]
+                      .sub_reqs[resp_sel2_subreq_idx[tile_i][port_i]].meta_id_base +
+                  meta_id_t'(resp_beat_offset2[drain2_sel_e2]);
               resp_out[tile_i][port_i].rdata.amo = '0;  // sub-requests are loads by construction (req_is_load)
               resp_from_mshr[tile_i][port_i] = 1'b1;
-              resp_mshr_id_dbg[tile_i][port_i] = e2;
+              resp_mshr_id_dbg[tile_i][port_i] = drain2_sel_e2;
               port_taken[tile_i][port_i] = 1'b1;
               if (resp_out_ready[tile_i][port_i]) begin
-                mshr_d[e2].beat_pending2[resp_sel2_subreq_idx[tile_i][port_i]] = 1'b0;
-                drain_count[e2] = drain_count[e2] + 1'b1;
+                mshr_d[drain2_sel_e2].beat_pending2[resp_sel2_subreq_idx[tile_i][port_i]] = 1'b0;
+                drain_count[drain2_sel_e2] = drain_count[drain2_sel_e2] + 1'b1;
               end
             end
           end
