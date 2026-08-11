@@ -143,15 +143,66 @@ cleaned by de-duplicating the define list the Makefile builds.
 
 ---
 
-## 7. Awaiting — "read but not set" / "set but not read"
+## 7. "read but not set" / "set but not read" — the full rule-check report
 
-**None have appeared yet** in any report so far. The rules present to date are listed above; the
-class you flagged (`W123`/`W415`/`W528`-family, depending on policy) has not been emitted, most
-likely because the full rule set has not finished — the in-flight run was at rule ~249 of 302 when
-this file was written.
+The `lint_rtl` goal finished (project `terapool_20260811_120634`, 38,304 findings). The class you
+flagged is present in volume. **Every Error-severity finding has been checked against the RTL below.**
 
-When they do appear the procedure is: open the RTL, establish whether the signal genuinely has no
-driver or no reader, and record the verdict here with the evidence rather than changing Spatz.
+### W123 "read but never set" — Error, 40 findings — 39 FALSE POSITIVE, 1 genuine-but-benign
+
+| signals | count | verdict | evidence |
+|---|---|---|---|
+| `tcdm_slave_req[0][N].mshr_tag` | 16 | **FALSE POSITIVE** | driven in `mempool_group_floonoc_wrapper.sv:566` from the NoC request header (`floo_tcdm_req_from_router_after_xbar[i][j].hdr.mshr_tag`) |
+| `tcdm_master_resp[0][N].mshr_tag` | 16 | **FALSE POSITIVE** | driven in `mempool_tile.sv:727` (`bank_resp_payload[b].mshr_tag = meta_out.mshr_tag`, "echo MSHR id back") and carried at wrapper `:733` |
+| `decoder_req_i.{instr,rd,rs1,rs2,rsd,vtype.vsew}` | 6 | **FALSE POSITIVE** | all assigned in `spatz_controller.sv:177-187` (default `'0` at 177, fields at 182-187) and wired to the decoder at `:165` |
+| `snitch_req.burst_len[4:0]` | 1 | **GENUINE, benign** | see below |
+
+The 38 struct-field false positives share one mechanism: the driver is a **field of a struct that
+crosses a module boundary** (through the NoC wrapper, or through a port connection), and the
+hierarchical analysis does not connect it. Note the report itself is inconsistent about this — it
+raises them as Errors while the same signals are demonstrably driven one level up.
+
+Plausible root cause worth checking before trusting any driver-tracing result from this run: four
+modules were **black-boxed** (`ErrorAnalyzeBBox` on `axi_xbar_unmuxed`, `floo_rob_wrapper`,
+`snitch_icache_lookup`, `snitch_read_only_cache`). A signal whose driver path passes through a black
+box appears undriven by construction. Fixing the black-box errors may clear most of this class.
+
+### The one that is real: `snitch_req.burst_len`
+
+`snitch_req` is a `snitch_pkg::dreq_t` whose fields are driven by the scalar core's output ports
+(`spatz_mempool_cc.sv:187-189`). The core has **no `data_qburst_len_o` output** — `snitch.sv` does
+not declare one — so `burst_len` genuinely has no driver. It is then copied wholesale
+(`assign data_req_d = snitch_req;` at `:347`), so the unset field propagates as X in simulation.
+
+It is benign only because the single consumer overrides it:
+
+```systemverilog
+assign data_qburst_len_o[0] = snitch_pkg::BurstLenWidth'(1);   // :398 -- constant, not snitch_req.burst_len
+```
+
+**Your call:** drive it explicitly (`snitch_req.burst_len = BurstLenWidth'(1)`) so the struct copy
+carries a defined value, or waive it on the grounds that the consumer is hardcoded. The former costs
+nothing and removes an X from the waveform.
+
+### W528 "set but never read" — Warning, 30,776 findings
+
+Not triaged individually — **29,932 of them (97%) are in one file**,
+`hardware/src/terapool_cluster_floonoc_wrapper.sv`, the generated top level, where per-instance
+signals are legitimately unused at many mesh positions. The remainder is dominated by vendored
+`common_cells` (`spill_register_flushable.sv` 5,305, `fifo_v3.sv` 396).
+
+**Recommendation:** waive by file for the generated wrapper and for `hardware/deps/`, then re-read
+what is left. At 30k findings the rule currently carries no signal.
+
+### Other high-count rules, all vendored or generated
+
+| rule | count | meaning | where |
+|---|---|---|---|
+| `FlopEConst` | 5,504 | flop enable pin tied constant | `common_cells` spill/fifo |
+| `W415a` | 835 | signal assigned more than once | `deps/axi` |
+| `W240` | 445 | input declared but not read (e.g. `clk_i`) | `deps/axi` |
+| `W287b` / `W287a` | 111 / 90 | port width / connection mismatches | deps |
+| `UndrivenInTerm-ML` | 64 | undriven input terminal | deps |
 
 ---
 
