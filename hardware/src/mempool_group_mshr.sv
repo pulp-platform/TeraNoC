@@ -1822,7 +1822,12 @@ module mempool_group_mshr
   always_comb begin
     hold_tick_phase                  = '0;
     hold_tick_phase[hold_prescale_q] = 1'b1;
-    for (int e = 0; e < MshrNum; e++) begin
+    // `int` is SIGNED: HoldPrescaleWSafe'(e) on a signed operand turns e = 8..15 into the 4-bit
+    // patterns 1000..1111, read back as -8..-1, so the bit-select went out of range and returned
+    // 'x for HALF the entries. Spyglass Design_Read caught it ("Illegal bit select. Index -8 for
+    // hold_tick_phase"); vlog and elaboration did not, because it is legal SystemVerilog.
+    // An unsigned loop variable truncates unsigned, giving 0..2**HoldPrescaleWSafe-1 as intended.
+    for (int unsigned e = 0; e < MshrNum; e++) begin
       hold_tick[e] = (HoldPrescaleW == 0) ? 1'b1 : hold_tick_phase[HoldPrescaleWSafe'(e)];
     end
   end
