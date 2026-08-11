@@ -523,7 +523,6 @@ module mempool_group_mshr
     // temporarily blocked or responses arrive from multiple channels.
     mshr_resp_slot_t [RespBufWords-1:0] resp_buf;
     // Valid bit per response-buffer slot.
-    logic [RespBufWords-1:0] resp_buf_valid;
     // Number of valid beats currently stored in resp_buf.
     logic [RespBufCountW-1:0] resp_buf_cnt;
     // Read pointer of resp_buf head beat to be drained next.
@@ -1841,7 +1840,7 @@ module mempool_group_mshr
       + SubReqCountW + ServedCntW
       + MshrMergeReqs + MshrMergeReqs + 1   // beat_pending, beat_pending2, beat2_armed
       + BurstLenWidth                       // beats_left
-      + RespBufWords + RespBufCountW + RespBufPtrW + RespBufPtrW
+      + RespBufCountW + RespBufPtrW + RespBufPtrW   // resp_buf_valid removed: write-only
       + 1                                   // cacheable
       + HoldCntW + 1                        // hold_cnt, issued
       + $bits(mshr_state_t)
@@ -1890,7 +1889,6 @@ module mempool_group_mshr
     `FFL(mshr_q[e].beat_pending2,   mshr_d[e].beat_pending2,   mshr_ctl_en[e], '0)
     `FFL(mshr_q[e].beat2_armed,     mshr_d[e].beat2_armed,     mshr_ctl_en[e], '0)
     `FFL(mshr_q[e].beats_left,      mshr_d[e].beats_left,      mshr_ctl_en[e], '0)
-    `FFL(mshr_q[e].resp_buf_valid,  mshr_d[e].resp_buf_valid,  mshr_ctl_en[e], '0)
     `FFL(mshr_q[e].resp_buf_cnt,    mshr_d[e].resp_buf_cnt,    mshr_ctl_en[e], '0)
     `FFL(mshr_q[e].resp_buf_rd_ptr, mshr_d[e].resp_buf_rd_ptr, mshr_ctl_en[e], '0)
     `FFL(mshr_q[e].resp_buf_wr_ptr, mshr_d[e].resp_buf_wr_ptr, mshr_ctl_en[e], '0)
@@ -2882,7 +2880,7 @@ module mempool_group_mshr
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].sub_reqs_num =
                     SubReqCountW'(1);
                 // Cache self-invalidate: the owner is the first served sub-request.
-                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].served_cnt = 6'd1;
+                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].served_cnt = ServedCntW'(1);
                 end
               end
             end
@@ -2908,7 +2906,6 @@ module mempool_group_mshr
                           req_in[tile_i][port_i].wdata.data[b*8 +: 8];
                     end
                   end
-                  mshr_d[cache_hit_e].resp_buf_valid[mshr_d[cache_hit_e].resp_buf_rd_ptr] = 1'b1;
                   if (mshr_d[cache_hit_e].resp_buf_cnt == '0) begin
                     mshr_d[cache_hit_e].resp_buf_cnt = RespBufCountW'(1);
                   end
@@ -3088,8 +3085,6 @@ module mempool_group_mshr
           mshr_d[resp_mshr_id[tile_i][port_i]].resp_buf[resp_push_ptr[resp_mshr_id[tile_i][port_i]]] =
               '{meta_id: resp_in[tile_i][port_i].rdata.meta_id,
                 data:    resp_in[tile_i][port_i].rdata.data};
-          mshr_d[resp_mshr_id[tile_i][port_i]].resp_buf_valid[resp_push_ptr[resp_mshr_id[tile_i][port_i]]] =
-              1'b1;
           if (RespBufWords > 1) begin
             if (resp_push_ptr[resp_mshr_id[tile_i][port_i]] == RespBufPtrW'(RespBufWords - 1)) begin
               resp_push_ptr[resp_mshr_id[tile_i][port_i]] = '0;
@@ -3637,7 +3632,6 @@ module mempool_group_mshr
           end else begin
             // Pop the drained head beat.
             if (mshr_d[mshr_i].resp_buf_cnt != '0) begin
-              mshr_d[mshr_i].resp_buf_valid[mshr_d[mshr_i].resp_buf_rd_ptr] = 1'b0;
               if (RespBufWords > 1) begin
                 if (mshr_d[mshr_i].resp_buf_rd_ptr == RespBufPtrW'(RespBufWords - 1)) begin
                   mshr_d[mshr_i].resp_buf_rd_ptr = '0;
@@ -3679,7 +3673,6 @@ module mempool_group_mshr
               if ((mshr_d[mshr_i].beat_pending2 == '0) &&
                   (mshr_d[mshr_i].resp_buf_cnt != '0)) begin
                 // Pop the (already fully served) promoted beat as well.
-                mshr_d[mshr_i].resp_buf_valid[mshr_d[mshr_i].resp_buf_rd_ptr] = 1'b0;
                 if (RespBufWords > 1) begin
                   if (mshr_d[mshr_i].resp_buf_rd_ptr == RespBufPtrW'(RespBufWords - 1)) begin
                     mshr_d[mshr_i].resp_buf_rd_ptr = '0;

@@ -8750,3 +8750,59 @@ Design-wide the only Errors are in vendored deps, not our RTL: 2 x ELAB_6312 (ax
 axi_demux_simple) and 4 x ErrorAnalyzeBBox (axi_xbar_unmuxed, floo_rob_wrapper, snitch_icache_lookup,
 snitch_read_only_cache).
 
+## 2026-08-11 -- Per-bit audit of the MSHR entry: one dead field, and three hypotheses that were wrong
+
+Systematic test on every field: strip the struct declaration and the `FFL register line (neither is
+a functional read), then count real writes vs real reads. Exactly one field has ZERO reads.
+
+    field            bits  writes  reads   verdict
+    base_addr          16      1     15    live
+    tgt_group_id        6      3     11    live
+    burst_len           5      3     43    live
+    sub_reqs[4]        52     12    101    live (13/slot: valid 1, tile 4, port 2, core 3, meta 3)
+    sub_reqs_num        3      5     31    live
+    served_cnt          3      2      2    live
+    beat_pending        4     11     15    live
+    beat_pending2       4      9      3    live (PD2=1)
+    beat2_armed         1      8      3    live
+    beats_left          5     10     14    live
+    resp_buf[2]        70      1      8    live (35/slot: meta_id 3 + data 32)
+    resp_buf_valid      2      4      0    *** WRITE-ONLY -> REMOVED ***
+    resp_buf_cnt        2      4     34    live
+    resp_buf_rd_ptr     1      7      9    live
+    resp_buf_wr_ptr     1      1      1    live (see below)
+    cacheable           1      3      1    live (single read at the drain, line 3611)
+    hold_cnt            6      9      4    live
+    issued              1      2      8    live
+    state               3     13     67    live
+
+**resp_buf_valid removed: 186 -> 184 bits.** Four writes, no reader anywhere in the tree. The only
+other copy that reads it is hardware/bottleneck_analysis/respbw_phase1_attempt/, a stale saved
+attempt whose drain loop did `if (!resp_buf_valid[r]) break;` -- so the bit became vestigial when
+the drain was rewritten around resp_buf_cnt, and nothing removed it.
+
+**THREE HYPOTHESES THAT LOOKED GOOD AND WERE WRONG.** Each would have been a real bug:
+
+  1. "core_id is 12 dead bits -- NumCoresPerTile is 1, so it is always 0."  WRONG. The tile drives
+     `wdata.core_id = idx[idx_width(NumCoresPerTile*NumDataPortsPerCore)-1:0]`, and
+     NumDataPortsPerCore=5, so the product is 5 and all 3 bits are needed. Reading the parameter
+     name without the expression would have deleted a live field.
+  2. "resp_buf_wr_ptr is derivable as (rd_ptr + cnt) mod RespBufWords."  TRUE for the ring itself,
+     but the store-to-cached-line path (a store hitting a CACHED entry) sets resp_buf_cnt to 1
+     while writing at rd_ptr and never advances wr_ptr, so the invariant does not hold globally.
+     Deriving it would silently corrupt the push pointer on that path.
+  3. "tgt_group_id is redundant -- the group is in the address."  WRONG. base_addr is a
+     tcdm_addr_t, the LOCAL address inside the target group; merge_addr_key only masks low bits.
+     The group is genuinely not recoverable from it.
+
+**Remaining slack, not taken: port_id.** Stored as RespPortIdW=2 bits per sub-request, but request
+ports only ever span 1..2, so one bit per slot (4 per entry) is provably unused. Taking it means
+storing port-1 and adjusting every map_resp_port_id() comparison -- 4 bits for a change across the
+drain comparisons, which is a poor trade while the drain is untested.
+
+**Also fixed: a stale literal I introduced.** Line 2885 assigned `6'd1` to served_cnt, which is
+ServedCntW=3 bits since the resize earlier today. The value truncates correctly so it was harmless,
+but it is exactly the kind of leftover this audit is for. Now `ServedCntW'(1)`.
+
+Cumulative for the session: **272 -> 184 bits per entry (-32.4%)**; at 64 entries x 64 groups,
+1,114,112 -> 753,664 flops.
