@@ -9024,3 +9024,76 @@ the equivalence is complete rather than statistical.
 full-table work is either per-entry (irreducible) or keyed on something other than the address
 (drain destination, meta-id conflicts). The win available here was not more banking but a better
 formulation of the cross-bank test that banking cannot scope.
+
+## 2026-08-11 -- DESIGN NOTE (not implemented): critical paths, and moving the drain OFF the chain
+
+Recorded for later. Nothing here is implemented.
+
+### Where the time goes now
+
+After today's rewrites no single structure dominates any more -- the accumulation does. Ranked:
+
+  1. mshr_q -> mshr_d, the state loop. Roughly 18-20 levels of request-side lookup and
+     arbitration BEFORE the main always_comb even starts:
+        mshr_q -> 4-way address compare (bank-scoped) -> req_hit_way
+               -> meta conflict [mask AND + 64-wide OR tree]
+               -> req_alloc_cand -> per-bank arbiter [thermometer mask + x&(~x+1) LSB isolate]
+               -> grant scatter -> req_alloc_found_mshr_id
+     then the main block: 16 top-level stages, 13 of which depend on the REQUEST stage, with
+     284 of 299 entry accesses reading the ALREADY-UPDATED mshr_d.
+  2. resp_in -> resp_out, sharing stages 7-15 with (1).
+  3. req_in -> req_out, the lookup/arbitration plus stage 1 and the hold-replay walker.
+
+Already addressed and no longer hot: the drain head-beat select (was MshrNum-deep), the drain
+second-slot select (was 256-deep nested), the meta-range overlap (was 16 add/compare x 2048), and
+the allocation arbiter (already log depth).
+
+### The idea worth pursuing: compute the drain candidates IN PARALLEL, not after
+
+The drain waits for the request side today because it reads mshr_d. But that dependency is an
+artifact of how the block is WRITTEN, not a real one. Every input that decides the drain candidate
+set traces back to a REGISTER:
+
+    what can create a drain candidate      real source                         depth to it
+    merge -> DRAIN_RESP      (2778,2796)   req_in + mshr_q address lookup      ~10 levels
+    response capture         (3140)        resp_in.mshr_tag -- a DIRECT INDEX  ~0 levels
+    cache-hit store          (3165)        req_in + mshr_q                     ~10 levels
+    amo / global sweep       (3186)        mshr_q                              ~1 level
+    serve-timeout expiry     (3219)        mshr_q.hold_cnt                     ~1 level
+    drain-finalize      (3749,3786)        affects the NEXT cycle -- irrelevant here
+
+    what can remove one                    real source
+    amo-inval, self-inval, timeout, drain-finalize   mshr_q, req_in, or next-cycle only
+
+So the candidate set is a function of (mshr_q, req_in, resp_in) alone. The heavy part -- evaluating
+MshrNum x MshrMergeReqs eligibility for each of the 32 (tile, resp port) instances -- could run
+CONCURRENTLY with the request-side lookup and arbitration instead of behind it, leaving only a
+narrow late correction in series:
+
+    cand_final[e] = (cand_from_registers[e] & ~killed_late[e]) | created_late[e]
+
+where killed_late / created_late cover only the entries the request side actually touches (at most
+one allocation and one merge per requester, plus the invalidate sweeps), i.e. a 64-bit AND/OR
+rather than a full re-evaluation.
+
+### Cost and risk, honestly
+
+  - It DUPLICATES the state-transition decision: the parallel path must re-derive "does entry e
+    become DRAIN_RESP this cycle" instead of reading the sequentially-computed mshr_d. Area for
+    timing, the usual trade. The duplicated part is the narrow transition logic; the wide
+    eligibility evaluation is what moves off the path.
+  - The sequential form is currently the SPECIFICATION. A parallel form has to be proven to
+    reproduce it exactly, and the failure mode is a dropped or duplicated response beat -- silent,
+    not loud. The equivalence must be established the way the priority encodes and the meta-range
+    mask were: a standalone model comparing old against new over the full input space, before the
+    RTL is touched.
+  - Do it AFTER the prescaler perf run and the 8x8 lint land, since unlike today's rewrites this
+    one changes the timing behaviour of the block rather than only its structure.
+
+### Smaller variants of the same idea, if the full one is too much
+
+  - Register only the drain DECISION (resp_sel_*): removes stages 14-15 from the path for one cycle
+    of added response latency. Much smaller change, first-order effect.
+  - Hoist just the tile/port match: sub_reqs[].tile_id vs tile_i does not depend on anything the
+    request side computes, so that comparison can be evaluated from mshr_q for all entries in
+    parallel and only corrected for merged entries.
