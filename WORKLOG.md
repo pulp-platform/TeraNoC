@@ -9155,3 +9155,34 @@ merge failure. Resolving it needs sub-period data (the NoC req/resp tracer over 
 and 3/4 roughly equally; HOLD_SUBS_BURST=4 demands all four merge slots be filled. Lowering it to
 2 or 3 attacks the stall directly, and unlike a longer window it does not extend way occupancy --
 which the hold-window sweep already measured as net-negative (3836 -> 3986/4209/4229).
+
+## 2026-08-11 -- Disk vs collapse window: CORRECTED, both runs make it
+
+Supersedes the earlier entry. Three previous estimates of this were wrong, in three different ways:
+
+    method                                        build_2        build_4     status
+    (cycles so far)/(process age)                 75 h           205 h       WRONG: age is mostly elaboration
+    total waveform / benchmark cycle span         50 h / +525GB  106 h/+1283GB WRONG: total size covers the whole
+                                                                              run, the span only the bench part
+    grep -oE '[0-9]+$' on the bench line          2741->2033 cyc/h            GARBAGE: took the LAST NUMBER on the
+                                                                              line (55868 for build_2, 0 for
+                                                                              build_4), so the delta was fiction
+    +2000 real cycles, both quantities same window 33 h / +344GB  42 h/+458GB CORRECT
+
+Correct figures (measured 19:04-21:58, verified extractor, both runs advanced 2000 real cycles):
+
+    build_2  689 cyc/h  15.0 GB/1000cyc  ->  92k collapse onset in 33 h (+344 GB)
+    build_4  693 cyc/h  15.8 GB/1000cyc  ->  92k collapse onset in 42 h (+458 GB)
+    combined burn 21.2 GB/h; 1169 GB free -> ~55 h to full
+
+**Both runs reach the collapse window before the disk fills**, build_4 with about 13 h to spare.
+The earlier recommendation to stop build_4 -- on the grounds that it could never get there -- was
+based on the second (wrong) method and should be disregarded.
+
+The sanity check that the earlier attempts failed: these two runs are the same design at the same
+phase, so their pace and cost per cycle should be nearly identical. They are (689 vs 693 cyc/h,
+15.0 vs 15.8 GB/1000cyc). The wrong methods had them differing by 2-3x, which should have been the
+tell.
+
+Margin is real but not generous: 13 h. Anything else that starts consuming this filesystem breaks
+it, and build_1 (299 GB) + build_3 (147 GB) still hold 446 GB while writing nothing.
