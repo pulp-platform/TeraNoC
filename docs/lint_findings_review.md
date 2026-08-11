@@ -207,3 +207,38 @@ what is left. At 30k findings the rule currently carries no signal.
 ---
 
 *Last updated 2026-08-11 from the reports listed above. Append new findings; do not fix in place.*
+
+---
+
+## 8. CAVEAT — the two `lint_rtl` runs are NOT directly comparable
+
+Do not quote "38,304 → 19,635 findings" as an improvement. It is almost certainly an artifact.
+
+| | 12:06 run | 19:42 run |
+|---|---|---|
+| total findings | 38,304 | 19,635 |
+| **`mempool_group_mshr.sv`** | **115** | **112** |
+| `W528` in `terapool_cluster_floonoc_wrapper.sv` | 29,715 | 14,858 |
+| source list | 3057 files (saved list) | 3050 files (regenerated, `SPYGLASS_EXCLUDE`) |
+
+The entire global difference is one file — the generated top level — which **none of today's RTL work
+touches**. The elaborated instance count evidently differs by roughly a factor of two between the
+runs, and the source lists differ slightly. Until that is explained, the two totals measure
+different things.
+
+What the comparison *does* legitimately show, because it is scoped to the file that was actually
+changed:
+
+| | 12:06 | 19:42 | |
+|---|---|---|---|
+| `WRN_74` translate_on without translate_off | 1 | **0** | the pragma fix worked |
+| `SYNTH_5255` illegal bit select | 0 | **1** | introduced by the prescaler, caught here, fixed in `b83d5db` |
+| `W415a` | 97 | 95 | unchanged in character |
+| MSHR total | 115 | 112 | the drain rewrites and meta-mask added **no new findings** |
+
+That last row is the useful result: two substantial rewrites of the most delicate block in the file
+landed without introducing lint findings, and the one finding they did introduce was a real bug that
+static analysis caught and simulation would not have.
+
+**Before comparing any two lint runs in future:** check the source list length and the elaborated
+instance count first. Same config name is not sufficient.
