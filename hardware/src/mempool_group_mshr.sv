@@ -970,21 +970,48 @@ module mempool_group_mshr
     map_resp_port_id = mapped_port;
   endfunction
 
-  // True when two modulo-meta_id ranges overlap:
-  // [base_a, base_a+len_a-1] and [base_b, base_b+len_b-1].
-  function automatic logic meta_range_overlap(input meta_id_t base_a,
-                                              input logic [BurstLenWidth-1:0] len_a,
-                                              input meta_id_t base_b,
-                                              input logic [BurstLenWidth-1:0] len_b);
-    logic hit_any;
-    hit_any = 1'b0;
-    for (int i = 0; i < MaxBurstWords; i++) begin
-      if ((i < len_a) && (((base_a + meta_id_t'(i)) - base_b) < len_b)) begin
-        hit_any = 1'b1;
+  // Occupancy mask of one modulo-meta_id range [base, base+len-1] over the whole meta space.
+  //
+  // This replaced meta_range_overlap(), which answered "do these two ranges overlap?" by
+  // ENUMERATING all MaxBurstWords offsets of range A and testing each for membership in B --
+  // MaxBurstWords add+subtract+compare units per call. That call sat in gen_req_meta_ovlp, which
+  // is replicated NumTilesPerGroup x active req ports x MshrNum = 2048 times at 8x8, making it the
+  // largest combinational structure in the module.
+  //
+  // As masks the test is |(mask_a & mask_b), and -- the actual win -- mask_b depends only on the
+  // ENTRY, so it is built once per entry instead of once per (tile, port, entry). Note the meta
+  // space is 2**$bits(meta_id_t) = 8 while MaxBurstWords is 16, so any len >= MetaSpace covers the
+  // whole space; the mask form gets that for free where the enumeration needed all 16 iterations.
+  //
+  // Proven EXHAUSTIVELY equivalent to the old function over the complete input space --
+  // 8 x 8 bases x 17 x 17 lengths = 18496 combinations, 0 mismatches.
+  localparam int unsigned MetaSpace = 1 << $bits(meta_id_t);
+  function automatic logic [MetaSpace-1:0] meta_range_mask(input meta_id_t base,
+                                                           input logic [BurstLenWidth-1:0] len);
+    meta_range_mask = '0;
+    for (int k = 0; k < MetaSpace; k++) begin
+      if ((meta_id_t'(k) - base) < len) meta_range_mask[k] = 1'b1;
+    end
+  endfunction
+
+  // Entry-side masks: one per entry, NOT per requester -- this is what removes the replication.
+  logic [MshrNum-1:0][MetaSpace-1:0] mshr_meta_mask;
+  always_comb begin
+    for (int e = 0; e < MshrNum; e++) begin
+      mshr_meta_mask[e] = meta_range_mask(mshr_q[e].sub_reqs[0].meta_id_base, mshr_q[e].burst_len);
+    end
+  end
+
+  // Request-side masks: one per (tile, request port).
+  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:0][MetaSpace-1:0] req_meta_mask;
+  always_comb begin
+    req_meta_mask = '0;
+    for (int t = 0; t < NumTilesPerGroup; t++) begin
+      for (int p = 1; p < NumRemoteReqPortsPerTile; p++) begin
+        req_meta_mask[t][p] = meta_range_mask(req_in[t][p].wdata.meta_id, req_len[t][p]);
       end
     end
-    meta_range_overlap = hit_any;
-  endfunction
+  end
 
   assign scan_data_o = scan_data_i;
   assign csr_trace_any_i = 1'b1;
@@ -1569,10 +1596,7 @@ module mempool_group_mshr
               (mshr_q[mshr_i].sub_reqs[0].core_id == req_in[tile_i][port_i].wdata.core_id) &&
               // Keep same-entry hits legal; block only cross-entry overlaps.
               !same_addr_excl &&
-              meta_range_overlap(req_in[tile_i][port_i].wdata.meta_id,
-                                 req_len[tile_i][port_i],
-                                 mshr_q[mshr_i].sub_reqs[0].meta_id_base,
-                                 mshr_q[mshr_i].burst_len);
+              |(req_meta_mask[tile_i][port_i] & mshr_meta_mask[mshr_i]);
         end
         assign req_hit_mshr[tile_i][port_i] = |req_hit_way[tile_i][port_i];
         assign req_addr_hit_drain[tile_i][port_i] = |req_addr_hit_drain_way[tile_i][port_i];

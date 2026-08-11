@@ -8971,3 +8971,56 @@ synthesised code. The one the scanner still reports (req_bankfull_bypass_fire_cn
 inside the translate_off region added earlier -- the scanner tracks `ifdef but not pragmas.
 
 Not attempted: the 4-wide sub-request scans. Depth 4 is not worth the risk.
+
+## 2026-08-11 -- Is the banked MSHR fully exploited? Audit, and the one structure it cannot help
+
+Question: entries are banked (MshrBanks=16 x MshrWaysPerBank=4 = MshrNum=64) and a request hashes
+to exactly one bank, so check/compare/allocate/replace should all be bank-scoped. Are they?
+
+**They already are.** The per-request path loops over MshrWaysPerBank, not MshrNum, and rebuilds the
+entry id as req_bank*MshrWaysPerBank + way:
+
+    hit / address compare   lines 1591, 1606     over MshrWaysPerBank
+    victim / replacement    lines 1642, 1655     over MshrWaysPerBank
+    allocation              alloc_bank_flat / alloc_scatter_bank keyed on req_bank
+    response capture        O(1) by round-tripped mshr_tag (RespSeenByTag=1; the O(MshrNum)
+                            fallback scan is the dead arm of a constant-condition if)
+
+Every remaining full-MshrNum sweep in synthesised code is one of:
+
+    per-entry independent work (12 sweeps)  timeouts, invalidate, beat bookkeeping. Banking cannot
+                                            reduce these -- they must touch every entry and do O(1)
+                                            work on each, which is already the minimum.
+    destination-scoped (drain, 4 sweeps)    the drain target is a TILE, while the bank is an ADDRESS
+                                            hash, so bank-scoping does not apply by construction.
+
+**The one exception, and the biggest combinational structure in the module: gen_req_meta_ovlp.**
+It is explicitly cross-bank -- "same tile+core, overlapping meta_id, DIFFERENT address" -- so the
+conflicting entry can be in any bank and no amount of banking helps. Replicated
+NumTilesPerGroup x active req ports x MshrNum = 2048 times.
+
+Its cost was not the replication but what sat inside it: meta_range_overlap() answered "do these
+ranges overlap?" by ENUMERATING all MaxBurstWords=16 offsets of range A and testing membership in
+B -- 16 add/subtract/compare units per call, so ~32768 in the group.
+
+Rewritten as masks over the meta space: overlap = |(mask_a & mask_b)|. The win is not the mask
+itself but that mask_b depends only on the ENTRY, so it is built once per entry rather than once
+per (tile, port, entry):
+
+    before  2048 call sites x 16 iterations                     = 32768 arithmetic units
+    after   64 entry masks x 8 + 32 request masks x 8           =   768 arithmetic units
+            plus 2048 x (8-bit AND + OR-tree), no arithmetic
+    -> 43x less arithmetic in the dominant structure
+
+Note the meta space is 2**$bits(meta_id_t) = 8 while MaxBurstWords is 16, so any len >= 8 covers
+the whole space -- the mask form gets that for free where the enumeration still ran all 16
+iterations.
+
+**Proven EXHAUSTIVELY, not sampled:** the input space is 8 x 8 bases x 17 x 17 lengths = 18496
+combinations, all tested against the original function, 0 mismatches. That is the whole domain, so
+the equivalence is complete rather than statistical.
+
+**Answer to the question:** banking is already exploited everywhere it applies; the remaining
+full-table work is either per-entry (irreducible) or keyed on something other than the address
+(drain destination, meta-id conflicts). The win available here was not more banking but a better
+formulation of the cross-bank test that banking cannot scope.
