@@ -176,6 +176,98 @@
     end
   endgenerate
 
+  // --------------------------------------------------------------------------
+  // PROBE 4: per-group STALL-REASON breakdown and outstanding-memory census.
+  //
+  // [FPUG] says WHICH groups are idle; until now nothing said WHY. Snitch's issue stage defines
+  // (snitch.sv:354)
+  //     stall = ~valid_instr | lsu_stall | acc_stall | fence_stall
+  // and that decomposition IS the diagnosis: a group sitting at ~0% FPU is either starved of
+  // instructions, blocked on scalar memory, unable to hand work to Spatz, or parked in a fence.
+  //
+  // Three of the four already have free-running counters inside the core (snitch.sv:394-400).
+  // They are always compiled -- SNITCH_ENABLE_STALL_COUNTER and SNITCH_ENABLE_PERF are set
+  // unconditionally in deps/snitch/Bender.yml -- so they cost one wire each and are already
+  // live in every run ever made; only the readout was missing. acc_stall and fence_stall have
+  // NO counter and are sampled combinationally and counted here.
+  //
+  // fence_stall is the reason this probe exists. It is
+  //     !lsu_empty || (|acc_mem_cnt_q)                                   (snitch.sv:887)
+  // i.e. "wait until the memory I already asked for comes back". A core parked there shows the
+  // exact signature the slow groups show: no FPU work, no retired instructions, and NO NoC
+  // stall -- it is not blocked ON the network, it is waiting for something the network already
+  // owes it. Congestion and a dropped response look identical from [BP] and opposite here.
+  //
+  // acc_mem_cnt_q is therefore exported alongside: if one group's outstanding count sits pinned
+  // at a constant non-zero value while every other group drains, a response was lost, which is a
+  // different bug from congestion and has a different fix. acc_mem_req_cnt_q (requests not yet
+  // issued) separates "hasn't sent it yet" from "sent it and never got it back".
+  // --------------------------------------------------------------------------
+  `define FU_SNITCH(gx,gy,t,c) dut.i_mempool_cluster.gen_groups_x[gx].gen_groups_y[gy] \
+      .gen_rtl_group.i_group.i_mempool_group.gen_tiles[t].i_tile.gen_cores[c]          \
+      .gen_mempool_cc.riscv_core.i_snitch
+
+  logic [31:0] fu_sins [NumGroups][NumTilesPerGroup][NumCoresPerTile]; // icache starvation
+  logic [31:0] fu_sraw [NumGroups][NumTilesPerGroup][NumCoresPerTile]; // operand / RAW hazard
+  logic [31:0] fu_slsu [NumGroups][NumTilesPerGroup][NumCoresPerTile]; // scalar LSU backpressure
+  logic        fu_sacc [NumGroups][NumTilesPerGroup][NumCoresPerTile]; // Spatz will not accept
+  logic        fu_sfen [NumGroups][NumTilesPerGroup][NumCoresPerTile]; // parked in a fence
+  logic [2:0]  fu_memo [NumGroups][NumTilesPerGroup][NumCoresPerTile]; // outstanding acc mem ops
+  logic [2:0]  fu_memq [NumGroups][NumTilesPerGroup][NumCoresPerTile]; // ... requests still unsent
+
+  generate
+    for (genvar gx = 0; gx < NumX; gx++) begin : gen_fu_st_gx
+      for (genvar gy = 0; gy < NumY; gy++) begin : gen_fu_st_gy
+        for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_fu_st_t
+          for (genvar c = 0; c < NumCoresPerTile; c++) begin : gen_fu_st_c
+            assign fu_sins[NumY*gx+gy][t][c] = `FU_SNITCH(gx,gy,t,c).stall_ins_q;
+            assign fu_sraw[NumY*gx+gy][t][c] = `FU_SNITCH(gx,gy,t,c).stall_raw_q;
+            assign fu_slsu[NumY*gx+gy][t][c] = `FU_SNITCH(gx,gy,t,c).stall_lsu_q;
+            assign fu_sacc[NumY*gx+gy][t][c] = `FU_SNITCH(gx,gy,t,c).acc_stall;
+            assign fu_sfen[NumY*gx+gy][t][c] = `FU_SNITCH(gx,gy,t,c).fence_stall;
+            assign fu_memo[NumY*gx+gy][t][c] = `FU_SNITCH(gx,gy,t,c).acc_mem_cnt_q;
+            assign fu_memq[NumY*gx+gy][t][c] = `FU_SNITCH(gx,gy,t,c).acc_mem_req_cnt_q;
+          end
+        end
+      end
+    end
+  endgenerate
+  `undef FU_SNITCH
+
+  // acc_stall / fence_stall are level signals, so the TB counts them; the other three arrive
+  // pre-counted. memo/memq accumulate their occupancy so a period mean falls out of the delta.
+  // All always-on (like fu_grp_cum) so the pre-benchmark ramp is visible too.
+  int unsigned fu_sacc_cum [NumGroups], fu_sacc_prev [NumGroups];
+  int unsigned fu_sfen_cum [NumGroups], fu_sfen_prev [NumGroups];
+  int unsigned fu_memo_cum [NumGroups], fu_memo_prev [NumGroups];
+  int unsigned fu_memq_cum [NumGroups], fu_memq_prev [NumGroups];
+  int unsigned fu_sins_prev [NumGroups], fu_sraw_prev [NumGroups], fu_slsu_prev [NumGroups];
+  int unsigned fu_insn_prev [NumGroups], fu_barc_prev [NumGroups];
+
+  always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      for (int g = 0; g < NumGroups; g++) begin
+        fu_sacc_cum[g] <= 0; fu_sfen_cum[g] <= 0;
+        fu_memo_cum[g] <= 0; fu_memq_cum[g] <= 0;
+      end
+    end else begin
+      for (int g = 0; g < NumGroups; g++) begin
+        automatic int unsigned na = 0, nf = 0, no = 0, nq = 0;
+        for (int t = 0; t < NumTilesPerGroup; t++)
+          for (int c = 0; c < NumCoresPerTile; c++) begin
+            if (fu_sacc[g][t][c]) na++;
+            if (fu_sfen[g][t][c]) nf++;
+            no += fu_memo[g][t][c];
+            nq += fu_memq[g][t][c];
+          end
+        fu_sacc_cum[g] <= fu_sacc_cum[g] + na;
+        fu_sfen_cum[g] <= fu_sfen_cum[g] + nf;
+        fu_memo_cum[g] <= fu_memo_cum[g] + no;
+        fu_memq_cum[g] <= fu_memq_cum[g] + nq;
+      end
+    end
+  end
+
   // PROBE 1 readback: barrier arrival spread, summed over all groups.
   logic [31:0] fu_bar_sum [NumGroups];
   logic [31:0] fu_bar_cnt [NumGroups];
@@ -377,6 +469,57 @@
         bs = {bs, $sformatf((g == 0) ? "%0d" : ",%0d", fu_bankfull_byp[g] - fu_bfb_grp_prev[g])};
       end
       $display("[MSHRG] %s cyc=%0d timeout=%s bypass=%s", tag, fu_cycle, ts, bs);
+    end
+
+    // [STALLG] / [MEMOG] / [INSNG] / [BARG] -- PROBE 4 readout, the "why is this group idle"
+    // set. Read them together; each alone is ambiguous and the combination is not:
+    //
+    //   low FPU + low insn + high fen   -> parked waiting for memory it already requested
+    //   low FPU + low insn + high ins   -> icache starvation
+    //   low FPU + low insn + high acc   -> Spatz backed up, core cannot hand off
+    //   low FPU + HIGH insn             -> not stalled at all: spinning in a poll/barrier loop
+    //   low FPU + low insn + all ~0     -> not stalled and not retiring => waiting on the
+    //                                      barrier's release signal, not on any local resource
+    //
+    // and then MEMOG disambiguates the first case: memo draining each period is congestion,
+    // memo pinned at a constant while other groups drain is a LOST RESPONSE. BARG closes it by
+    // showing whether the group is a barrier release behind everyone else.
+    //
+    // Denominator is core-cycles (not lane-cycles as [FPUG] uses) because these count per core,
+    // so a share is value/denom in [0,1]. memo/memq are occupancy sums: divide by denom for the
+    // mean outstanding ops per core.
+    //
+    // MUST stay ahead of the prev updates below, exactly as [FPUG] and [MSHRG] must.
+    begin
+      automatic string si = "", sr = "", sl = "", sa = "", sf = "";
+      automatic string mo = "", mq = "", ni = "", bc = "";
+      for (int g = 0; g < NumGroups; g++) begin
+        automatic int unsigned ci = 0, cr = 0, cl = 0, cn = 0;
+        for (int t = 0; t < NumTilesPerGroup; t++)
+          for (int c = 0; c < NumCoresPerTile; c++) begin
+            ci += fu_sins[g][t][c];
+            cr += fu_sraw[g][t][c];
+            cl += fu_slsu[g][t][c];
+            cn += fu_insn_cum[g][t][c];
+          end
+        si = {si, $sformatf((g == 0) ? "%0d" : ",%0d", ci - fu_sins_prev[g])};
+        sr = {sr, $sformatf((g == 0) ? "%0d" : ",%0d", cr - fu_sraw_prev[g])};
+        sl = {sl, $sformatf((g == 0) ? "%0d" : ",%0d", cl - fu_slsu_prev[g])};
+        sa = {sa, $sformatf((g == 0) ? "%0d" : ",%0d", fu_sacc_cum[g] - fu_sacc_prev[g])};
+        sf = {sf, $sformatf((g == 0) ? "%0d" : ",%0d", fu_sfen_cum[g] - fu_sfen_prev[g])};
+        mo = {mo, $sformatf((g == 0) ? "%0d" : ",%0d", fu_memo_cum[g] - fu_memo_prev[g])};
+        mq = {mq, $sformatf((g == 0) ? "%0d" : ",%0d", fu_memq_cum[g] - fu_memq_prev[g])};
+        ni = {ni, $sformatf((g == 0) ? "%0d" : ",%0d", cn - fu_insn_prev[g])};
+        bc = {bc, $sformatf((g == 0) ? "%0d" : ",%0d", fu_bar_cnt[g] - fu_barc_prev[g])};
+        fu_sins_prev[g] = ci;  fu_sraw_prev[g] = cr;  fu_slsu_prev[g] = cl;
+        fu_insn_prev[g] = cn;  fu_barc_prev[g] = fu_bar_cnt[g];
+        fu_sacc_prev[g] = fu_sacc_cum[g];  fu_sfen_prev[g] = fu_sfen_cum[g];
+        fu_memo_prev[g] = fu_memo_cum[g];  fu_memq_prev[g] = fu_memq_cum[g];
+      end
+      $display("[STALLG] %s cyc=%0d denom=%0d ins=%s raw=%s lsu=%s acc=%s fen=%s",
+               tag, fu_cycle, d_cyc*NumTilesPerGroup*NumCoresPerTile, si, sr, sl, sa, sf);
+      $display("[MEMOG] %s cyc=%0d memo=%s memq=%s", tag, fu_cycle, mo, mq);
+      $display("[INSNG] %s cyc=%0d insn=%s rel=%s", tag, fu_cycle, ni, bc);
     end
 `endif
     fu_raw_prev    = fu_raw_cum;
