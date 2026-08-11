@@ -49,7 +49,7 @@ noc_virtual_channel_num ?= 1
 
 # Channel configuration mode (internal control only)
 # Options: baseline, narrow, enhanced
-channel_config_mode := baseline  # Current MemPool setting
+channel_config_mode ?= baseline  # Current MemPool setting
 
 # Channel configuration based on selected mode
 ifeq ($(strip $(channel_config_mode)), baseline)
