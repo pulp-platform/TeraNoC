@@ -9097,3 +9097,61 @@ rather than a full re-evaluation.
   - Hoist just the tile/port match: sub_reqs[].tile_id vs tile_i does not depend on anything the
     request side computes, so that comparison can be evaluated from mshr_q for all entries in
     parallel and only corrected for merged entries.
+
+## 2026-08-11 -- g54/g62: the responses ARE arriving; the group MSHR is holding them
+
+The g54diag arm reached the collapse window with [MSHRG] and [RH] telemetry. Combined with the
+earlier PROBE 4 result this identifies the mechanism, and it REFINES the "mode A = lost responses"
+reading recorded earlier today.
+
+**g54diag vs h2047r2 is a clean MATCHED PAIR** -- every compile define is identical except:
+
+    g54diag   HOLD_WINDOW_BURST=1023  SERVE_TIMEOUT=1023
+    h2047r2   HOLD_WINDOW_BURST=2047  SERVE_TIMEOUT=2047
+
+(all NoC knobs, bank hash, HOLD_SUBS_*, ways, drain beats identical) -- so the comparison is
+legitimate, unlike most arm pairs in this campaign.
+
+**MSHR issue-timeouts track the collapse per group, in time:**
+
+    cyc      g54 timeout / insn     g62 timeout / insn     g21 (healthy)
+    88-92k         0 / ~2300              0 / ~2100            0 / ~2350
+    95-104k     4..22 / 164..380       8..20 / 178..532        0 / ~2300
+    105k+          0 / 2416 (RECOVERS)  10..26 / ~320           0 / ~2300
+
+g54 recovers at 105000 and its timeouts stop in the SAME period. g62 never recovers and its
+timeouts never stop. In the steady-state region (median group > 1500 insn, cyc 58000-112000)
+**healthy groups have exactly ZERO timeouts**.
+
+**The [RH] probe localises it completely.** Of 1804 [RH STUCK] reports (an entry holding a response
+while waiting to reach its serve target), the ones AFTER cyc 95000 occur in exactly two groups:
+
+    g62 = 43,  g54 = 13,  every other group = 0
+
+Before the collapse the same probe fires in all groups (g21=40, g42=59) -- normal churn. Afterwards
+it is exclusively the two failing groups. And the subscriber counts show how close they get:
+subs=1/4 (627), 2/4 (562), 3/4 (615) -- entries routinely stall SHORT of HOLD_SUBS_BURST=4.
+
+**Mechanism.** The response has already come back from the NoC; the group MSHR is holding it while
+waiting for a 4th subscriber. The cores that need that data are stalled on it (mode A: outstanding
+memory at the 99th percentile, request queue 20x BELOW healthy, LSU stalled 43-70%), so they cannot
+issue the requests that would supply the missing subscriber. Self-reinforcing.
+
+This CORRECTS the earlier reading: "cores pinned at maximum in-flight loads with an empty queue" is
+not evidence of a lost response in the NoC -- the response arrived and is parked in the MSHR.
+
+**What is NOT established.** That h2047r2 "works much better". Its cum FPU util is 89.3% vs 88.1%
+at comparable depth -- about 1 pp, on a metric this campaign has already shown to be ANTI-correlated
+with completion (corr +0.78, higher util finished SLOWER), and neither arm has completed. A prior
+matched-pair experiment found the OPPOSITE direction for this knob: 511 completed 22-108% faster
+than 1023, family medians 1.92x apart. So "bigger window is better" is not supported by completions.
+
+**Direction of causality is unresolved.** Timeout onset and collapse onset fall in the same
+1000-cycle period for both groups, so the telemetry cannot separate them. Both readings remain live:
+merge failure -> uncoalesced traffic -> congestion -> stall, or stall -> no subscribers arrive ->
+merge failure. Resolving it needs sub-period data (the NoC req/resp tracer over 95k-100k).
+
+**The lever the data actually points at is the TARGET, not the window.** Entries stall at 1/4, 2/4
+and 3/4 roughly equally; HOLD_SUBS_BURST=4 demands all four merge slots be filled. Lowering it to
+2 or 3 attacks the stall directly, and unlike a longer window it does not extend way occupancy --
+which the hold-window sweep already measured as net-negative (3836 -> 3986/4209/4229).
