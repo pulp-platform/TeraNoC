@@ -778,13 +778,52 @@ SPYGLASS_WORK_DIR ?= spyglass
 SNPS_SG ?= spyglass-2022.06
 SG_SCRIPT_PATH ?= scripts
 SG_SCRIPT_SUF ?=
-lint: update-floogen $(SPYGLASS_WORK_DIR)/tmp/files $(SPYGLASS_WORK_DIR)/sdc/func.sdc $(SPYGLASS_WORK_DIR)/scripts/run_lint.tcl
-	cd $(SPYGLASS_WORK_DIR); config=$(config) $(SNPS_SG) sg_shell -tcl $(SG_SCRIPT_PATH)/run_lint$(SG_SCRIPT_SUF).tcl
+# The bender target set below pulls in the TESTBENCH (-t mempool_verilator). Spyglass hits its
+# non-synthesizable constructs, prints "Syntax Errors detected - RULE CHECKING ABORTED" and runs
+# ZERO rules -- while make still exits 0. Those files are excluded from the source list; override
+# SPYGLASS_EXCLUDE='' to lint them anyway.
+SPYGLASS_EXCLUDE ?= /hardware/tb/|/common_verification/src/(clk_rst_gen|sim_timeout|stream_watchdog|signal_highlighter)
 
-# Build file list, use subst to remove the "32'd" which spyglass can't handle
-$(SPYGLASS_WORK_DIR)/tmp/files%: $(bender)
+lint: update-floogen $(SPYGLASS_WORK_DIR)/tmp/files $(SPYGLASS_WORK_DIR)/sdc/func.sdc $(SPYGLASS_WORK_DIR)/scripts/run_lint.tcl
+	@# hardware/generated/ is SHARED by every build and encodes the mesh, and one of its three
+	@# files is untracked. If update-floogen silently failed (it needs python>=3.10 and
+	@# verible-verilog-format on PATH) the wrong mesh is still in place and the lint would check
+	@# a design that is not this config.
+	@if [ -n "$(num_x)" ] && [ -f generated/perimeter_map_pkg.sv ]; then \
+	  mesh=`grep -m1 -oE 'NumMeshX *= *[0-9]+' generated/perimeter_map_pkg.sv | grep -oE '[0-9]+$$'`; \
+	  if [ "$$mesh" != "$(num_x)" ]; then \
+	    echo "[lint] ERROR: hardware/generated/ holds a $${mesh}x mesh, config=$(config) needs $(num_x)."; \
+	    echo "[lint]        update-floogen did not regenerate it -- check python3 --version (>=3.10)"; \
+	    echo "[lint]        and 'which verible-verilog-format'."; \
+	    exit 1; \
+	  fi; \
+	  echo "[lint] mesh NumMeshX=$$mesh matches config=$(config)"; \
+	fi
+	@before=`wc -l < $(SPYGLASS_WORK_DIR)/sg_shell.log 2>/dev/null || echo 0`; \
+	cd $(SPYGLASS_WORK_DIR); config=$(config) $(SNPS_SG) sg_shell -tcl $(SG_SCRIPT_PATH)/run_lint$(SG_SCRIPT_SUF).tcl; \
+	rc=$$?; \
+	if tail -n +$$((before+1)) sg_shell.log 2>/dev/null | grep -qE 'Syntax Errors detected|RULE CHECKING ABORTED'; then \
+	  echo "[lint] ERROR: rule checking was ABORTED -- no rules ran. See $(SPYGLASS_WORK_DIR)/sg_shell.log"; \
+	  exit 1; \
+	fi; \
+	exit $$rc
+	@echo "[lint] done. hardware/generated/ now holds the $(config) mesh (shared by every build)."
+	@ls -dt $(SPYGLASS_WORK_DIR)/sg_projects/*/consolidated_reports 2>/dev/null | head -1 \
+	  | sed 's|^|[lint] reports: |'
+
+# Build the Spyglass source list. subst removes the "32'd" which spyglass cannot handle.
+#
+# This was a PATTERN rule -- $(SPYGLASS_WORK_DIR)/tmp/files%: -- whose % must match at least one
+# character, so the plain target named in lint's prerequisites had NO recipe. make printed
+# "Nothing to be done", the list was never written, and sg_shell then died with
+#   `sourcelist' file `tmp/files' does not exist
+# while make still exited 0: a lint that checked nothing and reported success. It is a plain
+# target now, and .PHONY above keeps it regenerated on every run.
+$(SPYGLASS_WORK_DIR)/tmp/files: $(bender)
 	mkdir -p $(SPYGLASS_WORK_DIR)/tmp
-	$(bender) script verilator $(subst 32\'d,,$(vlog_defs)) -t rtl -t mempool_verilator $(bender_defs) > $@
+	$(bender) script verilator $(subst 32\'d,,$(vlog_defs)) -t rtl -t mempool_verilator $(bender_defs) \
+	  | grep -vE '$(SPYGLASS_EXCLUDE)' > $@
+	@echo "[lint] source list: $$(wc -l < $@) files (testbench and sim-only helpers excluded)"
 
 ################
 # Tracing      #

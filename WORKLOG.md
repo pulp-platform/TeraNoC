@@ -8806,3 +8806,40 @@ but it is exactly the kind of leftover this audit is for. Now `ServedCntW'(1)`.
 
 Cumulative for the session: **272 -> 184 bits per entry (-32.4%)**; at 64 entries x 64 groups,
 1,114,112 -> 753,664 flops.
+## 2026-08-11 -- make lint FIXED (it reported success while checking nothing)
+
+Three independent defects, each of which produced a PASSING run that linted nothing. All fixed in
+hardware/Makefile; `make lint config=<cfg>` now works directly.
+
+1. **Pattern-rule bug -> empty source list.** `.PHONY: $(SPYGLASS_WORK_DIR)/tmp/files` was declared,
+   but the recipe was written as `$(SPYGLASS_WORK_DIR)/tmp/files%:` -- a PATTERN rule whose % must
+   match at least one character, so the plain target named in lint's prerequisites had NO recipe.
+   make printed "Nothing to be done", the list was never written, sg_shell died with
+   ``sourcelist' file `tmp/files' does not exist`` -- and make still exited 0. Now a plain target.
+   VERIFIED: building it into a scratch SPYGLASS_WORK_DIR produces 3050 entries; before the fix it
+   produced no file at all.
+
+2. **The testbench was in the source list -> zero rules ran.** The list comes from `bender script
+   verilator -t rtl -t mempool_verilator`, which pulls in hardware/tb/* and 6 common_verification
+   sim helpers. Spyglass hits their non-synthesizable constructs, prints "Syntax Errors detected -
+   RULE CHECKING ABORTED" and runs nothing. Now filtered via a new `SPYGLASS_EXCLUDE` variable
+   (override to '' to lint them anyway). This was not theoretical: of three runs this session, the
+   two with an unfiltered list produced NO report; only the filtered one did.
+
+3. **Wrong-mesh lint.** `lint` depends on update-floogen, which rewrites the SHARED, mesh-specific
+   hardware/generated/. If floogen silently fails (it needs python>=3.10 + verible-verilog-format,
+   absent from the login shell) the previous config's mesh is still in place and the lint checks a
+   design that is not this config. The recipe now compares NumMeshX in generated/perimeter_map_pkg.sv
+   against $(num_x) and refuses to run on a mismatch, naming the likely cause.
+   VERIFIED both ways: with generated/ holding 4x4 and num_x=8 the guard exits 1; with num_x=4 it
+   proceeds.
+
+Also added: a post-run check that greps ONLY the lines sg_shell appended during this run (it uses
+`tee -a`, so the log is cumulative) for "Syntax Errors detected|RULE CHECKING ABORTED" and fails the
+make target if found -- so defect 2, or anything like it, can never again look like success. And the
+recipe prints where the reports landed.
+
+Still required from the environment, and NOT fixable in the Makefile:
+    export PATH=/home/dishen/.conda/envs/terapool_noc/bin:$PATH
+The recipe now names this in the error message when the mesh check trips.
+
