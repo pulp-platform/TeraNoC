@@ -8843,3 +8843,87 @@ Still required from the environment, and NOT fixable in the Makefile:
     export PATH=/home/dishen/.conda/envs/terapool_noc/bin:$PATH
 The recipe now names this in the error message when the mesh check trips.
 
+## 2026-08-11 -- g54/g62 diagnostic: TWO distinct collapse modes, and the slow set is not fixed
+
+The g54diag arm reached the collapse window (cyc 100000) with PROBE 4 ([STALLG]/[MEMOG]/[INSNG])
+covering it. Denominator is 16000 core-cycles per group per period (16 cores x 1000 cycles).
+
+**Timeline -- a transient global wave, then two groups that never recover.**
+
+    cyc      groups retiring < 1000 insn      Jaccard vs previous period
+    88-90k   0                                 --
+    91k      1   {56}
+    92k      7   {12,20,28,34,36,38,42}        0.00
+    93k     16                                 0.10
+    94k     24                                 0.29
+    95k     21                                 0.36
+    96k     20                                 0.28
+    97k      3   {47,54,62}                    0.10
+    98k      7                                 0.25
+    99k      2   {54,62}                       0.29
+    100k     3   {54,62,63}                    0.67
+
+Between 92k and 96k up to 24 of 64 groups are slow in a period, but membership CHURNS almost
+completely (Jaccard 0.00-0.36): a global phase, not a spatial defect. It then clears for everyone
+except **g54 and g62**, which never recover.
+
+**This refines the "fixed spatial slow set" entry.** That was measured on other arms with a
+utilisation metric; per-period INSTRUCTION RETIREMENT here shows a rotating set during the wave and
+a persistent set of just {54,62} after it. Not necessarily a contradiction (different arm, different
+metric) but the "21 of 64, same set early and late" claim should be re-derived with this metric
+before it is quoted again.
+
+**Two distinct failure modes at cyc=100000, with opposite memory-queue signatures:**
+
+    mode                        insn   lsu%   acc%   memo/core   memq/core
+    A  g54                       164   70.5   26.4       5.70       0.006
+    A  g62                       320   42.8   51.3       4.39       0.018
+    B  g63                       876    7.7   66.0       3.70       1.374
+    B  g56                      1058    6.9   71.2       4.08       1.271
+       healthy g21              2400   16.1   39.9       4.49       0.125
+       healthy g42              2392    1.5   54.7       4.32       0.132
+
+**Mode A = responses not coming back.** g54 ends with outstanding memory at 5.70 per core -- its own
+maximum, and at the 99th percentile of all 64 groups x 101 periods (global max 6.06, median 2.43) --
+while its request queue is 20x BELOW healthy (0.006 vs 0.125) and the core is LSU-stalled 70% of the
+time. Cores holding their maximum in-flight loads with an empty queue is the probe's designed
+signature for a lost/never-returning response, not for congestion: congestion would show the queue
+FULL, not empty.
+
+**Mode B = accelerator backpressure, the opposite.** g63/g56 are acc-stalled 66-71% with memq 10x
+ABOVE healthy. Spatz is backed up and the core cannot hand off. Same symptom (low retirement),
+opposite cause -- which is exactly why the three probes have to be read together.
+
+Next step for mode A: the NoC req/resp tracer (reference_noc_req_resp_tracer) on g54's cores across
+the 96k-100k window to identify which requests never receive a response.
+
+## 2026-08-11 -- Disk vs the collapse window: build_4 cannot get there, build_2 can
+
+/usr/scratch/fenga1 had 1420 GB free with the four GUI waveforms burning 22.5 GB/h (540 GB/day) --
+they are the entire growth; a sweep for reclaimable space found only 7 GB with neither a live
+process nor a live consumer. Time to full: ~63 h.
+
+Measured over a clean 4-minute window (NOT the process-lifetime average, which is mostly QuestaSim
+elaboration and understates the pace by 1.5-2x):
+
+    run       at cyc   waveform   growth      GB/1000cyc   reaches 92k     extra disk
+    build_2    66000    283 GB    10.4 GB/h      20.2        ~50 h          +525 GB
+    build_4    59000    117 GB    12.1 GB/h      38.9       ~106 h         +1283 GB
+
+**build_4 cannot reach the collapse window.** It needs 106 h; the disk lasts 63 h. It would be
+killed by a full filesystem having produced nothing at the window it is being run for, after
+consuming ~760 GB. It is simultaneously slower per hour (311 vs 517 cyc/h) and nearly 2x more
+expensive per simulated cycle (38.9 vs 20.2 GB) than build_2.
+
+**build_2 does reach it at ~50 h**, but with only 13 h of margin while build_4 runs. Stopping
+build_4 alone frees 117 GB and halves the burn, moving exhaustion 63 h -> ~148 h; adding build_1 and
+build_3 (neither has written a waveform in hours) frees 563 GB total -> ~190 h.
+
+METHOD NOTE, cost two wrong answers in one hour: a rate taken as (cycles so far)/(process age) gave
+75 h and 205 h; a rate taken from one notification interval gave 36 h. Both were wrong in different
+directions. The reliable form is a short simultaneous sample of BOTH quantities -- waveform bytes
+per hour and waveform bytes per 1000 simulated cycles -- and dividing.
+
+Not acted on: standing rule is that runs are not killed unless certainly useless, and all four are
+GUI sessions the user may be inspecting.
+
