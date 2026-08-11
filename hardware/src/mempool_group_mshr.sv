@@ -620,6 +620,15 @@ module mempool_group_mshr
   logic          [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]         bypass_beat_parity;
 
   if (PD2) begin : gen_bypass_retag
+    // Loop temporaries for the two always_comb blocks below, at generate scope rather than as
+    // procedural `automatic`s. Identical hardware -- each is assigned before it is read on every
+    // unrolled iteration -- but visible in a waveform and in the form the backend flow expects.
+    // bypass_retire_way keeps the table's own index width instead of widening to a 32-bit `int`
+    // only to index a BypassTrackWays-deep array.
+    meta_id_t                   bypass_off;         // meta_id - meta_base, wraps mod 2**MetaIdWidth
+    logic [BypassTrackWayW-1:0] bypass_retire_way;
+    logic                       bypass_way_found;
+
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) bypass_track_q <= '0;
       else         bypass_track_q <= bypass_track_d;
@@ -632,7 +641,6 @@ module mempool_group_mshr
     always_comb begin
       for (int t = 0; t < NumTilesPerGroup; t++) begin
         for (int p = 1; p < NumRemoteRespPortsPerTile; p++) begin
-          automatic meta_id_t off;
           bypass_match[t][p]       = 1'b0;
           bypass_match_way[t][p]   = '0;
           bypass_beat_parity[t][p] = 1'b0;
@@ -642,12 +650,12 @@ module mempool_group_mshr
               (resp_in[t][p].rdata.amo == '0) &&
               (resp_in[t][p].rdata.core_id == tile_core_id_t'(1))) begin
             for (int w = 0; w < BypassTrackWays; w++) begin
-              off = resp_in[t][p].rdata.meta_id - bypass_track_q[t][w].meta_base;
+              bypass_off = resp_in[t][p].rdata.meta_id - bypass_track_q[t][w].meta_base;
               if (!bypass_match[t][p] && bypass_track_q[t][w].valid &&
-                  (off < meta_id_t'(bypass_track_q[t][w].len))) begin
+                  (bypass_off < meta_id_t'(bypass_track_q[t][w].len))) begin
                 bypass_match[t][p]       = 1'b1;
                 bypass_match_way[t][p]   = BypassTrackWayW'(w);
-                bypass_beat_parity[t][p] = off[0];
+                bypass_beat_parity[t][p] = bypass_off[0];
               end
             end
           end
@@ -663,13 +671,14 @@ module mempool_group_mshr
       for (int t = 0; t < NumTilesPerGroup; t++) begin
         // Beat retirement first (a freed way can be re-allocated in the same cycle below).
         for (int p = 1; p < NumRemoteRespPortsPerTile; p++) begin
-          automatic int w = int'(bypass_match_way[t][p]);
+          bypass_retire_way = bypass_match_way[t][p];
           if (bypass_match[t][p] && resp_from_bypass[t][p] &&
               resp_out_valid[t][p] && resp_out_ready[t][p]) begin
-            if (bypass_track_d[t][w].beats_left <= BurstLenWidth'(1)) begin
-              bypass_track_d[t][w] = '0;
+            if (bypass_track_d[t][bypass_retire_way].beats_left <= BurstLenWidth'(1)) begin
+              bypass_track_d[t][bypass_retire_way] = '0;
             end else begin
-              bypass_track_d[t][w].beats_left = bypass_track_d[t][w].beats_left - 1'b1;
+              bypass_track_d[t][bypass_retire_way].beats_left =
+                  bypass_track_d[t][bypass_retire_way].beats_left - 1'b1;
             end
           end
         end
@@ -685,13 +694,13 @@ module mempool_group_mshr
               req_is_load[t][p] && (req_len[t][p] > BurstLenWidth'(1)) &&
               !req_alloc_found[t][p]) begin
             begin : alloc_bypass_way
-              automatic logic way_found = 1'b0;
+              bypass_way_found = 1'b0;
               for (int w = 0; w < BypassTrackWays; w++) begin
-                if (!way_found && !bypass_track_d[t][w].valid) begin
+                if (!bypass_way_found && !bypass_track_d[t][w].valid) begin
                   bypass_track_d[t][w] = '{valid: 1'b1,
                                            meta_base: req_in[t][p].wdata.meta_id,
                                            len: req_len[t][p], beats_left: req_len[t][p]};
-                  way_found          = 1'b1;
+                  bypass_way_found   = 1'b1;
                 end
               end
             end
@@ -1591,6 +1600,25 @@ module mempool_group_mshr
   logic [NumAllocSlots-1:0]                  alloc_rr_mask;   // 1 = slot is at/above the RR base
   logic [MshrBankNum-1:0][NumAllocSlots-1:0] bank_win_oh;     // one-hot winner per bank
 
+  // Loop temporaries for the allocation arbiter, declared at module scope rather than as
+  // procedural `automatic`s inside the always_comb below. Same hardware either way -- each is
+  // written before it is read on every unrolled iteration -- but module-scope packed vectors are
+  // what the backend flow expects, and they are visible in a waveform where an automatic is not.
+  //
+  // Widths are sized, not `int`: the slot index only has to span NumAllocSlots and the bank index
+  // MshrBankNum, so this drops two 32-bit signed intermediates that the tools would otherwise
+  // have to prove redundant.
+  // One signal PER always_comb: a module-scope variable may have only a single combinational
+  // driver, and this index is recomputed independently in the flatten and scatter blocks.
+  logic [AllocRrW-1:0]                       alloc_slot_idx;      // flatten block
+  logic [AllocRrW-1:0]                       alloc_scatter_slot;  // scatter block
+  logic [BankIdW-1:0]                        alloc_scatter_bank;
+  logic [NumAllocSlots-1:0]                  alloc_rq;        // per-bank request vector
+  logic [NumAllocSlots-1:0]                  alloc_hi;        // ... at/above the rotation base
+  logic [NumAllocSlots-1:0]                  alloc_lo;        // ... below it
+  logic [NumAllocSlots-1:0]                  alloc_hi_lsb;    // lowest set bit of each half
+  logic [NumAllocSlots-1:0]                  alloc_lo_lsb;
+
   always_comb begin
     alloc_cand_flat = '0;
     alloc_bank_flat = '0;
@@ -1598,9 +1626,9 @@ module mempool_group_mshr
     // (1..NumRemoteReqPortsPerTile-1); the * and + are constant folds, not arithmetic.
     for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
       for (int port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin
-        automatic int s = tile_i * NumReqPortsActive + (port_i - 1);
-        alloc_cand_flat[s] = req_alloc_cand[tile_i][port_i];
-        alloc_bank_flat[s] = req_bank[tile_i][port_i];
+        alloc_slot_idx = AllocRrW'(tile_i * NumReqPortsActive + (port_i - 1));
+        alloc_cand_flat[alloc_slot_idx] = req_alloc_cand[tile_i][port_i];
+        alloc_bank_flat[alloc_slot_idx] = req_bank[tile_i][port_i];
       end
     end
     // Thermometer mask from the rotation base, computed once and shared by every bank.
@@ -1610,18 +1638,18 @@ module mempool_group_mshr
       alloc_rr_mask[s] = EnableRrFairness ? (s >= int'(alloc_rr_q)) : 1'b1;
     end
     for (int b = 0; b < MshrBankNum; b++) begin
-      automatic logic [NumAllocSlots-1:0] rq, hi, lo, hi_lsb, lo_lsb;
-      rq = '0;
+      alloc_rq = '0;
       for (int s = 0; s < NumAllocSlots; s++) begin
-        rq[s] = alloc_cand_flat[s] && (int'(alloc_bank_flat[s]) == b);
+        alloc_rq[s] = alloc_cand_flat[s] && (int'(alloc_bank_flat[s]) == b);
       end
-      hi     = rq &  alloc_rr_mask;
-      lo     = rq & ~alloc_rr_mask;
-      hi_lsb = hi & (~hi + NumAllocSlots'(1));   // isolate lowest set bit
-      lo_lsb = lo & (~lo + NumAllocSlots'(1));
+      alloc_hi     = alloc_rq &  alloc_rr_mask;
+      alloc_lo     = alloc_rq & ~alloc_rr_mask;
+      alloc_hi_lsb = alloc_hi & (~alloc_hi + NumAllocSlots'(1));   // isolate lowest set bit
+      alloc_lo_lsb = alloc_lo & (~alloc_lo + NumAllocSlots'(1));
       // bank_has_free gating reproduces the old `bank_has_free[b]` term: a bank with no free way
       // grants nobody, and its candidates fall through to the stall/bypass decision unchanged.
-      bank_win_oh[b] = !bank_has_free[b] ? '0 : ((hi != '0) ? hi_lsb : lo_lsb);
+      bank_win_oh[b] = !bank_has_free[b] ? '0
+                                         : ((alloc_hi != '0) ? alloc_hi_lsb : alloc_lo_lsb);
     end
   end
 
@@ -1630,10 +1658,13 @@ module mempool_group_mshr
   always_comb begin
     for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
       for (int port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin
-        automatic int s = tile_i * NumReqPortsActive + (port_i - 1);
-        automatic int b = int'(req_bank[tile_i][port_i]);
-        req_alloc_found[tile_i][port_i]         = bank_win_oh[b][s];
-        req_alloc_found_mshr_id[tile_i][port_i] = bank_win_oh[b][s] ? bank_free_id[b] : '0;
+        alloc_scatter_slot = AllocRrW'(tile_i * NumReqPortsActive + (port_i - 1));
+        alloc_scatter_bank = req_bank[tile_i][port_i];
+        req_alloc_found[tile_i][port_i]         =
+            bank_win_oh[alloc_scatter_bank][alloc_scatter_slot];
+        req_alloc_found_mshr_id[tile_i][port_i] =
+            bank_win_oh[alloc_scatter_bank][alloc_scatter_slot] ? bank_free_id[alloc_scatter_bank]
+                                                                : '0;
       end
     end
   end
@@ -2330,6 +2361,25 @@ module mempool_group_mshr
   int unsigned dup_beat_mshr, dup_beat_beat, dup_beat_meta;
 `endif
 
+  // -------------------------------------------------------------------------------------------
+  // Loop temporaries for the three drain / response-select arbiters inside the always_comb below,
+  // at module scope rather than as procedural `automatic`s. Each is written before it is read on
+  // every unrolled iteration, so the hardware is unchanged -- but they are now visible in a
+  // waveform, and in the form the backend flow expects.
+  //
+  // Three sets because the arbiters sit in mutually exclusive branches of ONE always_comb and
+  // previously relied on `automatic` scoping to reuse the names `drain_base`/`subreq_base`.
+  // At module scope that would alias, so each branch gets its own.
+  //   A = DrainMultiPort priority-encoder path   B = PD2 second-beat path   C = single-port path
+  int                       drain_sel_base,  drain_sel_sub_base;   // A: rotation bases
+  logic [MshrNum-1:0]       drain_ent_cand;                        // A: entries offering a beat
+  logic [MshrMergeReqs-1:0] drain_sub_cand;                        // A: sub-reqs in the winner
+  int                       drain_win_e,     drain_win_s;
+  logic                     drain_have_e,    drain_have_s;
+  int                       drain_scan_e,    drain_scan_s;         // A: rotated scan indices
+  int                       drain2_base, drain2_sub_base, drain2_mshr_i, drain2_s;   // B
+  int                       drain3_base, drain3_sub_base, drain3_mshr_i, drain3_s;   // C
+
   always_comb begin
     int unsigned merge_new_idx;
     // Defaults
@@ -2970,16 +3020,10 @@ module mempool_group_mshr
             //     then the first eligible sub-request inside it. Two small rotated priority encodes
             //     (MshrNum-wide, then MshrMergeReqs-wide) reproduce that, at ~log2 depth instead of
             //     512 sequential stages.
-            automatic int drain_base   = EnableRrFairness ? int'(drain_mshr_rr_q) : 0;
-            automatic int subreq_base  = EnableRrFairness ? int'(subreq_rr_q) : 0;
-            automatic logic [MshrNum-1:0]       ent_cand;
-            automatic logic [MshrMergeReqs-1:0] sub_cand;
-            automatic int                       win_e;
-            automatic int                       win_s;
-            automatic bit                       have_e;
-            automatic bit                       have_s;
+            drain_sel_base     = EnableRrFairness ? int'(drain_mshr_rr_q) : 0;
+            drain_sel_sub_base = EnableRrFairness ? int'(subreq_rr_q) : 0;
             // Per-entry: does this entry offer any sub-request eligible for THIS port?
-            ent_cand = '0;
+            drain_ent_cand = '0;
             for (int e = 0; e < MshrNum; e++) begin
               if (mshr_d_valid[e] && mshr_d[e].resp_valid &&
                   (mshr_d[e].state == MSHR_DRAIN_RESP)) begin
@@ -2991,41 +3035,45 @@ module mempool_group_mshr
                               port_i[RespPortIdW-1:0])
                            : (map_resp_port_id(mshr_d[e].sub_reqs[s].port_id) ==
                               port_i[RespPortIdW-1:0]))) begin
-                    ent_cand[e] = 1'b1;
+                    drain_ent_cand[e] = 1'b1;
                   end
                 end
               end
             end
             // First candidate entry in rotated order (>= base first, then wrap).
-            have_e = 1'b0; win_e = 0;
+            drain_have_e = 1'b0; drain_win_e = 0;
             for (int k = 0; k < MshrNum; k++) begin
-              automatic int e = (drain_base + k) % MshrNum;
-              if (!have_e && ent_cand[e]) begin have_e = 1'b1; win_e = e; end
+              drain_scan_e = (drain_sel_base + k) % MshrNum;
+              if (!drain_have_e && drain_ent_cand[drain_scan_e]) begin
+                drain_have_e = 1'b1; drain_win_e = drain_scan_e;
+              end
             end
-            if (have_e) begin
+            if (drain_have_e) begin
               // First eligible sub-request inside the winning entry, same rotated order.
-              sub_cand = '0;
+              drain_sub_cand = '0;
               for (int s = 0; s < MshrMergeReqs; s++) begin
-                if (mshr_d[win_e].sub_reqs[s].valid && mshr_d[win_e].beat_pending[s] &&
-                    (mshr_d[win_e].sub_reqs[s].tile_id == tile_group_id_t'(tile_i)) &&
-                    ((PD2 && (mshr_d[win_e].burst_len != BurstLenWidth'(1)))
-                         ? ((RespPortIdW'(1) + RespPortIdW'(resp_beat_offset[win_e][0])) ==
+                if (mshr_d[drain_win_e].sub_reqs[s].valid && mshr_d[drain_win_e].beat_pending[s] &&
+                    (mshr_d[drain_win_e].sub_reqs[s].tile_id == tile_group_id_t'(tile_i)) &&
+                    ((PD2 && (mshr_d[drain_win_e].burst_len != BurstLenWidth'(1)))
+                         ? ((RespPortIdW'(1) + RespPortIdW'(resp_beat_offset[drain_win_e][0])) ==
                             port_i[RespPortIdW-1:0])
-                         : (map_resp_port_id(mshr_d[win_e].sub_reqs[s].port_id) ==
+                         : (map_resp_port_id(mshr_d[drain_win_e].sub_reqs[s].port_id) ==
                             port_i[RespPortIdW-1:0]))) begin
-                  sub_cand[s] = 1'b1;
+                  drain_sub_cand[s] = 1'b1;
                 end
               end
-              have_s = 1'b0; win_s = 0;
+              drain_have_s = 1'b0; drain_win_s = 0;
               for (int k = 0; k < MshrMergeReqs; k++) begin
-                automatic int s = (subreq_base + k) % MshrMergeReqs;
-                if (!have_s && sub_cand[s]) begin have_s = 1'b1; win_s = s; end
+                drain_scan_s = (drain_sel_sub_base + k) % MshrMergeReqs;
+                if (!drain_have_s && drain_sub_cand[drain_scan_s]) begin
+                  drain_have_s = 1'b1; drain_win_s = drain_scan_s;
+                end
               end
-              if (have_s) begin
+              if (drain_have_s) begin
                 resp_sel_valid[tile_i][port_i]      = 1'b1;
-                resp_sel_mshr_id[tile_i][port_i]    = mshr_id_t'(win_e);
-                resp_sel_subreq_idx[tile_i][port_i] = win_s[idx_width(MshrMergeReqs)-1:0];
-                subreq_claimed[win_e][win_s]        = 1'b1;  // debug view only; not a guard
+                resp_sel_mshr_id[tile_i][port_i]    = mshr_id_t'(drain_win_e);
+                resp_sel_subreq_idx[tile_i][port_i] = drain_win_s[idx_width(MshrMergeReqs)-1:0];
+                subreq_claimed[drain_win_e][drain_win_s]        = 1'b1;  // debug view only; not a guard
               end
             end
           end
@@ -3098,26 +3146,28 @@ module mempool_group_mshr
             resp_sel2_mshr_id[tile_i][port_i]    = '0;
             resp_sel2_subreq_idx[tile_i][port_i] = '0;
             if (!port_taken[tile_i][port_i] && !resp_sel_valid[tile_i][port_i]) begin
-              automatic int drain_base2 = EnableRrFairness ? int'(drain_mshr_rr_q) : 0;
+              drain2_base     = EnableRrFairness ? int'(drain_mshr_rr_q) : 0;
+              // Hoisted: the sub-request base does not depend on kk/ks, but was previously
+              // re-evaluated inside the inner loop on every unrolled iteration.
+              drain2_sub_base = EnableRrFairness ? int'(subreq_rr_q) : 0;
               for (int kk = 0; kk < MshrNum; kk++) begin
-                automatic int mshr_i = (drain_base2 + kk) % MshrNum;
-                if (mshr_d_valid[mshr_i] &&
-                    (mshr_d[mshr_i].state == MSHR_DRAIN_RESP) &&
-                    (mshr_d[mshr_i].burst_len != BurstLenWidth'(1)) &&
-                    (mshr_d[mshr_i].resp_buf_cnt >= RespBufCountW'(2)) &&
-                    mshr_d[mshr_i].beat2_armed) begin
-                  automatic int subreq_base2 = EnableRrFairness ? int'(subreq_rr_q) : 0;
+                drain2_mshr_i = (drain2_base + kk) % MshrNum;
+                if (mshr_d_valid[drain2_mshr_i] &&
+                    (mshr_d[drain2_mshr_i].state == MSHR_DRAIN_RESP) &&
+                    (mshr_d[drain2_mshr_i].burst_len != BurstLenWidth'(1)) &&
+                    (mshr_d[drain2_mshr_i].resp_buf_cnt >= RespBufCountW'(2)) &&
+                    mshr_d[drain2_mshr_i].beat2_armed) begin
                   for (int ks = 0; ks < MshrMergeReqs; ks++) begin
-                    automatic int s = (subreq_base2 + ks) % MshrMergeReqs;
+                    drain2_s = (drain2_sub_base + ks) % MshrMergeReqs;
                     if (!resp_sel2_valid[tile_i][port_i] &&
-                        mshr_d[mshr_i].sub_reqs[s].valid &&
-                        mshr_d[mshr_i].beat_pending2[s] &&
-                        (mshr_d[mshr_i].sub_reqs[s].tile_id == tile_group_id_t'(tile_i)) &&
-                        ((RespPortIdW'(1) + RespPortIdW'(resp_beat_offset2[mshr_i][0])) ==
+                        mshr_d[drain2_mshr_i].sub_reqs[drain2_s].valid &&
+                        mshr_d[drain2_mshr_i].beat_pending2[drain2_s] &&
+                        (mshr_d[drain2_mshr_i].sub_reqs[drain2_s].tile_id == tile_group_id_t'(tile_i)) &&
+                        ((RespPortIdW'(1) + RespPortIdW'(resp_beat_offset2[drain2_mshr_i][0])) ==
                          port_i[RespPortIdW-1:0])) begin
                       resp_sel2_valid[tile_i][port_i]      = 1'b1;
-                      resp_sel2_mshr_id[tile_i][port_i]    = mshr_id_t'(mshr_i);
-                      resp_sel2_subreq_idx[tile_i][port_i] = s[idx_width(MshrMergeReqs)-1:0];
+                      resp_sel2_mshr_id[tile_i][port_i]    = mshr_id_t'(drain2_mshr_i);
+                      resp_sel2_subreq_idx[tile_i][port_i] = drain2_s[idx_width(MshrMergeReqs)-1:0];
                     end
                   end
                 end
@@ -3177,59 +3227,60 @@ module mempool_group_mshr
 
       // RR fairness (audit M3): rotate the entry visit (mirror of the DrainMultiPort=1 path; inactive
       // when DrainMultiPort=1, kept aligned so the two paths do not silently diverge).
+      drain3_base     = EnableRrFairness ? int'(drain_mshr_rr_q) : 0;
+      // Hoisted out of both loops: neither base depends on kk or ks.
+      drain3_sub_base = EnableRrFairness ? int'(subreq_rr_q) : 0;
       for (int kk = 0; kk < MshrNum; kk++) begin
-        automatic int drain_base = EnableRrFairness ? int'(drain_mshr_rr_q) : 0;
-        automatic int mshr_i = (drain_base + kk) % MshrNum;
-        drain_subreq_found[mshr_i] = 1'b0;
-        drain_subreq_idx[mshr_i] = '0;
-        drain_dst_tile[mshr_i] = '0;
-        drain_dst_port[mshr_i] = '0;
-        drain_port_found[mshr_i] = 1'b0;
-        if (mshr_d_valid[mshr_i] && mshr_d[mshr_i].resp_valid &&
-            mshr_d[mshr_i].state == MSHR_DRAIN_RESP) begin
+        drain3_mshr_i = (drain3_base + kk) % MshrNum;
+        drain_subreq_found[drain3_mshr_i] = 1'b0;
+        drain_subreq_idx[drain3_mshr_i] = '0;
+        drain_dst_tile[drain3_mshr_i] = '0;
+        drain_dst_port[drain3_mshr_i] = '0;
+        drain_port_found[drain3_mshr_i] = 1'b0;
+        if (mshr_d_valid[drain3_mshr_i] && mshr_d[drain3_mshr_i].resp_valid &&
+            mshr_d[drain3_mshr_i].state == MSHR_DRAIN_RESP) begin
           // RR fairness (audit L3): rotate the sub_req visit, keep the first-match break.
           for (int ks = 0; ks < MshrMergeReqs; ks++) begin
-            automatic int subreq_base = EnableRrFairness ? int'(subreq_rr_q) : 0;
-            automatic int s = (subreq_base + ks) % MshrMergeReqs;
-            if (mshr_d[mshr_i].sub_reqs[s].valid &&
-                mshr_d[mshr_i].beat_pending[s]) begin
-              drain_subreq_found[mshr_i] = 1'b1;
-              drain_subreq_idx[mshr_i] = s[idx_width(MshrMergeReqs)-1:0];
+            drain3_s = (drain3_sub_base + ks) % MshrMergeReqs;
+            if (mshr_d[drain3_mshr_i].sub_reqs[drain3_s].valid &&
+                mshr_d[drain3_mshr_i].beat_pending[drain3_s]) begin
+              drain_subreq_found[drain3_mshr_i] = 1'b1;
+              drain_subreq_idx[drain3_mshr_i] = drain3_s[idx_width(MshrMergeReqs)-1:0];
               break;
             end
           end
 
-          if (drain_subreq_found[mshr_i]) begin
-            drain_dst_tile[mshr_i] = mshr_d[mshr_i].sub_reqs[drain_subreq_idx[mshr_i]].tile_id;
-            drain_dst_port[mshr_i] =
-                map_resp_port_id(mshr_d[mshr_i].sub_reqs[drain_subreq_idx[mshr_i]].port_id);
-            if (!port_taken[drain_dst_tile[mshr_i]][drain_dst_port[mshr_i]]) begin
-              drain_port_found[mshr_i] = 1'b1;
+          if (drain_subreq_found[drain3_mshr_i]) begin
+            drain_dst_tile[drain3_mshr_i] = mshr_d[drain3_mshr_i].sub_reqs[drain_subreq_idx[drain3_mshr_i]].tile_id;
+            drain_dst_port[drain3_mshr_i] =
+                map_resp_port_id(mshr_d[drain3_mshr_i].sub_reqs[drain_subreq_idx[drain3_mshr_i]].port_id);
+            if (!port_taken[drain_dst_tile[drain3_mshr_i]][drain_dst_port[drain3_mshr_i]]) begin
+              drain_port_found[drain3_mshr_i] = 1'b1;
             end
 
-            if (drain_port_found[mshr_i]) begin
-              resp_out_valid[drain_dst_tile[mshr_i]][drain_dst_port[mshr_i]] = 1'b1;
-              resp_out[drain_dst_tile[mshr_i]][drain_dst_port[mshr_i]].wen =
-                  mshr_d[mshr_i].resp_buf[mshr_d[mshr_i].resp_buf_rd_ptr].wen;
-              resp_out[drain_dst_tile[mshr_i]][drain_dst_port[mshr_i]].rdata.data =
-                  mshr_d[mshr_i].resp_buf[mshr_d[mshr_i].resp_buf_rd_ptr].rdata.data;
-              resp_out[drain_dst_tile[mshr_i]][drain_dst_port[mshr_i]].rdata.core_id =
-                  mshr_d[mshr_i].sub_reqs[drain_subreq_idx[mshr_i]].core_id;
-              resp_out[drain_dst_tile[mshr_i]][drain_dst_port[mshr_i]].rdata.meta_id =
-                  mshr_d[mshr_i].sub_reqs[drain_subreq_idx[mshr_i]].meta_id_base +
-                  meta_id_t'(resp_beat_offset[mshr_i]);
-              resp_out[drain_dst_tile[mshr_i]][drain_dst_port[mshr_i]].rdata.amo =
-                  mshr_d[mshr_i].sub_reqs[drain_subreq_idx[mshr_i]].amo;
-              resp_from_mshr[drain_dst_tile[mshr_i]][drain_dst_port[mshr_i]] = 1'b1;
-              resp_mshr_id_dbg[drain_dst_tile[mshr_i]][drain_dst_port[mshr_i]] = mshr_id_t'(mshr_i);
+            if (drain_port_found[drain3_mshr_i]) begin
+              resp_out_valid[drain_dst_tile[drain3_mshr_i]][drain_dst_port[drain3_mshr_i]] = 1'b1;
+              resp_out[drain_dst_tile[drain3_mshr_i]][drain_dst_port[drain3_mshr_i]].wen =
+                  mshr_d[drain3_mshr_i].resp_buf[mshr_d[drain3_mshr_i].resp_buf_rd_ptr].wen;
+              resp_out[drain_dst_tile[drain3_mshr_i]][drain_dst_port[drain3_mshr_i]].rdata.data =
+                  mshr_d[drain3_mshr_i].resp_buf[mshr_d[drain3_mshr_i].resp_buf_rd_ptr].rdata.data;
+              resp_out[drain_dst_tile[drain3_mshr_i]][drain_dst_port[drain3_mshr_i]].rdata.core_id =
+                  mshr_d[drain3_mshr_i].sub_reqs[drain_subreq_idx[drain3_mshr_i]].core_id;
+              resp_out[drain_dst_tile[drain3_mshr_i]][drain_dst_port[drain3_mshr_i]].rdata.meta_id =
+                  mshr_d[drain3_mshr_i].sub_reqs[drain_subreq_idx[drain3_mshr_i]].meta_id_base +
+                  meta_id_t'(resp_beat_offset[drain3_mshr_i]);
+              resp_out[drain_dst_tile[drain3_mshr_i]][drain_dst_port[drain3_mshr_i]].rdata.amo =
+                  mshr_d[drain3_mshr_i].sub_reqs[drain_subreq_idx[drain3_mshr_i]].amo;
+              resp_from_mshr[drain_dst_tile[drain3_mshr_i]][drain_dst_port[drain3_mshr_i]] = 1'b1;
+              resp_mshr_id_dbg[drain_dst_tile[drain3_mshr_i]][drain_dst_port[drain3_mshr_i]] = mshr_id_t'(drain3_mshr_i);
 
-              if (resp_out_ready[drain_dst_tile[mshr_i]][drain_dst_port[mshr_i]]) begin
-                mshr_d[mshr_i].beat_pending[drain_subreq_idx[mshr_i]] = 1'b0;
-                if (mshr_d[mshr_i].burst_len == BurstLenWidth'(1)) begin
-                  mshr_d[mshr_i].sub_reqs[drain_subreq_idx[mshr_i]].valid = 1'b0;
+              if (resp_out_ready[drain_dst_tile[drain3_mshr_i]][drain_dst_port[drain3_mshr_i]]) begin
+                mshr_d[drain3_mshr_i].beat_pending[drain_subreq_idx[drain3_mshr_i]] = 1'b0;
+                if (mshr_d[drain3_mshr_i].burst_len == BurstLenWidth'(1)) begin
+                  mshr_d[drain3_mshr_i].sub_reqs[drain_subreq_idx[drain3_mshr_i]].valid = 1'b0;
                 end
               end
-              port_taken[drain_dst_tile[mshr_i]][drain_dst_port[mshr_i]] = 1'b1;
+              port_taken[drain_dst_tile[drain3_mshr_i]][drain_dst_port[drain3_mshr_i]] = 1'b1;
             end
           end
         end
