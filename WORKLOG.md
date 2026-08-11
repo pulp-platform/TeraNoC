@@ -9214,3 +9214,16 @@ provably never swallowed a write in ~35k benchmark cycles of real traffic.
 
 Entry width across the session: **272 -> 184 bits (-32.4%)**; at 64 entries x 64 groups,
 1,114,112 -> 753,664 flops.
+
+### Run B (prescaler ON at the default W=4) -- the performance check
+
+    reference  34629 cycles  util 95.33%
+    run B      34417 cycles  util 95.68%   -> 0.61% FASTER
+
+So the prescaler is not merely neutral on this workload: it completes slightly faster while saving
+4 bits per entry (~16.1k flops at 8x8). Zero assertions and zero [CMS WARN] in both runs.
+
+CAVEAT, same discipline applied to the hold-window question earlier today: this is ONE matched pair
+on ONE workload. 0.61% is suggestive, not established, and this campaign has already produced a
+util/completion metric that inverted under scrutiny. Do not quote it as a speedup without more
+pairs.
