@@ -288,6 +288,15 @@ group_mshr_serve_timeout ?=
 # the request misses and allocates a SECOND way for the same address, costing a redundant NoC fetch
 # and leaving both entries short of their subscriber target.
 group_mshr_stall_on_resp ?=
+# Prescaler for the hold/serve countdown, in bits. Each entry stores its window in ticks of 2**W
+# cycles instead of cycles, so hold_cnt loses W bits and toggles 2**W times less often; entry e
+# takes its tick when the shared prescaler equals e[W-1:0], which spreads expiries instead of
+# releasing every held fetch on one grid tick. Default 4 (+-16 cycles on a window that is a
+# coalescing heuristic). 0 = exact cycle-accurate countdown.
+group_mshr_hold_prescale_w ?=
+ifneq ($(strip $(group_mshr_hold_prescale_w)),)
+  vlog_defs += -DGROUP_MSHR_HOLD_PRESCALE_W=$(group_mshr_hold_prescale_w)
+endif
 ifneq ($(strip $(group_mshr_stall_on_resp)),)
   vlog_defs += -DGROUP_MSHR_STALL_ON_RESP=$(group_mshr_stall_on_resp)
 endif

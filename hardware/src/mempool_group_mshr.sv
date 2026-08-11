@@ -214,7 +214,39 @@ module mempool_group_mshr
     `ifdef GROUP_MSHR_SERVE_TIMEOUT `GROUP_MSHR_SERVE_TIMEOUT `else 0 `endif;
   localparam int unsigned HoldCntMax =
     (HoldWindowMax > ServeTimeout) ? HoldWindowMax : ServeTimeout;
-  localparam int unsigned HoldCntW = (HoldCntMax > 1) ? $clog2(HoldCntMax + 1) : 1;
+  // HOLD PRESCALER. hold_cnt used to tick every cycle, so it needed enough bits for the whole
+  // window in cycles ($clog2(1024) = 10) and up to MshrNum counters toggled every cycle. A shared
+  // prescaler divides the tick rate by 2**HoldPrescaleW, so each entry stores the window in TICKS.
+  //
+  //   area  : 10 -> 6 bits per entry (4 x MshrNum flops per group), minus one shared counter
+  //   power : each hold_cnt moves once per 2**HoldPrescaleW cycles instead of every cycle
+  //   timing: the (hold_cnt == 0) test in the issue decision narrows from 10 bits to 6
+  //
+  // The window is a coalescing heuristic and the serve timeout a deadlock backstop, so the
+  // resulting +-2**HoldPrescaleW cycle quantisation is immaterial (1.5% at the default).
+  //
+  // PER-ENTRY PHASE, not a common overflow pulse: entry e ticks when the prescaler equals
+  // e[HoldPrescaleW-1:0]. A shared pulse would align every entry's expiry to one global tick, so
+  // up to MshrNum held fetches would release into the NoC in the same cycle -- the release
+  // bunching this design is measurably sensitive to. Phasing spreads them across the period.
+  //
+  // HoldPrescaleW = 0 disables the divider and restores exact cycle-accurate behaviour.
+  localparam int unsigned HoldPrescaleW =
+      `ifdef GROUP_MSHR_HOLD_PRESCALE_W `GROUP_MSHR_HOLD_PRESCALE_W `else 4 `endif;
+  localparam int unsigned HoldPrescaleWSafe = (HoldPrescaleW > 0) ? HoldPrescaleW : 1;
+  localparam int unsigned HoldCntTicks =
+      (HoldPrescaleW == 0) ? HoldCntMax : (HoldCntMax >> HoldPrescaleW);
+  localparam int unsigned HoldCntW = (HoldCntTicks > 1) ? $clog2(HoldCntTicks + 1) : 1;
+  // Convert a cycle count from the config into ticks. Never rounds a non-zero window down to
+  // zero, which would silently turn "hold briefly" into "do not hold at all".
+  function automatic logic [HoldCntW-1:0] hold_ticks(input int unsigned cycles);
+    if (HoldPrescaleW == 0) hold_ticks = HoldCntW'(cycles);
+    else if (cycles == 0)   hold_ticks = '0;
+    else begin
+      hold_ticks = HoldCntW'(cycles >> HoldPrescaleW);
+      if (hold_ticks == '0) hold_ticks = HoldCntW'(1);
+    end
+  endfunction
   if ((HoldSubs < 2) || (HoldSubs > MshrMergeReqs))
     $error("[mempool_group_mshr] group_mshr_hold_subs (%0d) must be in [2, MshrMergeReqs].",
            HoldSubs);
@@ -1685,6 +1717,23 @@ module mempool_group_mshr
   end
 
   // Sequential state update
+  // Shared hold prescaler: one free-running counter per MSHR instance. Entry e takes its tick
+  // when hold_prescale_q == e[HoldPrescaleWSafe-1:0].
+  logic [HoldPrescaleWSafe-1:0]      hold_prescale_q;
+  logic [2**HoldPrescaleWSafe-1:0]   hold_tick_phase;  // one-hot decode of the shared prescaler
+  logic [MshrNum-1:0]                hold_tick;        // per-entry tick enable
+  `FF(hold_prescale_q, (HoldPrescaleW == 0) ? '0 : (hold_prescale_q + 1'b1), '0)
+  // One 1-of-2**HoldPrescaleW decoder feeds all MshrNum entries -- entries sharing the low
+  // HoldPrescaleW bits of their index share a phase, so this is a decode and a fan-out, not
+  // MshrNum comparators. Const-folds to all-ones when the prescaler is disabled.
+  always_comb begin
+    hold_tick_phase                  = '0;
+    hold_tick_phase[hold_prescale_q] = 1'b1;
+    for (int e = 0; e < MshrNum; e++) begin
+      hold_tick[e] = (HoldPrescaleW == 0) ? 1'b1 : hold_tick_phase[HoldPrescaleWSafe'(e)];
+    end
+  end
+
   `FF(mshr_q_valid, mshr_d_valid, '0)
   `FF(mshr_q, mshr_d, '0)
   `FF(victim_rr_q, victim_rr_d, '0)
@@ -2398,7 +2447,7 @@ module mempool_group_mshr
     if (HoldWindowMax != 0) begin
       for (int e = 0; e < MshrNum; e++) begin
         if (mshr_q_valid[e] && (mshr_q[e].state == MSHR_WAIT_RESP) && !mshr_q[e].issued &&
-            (mshr_q[e].hold_cnt != '0)) begin
+            (mshr_q[e].hold_cnt != '0) && hold_tick[e]) begin
           mshr_d[e].hold_cnt = mshr_q[e].hold_cnt - HoldCntW'(1);
         end
       end
@@ -2578,8 +2627,8 @@ module mempool_group_mshr
                 // the feature off) means the fetch went out this same cycle on the passthrough, so
                 // mark it issued immediately.
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].hold_cnt =
-                    HoldCntW'((req_len[tile_i][port_i] == BurstLenWidth'(1)) ?
-                              HoldWindowSingle : HoldWindowBurst);
+                    hold_ticks((req_len[tile_i][port_i] == BurstLenWidth'(1)) ?
+                               HoldWindowSingle : HoldWindowBurst);
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].issued =
                     (((req_len[tile_i][port_i] == BurstLenWidth'(1)) ?
                       HoldWindowSingle : HoldWindowBurst) == 0);
@@ -2809,7 +2858,7 @@ module mempool_group_mshr
                SubReqCountW'(HoldSubsSingle))) begin
             mshr_d[resp_mshr_id[tile_i][port_i]].state = MSHR_RESP_HOLD;
             // Arm the serve-target timeout (0 => never expires; the countdown below is skipped).
-            mshr_d[resp_mshr_id[tile_i][port_i]].hold_cnt = HoldCntW'(ServeTimeout);
+            mshr_d[resp_mshr_id[tile_i][port_i]].hold_cnt = hold_ticks(ServeTimeout);
           end else begin
             mshr_d[resp_mshr_id[tile_i][port_i]].state = MSHR_DRAIN_RESP;
           end
@@ -2876,7 +2925,7 @@ module mempool_group_mshr
       for (int e = 0; e < MshrNum; e++) begin
         if (mshr_d_valid[e] && (mshr_d[e].state == MSHR_RESP_HOLD)) begin
           if (mshr_d[e].hold_cnt != '0) begin
-            mshr_d[e].hold_cnt = mshr_d[e].hold_cnt - HoldCntW'(1);
+            if (hold_tick[e]) mshr_d[e].hold_cnt = mshr_d[e].hold_cnt - HoldCntW'(1);
           end else begin
             // Expired: stop waiting for subscribers that are not coming and deliver the buffered
             // word to whoever HAS subscribed. Same re-arm the merge-target path performs.
@@ -2895,7 +2944,7 @@ module mempool_group_mshr
           // A cache line that never reaches its sharing target ages out instead of pinning its way
           // forever. Entries that DO reach the target are freed earlier by the self-invalidate pass.
           if (mshr_d[e].hold_cnt != '0) begin
-            mshr_d[e].hold_cnt = mshr_d[e].hold_cnt - HoldCntW'(1);
+            if (hold_tick[e]) mshr_d[e].hold_cnt = mshr_d[e].hold_cnt - HoldCntW'(1);
           end else begin
             mshr_d_valid[e] = 1'b0;
             mshr_d[e]       = '0;
@@ -3320,7 +3369,7 @@ module mempool_group_mshr
             // is not an allocation victim either -- so its way would be pinned for good. A cache
             // HIT re-enters DRAIN_RESP and returns here, which refreshes the window, so a
             // frequently-used line keeps its way and only an idle one ages out.
-            mshr_d[mshr_i].hold_cnt = HoldCntW'(ServeTimeout);
+            mshr_d[mshr_i].hold_cnt = hold_ticks(ServeTimeout);
             mshr_d[mshr_i].resp_valid = (mshr_d[mshr_i].resp_buf_cnt != '0);
           end else begin
             // Pop the drained head beat.

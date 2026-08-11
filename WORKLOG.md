@@ -8456,3 +8456,69 @@ Seven groups of arms have completed at **byte-identical** benchmark-cycle counts
    between-config difference. The right objection to that 0.4% was never noise -- it was that the
    two arms ran different channel splits, i.e. a confound. Same conclusion, wrong reason, and the
    wrong reason would have misled the next comparison.
+
+### CAVEAT on the K-indexed barrier-fix delta: the arm pool changes with K (2026-08-11)
+
+At K=98 the delta was +21.2 pp over **22** arms; at K=99 it fell to +20.54 over **12**. Nothing
+about the fix changed -- ten arms simply had not reached depth 99 and left the pool:
+
+    dropped : b1023 bfix c1023 cfix d1023 d511 xa511 xa511n xe1023 xf1023
+    retained: a2047 b2047 bremap2 c2047 e2047 f2047 fpug1023 fpug255 fpug511 fpugir2 ihash0 xd2047
+
+sem rose 1.9 -> 3.31 accordingly.
+
+**The series 13.71 -> 21.2 was therefore NOT a clean trend.** At each K the mean is taken over
+whichever arms have reached that depth, so the value moves for two reasons at once: the deltas
+themselves, and the membership. Describing the climb as "monotone, therefore a lower bound" was
+wrong -- monotonicity across a changing pool carries no such guarantee.
+
+This compounds the hold-window weighting already recorded: the retained set at K=99 skews toward
+hold-2047 arms, which carry the LARGEST deltas (+23.77 pp at 2047 vs -1.86 at 255). So pool
+composition and hold weighting push in the same direction and are not separable in this figure.
+
+**How to apply:** quote the delta only with its arm count and sem, never as a bare number, and
+never describe its movement across K as a trend. The completion-based **14.1%** remains the only
+figure free of both problems.
+
+## 2026-08-11 -- MSHR backend: prescale the hold countdown (commit 47beac8)
+
+**Purpose.** Shrink the MSHR entry and its per-cycle toggling. `hold_cnt` was the widest remaining
+field after the struct trims: it counted the hold/serve window in CYCLES, so it needed
+$clog2(1023+1) = 10 bits at the 8x8 setting, and all MshrNum of them changed on every clock edge.
+
+**Implementation.** One free-running `hold_prescale_q` per MSHR instance; each entry stores its
+window in ticks of 2**HoldPrescaleW cycles. Entry `e` takes its tick when the prescaler equals
+`e[HoldPrescaleW-1:0]` -- a per-entry PHASE, deliberately not a shared overflow pulse, because a
+shared pulse would align every entry's expiry onto one grid tick and dump up to MshrNum held
+fetches into the NoC in a single cycle. A single 1-of-16 decoder (`hold_tick_phase`) feeds the
+packed `hold_tick[MshrNum-1:0]`, so the cost is a decode plus fan-out, not MshrNum comparators.
+Only the three DECREMENT sites are gated; the expiry arms still fire the cycle `hold_cnt` reaches
+zero, so a window can never overrun by a period. `hold_ticks()` converts config cycle counts and
+never rounds a non-zero window down to zero. New knob `group_mshr_hold_prescale_w` (default 4,
+0 = exact cycle-accurate countdown).
+
+**Result** (elaborated with the 8x8 define set, hold_window_burst = serve_timeout = 1023):
+
+    HoldCntMax=1023  HoldPrescaleW=4  HoldCntTicks=63
+    hold_cnt   10 -> 6 bits
+    entry      190 -> 186 bits synthesised (250 in simulation: +64 bits of
+               beat_seen/beat_done/cache_hit_cnt, all `ifndef TARGET_SYNTHESIS)
+    per group  64 x 4 = 256 flops saved, less the 4-bit shared counter = 252 net
+    at 8x8     ~16.1k flops across 64 groups
+
+TRAP, cost two wrong numbers before I caught it: `mempool_group_mshr` takes
+NumRemoteRespPortsPerTile as a MODULE PARAMETER defaulting to 2, and the real
+instantiation in mempool_group.sv overrides it from mempool_pkg. A bare
+`mempool_group_mshr i_dut ()` probe therefore elaborates a DIFFERENT DESIGN --
+RespBufWords collapses 2 -> 1 and the sub-request record narrows 13 -> 15 bits --
+and reports 224 rather than 186. Any width/area probe must repeat the parameter
+overrides of the real instantiation, not just the +define+ set.
+
+Compile-clean in both define sets (with and without `TARGET_SYNTHESIS`), 0 errors.
+
+**Status.** Committed alone (rebased onto HEAD so the commit is independent of the still-unstaged
+struct trims and builds on its own). Quantisation is +-16 cycles on a 1023-cycle window, so this is
+a behaviour change by construction -- an equivalence run is the WRONG test for it. Pending: a
+performance-neutrality run on the 4x4 tuned config once the struct-trim equivalence run finishes
+using that slot.
+
