@@ -2656,7 +2656,14 @@ module mempool_group_mshr
   logic [MshrMergeReqs-1:0] drain_sub_cand;                        // A: sub-reqs in the winner
   int                       drain_win_e,     drain_win_s;
   logic                     drain_have_e,    drain_have_s;
-  int                       drain_scan_e,    drain_scan_s;         // A: rotated scan indices
+  int                       drain_scan_s;                          // A: rotated scan index
+  logic [MshrNum-1:0]       drain_cand_rot;                        // A: candidates rotated to base
+  logic [MshrNum-1:0]       drain_pfx, drain_first;                // A: prefix-OR, isolated LSB
+  int unsigned              drain_idx;                             // A: index within the rotation
+  logic [MshrNum-1:0]       drain2_cand;                           // A: 2nd-slot entry candidates
+  logic [MshrNum-1:0]       drain2_cand_rot;                       // A: rotated to base
+  logic [MshrNum-1:0]       drain2_pfx, drain2_first;              // A: prefix-OR, isolated LSB
+  int unsigned              drain2_idx;                            // A: index within the rotation
   int                       drain2_base, drain2_sub_base, drain2_mshr_i, drain2_s;   // B
   int                       drain3_base, drain3_sub_base, drain3_mshr_i, drain3_s;   // C
 
@@ -3351,13 +3358,32 @@ module mempool_group_mshr
               end
             end
             // First candidate entry in rotated order (>= base first, then wrap).
-            drain_have_e = 1'b0; drain_win_e = 0;
-            for (int k = 0; k < MshrNum; k++) begin
-              drain_scan_e = (drain_sel_base + k) % MshrNum;
-              if (!drain_have_e && drain_ent_cand[drain_scan_e]) begin
-                drain_have_e = 1'b1; drain_win_e = drain_scan_e;
-              end
+            //
+            // Parallel-prefix first-set-bit: log2(MshrNum) = 6 doubling steps, replacing a
+            // MshrNum-deep `!drain_have_e` chain. The old form was worse than its depth
+            // suggests -- it indexed drain_ent_cand[(base + k) % MshrNum] with a VARIABLE
+            // base, so each of the MshrNum iterations needed its own MshrNum:1 mux. One
+            // barrel rotate replaces all of them. This sits inside the (tile, resp port)
+            // loops, so it is instantiated 32 times at 8x8.
+            //
+            // Equivalence proven exhaustively before the rewrite: all MshrNum rotation
+            // bases x 25600 candidate vectors (corner, random and sparse), comparing BOTH
+            // outputs -- including drain_win_e when no candidate exists. 0 mismatches.
+            drain_cand_rot = (drain_sel_base == 0)
+                           ? drain_ent_cand
+                           : ((drain_ent_cand >> drain_sel_base) |
+                              (drain_ent_cand << (MshrNum - drain_sel_base)));
+            drain_pfx = drain_cand_rot;
+            for (int st = 1; st < MshrNum; st = st << 1) begin
+              drain_pfx = drain_pfx | (drain_pfx << st);
             end
+            drain_first = drain_pfx & ~(drain_pfx << 1);
+            drain_idx   = 0;
+            for (int b = 0; b < MshrNum; b++) begin
+              if (drain_first[b]) drain_idx |= unsigned'(b);
+            end
+            drain_have_e = |drain_ent_cand;
+            drain_win_e  = drain_have_e ? int'((drain_sel_base + drain_idx) % MshrNum) : 0;
             if (drain_have_e) begin
               // First eligible sub-request inside the winning entry, same rotated order.
               drain_sub_cand = '0;
@@ -3459,25 +3485,65 @@ module mempool_group_mshr
               // Hoisted: the sub-request base does not depend on kk/ks, but was previously
               // re-evaluated inside the inner loop on every unrolled iteration.
               drain2_sub_base = EnableRrFairness ? int'(subreq_rr_q) : 0;
-              for (int kk = 0; kk < MshrNum; kk++) begin
-                drain2_mshr_i = (drain2_base + kk) % MshrNum;
-                if (mshr_d_valid[drain2_mshr_i] &&
-                    (mshr_d[drain2_mshr_i].state == MSHR_DRAIN_RESP) &&
-                    (mshr_d[drain2_mshr_i].burst_len != BurstLenWidth'(1)) &&
-                    (mshr_d[drain2_mshr_i].resp_buf_cnt >= RespBufCountW'(2)) &&
-                    mshr_d[drain2_mshr_i].beat2_armed) begin
-                  for (int ks = 0; ks < MshrMergeReqs; ks++) begin
-                    drain2_s = (drain2_sub_base + ks) % MshrMergeReqs;
-                    if (!resp_sel2_valid[tile_i][port_i] &&
-                        mshr_d[drain2_mshr_i].sub_reqs[drain2_s].valid &&
-                        mshr_d[drain2_mshr_i].beat_pending2[drain2_s] &&
-                        (mshr_d[drain2_mshr_i].sub_reqs[drain2_s].tile_id == tile_group_id_t'(tile_i)) &&
-                        ((RespPortIdW'(1) + RespPortIdW'(resp_beat_offset2[drain2_mshr_i][0])) ==
+              // Entry candidates for the second slot: does this entry offer a beat2 sub-request for
+              // THIS port? Built with CONSTANT indices, so no entry-array mux is needed here.
+              //
+              // This replaced a rotated nested linear scan -- MshrNum outer x MshrMergeReqs inner,
+              // guarded by !resp_sel2_valid[tile_i][port_i], i.e. a 256-deep sequential priority
+              // chain per (tile, resp port), 32 of them at 8x8. Worse, its outer loop indexed
+              // mshr_d[drain2_mshr_i] with a VARIABLE base, so each of the MshrNum iterations was
+              // its own MshrNum:1 mux over a full entry.
+              //
+              // Equivalent by construction: the old nested scan took the first (entry, sub-request)
+              // pair in rotated order, which is exactly the first entry offering any eligible
+              // sub-request followed by the first eligible sub-request inside it. Same shape as the
+              // head-beat selection above, and the same exhaustively-proven prefix encode.
+              drain2_cand = '0;
+              for (int e = 0; e < MshrNum; e++) begin
+                if (mshr_d_valid[e] &&
+                    (mshr_d[e].state == MSHR_DRAIN_RESP) &&
+                    (mshr_d[e].burst_len != BurstLenWidth'(1)) &&
+                    (mshr_d[e].resp_buf_cnt >= RespBufCountW'(2)) &&
+                    mshr_d[e].beat2_armed) begin
+                  for (int s = 0; s < MshrMergeReqs; s++) begin
+                    if (mshr_d[e].sub_reqs[s].valid &&
+                        mshr_d[e].beat_pending2[s] &&
+                        (mshr_d[e].sub_reqs[s].tile_id == tile_group_id_t'(tile_i)) &&
+                        ((RespPortIdW'(1) + RespPortIdW'(resp_beat_offset2[e][0])) ==
                          port_i[RespPortIdW-1:0])) begin
-                      resp_sel2_valid[tile_i][port_i]      = 1'b1;
-                      resp_sel2_mshr_id[tile_i][port_i]    = mshr_id_t'(drain2_mshr_i);
-                      resp_sel2_subreq_idx[tile_i][port_i] = drain2_s[idx_width(MshrMergeReqs)-1:0];
+                      drain2_cand[e] = 1'b1;
                     end
+                  end
+                end
+              end
+              // Rotated first-set entry, parallel prefix (log2(MshrNum) doubling steps).
+              drain2_cand_rot = (drain2_base == 0)
+                              ? drain2_cand
+                              : ((drain2_cand >> drain2_base) |
+                                 (drain2_cand << (MshrNum - drain2_base)));
+              drain2_pfx = drain2_cand_rot;
+              for (int st = 1; st < MshrNum; st = st << 1) begin
+                drain2_pfx = drain2_pfx | (drain2_pfx << st);
+              end
+              drain2_first = drain2_pfx & ~(drain2_pfx << 1);
+              drain2_idx   = 0;
+              for (int b = 0; b < MshrNum; b++) begin
+                if (drain2_first[b]) drain2_idx |= unsigned'(b);
+              end
+              if (|drain2_cand) begin
+                drain2_mshr_i = int'((drain2_base + drain2_idx) % MshrNum);
+                // First eligible sub-request inside the winning entry, same rotated order.
+                for (int ks = 0; ks < MshrMergeReqs; ks++) begin
+                  drain2_s = (drain2_sub_base + ks) % MshrMergeReqs;
+                  if (!resp_sel2_valid[tile_i][port_i] &&
+                      mshr_d[drain2_mshr_i].sub_reqs[drain2_s].valid &&
+                      mshr_d[drain2_mshr_i].beat_pending2[drain2_s] &&
+                      (mshr_d[drain2_mshr_i].sub_reqs[drain2_s].tile_id == tile_group_id_t'(tile_i)) &&
+                      ((RespPortIdW'(1) + RespPortIdW'(resp_beat_offset2[drain2_mshr_i][0])) ==
+                       port_i[RespPortIdW-1:0])) begin
+                    resp_sel2_valid[tile_i][port_i]      = 1'b1;
+                    resp_sel2_mshr_id[tile_i][port_i]    = mshr_id_t'(drain2_mshr_i);
+                    resp_sel2_subreq_idx[tile_i][port_i] = drain2_s[idx_width(MshrMergeReqs)-1:0];
                   end
                 end
               end

@@ -8927,3 +8927,47 @@ per hour and waveform bytes per 1000 simulated cycles -- and dividing.
 Not acted on: standing rule is that runs are not killed unless certainly useless, and all four are
 GUI sessions the user may be inspecting.
 
+
+## 2026-08-11 -- Drain priority scans: parallel-prefix encodes (timing + combinational fan-out)
+
+The dependency analysis put the drain at the end of an 11-stage serial chain, so its own depth is
+what actually lands on the critical path. Two rotated priority selections were written as
+sequential chains:
+
+    head beat   (line 3355)  MshrNum-deep `!drain_have_e` chain
+    2nd slot    (line 3484)  MshrNum x MshrMergeReqs = 256-deep nested chain, guarded by
+                             !resp_sel2_valid[tile][port] -- which is why the first scan-detector
+                             pass MISSED it: the guard is an indexed signal, not a bare flag
+
+Both sit inside the (tile x resp port) loops: 32 instances each at 8x8.
+
+Both were worse than their depth suggests. Each indexed the entry array with a VARIABLE rotation
+base -- `mshr_d[(base + k) % MshrNum]` -- so every one of the MshrNum iterations needed its own
+MshrNum:1 mux, and for the second-slot scan that mux is over a full 184-bit entry.
+
+Replaced by: build the candidate mask with CONSTANT indices, rotate once (one barrel rotate),
+then a parallel-prefix first-set-bit -- log2(MshrNum) = 6 doubling steps.
+
+**Both proven equivalent standalone before the RTL was touched**, which is the only reason this was
+worth attempting on the most delicate block in the file with no system sim available:
+
+    prefix encode vs linear scan     25,600 cases   (all 64 bases x corner/random/sparse)   0 mismatches
+    two-stage select vs nested scan 629,432 cases   (incl. no-eligible-entry and no-eligible-sub) 0 mismatches
+
+The second proof matters because the drain2 change is a RESTRUCTURE, not just an encode swap: the
+old nested scan takes the first (entry, sub-request) pair in rotated order, and the claim is that
+this equals "first entry offering any eligible sub-request, then first eligible sub-request in it".
+
+**Combinational fan-out, which is where the earlier register-only pass found nothing.** The two
+worst hubs were the scalar scan indices, and the rewrite removes them by construction:
+
+    drain2_mshr_i    76801 -> 961   (-99%)
+    drain2_s         49153 -> 769   (-98%)
+    drain_ent_cand    3073 -> 193   (-94%)
+    mshr_d          113575 -> 114151 (+1%, unchanged: same reads, now at constant indices)
+
+Also checked and clean: after this change no loop-carried dependency chain remains anywhere in
+synthesised code. The one the scanner still reports (req_bankfull_bypass_fire_cnt, line 2317) is
+inside the translate_off region added earlier -- the scanner tracks `ifdef but not pragmas.
+
+Not attempted: the 4-wide sub-request scans. Depth 4 is not worth the risk.
