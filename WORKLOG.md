@@ -8028,3 +8028,431 @@ config arms (their non-barrier knobs do vary), just not for the broadcast questi
 **Third experiment invalidated by this one bug**, after the GBAR_PLOOP ablation and the whole 8x8
 utilisation campaign. When re-running the broadcast question, do it on the FIXED kernel and verify
 `bar_rel > 0` before trusting any comparison.
+
+### TWO different "bypass" counters, and only one of them measures capacity
+
+Prompted by the user asking whether the bypass statistic separates store/AMO bypass from
+bank-full bypass. It does -- in the aggregate counter. The per-group probe does NOT, and I had
+just published a panel that read it as capacity pressure.
+
+| | gate | stores/AMOs | multi-beat | what it means |
+|---|---|---|---|---|
+| `req_bankfull_bypass_cnt_dbg` | `req_can_merge` -> `req_is_load` (`~wen && amo=='0`) | **excluded** | included | **CAPACITY**: a mergeable load wanted an entry, found no free way in its bank, went around |
+| `[BYP] fwd` (`GROUP_MSHR_BYPASS_PROBE`) | `mshr_tag=='0 && req_len==1` | **INCLUDED** | **excluded** | **TRAFFIC**: any single-beat request leaving the group without an entry |
+
+`[BYP]`'s purpose in the RTL is matching forwards to responses to find orphans -- a correctness
+probe. It over-counts (stores and AMOs can never occupy an entry, so they always "bypass") and
+under-counts (`req_len==1` drops every multi-beat bypass) relative to capacity pressure.
+
+**What this does and does not affect.** Every aggregate figure quoted in this campaign --
+"bankfull_bypass down 74% with the fix", the hold-window mechanism (corr +0.71), the 4x4
+provisioning result (2,099/1k -> 0) -- uses the GATED counter and stands. Only the per-group
+panel published 2026-08-10 was mislabelled; it now states what it measures, and the note switches
+depending on the selected series.
+
+The RTL also distinguishes two more cases the bank-full counter deliberately excludes:
+`stat_req_subreq_overflow` (an entry exists but its requester list is full) and misaligned bursts
+(clamped to `req_len=1` with `req_can_merge=0` on purpose, so the owner still receives all N
+beats). Neither is capacity pressure.
+
+**RULE:** before reading any counter as a capacity signal, find its enable condition and check
+for a `req_can_merge` / `req_is_load` gate. Similar names hide opposite meanings here.
+
+### CORRECTION: the BCAST "batch" is ONE arm, not eight
+
+The entry above states that the whole X-prefixed batch (XA511N, XA511, XA1023, XB1023, XC1023,
+XD2047, XE1023, XF1023) is void for the broadcast question. That over-states it. Checking every
+build in the tree for the define:
+
+    build_xa511n   HAS  GROUP_BARRIER_BCAST_OFF
+    all others     NO   -- the X prefix marks a TRACE-OFF RERUN, not a broadcast variant
+
+So the broadcast experiment is a single pair, XA511 vs XA511N, and the other seven X arms are
+ordinary reruns of their base configs with SNITCH_TRACE=0 / TRACE_FORCE_OFF / V4M_ENABLE=0.
+
+**The finding itself survives and is cleaner than I described it.** XA511 vs XA511N isolates
+`GROUP_BARRIER_BCAST_OFF` as the single functional difference, and the two completed
+bit-identically at 866,235 cycles -- so the knob was untested (the barrier was dead, nothing for
+it to act on), not proven inert. That is a two-arm result, not an eight-arm one.
+
+**Corroborated again today:** XF1023 completed at 1,556,377 cycles, identical to F1023, and the
+two differ ONLY in tracing defines. That is a third independent confirmation that
+SNITCH_TRACE / TRACE_FORCE_OFF / V4M_ENABLE are behaviourally inert -- trace-on and trace-off
+runs are directly comparable -- and it is NOT another broadcast data point.
+
+**Lesson:** the arm-naming convention encodes intent that the build defines do not. I inferred
+the experiment from the "X" prefix rather than reading the define, and got the scope wrong by 4x.
+Read the defines.
+
+### First-period group fan-out is a SPATIAL start-up transient, not a barrier effect
+
+User observation: a few groups recover much more slowly than the rest from the first
+p-iteration group sync. Measured on the per-group [FPUG] data.
+
+**The gradient.** fpugir2's first benchmark period spans 16x between groups -- the far mesh
+corner (7,7) at 4.1% against (0,2) at 66.4% -- decaying monotonically with mesh position:
+
+          y0  y1  y2  y3  y4  y5  y6  y7
+     x0   38  55  66  64  55  38  28  25
+     x4   21  21  30  22  20  13  13   8
+     x7   15  13  21  14  12   8   4   4
+
+    corr(x+y, busy) = -0.83 in period 1  ->  -0.09 in period 2.  A one-period transient.
+
+**Two mechanisms, separated by the y axis.** Group id is `8x + y`, so id and x are 0.99
+collinear and cannot be told apart -- but y can. Sequential wake-up order is nearly independent
+of y (corr(id,y) = +0.12), yet busy correlates **-0.42** with y. So a genuine NoC-DISTANCE
+component exists that ordering cannot explain, alongside an ordering component
+(partials: distance -0.53, id -0.41). A per-group wake-up loop issued g=0..63 whose writes also
+traverse different mesh distances produces exactly both.
+
+**It is NOT the barrier.** The strongest gradient in the fleet is `fpuggb0`, the arm with the
+barrier COMPILED OUT: corr(hop) = -0.90, corr(y) = -0.59. The fan-out therefore precedes the
+group sync and is independent of it -- the barrier is what the late groups are late TO, not what
+makes them late.
+
+**It is not remapping either**, though remap=2 is why it is visible. fpugir2 is the only arm whose
+laggards have started at all in period 1 (min 4.1%); every remap=0 arm has min = 0.0%, i.e. some
+groups do literally nothing. fpug255 shows no gradient only because nothing has started anywhere
+(max 0.6%).
+
+**Distinct from the late collapse.** The ~35-period degradation seen in fpugir2 and bremap2 has a
+ROTATING straggler and appears long after this transient has washed out. Two different phenomena;
+do not conflate them.
+
+---
+
+## 2026-08-10 — PROBE 4: per-group stall taxonomy, to explain the g54/g62 collapse
+
+**Time / purpose.** The 8x8 fpugir2 arm shows two groups (g54, g62) that never recover after the
+first p-loop sync: from period 42 they sit at 2-15% FPU while the fleet median is 92-97%, they
+hold cumulative ranks 1 and 0 of 64, and the deficit widens from -1.1% to -24.7%. Every probe we
+had said the same unhelpful thing: `[BYP]` shows zero in-flight beats and `[BP]` shows ~0.000
+stall across all eight stages while the fleet max hits 0.85-0.91. **The NoC and the MSHR are
+exonerated — those groups are not blocked, they are not issuing.** Nothing measured so far could
+say why, because every existing probe measures the network, and for them the network is idle.
+
+**Implementation.**
+
+1. `hardware/tb/tb_fpu_util.svh` — PROBE 4. Snitch's issue stage defines
+   `stall = ~valid_instr | lsu_stall | acc_stall | fence_stall` (snitch.sv:354), and that
+   decomposition is the diagnosis. New per-group per-1000-cycle emits:
+   - `[STALLG]` — five-way split: `ins` (icache), `raw` (operand hazard), `lsu` (scalar LSU),
+     `acc` (Spatz will not accept), `fen` (parked in a fence).
+   - `[MEMOG]` — `acc_mem_cnt_q` / `acc_mem_req_cnt_q` occupancy: outstanding accelerator memory
+     ops, and how many have not even been issued.
+   - `[INSNG]` — retired instructions per group (`insn=`), plus barrier releases per group
+     (`rel=`) on the same line. `insn` separates STALLED from SPINNING; `rel` says whether the
+     group is simply a release behind. There is no separate `[BARG]` tag — grep `[INSNG]`.
+
+   `ins`/`raw`/`lsu` were **already being counted in every run ever made** —
+   `SNITCH_ENABLE_PERF` and `SNITCH_ENABLE_STALL_COUNTER` are unconditional in
+   `deps/snitch/Bender.yml` — only the readout was missing. `acc` and `fen` have no counter and
+   are counted TB-side.
+
+2. `working_dir/spatz/hw/ip/spatz_cc/src/spatz_mempool_cc.sv` — per-group trace filter.
+   New `TRACE_CORES_PER_GROUP` + `TRACE_G0..G3` defines gate the `.dasm` and Spatz trace fopen
+   AND write sites. With none set, behaviour is bit-identical to before. The divisor is passed
+   in, never baked in: hart_id field widths move with the mesh, and a hardcoded shift is exactly
+   what made the group barrier a silent no-op at 8x8.
+
+**Why fence_stall is the leading hypothesis.** It is `!lsu_empty || (|acc_mem_cnt_q)`
+(snitch.sv:887) — "wait until the memory I already asked for comes back". A core parked there
+shows precisely the observed signature: no FPU work, no retired instructions, and no NoC stall.
+It is not blocked ON the network; it is waiting for something the network already owes it.
+Congestion and a dropped response are indistinguishable in `[BP]` and opposite in `[MEMOG]`:
+draining each period is congestion, **pinned at a constant while other groups drain is a lost
+response**, which is a different bug with a different fix.
+
+**Reading key** (the combination is decisive where each part alone is not):
+| FPU | insn | dominant counter | conclusion |
+|---|---|---|---|
+| low | low | `fen` | waiting on memory already requested |
+| low | low | `ins` | icache starvation |
+| low | low | `acc` | Spatz backed up |
+| low | **high** | — | not stalled at all: spinning in a poll/barrier loop |
+| low | low | all ~0 | waiting on the barrier release, not on any local resource |
+
+**Run.** `build_g54diag`, config `terapool_spatz4_fpu_8x8_r2` (= fpugir2 exactly), fixed ELF
+`matmul_8x8_gbarfix.elf`, traces scoped to g54 / g56 / g62 (48 of 1024 harts). **g56 is the
+CONTROL** — named alongside the other two but not itself collapsed; a healthy group traced under
+identical conditions is what makes the sick ones interpretable. Full-fleet tracing costs 609 GB
+at 67 GB/h and would roughly double time-to-collapse; at 3/64 of the cores it is a few GB.
+`disk_autoreclaim.sh` now skips `run_g54diag` — it truncates `.dasm`/`trace_spatz_*` on low disk,
+which would have silently destroyed the only copy of the evidence while the run looked healthy.
+
+**Status.** Building (0 errors at 90 s; TB parse-verified standalone with `vlog` against a stub,
+which also retro-validates the `[MSHRG]` emit added earlier and never compiled until now).
+Collapse window is cyc ~96k-110k; at the fleet's current rate that is several hours out.
+
+**Correction to the 2026-08-09 entry above.** It calls the late degradation's straggler
+"ROTATING". That was superseded: the slow set is FIXED and spatial — 21 of 64 groups persistently
+slow, same set early and late (r=0.92), bimodal ~82%/~22%, contiguous on the mesh. Rotating
+extremes in the per-period *max* hid a stable underlying set.
+
+## 2026-08-11 — g54/g62 REFRAMED: barrier-release tail, not a stuck group (user observation)
+
+**Trigger.** User noticed g62 recovers to high utilisation in the latest fpugir2 frame after a
+very long low period. Checked, and it is correct — which invalidates the framing I had been
+working from.
+
+**What the data actually shows** (fpugir2, `[FPUG]`/`[FPU]`, cyc 88k-115k):
+
+| phase | cycles | content |
+|---|---|---|
+| wave | 92k-96k | membership **rotates** every period (12,36,42 -> 17,18,21,26,27,29,34,35,44 -> 4,19,21,22,... -> 9,23,32,39,40,41,46,54,60); median falls 98% -> 57% |
+| tail | 97k-104k | only g54 + g62 low; median back to 92-97% |
+| tail | 105k-113k | only g62 low |
+| clear | 114k+ | both fully recovered |
+
+**Mechanism — the barrier release counts settle it:**
+
+    cyc=56000  bar_rel=+64      <- all 64 groups release in ONE period
+    cyc=93000..114000  bar_rel = +7,+11,+8,+17,+11,+1,+5,+2,+1,+1   (sums to exactly 64)
+
+The second barrier smears the same 64 group-releases over **21,000 cycles**. g62 is simply the
+64th of 64 to pass it. Nothing is stuck.
+
+**Inside a lagging group:** g62 runs at ~2 of 16 cores busy through the tail (14 idle), and
+`insn_drift_intra` for g62 is pinned at **exactly 76** for fifteen consecutive periods
+(99k-112k). That is 14 cores parked at the intra-group barrier waiting on 1-2 stragglers that
+are 76 retired instructions behind — and those 76 instructions take >15,000 cycles, i.e.
+**~200 cycles per instruction**. Inter-group drift climbs monotonically 815 -> 3,077 over the
+same window.
+
+**Ruled out by the recovery itself:** lost NoC response and permanent deadlock. Both would be
+terminal; g54 and g62 clear completely.
+
+**The question is now sharper**, and PROBE 4 is still the right instrument for it, aimed
+differently: not "why is the group stuck" but "**what are the 1-2 straggler cores doing at
+~200 cyc/instruction, and do the other 14 show the idle-no-local-stall signature of a barrier
+wait?**" `[STALLG]` + `[INSNG]` answer both directly — the waiting cores should show low insn
+with every stall counter near zero, and the stragglers should show which resource they are on.
+
+**Correction to the 2026-08-10 entry.** It states the deficit was "widening -1.1% -> -24.7%"
+with g54/g62 at cumulative ranks 1 and 0 of 64. That was measured on data ending ~110k, inside
+g62's tail. It describes a transient, not a trend; both groups recover by 115k. Do not cite the
+widening deficit as evidence of a persistent defect.
+
+### Pre-registered prediction for the g54diag run (written 2026-08-11, BEFORE the data)
+
+Aggregate `[FPU]` on fpugir2 shows MSHR serve-timeouts tracking the straggler tail, not the wave:
+
+    metric            calm 85-91k   wave 92-96k   tail 97-113k
+    util                     93.6          60.6           91.4
+    mshr_timeout              0.0           7.2           22.9
+    bankfull_bypass           0.3           0.0            0.0
+    core_spread             246.3         339.6          235.7
+
+Timeouts are **identically zero** whenever the fleet is aligned, appear with the wave, and then
+**rise further during the tail while fleet utilisation recovers to 91%**. Per the standing rule
+that a counter which is identically zero across every calm period and non-zero only in the
+anomaly is a signal and not background, this is the strongest lead available.
+
+fpugir2 has **no `[MSHRG]`** (it predates the probe), so per-group attribution was never
+possible for the arm that shows the phenomenon. `build_g54diag` is the same config WITH the
+probe, and will reach the same barrier event.
+
+**Prediction, to be judged on the g54diag data:**
+
+* **If timeouts CONCENTRATE in the straggler groups** -> the stragglers' ~200 cyc/instruction is
+  tied to MSHR serve-timeouts, and the fix is in the MSHR (window/way policy).
+* **If timeouts are spread EVENLY across groups** -> they are a fleet-wide symptom of the
+  misalignment, not the cause of any group being slow, and the MSHR is exonerated a second time
+  (`[BP]` already exonerated the NoC).
+
+Both outcomes are informative; the second would redirect effort to the cores rather than the
+memory system. Recording this now so the reading is not fitted to whichever result arrives.
+
+## 2026-08-11 — CORRECTION: the +15.63 pp barrier-fix headline is hold-window-weighted
+
+The figure quoted repeatedly through 10-11 Aug (+13.13 -> +15.63 pp as K grew) is the **mean of
+22 matched same-config pairs**, and that pool is dominated by long-hold arms. Decomposed:
+
+    hold   arms   mean delta
+     255      1       -1.86      <- NEGATIVE, and this is the FASTEST-completing config
+     511      6      +15.25
+    1023      9      +21.31
+    2047      6      +23.77
+    corr(hold window, delta) = +0.49 over 22 arms
+
+15 of the 22 pairs are hold 1023/2047. Those are also the slowest arms to finish:
+
+    hold   distinct arms   median completion
+     255        1               648,607
+     511        1 (4 dup logs)  866,235
+    1023        3             1,556,377     <- 2.4x slower than the fastest arm (vcs12, 552,669)
+
+**So the barrier fix recovers utilisation that a long hold window throws away, and where the
+hold window is already short there is little to recover.** The best-ALIGNED arm (fpugir2, best
+post-first-barrier release concentration at 6.4/period) shows only +12.24 pp, below the mean.
+
+**What still stands:**
+* the fix is robustly positive as utilisation -- 19 of 22 pairs positive, sem 1.9
+* the THROUGHPUT claim is unaffected and remains the number to quote: GBAR0 743,851 vs A
+  866,235 = **14.1% faster**, from actual completions, not a utilisation delta
+* the barrier itself is still required (the pre-fix barrier was a silent no-op at 8x8)
+
+**What must change:** stop quoting +15.63 pp as "the value of the fix". It is the value
+*averaged over a pool weighted toward badly-tuned configs*. Quote either the completion-based
+14.1%, or the per-hold row that matches the configuration being discussed.
+
+Caveat on the caveat: hold=255 is a single arm (fpug255), so -1.86 is one point, not a
+distribution. The monotone ordering across 255/511/1023/2047 is the robust part.
+
+### Recommendation (NOT applied): the 8x8 base config inherits hold=1023, the 4x4 default is 255
+
+`config/terapool_spatz4_fpu_8x8.mk` sets
+
+    group_mshr_hold_window_burst = 1023
+    group_mshr_serve_timeout     = 1023
+
+and EVERY 8x8 arm inherits it (fpugir2, the build_4 GUI run, build_g54diag, the h2047r2 pair
+overrides to 2047). The shipped 4x4 `terapool_spatz4_fpu.mk` defaults both to **255**.
+
+**Matched pairs, same config, hold the only variable (completion cycles):**
+
+    config    hold 511     hold 1023    cost
+    D        1,308,180     1,597,735    +22%
+    F          857,017     1,556,377    +82%
+
+Four independent lines agree that long holds are bad: these matched pairs; the monotone
+completion ordering 255 (648,607) < 511 (866,235) < 1023 (1,556,377 median); the 4x4
+hold-the-fetch W-sweep being net-negative (3836 -> 3986/4209/4229); and the 4x4 shipped default
+already being 255.
+
+**Strengthened 2026-08-11 (later):** the *1023 family is now n=5 completions, all inside a 10%
+band -- 1,446,448 / 1,493,883 / 1,556,377 / 1,556,377 / 1,597,735 (XB, A, XF, F, D) -- against a
+511 cluster at ~830-866k. A consistent ~1.75x ratio across five independent arms, which is much
+harder to attribute to per-arm noise than the two matched pairs alone.
+
+**Caveats:** n=2 matched pairs, and all of these completions are OLD-fleet (pre-barrier-fix) --
+no fixed-fleet arm has completed yet. The barrier fix's utilisation benefit is LARGEST at long
+holds (+23.77 pp at 2047 vs -1.86 at 255), so the fix recovers part of what a long hold loses,
+but there is no evidence it makes 1023 faster than 511 in absolute terms.
+
+**NOT APPLIED.** 23 fixed-fleet arms are in flight against the current config; changing it now
+would make everything launched afterwards incomparable with everything already running. The
+decision is the user's, and the natural moment is when the current campaign completes.
+
+### Healthy-state fingerprint from PROBE 4 (g54diag, benchmark open at cyc 56,000)
+
+Baseline to read the collapse against — measured while g54/g62 are still at median:
+
+    grp   FPU%  insn/cyc    ins    raw    lsu    acc    fen   memo
+     54  55.72     0.076  0.022  0.000  0.148  0.616  0.000  4.21
+     56  38.16     0.050  0.010  0.000  0.102  0.746  0.000  3.62
+     62  53.23     0.072  0.025  0.000  0.208  0.566  0.000  4.53
+    MED  55.63     0.075  0.015  0.000  0.078  0.690  0.000  3.91
+
+* **`acc` ~0.69 is the NORMAL state**, not a fault: the scalar core waiting to hand work to a
+  saturated Spatz. Any collapse must be read as a CHANGE from this, never as "acc is high".
+* **`fen` is exactly 0.000** in the healthy region — so if fence stalls appear during the
+  collapse they are genuinely discriminating, which is what makes the pre-registered fence
+  hypothesis testable rather than vacuous.
+* **`memo` 3.6-4.5 outstanding ops/core is the normal in-flight level.** "Pinned vs draining"
+  must be judged against ~4, not against 0.
+* `raw` is 0.000 throughout; `lsu` 0.10-0.21.
+
+The verdict logic correctly reports "not collapsed" here — divergence in fpugir2 begins ~92k.
+
+### remap=2 throughput: WITHDRAWN, then REINSTATED on the correct comparison (2026-08-11)
+
+Three passes over the same data. The final answer is the third.
+
+**Pass 1 (wrong framing).** With 8 remap=0 completions, IREMAP2 (1,432,655) sat below the entire
+hold-1023 band and I called it "1% faster than the best, 8% faster than the median".
+Rank-order against a mixed set of configs.
+
+**Pass 2 (wrong withdrawal).** vcsXC1023 landed at 1,438,712, cutting the margin to 0.4% against
+a 16%-wide band, and I withdrew the claim as noise. **Also wrong**: XC1023/C1023 run the
+`rd1+rdwr1` split, IREMAP2 runs `rd0+rdwr2`. That comparison is confounded by the channel split,
+not controlled.
+
+**Pass 3 (correct).** `gen_util_artifact.py` already DECLARES the matched pairs. Line 107 is
+`("IR2", "A^", "remap 2 vs 0, on the A split")` -- identical hold (1023), split (rd0+rdwr2) and
+resp (2), with remap the only variable:
+
+    remap=2  IREMAP2   1,432,655
+    remap=0  A1023     1,493,883
+    -> remap=2 is +4.1% FASTER
+
+**Why 4.1% is trustworthy where 0.4% was not:** duplicate configs complete at *byte-identical*
+cycle counts -- E/XE, F/XF, A/XA, B/XB, C/XC all agree exactly. Run-to-run variation is **zero**,
+so a 4.1% gap between a controlled pair is deterministic signal. The earlier 16% "spread" was
+never noise; it was genuine differences between non-comparable configs, which is exactly why
+comparing across it proved nothing either way.
+
+**Status: n=1 matched pair.** The second declared pair (`BR2` vs `B^`, the B split) is pending
+BREMAP2's completion and will confirm or refute. Together with fpugir2's best-in-fleet barrier
+release concentration (6.4/period), remap=2 now has two independent supports again -- but on
+proper evidence this time, not the rank-order argument.
+
+**Lesson: look for a declared matched pair BEFORE doing rank-order analysis.** The controlled
+comparison existed in the config table the whole time. Rank-order against a heterogeneous set
+answers a different question, and the answer flips depending on which arms happen to have
+finished -- which is precisely what happened across passes 1 and 2.
+
+### The fixed fleet cannot answer the throughput question on this workload (2026-08-11)
+
+Applying the valid one-sided bound (an arm past its twin's completion cycle is already slower,
+whatever it does next) to every fixed/pre-fix matched pair:
+
+    arm        bench cyc now   twin finished at    rate     days to REACH it
+    fpugir2           78,000          1,432,655   2,583/h            22
+    b1023             80,000          1,446,448   2,649/h            21
+    fpug1023         103,000          1,493,883   3,411/h            17
+    d1023            163,000          1,597,735   5,398/h            11
+
+**0 of 6 fixed arms have passed their twin's completion cycle**, so the bound currently proves
+nothing in either direction -- they are 5-10% of the way. Median **~21 days** just to reach the
+comparison point, longer to complete.
+
+**Why this matters.** Whole-kernel utilisation is algebraically 1/cycles (see the identity note),
+so the +18.68 pp figure can never become a throughput claim by accumulating more periods. Only a
+completion settles it, and completions are ~3 weeks away. `fixed-fleet: 0` is not a transient.
+
+**Options, for the user to choose -- NOT actioned:**
+1. **Smaller workload for a throughput arm.** The pre-fix fleet needed 1.4-1.7M cycles; a
+   proportionally smaller matmul on the same fixed config would complete in days, not weeks.
+   Precedent exists: the 4x4 investigation arms completed in 34,629 (tuned4x4) and 124,692
+   (exp4x4gbar0) cycles.
+2. **Accept the utilisation result as utilisation** and stop treating a throughput number as
+   pending. The fix is defensible on other grounds -- the pre-fix barrier was a silent no-op, so
+   the comparison is "barrier working" vs "barrier absent", not a tuning choice.
+3. **Wait**, accepting ~3 weeks and the compute cost of 24 arms running that long.
+
+Note the interaction with the hold-window finding: these arms are slow partly BECAUSE the 8x8
+base config sets hold=1023, which costs +22..108% on matched pairs. A throughput arm launched at
+hold=255 would finish substantially sooner as well as being the better configuration.
+
+### Determinism is EXACT — and that changes how many runs a comparison needs (2026-08-11)
+
+Seven groups of arms have completed at **byte-identical** benchmark-cycle counts:
+
+      866,235  x5   11, P511, PA511, XA511, XA511N
+    1,493,883  x3   A1023, PA1023, XA1023
+      743,851  x2   GBAR0, PGB0
+    1,438,712  x2   C1023, XC1023
+    1,446,448  x2   B1023, XB1023
+    1,556,377  x2   F1023, XF1023
+    1,669,486  x2   E1023, XE1023
+
+18 arms, 7 groups, **zero** run-to-run variation -- not "small", exactly zero.
+
+**Consequences:**
+
+1. **One run per config is statistically sufficient.** Repeats measure nothing; the 5-way and
+   3-way groups above are wasted compute confirming a value that cannot vary. Future sweeps
+   should spend those slots on more CONFIGS, not more repeats.
+2. **Any cycle-count difference between configs is 100% signal.** There is no noise floor to
+   clear -- only confounds to rule out. So the question is never "is this bigger than noise", it
+   is always "are these two arms matched on everything except the knob".
+3. **It settles the remap=2 result.** The matched pair's remap=0 baseline (1,493,883) is one of
+   the triples -- reproduced exactly by A1023, PA1023 and XA1023 -- against IREMAP2's 1,432,655.
+   A 61,228-cycle (+4.1%) gap on a triple-confirmed baseline with zero variance is decisive.
+4. **It retrospectively condemns my withdrawal.** I dismissed a 0.4% margin as "inside the 16%
+   spread". With zero variance there IS no spread to be inside; the 16% was entirely genuine
+   between-config difference. The right objection to that 0.4% was never noise -- it was that the
+   two arms ran different channel splits, i.e. a confound. Same conclusion, wrong reason, and the
+   wrong reason would have misled the next comparison.
