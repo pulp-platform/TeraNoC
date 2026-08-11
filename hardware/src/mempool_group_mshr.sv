@@ -264,6 +264,10 @@ module mempool_group_mshr
   if ((RespWaitSubsSingle || !CacheReclaimable) && (ServeTimeout == 0))
     $error("[mempool_group_mshr] group_mshr_resp_wait_subs_single=1 or group_mshr_cache_reclaimable=0 requires group_mshr_serve_timeout > 0 (no release path otherwise).");
   localparam int unsigned SubReqCountW     = idx_width(MshrMergeReqs + 1);
+  // served_cnt only has to reach the larger sharing target, where it saturates.
+  localparam int unsigned ServedCntMax     = (HoldSubsSingle > HoldSubsBurst)
+                                             ? HoldSubsSingle : HoldSubsBurst;
+  localparam int unsigned ServedCntW       = idx_width(ServedCntMax + 1);
   localparam int unsigned RespBufCountW    = idx_width(RespBufWords + 1);
   localparam int unsigned RespBufPtrW      = idx_width(RespBufWords);
   localparam int unsigned MergeWordOffset  = (MshrMergeWords <= 1) ? 0 : $clog2(MshrMergeWords);
@@ -443,8 +447,27 @@ module mempool_group_mshr
     // Base meta_id of this requester; per-beat meta_id is computed as
     // (meta_id_base + beat_offset) when draining a returned beat.
     meta_id_t       meta_id_base;
-    amo_t           amo;
+    // NOTE: no `amo` field. A sub-request can only exist behind req_can_merge (1057), which
+    // requires req_is_load (1006) = valid && ~wen && (wdata.amo == '0). Both the merge and the
+    // allocate path are gated on it, so the AMO code of a stored requester is provably zero --
+    // it was 4 bits x MshrMergeReqs = 16 flops per entry recording a constant.
   } mempool_group_mshr_sub_req_t;
+
+  // Response-buffer slot. NOT a full tcdm_master_resp_t: only these three fields are ever read
+  // back out. The drain path builds its reply from sub_reqs, not from the buffer --
+  //     .wen           <- resp_buf                                (head drain, 2nd-slot drain)
+  //     .rdata.data    <- resp_buf
+  //     .rdata.core_id <- sub_reqs[].core_id + parity retag
+  //     .rdata.meta_id <- sub_reqs[].meta_id_base + beat_offset
+  //     .rdata.amo     <- constant '0 (sub-requests are loads: req_is_load gate)
+  // so core_id, amo and mshr_tag were stored and never used: 14 of 53 bits per slot, x2 slots
+  // x64 entries = 1792 flops per group (114,688 at 8x8). meta_id is kept because the
+  // ParityDrain second-slot path derives its beat offset from it (resp_beat_offset2).
+  // mshr_tag in particular is the entry's own index -- known from where the slot lives.
+  typedef struct packed {
+    meta_id_t meta_id;
+    data_t    data;
+  } mshr_resp_slot_t;
 
   typedef struct packed {
     // Canonical merged address key (tile bits included) used for hit lookup.
@@ -464,7 +487,9 @@ module mempool_group_mshr
     // entry has admitted/served over its whole life (owner + every merge, in WAIT_RESP and CACHED).
     // When it reaches the entry's per-type sharing target the entry self-invalidates (see the
     // self-invalidate block). Unused (stays 0) when the feature is off.
-    logic [5:0] served_cnt;
+    // Width derived from the only values it is compared against (HoldSubsSingle/HoldSubsBurst:
+    // 4 in the shipped configs, 16 in the widest preset). It was a fixed [5:0] holding up to 63.
+    logic [ServedCntW-1:0] served_cnt;
     // Per-head-beat pending mask: bit s=1 means requester s still needs the current
     // buffered response beat; cleared as each requester is serviced.
     logic [MshrMergeReqs-1:0] beat_pending;
@@ -480,11 +505,23 @@ module mempool_group_mshr
     // Per-beat bookkeeping (no per-beat payload stored here):
     // - beat_seen[b]   : beat b has been captured from NoC (possibly out-of-order)
     // - beat_done[b]   : beat b has been fully drained to all merged requesters
+`ifndef TARGET_SYNTHESIS
+    // VERIFICATION ONLY. Every read of beat_seen is an assertion (beat_done must be a subset
+    // of it; hold-the-fetch must see no response activity before issue), all under
+    // `!VERILATOR` / `!TARGET_SYNTHESIS`. Synthesis was carrying 16 flops per entry -- 1024
+    // per group, 65,536 at 8x8 -- that nothing reads. Writes below are guarded to match.
     logic [MaxBurstWords-1:0] beat_seen;
+`endif
+`ifndef TARGET_SYNTHESIS
+    // VERIFICATION ONLY, for the same reason as beat_seen above: its only reader is the
+    // beat_done_subset_seen assertion. Synthesised completion is tracked by beats_left, a
+    // counter the state machine actually tests; this per-beat bitmap existed so the
+    // assertion could check beat_done is a subset of beat_seen. 16 flops per entry.
     logic [MaxBurstWords-1:0] beat_done;
+`endif
     // Small per-entry response FIFO to absorb returning beats while outputs are
     // temporarily blocked or responses arrive from multiple channels.
-    tcdm_master_resp_t [RespBufWords-1:0] resp_buf;
+    mshr_resp_slot_t [RespBufWords-1:0] resp_buf;
     // Valid bit per response-buffer slot.
     logic [RespBufWords-1:0] resp_buf_valid;
     // Number of valid beats currently stored in resp_buf.
@@ -494,7 +531,8 @@ module mempool_group_mshr
     // Write pointer where the next captured response beat is stored.
     logic [RespBufPtrW-1:0] resp_buf_wr_ptr;
     // Convenience mirror of (resp_buf_cnt != 0), used by scheduling logic.
-    logic resp_valid;
+    // resp_valid removed: a registered mirror of (resp_buf_cnt != '0). An assertion in this file
+    // asserted exactly that identity, so the duplicate carried no information. Readers decode it.
     // Cleared when a store/AMO overlaps a held response. Existing subscribers may consume the
     // captured value, but the entry must deallocate afterward instead of caching stale data.
     logic cacheable;
@@ -1161,9 +1199,9 @@ module mempool_group_mshr
       resp_valid_coherent: assert property(
         @(posedge clk_i) disable iff (!rst_ni)
           !mshr_q_valid[mshr_i] ||
-          (mshr_q[mshr_i].resp_valid == (mshr_q[mshr_i].resp_buf_cnt != '0)))
+          ((mshr_q[mshr_i].resp_buf_cnt != '0) == (mshr_q[mshr_i].resp_buf_cnt != '0)))
         else $fatal(1, "MSHR resp_valid mismatch with resp_buf_cnt: mshr=%0d valid=%0d cnt=%0d",
-                    mshr_i, mshr_q[mshr_i].resp_valid, mshr_q[mshr_i].resp_buf_cnt);
+                    mshr_i, (mshr_q[mshr_i].resp_buf_cnt != '0), mshr_q[mshr_i].resp_buf_cnt);
 
       // Load-bearing invariant for EnableMshrSingleReq + EnableRespCache: a live
       // CACHED entry must always hold its buffered response (resp_buf_cnt > 0, so
@@ -1196,12 +1234,17 @@ module mempool_group_mshr
                     mshr_i, mshr_q[mshr_i].burst_len, mshr_q[mshr_i].resp_buf_cnt,
                     mshr_q[mshr_i].sub_reqs_num);
 
+`ifndef TARGET_SYNTHESIS
+      // Guarded on TARGET_SYNTHESIS, not just VERILATOR: beat_seen itself is now
+      // verification-only, so an assertion that reads it must vanish on exactly the same
+      // condition as the field or the synthesis build fails on a missing member.
       beat_done_subset_seen: assert property(
         @(posedge clk_i) disable iff (!rst_ni)
           !mshr_q_valid[mshr_i] ||
           ((mshr_q[mshr_i].beat_done & ~mshr_q[mshr_i].beat_seen) == '0))
         else $fatal(1, "MSHR beat_done not subset of beat_seen: mshr=%0d seen=0x%0x done=0x%0x",
                     mshr_i, mshr_q[mshr_i].beat_seen, mshr_q[mshr_i].beat_done);
+`endif
 
       // A buffered head beat must match at least one pending sub-request.
       // Otherwise the beat gets popped without being delivered and data is lost.
@@ -1224,7 +1267,7 @@ module mempool_group_mshr
           (resp_head_beat_pending[mshr_i]))
         else $fatal(1, "MSHR unmatched head beat: mshr=%0d meta=%0d base_meta=%0d subreqs=%0d beat_pending=0x%0x",
                     mshr_i,
-                    mshr_d[mshr_i].resp_buf[mshr_d[mshr_i].resp_buf_rd_ptr].rdata.meta_id,
+                    mshr_d[mshr_i].resp_buf[mshr_d[mshr_i].resp_buf_rd_ptr].meta_id,
                     mshr_d[mshr_i].sub_reqs[0].meta_id_base,
                     mshr_d[mshr_i].sub_reqs_num,
                     mshr_d[mshr_i].beat_pending);
@@ -1303,12 +1346,14 @@ module mempool_group_mshr
     // was captured for a never-sent tag (tag aliasing / capture-guard bug).
     if (HoldWindowMax != 0) begin : gen_hold_assert
       for (genvar he = 0; he < MshrNum; he++) begin : gen_hold_assert_entry
+`ifndef TARGET_SYNTHESIS
         hold_unissued_no_beats: assert property(
           @(posedge clk_i) disable iff (!rst_ni)
             !mshr_q_valid[he] || mshr_q[he].issued ||
             ((mshr_q[he].state == MSHR_WAIT_RESP) && (mshr_q[he].beat_seen == '0)))
           else $fatal(1, "hold-the-fetch: entry %0d has response activity before issue (state=%0d beat_seen=%0h).",
                       he, mshr_q[he].state, mshr_q[he].beat_seen);
+`endif
       end
     end
 
@@ -1472,11 +1517,11 @@ module mempool_group_mshr
                 (mshr_q[e_abs].beats_left == mshr_q[e_abs].burst_len)) ||
                (RespWaitSubsSingle && !amo_invalidate &&
                 (mshr_q[e_abs].state == MSHR_RESP_HOLD) &&
-                mshr_q[e_abs].resp_valid &&
+                (mshr_q[e_abs].resp_buf_cnt != '0) &&
                 (req_len[tile_i][port_i] == BurstLenWidth'(1))) ||
                (EnableRespCache && !amo_invalidate &&
                 (mshr_q[e_abs].state == MSHR_CACHED) &&
-                mshr_q[e_abs].resp_valid &&
+                (mshr_q[e_abs].resp_buf_cnt != '0) &&
                 (req_len[tile_i][port_i] == BurstLenWidth'(1)))) &&
               !mshr_resp_seen_now[e_abs] &&
               !mshr_resp_inflight[e_abs] &&
@@ -2192,12 +2237,12 @@ module mempool_group_mshr
           mshr_q_valid[mshr_i] &&
           EnableRespCache &&
           (mshr_q[mshr_i].state == MSHR_CACHED) &&
-          mshr_q[mshr_i].resp_valid;
+          (mshr_q[mshr_i].resp_buf_cnt != '0);
       assign mshr_q_valid_uncached[mshr_i] =
           mshr_q_valid[mshr_i] &&
           (!EnableRespCache ||
            (mshr_q[mshr_i].state != MSHR_CACHED) ||
-           !mshr_q[mshr_i].resp_valid);
+           !(mshr_q[mshr_i].resp_buf_cnt != '0));
     end
   endgenerate
 
@@ -2224,7 +2269,7 @@ module mempool_group_mshr
                             mshr_q[16].sub_reqs[1].valid,
                             mshr_q[16].sub_reqs[0].valid};
     e16_curr_sig[35:28] = 8'(mshr_q[16].resp_buf_cnt); // zero-extend (width varies by config)
-    e16_curr_sig[36]    = mshr_q[16].resp_valid;
+    e16_curr_sig[36]    = (mshr_q[16].resp_buf_cnt != '0);
     e16_curr_sig[40:37] = mshr_q[16].beats_left[3:0];
   end
   always_ff @(posedge clk_i) begin
@@ -2500,13 +2545,11 @@ module mempool_group_mshr
                     req_in[tile_i][port_i].wdata.core_id;
                 mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[merge_new_idx].meta_id_base =
                     req_in[tile_i][port_i].wdata.meta_id;
-                mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[merge_new_idx].amo =
-                    req_in[tile_i][port_i].wdata.amo;
                 mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num =
                     mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num + SubReqCountW'(1);
                 // Cache self-invalidate: count this merged sub-request toward the sharing target.
                 mshr_d[req_merge_mshr_id[tile_i][port_i]].served_cnt =
-                    mshr_d[req_merge_mshr_id[tile_i][port_i]].served_cnt + 6'd1;
+                    mshr_d[req_merge_mshr_id[tile_i][port_i]].served_cnt + ServedCntW'(1);
                 if (EnableRespCache &&
                     (mshr_d[req_merge_mshr_id[tile_i][port_i]].state == MSHR_CACHED)) begin
                   mshr_d[req_merge_mshr_id[tile_i][port_i]].state = MSHR_DRAIN_RESP;
@@ -2514,9 +2557,13 @@ module mempool_group_mshr
                   mshr_d[req_merge_mshr_id[tile_i][port_i]].beat_pending = '0;
                   mshr_d[req_merge_mshr_id[tile_i][port_i]].beat_pending2 = '0;
                   mshr_d[req_merge_mshr_id[tile_i][port_i]].beat2_armed = 1'b0;
+`ifndef TARGET_SYNTHESIS
                   mshr_d[req_merge_mshr_id[tile_i][port_i]].beat_seen = '0;
                   mshr_d[req_merge_mshr_id[tile_i][port_i]].beat_seen[0] = 1'b1;
+`endif
+`ifndef TARGET_SYNTHESIS
                   mshr_d[req_merge_mshr_id[tile_i][port_i]].beat_done = '0;
+`endif
                 end else if (
                     RespWaitSubsSingle &&
                     (mshr_d[req_merge_mshr_id[tile_i][port_i]].state == MSHR_RESP_HOLD) &&
@@ -2528,9 +2575,13 @@ module mempool_group_mshr
                   mshr_d[req_merge_mshr_id[tile_i][port_i]].beat_pending = '0;
                   mshr_d[req_merge_mshr_id[tile_i][port_i]].beat_pending2 = '0;
                   mshr_d[req_merge_mshr_id[tile_i][port_i]].beat2_armed = 1'b0;
+`ifndef TARGET_SYNTHESIS
                   mshr_d[req_merge_mshr_id[tile_i][port_i]].beat_seen = '0;
                   mshr_d[req_merge_mshr_id[tile_i][port_i]].beat_seen[0] = 1'b1;
+`endif
+`ifndef TARGET_SYNTHESIS
                   mshr_d[req_merge_mshr_id[tile_i][port_i]].beat_done = '0;
+`endif
                 end
               end
             end
@@ -2601,15 +2652,18 @@ module mempool_group_mshr
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].burst_len =
                     req_len[tile_i][port_i];
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].state      = MSHR_WAIT_RESP;
-                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].resp_valid = 1'b0;
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].cacheable  = 1'b1;
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].beats_left =
                     req_len[tile_i][port_i];
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].beat_pending = '0;
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].beat_pending2 = '0;
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].beat2_armed = 1'b0;
+`ifndef TARGET_SYNTHESIS
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].beat_seen = '0;
+`endif
+`ifndef TARGET_SYNTHESIS
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].beat_done = '0;
+`endif
                 // Owner request is always stored in sub_reqs[0].
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].sub_reqs[0].valid = 1'b1;
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].sub_reqs[0].tile_id = tile_i;
@@ -2618,8 +2672,6 @@ module mempool_group_mshr
                     req_in[tile_i][port_i].wdata.core_id;
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].sub_reqs[0].meta_id_base =
                     req_in[tile_i][port_i].wdata.meta_id;
-                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].sub_reqs[0].amo =
-                    req_in[tile_i][port_i].wdata.amo;
 `ifndef TARGET_SYNTHESIS
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].cache_hit_cnt = '0;
 `endif
@@ -2657,16 +2709,14 @@ module mempool_group_mshr
                   for (int b = 0; b < $bits(req_in[tile_i][port_i].be); b++) begin
                     if (req_in[tile_i][port_i].be[b]) begin
                       mshr_d[hit_e].resp_buf[mshr_d[hit_e].resp_buf_rd_ptr]
-                            .rdata.data[b*8 +: 8] =
+                            .data[b*8 +: 8] =
                           req_in[tile_i][port_i].wdata.data[b*8 +: 8];
                     end
                   end
-                  mshr_d[hit_e].resp_buf[mshr_d[hit_e].resp_buf_rd_ptr].wen = 1'b0;
                   mshr_d[hit_e].resp_buf_valid[mshr_d[hit_e].resp_buf_rd_ptr] = 1'b1;
                   if (mshr_d[hit_e].resp_buf_cnt == '0) begin
                     mshr_d[hit_e].resp_buf_cnt = RespBufCountW'(1);
                   end
-                  mshr_d[hit_e].resp_valid = 1'b1;
                 end
               end
             end
@@ -2739,7 +2789,7 @@ module mempool_group_mshr
         if (mshr_d_valid[e] && (mshr_d[e].state == MSHR_CACHED) &&
             (mshr_d[e].sub_reqs_num == '0) &&
             (mshr_d[e].served_cnt >=
-             6'((mshr_d[e].burst_len == BurstLenWidth'(1)) ? HoldSubsSingle : HoldSubsBurst))) begin
+             ServedCntW'((mshr_d[e].burst_len == BurstLenWidth'(1)) ? HoldSubsSingle : HoldSubsBurst))) begin
           mshr_d_valid[e] = 1'b0;
           mshr_d[e]       = '0;
         end
@@ -2835,7 +2885,8 @@ module mempool_group_mshr
           end
 `endif
           mshr_d[resp_mshr_id[tile_i][port_i]].resp_buf[resp_push_ptr[resp_mshr_id[tile_i][port_i]]] =
-              resp_in[tile_i][port_i];
+              '{meta_id: resp_in[tile_i][port_i].rdata.meta_id,
+                data:    resp_in[tile_i][port_i].rdata.data};
           mshr_d[resp_mshr_id[tile_i][port_i]].resp_buf_valid[resp_push_ptr[resp_mshr_id[tile_i][port_i]]] =
               1'b1;
           if (RespBufWords > 1) begin
@@ -2851,7 +2902,6 @@ module mempool_group_mshr
                 mshr_d[resp_mshr_id[tile_i][port_i]].resp_buf_cnt + 1'b1;
           end
           mshr_d[resp_mshr_id[tile_i][port_i]].resp_buf_wr_ptr = resp_push_ptr[resp_mshr_id[tile_i][port_i]];
-          mshr_d[resp_mshr_id[tile_i][port_i]].resp_valid = 1'b1;
           if (RespWaitSubsSingle && !amo_invalidate &&
               (mshr_d[resp_mshr_id[tile_i][port_i]].burst_len == BurstLenWidth'(1)) &&
               (mshr_d[resp_mshr_id[tile_i][port_i]].sub_reqs_num <
@@ -2862,7 +2912,9 @@ module mempool_group_mshr
           end else begin
             mshr_d[resp_mshr_id[tile_i][port_i]].state = MSHR_DRAIN_RESP;
           end
+`ifndef TARGET_SYNTHESIS
           mshr_d[resp_mshr_id[tile_i][port_i]].beat_seen[resp_capture_beat_offset[tile_i][port_i]] = 1'b1;
+`endif
         end
       end
     end
@@ -2889,9 +2941,13 @@ module mempool_group_mshr
               mshr_d[hit_e].beat_pending = '0;
               mshr_d[hit_e].beat_pending2 = '0;
               mshr_d[hit_e].beat2_armed = 1'b0;
+`ifndef TARGET_SYNTHESIS
               mshr_d[hit_e].beat_seen = '0;
               mshr_d[hit_e].beat_seen[0] = 1'b1;
+`endif
+`ifndef TARGET_SYNTHESIS
               mshr_d[hit_e].beat_done = '0;
+`endif
             end
           end
         end
@@ -2906,9 +2962,13 @@ module mempool_group_mshr
           mshr_d[mshr_i].beat_pending = '0;
           mshr_d[mshr_i].beat_pending2 = '0;
           mshr_d[mshr_i].beat2_armed = 1'b0;
+`ifndef TARGET_SYNTHESIS
           mshr_d[mshr_i].beat_seen = '0;
           mshr_d[mshr_i].beat_seen[0] = 1'b1;
+`endif
+`ifndef TARGET_SYNTHESIS
           mshr_d[mshr_i].beat_done = '0;
+`endif
         end
       end
     end
@@ -2934,9 +2994,13 @@ module mempool_group_mshr
             mshr_d[e].beat_pending  = '0;
             mshr_d[e].beat_pending2 = '0;
             mshr_d[e].beat2_armed   = 1'b0;
+`ifndef TARGET_SYNTHESIS
             mshr_d[e].beat_seen     = '0;
             mshr_d[e].beat_seen[0]  = 1'b1;
+`endif
+`ifndef TARGET_SYNTHESIS
             mshr_d[e].beat_done     = '0;
+`endif
           end
         end else if (CacheSelfInval && EnableRespCache && mshr_d_valid[e] &&
                      (mshr_d[e].state == MSHR_CACHED) &&
@@ -2963,7 +3027,7 @@ module mempool_group_mshr
           resp_beat_offset[mshr_i] = '0;
         end else begin
           resp_beat_offset[mshr_i] =
-              mshr_d[mshr_i].resp_buf[mshr_d[mshr_i].resp_buf_rd_ptr].rdata.meta_id -
+              mshr_d[mshr_i].resp_buf[mshr_d[mshr_i].resp_buf_rd_ptr].meta_id -
               mshr_d[mshr_i].sub_reqs[0].meta_id_base;
         end
       end else begin
@@ -2999,7 +3063,7 @@ module mempool_group_mshr
           (mshr_d[mshr_i].burst_len != BurstLenWidth'(1)) &&
           (mshr_d[mshr_i].resp_buf_cnt >= RespBufCountW'(2))) begin
         resp_beat_offset2[mshr_i] =
-            mshr_d[mshr_i].resp_buf[resp_rd_ptr2[mshr_i]].rdata.meta_id -
+            mshr_d[mshr_i].resp_buf[resp_rd_ptr2[mshr_i]].meta_id -
             mshr_d[mshr_i].sub_reqs[0].meta_id_base;
         if ((mshr_d[mshr_i].state == MSHR_DRAIN_RESP) &&
             !mshr_d[mshr_i].beat2_armed &&
@@ -3074,7 +3138,7 @@ module mempool_group_mshr
             // Per-entry: does this entry offer any sub-request eligible for THIS port?
             drain_ent_cand = '0;
             for (int e = 0; e < MshrNum; e++) begin
-              if (mshr_d_valid[e] && mshr_d[e].resp_valid &&
+              if (mshr_d_valid[e] && (mshr_d[e].resp_buf_cnt != '0) &&
                   (mshr_d[e].state == MSHR_DRAIN_RESP)) begin
                 for (int s = 0; s < MshrMergeReqs; s++) begin
                   if (mshr_d[e].sub_reqs[s].valid && mshr_d[e].beat_pending[s] &&
@@ -3134,12 +3198,13 @@ module mempool_group_mshr
         for (int port_i = 1; port_i < NumRemoteRespPortsPerTile; port_i++) begin
           if (resp_sel_valid[tile_i][port_i]) begin
             resp_out_valid[tile_i][port_i] = 1'b1;
-            resp_out[tile_i][port_i].wen =
-                mshr_d[resp_sel_mshr_id[tile_i][port_i]]
-                      .resp_buf[mshr_d[resp_sel_mshr_id[tile_i][port_i]].resp_buf_rd_ptr].wen;
+            // A buffered beat is a READ response by construction: the capture gate only admits
+            // responses with wen == 0 (resp_is_mshr stays 0 otherwise and the beat takes the
+            // bypass path), so the stored bit could never be anything but 0.
+            resp_out[tile_i][port_i].wen = 1'b0;
             resp_out[tile_i][port_i].rdata.data =
                 mshr_d[resp_sel_mshr_id[tile_i][port_i]]
-                      .resp_buf[mshr_d[resp_sel_mshr_id[tile_i][port_i]].resp_buf_rd_ptr].rdata.data;
+                      .resp_buf[mshr_d[resp_sel_mshr_id[tile_i][port_i]].resp_buf_rd_ptr].data;
             // ParityDrain core_id retag: odd beats of a burst entry go to the next core data
             // port (VLSU mem port 1) so the tile xbar delivers 2 beats/cycle into one core.
             // Identity for single-word entries and when PD2=0 (legacy).
@@ -3153,9 +3218,7 @@ module mempool_group_mshr
                 mshr_d[resp_sel_mshr_id[tile_i][port_i]].sub_reqs[
                     resp_sel_subreq_idx[tile_i][port_i]].meta_id_base +
                 meta_id_t'(resp_beat_offset[resp_sel_mshr_id[tile_i][port_i]]);
-            resp_out[tile_i][port_i].rdata.amo =
-                mshr_d[resp_sel_mshr_id[tile_i][port_i]].sub_reqs[
-                    resp_sel_subreq_idx[tile_i][port_i]].amo;
+            resp_out[tile_i][port_i].rdata.amo = '0;  // sub-requests are loads by construction (req_is_load)
             resp_from_mshr[tile_i][port_i] = 1'b1;
             resp_mshr_id_dbg[tile_i][port_i] = resp_sel_mshr_id[tile_i][port_i];
 
@@ -3230,18 +3293,16 @@ module mempool_group_mshr
             if (resp_sel2_valid[tile_i][port_i]) begin
               automatic mshr_id_t e2 = resp_sel2_mshr_id[tile_i][port_i];
               resp_out_valid[tile_i][port_i] = 1'b1;
-              resp_out[tile_i][port_i].wen =
-                  mshr_d[e2].resp_buf[resp_rd_ptr2[e2]].wen;
+              resp_out[tile_i][port_i].wen = 1'b0;  // buffered beats are reads by construction (capture gate)
               resp_out[tile_i][port_i].rdata.data =
-                  mshr_d[e2].resp_buf[resp_rd_ptr2[e2]].rdata.data;
+                  mshr_d[e2].resp_buf[resp_rd_ptr2[e2]].data;
               resp_out[tile_i][port_i].rdata.core_id =
                   mshr_d[e2].sub_reqs[resp_sel2_subreq_idx[tile_i][port_i]].core_id +
                   tile_core_id_t'(resp_beat_offset2[e2][0]);
               resp_out[tile_i][port_i].rdata.meta_id =
                   mshr_d[e2].sub_reqs[resp_sel2_subreq_idx[tile_i][port_i]].meta_id_base +
                   meta_id_t'(resp_beat_offset2[e2]);
-              resp_out[tile_i][port_i].rdata.amo =
-                  mshr_d[e2].sub_reqs[resp_sel2_subreq_idx[tile_i][port_i]].amo;
+              resp_out[tile_i][port_i].rdata.amo = '0;  // sub-requests are loads by construction (req_is_load)
               resp_from_mshr[tile_i][port_i] = 1'b1;
               resp_mshr_id_dbg[tile_i][port_i] = e2;
               port_taken[tile_i][port_i] = 1'b1;
@@ -3286,7 +3347,7 @@ module mempool_group_mshr
         drain_dst_tile[drain3_mshr_i] = '0;
         drain_dst_port[drain3_mshr_i] = '0;
         drain_port_found[drain3_mshr_i] = 1'b0;
-        if (mshr_d_valid[drain3_mshr_i] && mshr_d[drain3_mshr_i].resp_valid &&
+        if (mshr_d_valid[drain3_mshr_i] && (mshr_d[drain3_mshr_i].resp_buf_cnt != '0) &&
             mshr_d[drain3_mshr_i].state == MSHR_DRAIN_RESP) begin
           // RR fairness (audit L3): rotate the sub_req visit, keep the first-match break.
           for (int ks = 0; ks < MshrMergeReqs; ks++) begin
@@ -3309,17 +3370,15 @@ module mempool_group_mshr
 
             if (drain_port_found[drain3_mshr_i]) begin
               resp_out_valid[drain_dst_tile[drain3_mshr_i]][drain_dst_port[drain3_mshr_i]] = 1'b1;
-              resp_out[drain_dst_tile[drain3_mshr_i]][drain_dst_port[drain3_mshr_i]].wen =
-                  mshr_d[drain3_mshr_i].resp_buf[mshr_d[drain3_mshr_i].resp_buf_rd_ptr].wen;
+              resp_out[drain_dst_tile[drain3_mshr_i]][drain_dst_port[drain3_mshr_i]].wen = 1'b0;
               resp_out[drain_dst_tile[drain3_mshr_i]][drain_dst_port[drain3_mshr_i]].rdata.data =
-                  mshr_d[drain3_mshr_i].resp_buf[mshr_d[drain3_mshr_i].resp_buf_rd_ptr].rdata.data;
+                  mshr_d[drain3_mshr_i].resp_buf[mshr_d[drain3_mshr_i].resp_buf_rd_ptr].data;
               resp_out[drain_dst_tile[drain3_mshr_i]][drain_dst_port[drain3_mshr_i]].rdata.core_id =
                   mshr_d[drain3_mshr_i].sub_reqs[drain_subreq_idx[drain3_mshr_i]].core_id;
               resp_out[drain_dst_tile[drain3_mshr_i]][drain_dst_port[drain3_mshr_i]].rdata.meta_id =
                   mshr_d[drain3_mshr_i].sub_reqs[drain_subreq_idx[drain3_mshr_i]].meta_id_base +
                   meta_id_t'(resp_beat_offset[drain3_mshr_i]);
-              resp_out[drain_dst_tile[drain3_mshr_i]][drain_dst_port[drain3_mshr_i]].rdata.amo =
-                  mshr_d[drain3_mshr_i].sub_reqs[drain_subreq_idx[drain3_mshr_i]].amo;
+              resp_out[drain_dst_tile[drain3_mshr_i]][drain_dst_port[drain3_mshr_i]].rdata.amo = '0;
               resp_from_mshr[drain_dst_tile[drain3_mshr_i]][drain_dst_port[drain3_mshr_i]] = 1'b1;
               resp_mshr_id_dbg[drain_dst_tile[drain3_mshr_i]][drain_dst_port[drain3_mshr_i]] = mshr_id_t'(drain3_mshr_i);
 
@@ -3361,7 +3420,9 @@ module mempool_group_mshr
             end
             mshr_d[mshr_i].sub_reqs_num = '0;
             mshr_d[mshr_i].beat_pending = '0;
+`ifndef TARGET_SYNTHESIS
             mshr_d[mshr_i].beat_done[resp_beat_offset[mshr_i]] = 1'b1;
+`endif
             mshr_d[mshr_i].beats_left = '0;
             mshr_d[mshr_i].state = MSHR_CACHED;
             // Re-arm the serve-target timeout for the cache-resident phase: a line whose target is
@@ -3370,7 +3431,6 @@ module mempool_group_mshr
             // HIT re-enters DRAIN_RESP and returns here, which refreshes the window, so a
             // frequently-used line keeps its way and only an idle one ages out.
             mshr_d[mshr_i].hold_cnt = hold_ticks(ServeTimeout);
-            mshr_d[mshr_i].resp_valid = (mshr_d[mshr_i].resp_buf_cnt != '0);
           end else begin
             // Pop the drained head beat.
             if (mshr_d[mshr_i].resp_buf_cnt != '0) begin
@@ -3387,7 +3447,9 @@ module mempool_group_mshr
             end
 
             mshr_d[mshr_i].beat_pending = '0;
+`ifndef TARGET_SYNTHESIS
             mshr_d[mshr_i].beat_done[resp_beat_offset[mshr_i]] = 1'b1;
+`endif
             if (mshr_d[mshr_i].beats_left == BurstLenWidth'(1)) begin
               mshr_d_valid[mshr_i] = 1'b0;
               mshr_d[mshr_i] = '0;
@@ -3397,10 +3459,8 @@ module mempool_group_mshr
               end
               if (resp_cnt_after_pop[mshr_i] != '0) begin
                 mshr_d[mshr_i].state = MSHR_DRAIN_RESP;
-                mshr_d[mshr_i].resp_valid = 1'b1;
               end else begin
                 mshr_d[mshr_i].state = MSHR_WAIT_RESP;
-                mshr_d[mshr_i].resp_valid = 1'b0;
               end
             end
 
@@ -3424,7 +3484,9 @@ module mempool_group_mshr
                   end
                 end
                 mshr_d[mshr_i].resp_buf_cnt = mshr_d[mshr_i].resp_buf_cnt - 1'b1;
+`ifndef TARGET_SYNTHESIS
                 mshr_d[mshr_i].beat_done[resp_beat_offset2[mshr_i]] = 1'b1;
+`endif
                 if (mshr_d[mshr_i].beats_left == BurstLenWidth'(1)) begin
                   mshr_d_valid[mshr_i] = 1'b0;
                   mshr_d[mshr_i] = '0;
@@ -3434,10 +3496,8 @@ module mempool_group_mshr
                   end
                   if (mshr_d[mshr_i].resp_buf_cnt != '0) begin
                     mshr_d[mshr_i].state = MSHR_DRAIN_RESP;
-                    mshr_d[mshr_i].resp_valid = 1'b1;
                   end else begin
                     mshr_d[mshr_i].state = MSHR_WAIT_RESP;
-                    mshr_d[mshr_i].resp_valid = 1'b0;
                   end
                 end
               end else begin

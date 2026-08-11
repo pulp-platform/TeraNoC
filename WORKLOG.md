@@ -8522,3 +8522,37 @@ a behaviour change by construction -- an equivalence run is the WRONG test for i
 performance-neutrality run on the 4x4 tuned config once the struct-trim equivalence run finishes
 using that slot.
 
+## 2026-08-11 -- eq4x4: struct trims + automatic conversions proven equivalent
+
+Reference `tuned4x4` vs `eq4x4`, config terapool_spatz4_fpu_gemm256x512x256, ELF
+hardware/matmul_4x4_256x512x256.elf: **all 35 periodic [FPU] lines are byte-for-byte identical**,
+including per-group grp_max/grp_min, mshr_timeout, bankfull_bypass, core_spread and the barrier
+fields -- not just the final cycle count. The simulator is exactly deterministic here (18 arms in 7
+duplicate-config groups completed at identical cycle counts), so this is proof, not agreement.
+
+Validates: the 24 procedural-automatic conversions (9045e34) and the entry struct trims (amo,
+resp_buf slot type, served_cnt width, resp_valid, beat_seen/beat_done guards).
+
+NOT covered by this run -- it was built before them: the hold prescaler (47beac8), the entry
+clock gating, the probe gating, and the last 12 automatic hoists.
+
+Comparing the whole periodic series rather than the [FPU FINAL] line is the better check and costs
+nothing: it catches a divergence that happens to land on the same total, and it reports before the
+run finishes its epilogue (the FINAL line had not yet printed when this was confirmed). The FINAL
+line arrived shortly after and agrees exactly:
+
+    [FPU FINAL] busy=33802656 of 35460096 lane-cycles over 34629 benchmark cycles -> util=95.33%
+
+**LINT COVERAGE.** The backend_4x4 Spyglass run in flight was launched at ~12:10 and read its
+sources then, so it covers NONE of the later work -- not the prescaler, the entry clock gating, the
+probe gating or the automatic hoists. Treat it as a baseline for the pre-backend-work tree.
+
+The backend_8x8 lint queued behind it is different: Spyglass reads the source FILES when its run
+starts, and the file list holds paths, not content. That run therefore picks up whatever is on disk
+when the 4x4 finishes -- i.e. the current tree, including the clock gating. So it WILL answer the
+open question (does Spyglass object to mshr_q being driven from several always_ff blocks on
+disjoint fields?), and only the 4x4 needs a re-lint.
+
+Consequence: do NOT edit hardware/src/*.sv in the window where the 8x8 lint starts its Design Read,
+or it will lint a torn mix of two versions.
+
