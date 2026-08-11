@@ -566,6 +566,13 @@ module mempool_group_mshr
 
   // MSHR state (registered and next-state).
   mempool_group_mshr_t [MshrNum-1:0]                                           mshr_d;
+  // Clock-gate write flags, raised at the write sites themselves (see the entry register block).
+  //   mshr_wr_all : the whole entry was written wholesale (allocation init, or a free clear)
+  //   mshr_id_we  : a merge wrote the identity fields of one sub-request slot
+  //   mshr_rb_we  : a response beat was captured into one resp_buf slot
+  logic [MshrNum-1:0]                                                          mshr_wr_all;
+  logic [MshrNum-1:0]                                                          mshr_id_we;
+  logic [MshrNum-1:0][RespBufWords-1:0]                                        mshr_rb_we;
   mempool_group_mshr_t [MshrNum-1:0]                                           mshr_q;
   logic                [MshrNum-1:0]                                           mshr_d_valid;
   logic                [MshrNum-1:0]                                           mshr_q_valid;
@@ -1780,7 +1787,149 @@ module mempool_group_mshr
   end
 
   `FF(mshr_q_valid, mshr_d_valid, '0)
-  `FF(mshr_q, mshr_d, '0)
+
+  // ------------------------------------------------------------
+  // Entry register, split by WRITE FREQUENCY so the wide fields can be clock gated.
+  //
+  // 145 of an entry's 186 synthesised bits are written once or twice in its entire life:
+  //
+  //   identity  75 bits  base_addr, tgt_group_id, burst_len, sub_reqs[].{tile,port,core,meta}
+  //                      -- written only by an allocation or a merge
+  //   resp_buf  70 bits  -- written only when a response beat is captured
+  //   control   41 bits  state, counters, masks, pointers -- changes on nearly every event
+  //
+  // One unconditional `FF over the whole entry clocked all 186 bits x MshrNum every cycle in
+  // order to move, typically, a 3-bit state field.
+  //
+  // The enables are raised at the write sites THEMSELVES (mshr_wr_all / mshr_id_we / mshr_rb_we
+  // are assigned on the line above the write they describe), not by restating the conditions
+  // that guard those writes -- a restatement is what drifts out of sync when the logic changes.
+  // Two independent checks keep the split honest:
+  //   - MshrGateBits* below fails ELABORATION if a field is added to the entry struct without
+  //     being placed in one of the three groups, so a new field cannot silently lose its flop;
+  //   - mshr_gate_no_lost_write asserts every cycle in simulation that a gated-off field really
+  //     is unchanged, so a missed write site is caught the first time it fires.
+  //
+  // The control group keeps the coarse (valid | valid_next) enable rather than a per-field one:
+  // it is only 41 bits, and its fields change so often that a finer gate would cost more in
+  // enable logic than it saves in clock power.
+  // ------------------------------------------------------------
+  localparam int unsigned MshrGateBitsIdent =
+      $bits(tcdm_addr_t) + $bits(group_id_t) + BurstLenWidth +
+      MshrMergeReqs * ($bits(mempool_group_mshr_sub_req_t) - 1);
+  localparam int unsigned MshrGateBitsRespBuf = RespBufWords * $bits(mshr_resp_slot_t);
+  localparam int unsigned MshrGateBitsCtl =
+      MshrMergeReqs                 // sub_reqs[].valid
+      + SubReqCountW + ServedCntW
+      + MshrMergeReqs + MshrMergeReqs + 1   // beat_pending, beat_pending2, beat2_armed
+      + BurstLenWidth                       // beats_left
+      + RespBufWords + RespBufCountW + RespBufPtrW + RespBufPtrW
+      + 1                                   // cacheable
+      + HoldCntW + 1                        // hold_cnt, issued
+      + $bits(mshr_state_t)
+`ifndef TARGET_SYNTHESIS
+      + MaxBurstWords + MaxBurstWords + 32  // beat_seen, beat_done, cache_hit_cnt
+`endif
+      ;
+  if ((MshrGateBitsIdent + MshrGateBitsRespBuf + MshrGateBitsCtl) !=
+      $bits(mempool_group_mshr_t))
+    $error("[mempool_group_mshr] entry clock-gate groups cover %0d of %0d bits -- a field was added to mempool_group_mshr_t without being assigned to a group in the entry register block.",
+           MshrGateBitsIdent + MshrGateBitsRespBuf + MshrGateBitsCtl,
+           $bits(mempool_group_mshr_t));
+
+  logic [MshrNum-1:0]                   mshr_id_en;   // identity fields
+  logic [MshrNum-1:0]                   mshr_ctl_en;  // control fields
+  logic [MshrNum-1:0][RespBufWords-1:0] mshr_rb_en;   // one enable per response-buffer slot
+  always_comb begin
+    for (int e = 0; e < MshrNum; e++) begin
+      // Control changes only while the entry is live; the free cycle (valid -> !valid) is
+      // included so the clear lands.
+      mshr_ctl_en[e] = mshr_q_valid[e] | mshr_d_valid[e];
+      mshr_id_en[e]  = mshr_wr_all[e]  | mshr_id_we[e];
+      for (int b = 0; b < RespBufWords; b++) begin
+        mshr_rb_en[e][b] = mshr_wr_all[e] | mshr_rb_we[e][b];
+      end
+    end
+  end
+
+  for (genvar e = 0; e < MshrNum; e++) begin : gen_mshr_entry_reg
+    `FFL(mshr_q[e].base_addr,    mshr_d[e].base_addr,    mshr_id_en[e], '0)
+    `FFL(mshr_q[e].tgt_group_id, mshr_d[e].tgt_group_id, mshr_id_en[e], '0)
+    `FFL(mshr_q[e].burst_len,    mshr_d[e].burst_len,    mshr_id_en[e], '0)
+    for (genvar s = 0; s < MshrMergeReqs; s++) begin : gen_sub_req_reg
+      `FFL(mshr_q[e].sub_reqs[s].tile_id,      mshr_d[e].sub_reqs[s].tile_id,      mshr_id_en[e], '0)
+      `FFL(mshr_q[e].sub_reqs[s].port_id,      mshr_d[e].sub_reqs[s].port_id,      mshr_id_en[e], '0)
+      `FFL(mshr_q[e].sub_reqs[s].core_id,      mshr_d[e].sub_reqs[s].core_id,      mshr_id_en[e], '0)
+      `FFL(mshr_q[e].sub_reqs[s].meta_id_base, mshr_d[e].sub_reqs[s].meta_id_base, mshr_id_en[e], '0)
+      `FFL(mshr_q[e].sub_reqs[s].valid,        mshr_d[e].sub_reqs[s].valid,        mshr_ctl_en[e], '0)
+    end
+    for (genvar b = 0; b < RespBufWords; b++) begin : gen_resp_buf_reg
+      `FFL(mshr_q[e].resp_buf[b], mshr_d[e].resp_buf[b], mshr_rb_en[e][b], '0)
+    end
+    `FFL(mshr_q[e].sub_reqs_num,    mshr_d[e].sub_reqs_num,    mshr_ctl_en[e], '0)
+    `FFL(mshr_q[e].served_cnt,      mshr_d[e].served_cnt,      mshr_ctl_en[e], '0)
+    `FFL(mshr_q[e].beat_pending,    mshr_d[e].beat_pending,    mshr_ctl_en[e], '0)
+    `FFL(mshr_q[e].beat_pending2,   mshr_d[e].beat_pending2,   mshr_ctl_en[e], '0)
+    `FFL(mshr_q[e].beat2_armed,     mshr_d[e].beat2_armed,     mshr_ctl_en[e], '0)
+    `FFL(mshr_q[e].beats_left,      mshr_d[e].beats_left,      mshr_ctl_en[e], '0)
+    `FFL(mshr_q[e].resp_buf_valid,  mshr_d[e].resp_buf_valid,  mshr_ctl_en[e], '0)
+    `FFL(mshr_q[e].resp_buf_cnt,    mshr_d[e].resp_buf_cnt,    mshr_ctl_en[e], '0)
+    `FFL(mshr_q[e].resp_buf_rd_ptr, mshr_d[e].resp_buf_rd_ptr, mshr_ctl_en[e], '0)
+    `FFL(mshr_q[e].resp_buf_wr_ptr, mshr_d[e].resp_buf_wr_ptr, mshr_ctl_en[e], '0)
+    `FFL(mshr_q[e].cacheable,       mshr_d[e].cacheable,       mshr_ctl_en[e], '0)
+    `FFL(mshr_q[e].hold_cnt,        mshr_d[e].hold_cnt,        mshr_ctl_en[e], '0)
+    `FFL(mshr_q[e].issued,          mshr_d[e].issued,          mshr_ctl_en[e], '0)
+    `FFL(mshr_q[e].state,           mshr_d[e].state,           mshr_ctl_en[e], mshr_state_t'(0))
+`ifndef TARGET_SYNTHESIS
+    `FFL(mshr_q[e].beat_seen,     mshr_d[e].beat_seen,     mshr_ctl_en[e], '0)
+    `FFL(mshr_q[e].beat_done,     mshr_d[e].beat_done,     mshr_ctl_en[e], '0)
+    `FFL(mshr_q[e].cache_hit_cnt, mshr_d[e].cache_hit_cnt, mshr_ctl_en[e], '0)
+`endif
+  end
+
+  // The gate must never swallow a write. A clock-gated field whose enable is low simply keeps its
+  // old value, so a missed write site would not error anywhere -- the entry would just silently
+  // carry stale data, exactly the failure mode that is hardest to find in a sim. These check the
+  // converse of each enable directly: enable low => nothing wanted to change.
+`ifndef VERILATOR
+`ifndef TARGET_SYNTHESIS
+  for (genvar e = 0; e < MshrNum; e++) begin : gen_mshr_gate_checks
+    mshr_gate_ident_no_lost_write: assert property(
+      @(posedge clk_i) disable iff (!rst_ni)
+        mshr_id_en[e] ||
+        ((mshr_d[e].base_addr    == mshr_q[e].base_addr) &&
+         (mshr_d[e].tgt_group_id == mshr_q[e].tgt_group_id) &&
+         (mshr_d[e].burst_len    == mshr_q[e].burst_len)))
+      else $fatal(1, "MSHR clock gate dropped an identity write: entry=%0d", e);
+
+    for (genvar s = 0; s < MshrMergeReqs; s++) begin : gen_mshr_gate_sub_checks
+      mshr_gate_sub_no_lost_write: assert property(
+        @(posedge clk_i) disable iff (!rst_ni)
+          mshr_id_en[e] ||
+          ((mshr_d[e].sub_reqs[s].tile_id      == mshr_q[e].sub_reqs[s].tile_id) &&
+           (mshr_d[e].sub_reqs[s].port_id      == mshr_q[e].sub_reqs[s].port_id) &&
+           (mshr_d[e].sub_reqs[s].core_id      == mshr_q[e].sub_reqs[s].core_id) &&
+           (mshr_d[e].sub_reqs[s].meta_id_base == mshr_q[e].sub_reqs[s].meta_id_base)))
+        else $fatal(1, "MSHR clock gate dropped a sub-request write: entry=%0d slot=%0d", e, s);
+    end
+
+    for (genvar b = 0; b < RespBufWords; b++) begin : gen_mshr_gate_rb_checks
+      mshr_gate_rb_no_lost_write: assert property(
+        @(posedge clk_i) disable iff (!rst_ni)
+          mshr_rb_en[e][b] || (mshr_d[e].resp_buf[b] == mshr_q[e].resp_buf[b]))
+        else $fatal(1, "MSHR clock gate dropped a resp_buf write: entry=%0d slot=%0d", e, b);
+    end
+
+    // The control group carries every remaining field, so compare the whole entry and let the
+    // two checks above account for the parts they own.
+    mshr_gate_ctl_no_lost_write: assert property(
+      @(posedge clk_i) disable iff (!rst_ni)
+        mshr_ctl_en[e] || mshr_id_en[e] || (|mshr_rb_en[e]) ||
+        (mshr_d[e] == mshr_q[e]))
+      else $fatal(1, "MSHR clock gate dropped a control write: entry=%0d", e);
+  end
+`endif
+`endif
   `FF(victim_rr_q, victim_rr_d, '0)
 
   // Round-robin fairness bases: free-running +1 mod-N every cycle, reset '0.
@@ -1933,6 +2082,11 @@ module mempool_group_mshr
   // Reported once per hold episode (rh_rep), so a wedged entry does not spam.
   // ------------------------------------------------------------------------
   // pragma translate_off
+  // SIMULATION ONLY -- the resp-hold probe is [RH STUCK] telemetry: a longint cycle counter, 32-bit debug counters and a
+  // $display of stuck held entries. Nothing outside reads it.
+  // It is enabled by a VALUE knob (group_mshr_resp_hold_probe), which both backend
+  // configs set, so without this guard the probe is elaborated as real hardware.
+`ifndef TARGET_SYNTHESIS
   if (RespHoldProbe != 0) begin : gen_resp_hold_probe
     int  rh_age   [MshrNum];
     int  rh_byp   [MshrNum];
@@ -2015,6 +2169,7 @@ module mempool_group_mshr
       end
     end
   end
+`endif
   // pragma translate_on
 
   // ------------------------------------------------------------------------
@@ -2040,6 +2195,11 @@ module mempool_group_mshr
   // and a response can touch the same key in the same cycle.
   // ------------------------------------------------------------------------
   // pragma translate_off
+  // SIMULATION ONLY -- the bypass-orphan probe is [BYP ORPHAN] telemetry, including `integer bp_out_cnt [NumTilesPerGroup][BpCoreN][BpMetaN]`
+  // -- an unpacked 16 x 8 x 8 array of integers, 32 kbit per group, plus longint counters.
+  // It is enabled by a VALUE knob (group_mshr_bypass_probe), which both backend
+  // configs set, so without this guard the probe is elaborated as real hardware.
+`ifndef TARGET_SYNTHESIS
   if (BypassProbe) begin : gen_bypass_probe
     localparam int unsigned BpCoreN = 2**$bits(tile_core_id_t);
     localparam int unsigned BpMetaN = 2**$bits(meta_id_t);
@@ -2104,6 +2264,7 @@ module mempool_group_mshr
       end
     end
   end
+`endif
   // pragma translate_on
 
   // ------------------------------------------------------------------------
@@ -2477,7 +2638,12 @@ module mempool_group_mshr
   always_comb begin
     int unsigned merge_new_idx;
     // Defaults
-    mshr_d = mshr_q;
+    mshr_d      = mshr_q;
+    // Clock-gate write flags. Set on the same line as the write they describe (see the entry
+    // register block), never from a restatement of the write's condition.
+    mshr_wr_all = '0;
+    mshr_id_we  = '0;
+    mshr_rb_we  = '0;
 `ifndef TARGET_SYNTHESIS
     dup_beat_detected = 1'b0;
     dup_beat_mshr = 0; dup_beat_beat = 0; dup_beat_meta = 0;
@@ -2538,6 +2704,7 @@ module mempool_group_mshr
                 end
 `endif
                 merge_new_idx = mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num;
+                mshr_id_we[req_merge_mshr_id[tile_i][port_i]] = 1'b1;
                 mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[merge_new_idx].valid = 1'b1;
                 mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[merge_new_idx].tile_id = tile_i;
                 mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[merge_new_idx].port_id = port_i;
@@ -2645,6 +2812,7 @@ module mempool_group_mshr
                 req_out[tile_i][port_i].mshr_tag =
                     MshrTagWidth'(req_alloc_found_mshr_id[tile_i][port_i]) + MshrTagWidth'(1);
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]] = '0;
+                mshr_wr_all[req_alloc_found_mshr_id[tile_i][port_i]] = 1'b1;
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].base_addr =
                     req_addr_key[tile_i][port_i];
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].tgt_group_id =
@@ -2773,6 +2941,7 @@ module mempool_group_mshr
         if (mshr_d_valid[mshr_i] && (mshr_d[mshr_i].state == MSHR_CACHED)) begin
           mshr_d_valid[mshr_i] = 1'b0;
           mshr_d[mshr_i] = '0;
+          mshr_wr_all[mshr_i] = 1'b1;
         end
       end
     end
@@ -2792,6 +2961,7 @@ module mempool_group_mshr
              ServedCntW'((mshr_d[e].burst_len == BurstLenWidth'(1)) ? HoldSubsSingle : HoldSubsBurst))) begin
           mshr_d_valid[e] = 1'b0;
           mshr_d[e]       = '0;
+          mshr_wr_all[e] = 1'b1;
         end
       end
     end
@@ -2884,6 +3054,7 @@ module mempool_group_mshr
             dup_beat_meta     = resp_in[tile_i][port_i].rdata.meta_id;
           end
 `endif
+          mshr_rb_we[resp_mshr_id[tile_i][port_i]][resp_push_ptr[resp_mshr_id[tile_i][port_i]]] = 1'b1;
           mshr_d[resp_mshr_id[tile_i][port_i]].resp_buf[resp_push_ptr[resp_mshr_id[tile_i][port_i]]] =
               '{meta_id: resp_in[tile_i][port_i].rdata.meta_id,
                 data:    resp_in[tile_i][port_i].rdata.data};
@@ -3012,6 +3183,7 @@ module mempool_group_mshr
           end else begin
             mshr_d_valid[e] = 1'b0;
             mshr_d[e]       = '0;
+            mshr_wr_all[e] = 1'b1;
           end
         end
       end
@@ -3453,6 +3625,7 @@ module mempool_group_mshr
             if (mshr_d[mshr_i].beats_left == BurstLenWidth'(1)) begin
               mshr_d_valid[mshr_i] = 1'b0;
               mshr_d[mshr_i] = '0;
+              mshr_wr_all[mshr_i] = 1'b1;
             end else begin
               if (mshr_d[mshr_i].beats_left != '0) begin
                 mshr_d[mshr_i].beats_left = mshr_d[mshr_i].beats_left - BurstLenWidth'(1);
@@ -3490,6 +3663,7 @@ module mempool_group_mshr
                 if (mshr_d[mshr_i].beats_left == BurstLenWidth'(1)) begin
                   mshr_d_valid[mshr_i] = 1'b0;
                   mshr_d[mshr_i] = '0;
+                  mshr_wr_all[mshr_i] = 1'b1;
                 end else begin
                   if (mshr_d[mshr_i].beats_left != '0) begin
                     mshr_d[mshr_i].beats_left = mshr_d[mshr_i].beats_left - BurstLenWidth'(1);

@@ -8556,3 +8556,131 @@ disjoint fields?), and only the 4x4 needs a re-lint.
 Consequence: do NOT edit hardware/src/*.sv in the window where the 8x8 lint starts its Design Read,
 or it will lint a torn mix of two versions.
 
+## 2026-08-11 -- MSHR backend: clock-gate the entry register by write frequency (staged)
+
+**Purpose.** Item 2 of the backend review: add clock enables. The entry register was one
+unconditional `FF over the whole array, so MshrNum x 186 flops took a clock edge every cycle in
+order to move, typically, a 3-bit state field.
+
+**Split.** Measured on the shipped 8x8 backend config, an entry's 186 synthesised bits divide by
+how often they are written:
+
+    identity   75 bits   base_addr, tgt_group_id, burst_len, sub_reqs[].{tile,port,core,meta}
+                         written ONLY by an allocation or a merge
+    resp_buf   70 bits   written ONLY when a response beat is captured
+    control    41 bits   state, counters, masks, pointers -- changes on nearly every event
+
+145 of 186 bits (78%) therefore need a clock only on events that happen once or twice in an
+entry's whole life.
+
+**Why the enables are trustworthy.** They are raised at the write sites THEMSELVES -- `mshr_wr_all`
+/ `mshr_id_we` / `mshr_rb_we` are assigned on the line above the write they describe -- rather than
+by restating the conditions that guard those writes. A restatement is what drifts when the logic
+changes. All eight write sites live in the single always_comb at line 2477, so this is possible;
+the six wholesale writes (allocation init plus five free-clears) were found by a bracket-balanced
+scan for `mshr_d[<idx>] = '0`, not by eye.
+
+Two independent checks keep the split honest:
+
+  - `MshrGateBits{Ident,RespBuf,Ctl}` are summed and compared against `$bits(mempool_group_mshr_t)`
+    at ELABORATION, so a field added to the struct without being placed in a group fails the build
+    instead of silently losing its flop. NEGATIVE-TESTED: perturbing one group width by a single
+    bit produces "entry clock-gate groups cover 187 of 186 bits" and elaboration stops.
+  - `mshr_gate_*_no_lost_write` assert every cycle in simulation that a gated-off field is
+    genuinely unchanged. This is the failure mode worth guarding: a missed write site does not
+    error anywhere, the entry just quietly keeps stale data.
+
+**Result.** Compiles and elaborates clean (0 errors, warning count unchanged at 158/159) with and
+without TARGET_SYNTHESIS. Writing distinct FIELDS of `mshr_q` from separate `FFL blocks is accepted
+-- no reassembly layer needed, so `mshr_q` stays one signal and existing wave/debug scripts are
+untouched. Open question for the lint run: whether Spyglass objects to one variable being driven
+from several always_ff blocks even on disjoint fields; if it does, the fallback is separate
+per-group registers combined back into `mshr_q`.
+
+**Status.** Staged for review, not committed. Compile-verified only; needs the functional run.
+
+## 2026-08-11 -- MSHR backend: timing and fan-out analysis (item 2)
+
+**Critical path: one 1056-line serial chain.** The main always_comb has 16 top-level stages, and
+**95% of entry accesses (288 of 303) read mshr_d -- the already-updated value -- not mshr_q**. Each
+stage's logic therefore sits on top of every earlier stage within the same cycle. Measured
+dependency chain:
+
+    0 hold-countdown -> 1 REQUEST(226 lines) -> 3 amo-inval -> 4 cache-self-inval -> 7 resp-capture
+      -> 8 -> 9 -> 10 serve-timeout -> 12/13 pending-init/beat2-arm -> 14 DRAIN(318 lines) -> 15
+
+11 stages deep, with the two largest (request allocation/merge arbitration, and drain
+selection/arbitration) in series. This, not fan-out, is the timing problem.
+
+**Fan-out: NO duplication warranted.** The raw count said mshr_q_valid has ~7036 elaborated loads,
+which looks alarming. It is not:
+
+    5774 (82%)  simulation-only -- inside the probe/verification blocks
+    1024 (15%)  a DEAD BRANCH -- the legacy O(MshrNum) mshr_resp_seen_now scan, which is
+                `if (RespSeenByTag) <O(1) tag lookup> else <this>` and RespSeenByTag == 1 in BOTH
+                backend configs, so synthesis const-folds it away
+     238 ( 3%)  real: ~3.7 loads per bit over 64 bits -- unremarkable
+
+No other register comes close (drain_mshr_rr_q 37, hold_tick 65, alloc_rr_q 5). Duplicating any of
+them would add flops for nothing. **A fan-out estimate that does not exclude simulation-only code
+and parameter-const-folded branches is worse than no estimate** -- it argued for the opposite action.
+
+**Where the banked design is already exploited**, so this is not low-hanging fruit: RespSeenByTag
+replaced an O(MshrNum) response scan with an O(1) tag index, and the store-hit path is already
+bank-scoped ("a store can only hit a CACHED entry in its own bank, so scan only this request's
+MshrWaysPerBank ways").
+
+**The real remaining structural win is in DRAIN, and it is not banking.** Bank is an address hash
+while the drain target is a destination tile, so bank-scoping does not apply. But three scans sit
+INSIDE the (tile x resp-port) loops at 2048 instances each, and their leading terms do not depend
+on tile_i/port_i at all:
+
+    mshr_d_valid[e] && (mshr_d[e].resp_buf_cnt != '0) && (mshr_d[e].state == MSHR_DRAIN_RESP)
+
+is re-evaluated in all 32 port instances, and `sub_reqs[s].tile_id == tile_i` is one 4-bit field
+compared against 16 different constants.
+
+**Correction to my first reading of this.** Hoisting those into drain_entry_ready[e] /
+drain_sub_ready[e][s] is only common-subexpression extraction, and DC/Genus already share common
+subexpressions and already infer a decoder from a 16-way compare against distinct constants. The
+RTL edit would be cosmetic: same logic depth, and the sharing happens with or without it. Writing
+it up as "the real remaining structural win" overstated it.
+
+The drain's cost is inherent to its job: for each of 32 output ports, find among MshrNum x
+MshrMergeReqs = 256 (entry, sub-request) pairs one destined for that port. Reducing it needs a
+different structure, not tidier expressions. The candidate worth considering:
+
+  maintain a per-tile pending bitmap as STATE -- drain_pending_by_tile[tile][e], updated when an
+  entry's sub-requests or beat_pending change -- so each port's scan starts from a 64-bit vector
+  already filtered by destination and the tile_id comparison leaves the per-port critical path
+  entirely, moving into the (much shallower) entry-update path.
+
+That is a genuine change with genuine risk: new state that must stay coherent with sub_reqs and
+beat_pending, and a desync would misroute a response rather than fail loudly. Not attempted
+unprompted; it needs a design decision, not just an edit.
+
+## 2026-08-11 -- Clock gating: static coverage proof
+
+The gating enables are only correct if EVERY write to a gated field happens in a cycle where that
+field's enable is high. The per-cycle assertions catch a violation the first time it fires; this is
+the static counterpart, and it costs nothing:
+
+For each write to an identity field, a resp_buf slot, or the whole entry, extract the BALANCED
+index expression on the left-hand side, then require a flag assignment (mshr_id_we / mshr_rb_we /
+mshr_wr_all) with the IDENTICAL index expression somewhere in the same begin/end scope.
+
+    18 gated writes checked -> 0 uncovered
+
+Two false alarms on the way there, both mine, both worth remembering because each produced a
+confident wrong answer:
+
+  1. Splitting a line on the first `=` to find the left-hand side treats `if (x.burst_len == 1)` as
+     a write to burst_len. That reported 43 identity writes with 34 "MISSING FLAG" -- a terrifying
+     result, entirely fictional. Match an assignment as `(?<![=!<>+\-*/&|^~])=(?!=)`.
+  2. Proximity is not scope. A +-16-line window reported the allocation's four sub_reqs[0] writes
+     as unflagged; mshr_wr_all is raised 22 lines above them in the same straight-line block. Match
+     the enclosing begin/end and the index expression, not the line distance.
+
+Both failure modes report a PROBLEM where none exists, which is the safer direction -- but a
+scary-looking false positive still costs the same review time as a real one.
+
