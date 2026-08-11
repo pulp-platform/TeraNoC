@@ -42,6 +42,17 @@ Use `buildpath=build_X` to keep multiple build dirs (e.g. `buildpath=build_1`).
 
 ### ⚠️ Build gotchas (non-obvious, will bite a fresh instance)
 - **floogen runs on every compile.** `compile`/`sim`/`simc`/`verilate`/`lint` all depend on `update-floogen`, and its make sentinel never matches the real output, so floogen re-runs unconditionally. floogen requires **Python ≥ 3.10** and is installed via `pip install .` from `hardware/deps/floo_noc/`; it also needs **`verible-verilog-format` on `PATH`** or it aborts with `RuntimeError: verible-verilog-format not found`. On hosts with older Python (or no floogen) every sim aborts.
+  ✅ **The working toolchain is a conda env — use it before concluding floogen is unavailable:**
+  ```bash
+  export PATH=/home/dishen/.conda/envs/terapool_noc/bin:$PATH   # Python 3.12.9 + verible + floogen
+  ```
+  The login shell has Python 3.9.12 and no verible, so floogen fails there and the `-o update-floogen`
+  workaround below is the *fallback*, not the fix. With the env on `PATH`, a mesh can actually be
+  regenerated, which is what makes a 4x4 lint or a mesh switch possible at all.
+  ⚠️ **A new config flavour also needs its own `config/floo_noc_<flavour>.yml`**, or update-floogen
+  dies with `No rule to make target 'config/floo_noc_<flavour>.yml'`. Generate it with
+  `python3 hardware/scripts/gen_perimeter_map.py --num-x X --num-y Y -o <tmpdir> --emit-yml config/floo_noc_<flavour>.yml`
+  (use a throwaway `-o` so `hardware/generated/` is not disturbed).
   **Workaround — `make -o update-floogen <target>` — but ONLY when building the mesh the tree was last generated for:**
   ```bash
   cd hardware && app=... make -o update-floogen simc config=terapool_spatz4_fpu buildpath=build_X
@@ -80,6 +91,28 @@ Use `buildpath=build_X` to keep multiple build dirs (e.g. `buildpath=build_1`).
   Related: add `grep -a` when scanning simulator logs — grep classifies some as binary and
   quietly changes behaviour.
 
+- **⚠️ QuestaSim prefixes EVERY transcript line with `# `; VCS does not.** So an anchored pattern
+  like `grep '^\[FPU\]'` or `ln.startswith(b'[FPUG]')` matches **zero** lines in a GUI run's
+  transcript while working perfectly on a VCS log. It never errors — the GUI arm just silently
+  contributes nothing, which reads as "that run has no data" rather than "my filter is wrong".
+  This cost four separate wrong answers in one session: `groupprog.py`, `mshrctr.py`, the FPUG
+  reader in `gen_fix_artifact.py`, and a barrier-firing audit that reported a healthy arm as
+  **NEVER FIRED**. Normalise once at read time:
+  ```bash
+  sed 's/^# //' run.log | grep '^\[FPU\] bench'      # shell
+  ```
+  ```python
+  if ln.startswith(b'# '): ln = ln[2:]                # before any startswith()/match()
+  ```
+  Note a prefix-tolerant regex is **not enough on its own** if a byte-level `startswith()`
+  prefilter runs before it — fix the prefilter too.
+
+- **⚠️ SystemVerilog CSV probes carry a LEADING SPACE on field 0.** The TB builds each per-group
+  line with a ternary between `"%0d"` and `",%0d"`, and SV pads the shorter literal, so the output
+  is `busy= 24016,17932,...`. A pattern demanding a digit straight after `=` (`([\d,]+)`) matches
+  nothing and the tool reports "probe not compiled in" for a log full of them. Use `=\s*` and strip
+  whitespace before `int()`. (Bit `stallg.py` and `mshrctr.py`.)
+
 - **⚠️ `software/bin` is GLOBAL — a software rebuild can corrupt a sim that is still elaborating.**
   `hardware/Makefile:85` resolves `preload := "$(app_path)/$(app)"`, so every sim preloads the one
   shared `software/bin/apps/<cat>/<name>` path, and there is **no output-path override**. The ELF is
@@ -110,6 +143,27 @@ cd software && make riscv-tests COMPILER=gcc  # build MemPool ISA test binaries 
 make format               # clang-format on C/C++ + autopep8 on software/data/*.py
 cd hardware && make lint   # Spyglass RTL linting (also runs update-floogen)
 ```
+⚠️ **`make lint` does not work as written — it reports success while checking nothing.** Three
+separate defects, all of which must be worked around:
+1. **The source list includes the testbench.** It is built with `bender script verilator -t rtl
+   -t mempool_verilator`, which drags in `hardware/tb/mempool_tb_verilator.sv` and
+   `common_verification/src/clk_rst_gen.sv`. Spyglass hits their non-synthesizable constructs and
+   prints `***Syntax Errors detected - RULE CHECKING ABORTED***` — **zero rules ever run**. Filter
+   them out of `spyglass/tmp/files` before invoking sg_shell.
+2. **A pattern-rule bug drops the file list entirely.** `hardware/Makefile` declares
+   `.PHONY: $(SPYGLASS_WORK_DIR)/tmp/files` but writes the recipe as `$(SPYGLASS_WORK_DIR)/tmp/files%:`
+   — a *pattern* whose `%` must match ≥1 character, so the plain name has no recipe. make says
+   "Nothing to be done", the list is never written, sg_shell fails with
+   ``` `sourcelist' file `tmp/files' does not exist ``` — **and make still exits 0.** Build
+   `spyglass/tmp/files1` (which the pattern does match) and `mv` it into place.
+3. **`update-floogen` needs the conda env** (see the floogen note above), and rewrites the shared
+   `hardware/generated/`. Snapshot all three files and restore from a trap; assert the regenerated
+   `NumMeshX` matches the config before linting, or a floogen failure silently lints the wrong mesh.
+
+Reports land in `hardware/spyglass/sg_projects/terapool_<timestamp>/consolidated_reports/*/` —
+`moresimple.rpt` for the one-line-per-violation list, `spyglass.log` for the message text with
+file:line. **Each run creates a new timestamped directory**, and a stale `sg_projects/terapool/`
+also exists, so sort by mtime or you will read an old report.
 
 ## Configuration System
 
@@ -164,7 +218,11 @@ field: bank_row(in-bank)|  GROUP   |  TILE   | bank | byte
 Consecutive words round-robin bank→tile→group (full 1024-word/4KB sweep, then `bank_row++`). **Target NoC group** = `addr[ByteOffset+log2(BanksPerTile)+log2(TilesPerGroup) +: log2(NumGroups)]` = byte-addr **[11:8]** (carried as `tgt_group_id`; decode at `mempool_tile.sv:1192`). **A request enters the MSHR of its SOURCE core's group** (hartid=`(group<<4)|tile`), *not* the address — the group MSHR is source-side (`mempool_group.sv:451-458`), coalescing its own 16 cores' outgoing remote reqs (so coalescing is only among same-group cores → matmul B-share is degree-2). **The BANK within that MSHR is address-hashed**: `req_bank = mshr_bank_of(req_addr_key, tgt_group_id)` (`mempool_group_mshr.sv:1075`, knob `group_mshr_bank_hash` 0=legacy strided-XOR-fold / 1=xorshift); the *way* (1 of 4) is arbitration. Full decode + hash analysis: `docs/mshr_bank_hash_design.md` §0.
 
 ### Hardware Dependencies (`hardware/deps/`)
-Bender-managed vendored IP — patch minimally. **`spatz` is the exception: it lives at `working_dir/spatz` via a `Bender.local` path override, not in `hardware/deps/`** — edit Spatz there. `floo_noc` tracks the project branch `yr/adaptive_routing`. Only three patches exist (`hardware/deps/patches/`): `floo_noc.patch`, `register_interface.patch`, `tech_cells_generic.patch`, applied by `make update-deps`. `Bender.yml` versions are lower bounds; `Bender.lock` holds the resolved (often newer) revisions.
+Bender-managed vendored IP — patch minimally. **`spatz` is the exception: it lives at `working_dir/spatz` via a `Bender.local` path override, not in `hardware/deps/`** — edit Spatz there. `floo_noc` tracks the project branch `yr/adaptive_routing`. **Four** patches exist (`hardware/deps/patches/`): `axi.patch`, `floo_noc.patch`, `register_interface.patch`, `tech_cells_generic.patch`, applied by `make update-deps`. (This said "three" and omitted `axi.patch` — a modified `axi` checkout is expected, not stray.)
+
+⚠️ **`hardware/deps/spatz` is a stale, UNUSED checkout and it carries local modifications with no patch file.** `Bender.local` overrides spatz to `working_dir/spatz`, and a build pulls 32 files from there and **0** from `hardware/deps/spatz`. Do not edit it and do not trust it when reading Spatz RTL — verify which path `compilevcs.sh` actually lists first.
+
+⚠️ **`Bender.lock` in the working tree is NOT the committed one.** `bender clone` converted 12 dependencies from pinned git revisions to `Path: hardware/deps/<dep>` with `revision: null`, so the local lock pins **nothing**. Keep it unstaged; when a genuine pin must change (e.g. the spatz revision), stage that hunk alone with `git add -p`. `Bender.yml` versions are lower bounds; `Bender.lock` holds the resolved (often newer) revisions.
 
 ### FlooNoC Generation
 ```bash
