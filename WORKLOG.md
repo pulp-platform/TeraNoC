@@ -9263,3 +9263,36 @@ anything: its build directory was among those reclaimed for disk space, so its k
 for most of the early vcs arms. The durable fixes are (a) pin active knobs into the config files, as
 done for group_mshr_hold_prescale_w, so they land in every build's compilevcs.sh, and (b) have the
 launcher echo its knob list into the run log, which survives build-dir reclamation.
+
+## 2026-08-12 -- CORRECTION: the hold window is NOT monotonic; 1023 sits at a minimum
+
+Supersedes the direction stated in the previous entry and in
+[[project_hold1023_costs_throughput]]. Three CONTROLLED points now exist on one workload (the
+gbarfix fix-fleet ELF), each pair differing in nothing but HOLD_WINDOW_BURST and SERVE_TIMEOUT,
+verified by full define diffs:
+
+    hold=511    363,782 cyc   (fpug511, and xa511 identical -- duplicate config, deterministic sim)
+    hold=1023   200,675 cyc   (fpug1023)   <-- best
+    hold=2047   332,191 cyc   (xd2047)
+
+So 511 is +81% and 2047 is +66% against 1023. The curve has a MINIMUM near 1023, not a monotone
+preference for shorter windows.
+
+**What this corrects.** The recorded finding "hold=1023 costs ~71% throughput, 3 matched pairs show
+511 beating 1023 by 22-108%" is not wrong as data, but it is wrong as a general rule -- those pairs
+sampled a different part of the curve (and a different workload/ELF). Today's earlier entry, which
+reported the pd1023-vs-xd2047 pair (+74% for 2047) and read it as "longer windows cost throughput",
+is likewise only half the story: longer costs, but so does shorter.
+
+**Why a minimum is physically sensible.** Too short and a held entry issues its fetch before enough
+requesters have merged, so coalescing is lost and NoC traffic rises. Too long and the entry pins its
+MSHR way for the full window, so capacity runs out and later requests bypass -- which the
+hold-the-fetch W-sweep already measured as net-negative (3836 -> 3986/4209/4229). The optimum is
+wherever those two costs cross, and on this workload that is near 1023.
+
+**Practical consequence.** Do not tune this knob by extrapolating a direction from one pair. Any
+future change wants at least three points bracketing the candidate, on the workload of interest,
+measured by COMPLETION. The 8x8 base flavours already ship 1023, which this supports.
+
+Still open: the same sweep on the vcs/matmul ELF has only 1023 and 2047 (1023 better); no 511 arm
+there has completed with a recoverable config.
