@@ -314,6 +314,12 @@ module mempool_group
     assign tcdm_master_resp[0][t].rdata       = bar_rel_vec[t] ? bar_rel_rdata[t]
                                                               : master_local_resp_rdata[t];
     assign tcdm_master_resp[0][t].wen         = bar_rel_vec[t] ? 1'b0 : master_local_resp_wen[t];
+    // Port 0 is the LOCAL path: the remote ports are declared [N-1:1] and the port->array loops
+    // start at r=1, so nothing upstream ever writes index [0]. Tie the MSHR tag off explicitly --
+    // the group MSHR only sees ports 1.., so the field is unused here (same rationale as the
+    // tile's own local tie-offs, mempool_tile.sv:1201/1207), but leaving it undriven puts an X on
+    // a struct that crosses into the tile.
+    assign tcdm_master_resp[0][t].mshr_tag    = '0;
     assign master_local_resp_ready[t]         = tcdm_master_resp_ready[0][t] & ~bar_rel_vec[t];
     assign bar_rel_ready[t]                   = tcdm_master_resp_ready[0][t];
     assign tcdm_slave_req_valid[0][t]         = slave_local_req_valid[t];
@@ -328,6 +334,7 @@ module mempool_group
       slave_local_req_valid[t] ? master_local_req_burst_len[slave_local_req_ini_addr[t]]
                                : BurstLenWidth'(1);
     assign tcdm_slave_req[0][t].src_group_id  = group_id_i;
+    assign tcdm_slave_req[0][t].mshr_tag      = '0; // Tier-b: local path unused (see resp above)
     assign slave_local_req_ready[t]           = tcdm_slave_req_ready[0][t];
   end
 
