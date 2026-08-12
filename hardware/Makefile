@@ -439,9 +439,6 @@ endif
 # --------------------------
 vlog_defs += -DAXI_DATA_WIDTH=$(axi_data_width)
 vlog_defs += -DRO_LINE_WIDTH=$(ro_line_width)
-# R-MCAST: 1-cycle multicast of the RO instruction-cache response to all merged tile icaches
-# (docs/icache_rmcast_design.md). 0 = OFF, bit-identical. Default lives in config/config.mk.
-vlog_defs += -DRO_CACHE_R_MCAST=$(ro_cache_r_multicast)
 vlog_defs += -DDMAS_PER_GROUP=$(dmas_per_group)
 vlog_defs += -DAXI_HIER_RADIX=$(axi_hier_radix)
 vlog_defs += -DAXI_MASTERS_PER_GROUP=$(axi_masters_per_group)

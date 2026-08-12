@@ -29,11 +29,6 @@ module axi_hier_interco
   parameter int unsigned NumMstPorts    = 0,
   parameter int unsigned Radix          = 2,
   parameter int unsigned EnableCache    = 0,
-  // R-MCAST (docs/icache_rmcast_design.md): bit p = 1 means slave port p is a tile instruction cache
-  // that may share ONE multicast R beat with the other set bits. '0 (default) disables the feature
-  // entirely -- axi_mux_mcast then generates exactly the upstream axi_mux R logic. Only meaningful
-  // at the level that instantiates the RO cache; the recursive levels are always passed '0.
-  parameter logic [NumSlvPorts-1:0] McastPortMask = '0,
   parameter int unsigned CacheLineWidth = 0,
   parameter int unsigned CacheSizeByte  = 0,
   parameter int unsigned CacheSets      = 0,
@@ -189,12 +184,7 @@ module axi_hier_interco
     cache_req_t  cache_req;
     cache_resp_t cache_resp;
 
-    // R-MCAST (docs/icache_rmcast_design.md): N-hot "deliver this R beat to these slave ports" mask
-    // produced by the RO cache when a merged instruction-line response is ready. All-zero (and the
-    // whole feature const-folded away) unless McastPortMask != 0.
-    logic [NumSlvPorts-1:0] r_mcast_mask;
-
-    axi_mux_mcast #(
+    axi_mux #(
       // AXI parameter and channel types
       .SlvAxiIDWidth (SlvIdWidth ), // AXI ID width, slave ports
       .slv_aw_chan_t (slv_aw_t   ), // AW Channel Type, slave ports
@@ -221,19 +211,15 @@ module axi_hier_interco
       .SpillB        (1'b1       ),
       // add spill register on read master ports, adds a cycle latency on read channels
       .SpillAr       (1'b1       ),
-      .SpillR        (1'b1       ),
-      // Multicast R fan-out only where an RO cache can actually produce a mask. With 0 the mux is
-      // bit-identical to the upstream axi_mux (the multicast logic is not generated at all).
-      .RMcastEn      (McastPortMask != '0)
+      .SpillR        (1'b1       )
     ) i_axi_mux (
-      .clk_i              (clk_i       ),
-      .rst_ni             (rst_ni      ),
-      .test_i             (test_i      ),
-      .slv_reqs_i         (slv_req_i   ),
-      .slv_resps_o        (slv_resp_o  ),
-      .mst_req_o          (int_req     ),
-      .mst_resp_i         (int_resp    ),
-      .mst_r_mcast_mask_i (r_mcast_mask)
+      .clk_i       (clk_i     ),
+      .rst_ni      (rst_ni    ),
+      .test_i      (test_i    ),
+      .slv_reqs_i  (slv_req_i ),
+      .slv_resps_o (slv_resp_o),
+      .mst_req_o   (int_req   ),
+      .mst_resp_i  (int_resp  )
     );
 
     if (EnableCache[0]) begin: gen_ro_cache
@@ -249,9 +235,6 @@ module axi_hier_interco
         .MaxTrans     (32'd16        ),
         .NrAddrRules  (NrAddrRules   ),
         // .SerialLookup (1             ),
-        .McastNumPorts (NumSlvPorts  ),
-        .McastIdShift  (SlvIdWidth   ),
-        .McastPortMask (McastPortMask),
         .slv_req_t    (int_req_t     ),
         .slv_rsp_t    (int_resp_t    ),
         .mst_req_t    (cache_req_t   ),
@@ -267,12 +250,9 @@ module axi_hier_interco
         .axi_slv_req_i (int_req                    ),
         .axi_slv_rsp_o (int_resp                   ),
         .axi_mst_req_o (cache_req                  ),
-        .axi_mst_rsp_i (cache_resp                 ),
-        .r_mcast_mask_o(r_mcast_mask               )
+        .axi_mst_rsp_i (cache_resp                 )
       );
     end else begin: gen_no_ro_cache
-      // No cache on this level => no merged responses => plain unicast R.
-      assign r_mcast_mask = '0;
       assign cache_req = int_req;
       assign int_resp  = cache_resp;
     end

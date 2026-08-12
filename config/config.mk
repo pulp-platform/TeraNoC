@@ -50,14 +50,6 @@ axi_data_width ?= 512
 # Read-only cache line width in AXI interconnect (in bits)
 ro_line_width ?= 512
 
-# R-MCAST: multicast the RO (instruction) cache's response to all merged tile icaches in ONE cycle
-# instead of unrolling the requester bitmask one id per cycle (docs/icache_rmcast_design.md).
-# 0 = OFF (bit-identical to baseline; every added term const-folds away). 1 = ON.
-# NOTE: this default MUST live here, not in a flavor .mk -- otherwise -DRO_CACHE_R_MCAST= expands
-# empty on the other configs and vlog fails. Self-disables unless
-# ROCacheLineWidth==AxiDataWidth && ICacheLineWidth<=AxiDataWidth (see mempool_pkg ROCacheMcastOk).
-ro_cache_r_multicast ?= 0
-
 #############################
 ##  Xqueues configuration  ##
 #############################

@@ -19,12 +19,6 @@ module snitch_axi_to_cache #(
   // AXI Bus Types
   parameter type         req_t              = logic,
   parameter type         resp_t             = logic,
-  // R-MCAST (docs/icache_rmcast_design.md): deliver a merged response to every waiting tile icache
-  // in ONE beat instead of unrolling the requester bitmask one id per cycle.
-  // McastPortMask = '0 (default) disables the feature; every added term then const-folds away.
-  parameter int unsigned McastNumPorts      = 1,
-  parameter int unsigned McastIdShift       = 0,
-  parameter logic [McastNumPorts-1:0] McastPortMask = '0,
   parameter snitch_icache_pkg::config_t CFG = '0
 )(
   input  logic                         clk_i,
@@ -42,12 +36,7 @@ module snitch_axi_to_cache #(
   output logic                         rsp_ready_o,
   // AXI
   input  req_t                         slv_req_i,
-  output resp_t                        slv_rsp_o,
-  // R-MCAST: N-hot "this R beat is for these slave ports". Non-zero only while a multicast (phase A)
-  // beat is presented; '0 for every ordinary/unicast beat.
-  output logic [McastNumPorts-1:0]     r_mcast_mask_o,
-  // Same information as r_mcast_mask_o but expanded to ID space, for the demux id-counter pop.
-  output logic [CFG.ID_WIDTH_RESP-1:0] r_mcast_idset_o
+  output resp_t                        slv_rsp_o
 );
 
   import cf_math_pkg::idx_width;
@@ -129,17 +118,6 @@ module snitch_axi_to_cache #(
 
   typedef enum logic {Idle, Busy} ar_state_e;
   ar_state_e ar_state_d, ar_state_q;
-
-  // R-MCAST: an ELIGIBLE read is served by phase A, which never queries the burst-length table
-  // (r_cnt_req = 0). It must therefore not ALLOCATE a table entry either, or the entry would leak
-  // and eventually block AR. Eligibility is a pure function of the (constant-masked) id, so an id is
-  // either always eligible or never -- alloc and query can never disagree.
-  logic ar_elig, ar_noalloc;
-  assign ar_elig    = (McastPortMask != '0)
-                   && (slv_req_i.ar.id[McastIdShift-1:0] == '0)
-                   && McastPortMask[slv_req_i.ar.id[$bits(slv_req_i.ar.id)-1:McastIdShift]];
-  assign ar_noalloc = ar_elig;
-
   always_comb begin
     cnt_alloc_req      = 1'b0;
     ax_d               = ax_q;
@@ -149,16 +127,15 @@ module snitch_axi_to_cache #(
     slv_rsp_o.ar_ready = 1'b0;
     unique case (ar_state_q)
       Idle: begin
-        if (slv_req_i.ar_valid && (cnt_alloc_gnt || ar_noalloc)) begin
+        if (slv_req_i.ar_valid && cnt_alloc_gnt) begin
           if (ar_len == '0) begin // No splitting required -> feed through.
             ax_o.addr  = slv_req_i.ar.addr >> CFG.LINE_ALIGN << CFG.LINE_ALIGN;
             ax_o.id    = slv_req_i.ar.id;
             ax_o.len   = ar_len;
             req_valid_o = 1'b1;
             // As soon as downstream is ready, allocate a counter and acknowledge upstream.
-            // R-MCAST: an eligible id skips the allocation (see ar_noalloc above).
             if (req_ready_i) begin
-              cnt_alloc_req      = ~ar_noalloc;
+              cnt_alloc_req      = 1'b1;
               slv_rsp_o.ar_ready = 1'b1;
             end
           end else begin // Splitting required.
@@ -251,62 +228,23 @@ module snitch_axi_to_cache #(
   logic rsp_id_onehot, rsp_id_empty;
   logic [CFG.ID_WIDTH_RESP-1:0] rsp_id_mask, rsp_id_masked;
 
-  // ------------------------------------------------------------------------------------------
-  // R-MCAST phase split (docs/icache_rmcast_design.md 3.2)
-  //   phase A (mcast_phase): every ELIGIBLE requester -- one beat, all of them at once.
-  //   phase B             : the residue (DMA / SoC port) -- the original one-id-per-cycle walk.
-  // The two sets are an EXACT partition of the outstanding mask, so no id is served twice or lost,
-  // and an eligible id can never reach the lzc/burst-table path.
-  // McastPortMask is an elaboration constant, so mcast_pmask is a pure wire-pick off flops (no lzc
-  // in front of it) and all non-eligible bits fold away.
-  // ------------------------------------------------------------------------------------------
-  logic [McastNumPorts-1:0]     mcast_pmask;
-  logic [CFG.ID_WIDTH_RESP-1:0] mcast_idset, resid_set;
-  logic                         mcast_phase;
-  logic [McastNumPorts-1:0]     mcast_rep_onehot;
-  logic [$clog2(McastNumPorts > 1 ? McastNumPorts : 2)-1:0] mcast_rep;
-
-  always_comb begin
-    mcast_idset = '0;
-    for (int unsigned p = 0; p < McastNumPorts; p++) begin
-      mcast_pmask[p] = McastPortMask[p] & rsp_id_masked[p << McastIdShift];
-      mcast_idset[p << McastIdShift] = mcast_pmask[p];
-    end
-  end
-  assign resid_set   = rsp_id_masked & ~mcast_idset;
-  assign mcast_phase = |mcast_pmask;
-
-  lzc #(
-    .WIDTH ( McastNumPorts ),
-    .MODE  ( 0             )
-  ) i_lzc_mcast (
-    .in_i    ( mcast_pmask ),
-    .cnt_o   ( mcast_rep   ),
-    .empty_o ( /* unused */)
-  );
-
-  // Pop the cache entry when phase A (if any) and phase B have both drained.
-  assign rsp_ready_q   = mcast_phase ? (rsp_ready & ~|resid_set)
-                                     : ((rsp_id_onehot | rsp_id_empty) & rsp_ready);
+  assign rsp_ready_q   = (rsp_id_onehot | rsp_id_empty) & rsp_ready;
   assign rsp_valid     = rsp_valid_q; // And not empty?
   assign rsp_id_masked = rsp_in_q.id & ~rsp_id_mask;
-  assign r_mcast_mask_o  = (rsp_valid && mcast_phase) ? mcast_pmask : '0;
-  assign r_mcast_idset_o = (rsp_valid && mcast_phase) ? mcast_idset : '0;
 
-  // The original walk now runs over the RESIDUE only (identical when McastPortMask == '0).
   lzc #(
     .WIDTH ( CFG.ID_WIDTH_RESP ),
     .MODE  ( 0                 )
   ) i_lzc (
-    .in_i    ( resid_set    ),
-    .cnt_o   ( rsp_id       ),
-    .empty_o ( rsp_id_empty )
+    .in_i    ( rsp_id_masked ),
+    .cnt_o   ( rsp_id        ),
+    .empty_o ( rsp_id_empty  )
   );
 
   cc_onehot #(
     .Width ( CFG.ID_WIDTH_RESP )
   ) i_onehot (
-    .d_i         ( resid_set     ),
+    .d_i         ( rsp_id_masked ),
     .is_onehot_o ( rsp_id_onehot )
   );
 
@@ -315,9 +253,8 @@ module snitch_axi_to_cache #(
       rsp_id_mask <= '0;
     end else begin
       if (rsp_valid && rsp_ready) begin
-        // Downstream handshake --> Go to next ID.
-        // R-MCAST phase A retires EVERY eligible id in one handshake; phase B is the original walk.
-        rsp_id_mask <= rsp_id_mask | (mcast_phase ? mcast_idset : (1 << rsp_id));
+        // Downstream handshake --> Go to next ID
+        rsp_id_mask <= rsp_id_mask | (1 << rsp_id);
       end
       if (rsp_valid_q && rsp_ready_q) begin // Or empty, should be redundant
         // Upstream handshake --> Clear mask
@@ -356,23 +293,9 @@ module snitch_axi_to_cache #(
 
     unique case (r_state_q)
       RFeedthrough: begin
-        // R-MCAST phase A: one beat for ALL eligible requesters. This arm never enters RWait --
-        // while the beat is held the spill is not popped, so rsp_in_q is frozen, and rsp_id_mask
-        // only changes on a handshake, so mcast_pmask/mcast_rep are frozen too. Payload stability
-        // is therefore free (this is what makes the freeze-register bugs of other designs
-        // impossible). r.last is a THEOREM here: eligibility implies ar.len == 0 (see
-        // mempool_pkg::ROCacheMcastOk), and r_offset is tied '1 because LINE_WIDTH == FETCH_DW.
-        if (rsp_valid && mcast_phase) begin
-          slv_rsp_o.r_valid = 1'b1;
-          slv_rsp_o.r.last  = 1'b1;
-          // id[McastIdShift-1:0] == 0 for every eligible member, so one representative id is
-          // bit-exact for all of them after the group mux truncates to the slave-port id width.
-          slv_rsp_o.r.id    = mcast_rep << McastIdShift;
-          r_cnt_req         = 1'b0;   // burst table is never queried for eligible ids
-          if (slv_req_i.r_ready) rsp_ready = 1'b1;
         // If downstream has an R beat and the R counters can give us the remaining length of
         // that burst, ...
-        end else if (rsp_valid) begin
+        if (rsp_valid) begin
           r_cnt_req = 1'b1;
           if (r_cnt_gnt) begin
             r_last_d = (r_cnt_len == 8'd0);
