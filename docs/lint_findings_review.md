@@ -242,3 +242,50 @@ static analysis caught and simulation would not have.
 
 **Before comparing any two lint runs in future:** check the source list length and the elaborated
 instance count first. Same config name is not sufficient.
+
+---
+
+## 9. FIXED — the two meaningful findings from the 19:42 run
+
+Both were Error severity, both in code under our control (`working_dir/spatz`), both fixed in spatz
+commit `a1047cf`. The full design compiles clean in both define sets.
+
+### W110 — `spatz_vlsu.sv:500`, incompatible port width
+
+```
+Incompatible width for port 'usage_o' (width 6 in module 'fifo_v3')
+on instance 'i_fifo_commit_insn' (actual width 7)
+```
+
+`commit_usage` was `[idx_width(CommitQDepth):0]` while `fifo_v3` drives `usage_o` as
+`[ADDR_DEPTH-1:0]` = `idx_width(CommitQDepth)` bits, so the MSB was never driven and read as `'x`.
+
+**Narrowing it to match uncovered a second, pre-existing bug in the assertion that consumes it.**
+`usage_o` is the LOW `idx_width` bits of an `idx_width+1`-bit count, so a FULL queue reads back as
+**0**. The A5 assertion compared `inflight_q` against it directly — wrong at precisely the boundary
+the assertion exists to guard. The full case is now tested explicitly through `commit_insn_full`.
+
+### W123 — `spatz_mempool_cc.sv`, `snitch_req.burst_len` read but never set
+
+The scalar core has no `data_qburst_len_o` output, so the field had no driver at all, and
+`assign data_req_d = snitch_req` copied the undefined value onward as an X. Benign only because the
+single consumer hardcodes `BurstLenWidth'(1)` instead of reading it. Now driven at the source, so
+the struct copy carries a defined value.
+
+### NOT fixed, deliberately — W216 int part-selects in the MSHR drain
+
+Seven sites: `port_i[RespPortIdW-1:0]`, `drain_win_s[...]`, `drain2_s[...]`, `drain3_s[...]`.
+
+They are **benign**: the values are small positives, so the low bits are correct. They are also the
+same CLASS as `SYNTH_5255`, which was a genuine X-propagation bug — so they are recorded here
+rather than waived.
+
+The reason not to touch them now is evidence, not risk aversion: that drain code was proven
+**bit-exact** against the pre-work reference across all 35 telemetry periods hours ago. Editing it
+would discard that proof for no functional gain. Worth cleaning at the same time as any future
+change to the drain, when the equivalence run has to be repeated anyway.
+
+### Also benign — UndrivenInTerm-ML x16
+
+All at `terapool_cluster_floonoc_wrapper.sv:305`, `.scan_data_i (/* Unconnected */)` — one per group,
+deliberately unconnected. A DFT note (an undriven scan input), not a functional defect.
