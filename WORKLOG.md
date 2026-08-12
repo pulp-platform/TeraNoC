@@ -9296,3 +9296,35 @@ measured by COMPLETION. The 8x8 base flavours already ship 1023, which this supp
 
 Still open: the same sweep on the vcs/matmul ELF has only 1023 and 2047 (1023 better); no 511 arm
 there has completed with a recoverable config.
+
+## 2026-08-12 -- CORRECTION OF THE CORRECTION: verified pairs only; the long side is a PLATEAU
+
+The previous entry claimed a minimum at 1023 with 2047 costing +66%. **That +66% came from a
+CONFOUNDED comparison** -- xd2047 differs from fpug1023 in two NoC defines as well as the window,
+and I used it as a controlled point without diffing it, in the same entry that told the reader to
+insist on controlled points. Owning that plainly because it is the second time today a comparison
+was quoted before being verified.
+
+Clean pairs only (define-diffed, differing in nothing but HOLD_WINDOW_BURST + SERVE_TIMEOUT), same
+fix-fleet workload:
+
+    fpug1023 vs fpug511   CLEAN   200,675 vs 363,782   ->  511 is +81%
+    fpug1023 vs a2047     CLEAN   200,675 vs 201,075   -> 2047 is +0.2%  (negligible)
+    fpug1023 vs xd2047    CONFOUNDED -- 2 non-window defines differ; DISCARD
+
+So the shape is a **PLATEAU above ~1023, not a minimum**: shortening the window costs heavily,
+lengthening it costs nothing measurable on this workload.
+
+**Physical reading.** On the short side, entries issue before enough requesters merge and coalescing
+is lost. On the long side, entries are released by REACHING THEIR SUBSCRIBER TARGET well before the
+window expires -- so doubling an already-sufficient window changes nothing. That is consistent with
+the [RH] evidence: entries stall at 1/4, 2/4, 3/4 of HOLD_SUBS_BURST=4, i.e. the target, not the
+window, is what gates release.
+
+**Re-framing the earlier vcs result.** pd1023 vs xd2047 (+74% for 2047) WAS a clean pair, so that
+penalty is real -- but given a2047 shows ~0% on the fix fleet, the vcs penalty evidently comes from
+that fleet's channel configuration interacting with a long window, not from window length alone.
+
+**Standing conclusion:** 1023 (the shipped 8x8 default) is fine; do not shorten it. Lengthening is
+neither helpful nor harmful here. The lever for the g54/g62 merge starvation remains
+HOLD_SUBS_BURST.
