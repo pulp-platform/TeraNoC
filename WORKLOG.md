@@ -9227,3 +9227,39 @@ CAVEAT, same discipline applied to the hold-window question earlier today: this 
 on ONE workload. 0.61% is suggestive, not established, and this campaign has already produced a
 util/completion metric that inverted under scrutiny. Do not quote it as a speedup without more
 pairs.
+
+## 2026-08-12 -- Two completion-based matched pairs: hold window, and router remapping
+
+Both are COMPLETIONS, not utilisation -- the only metric this campaign has shown to be trustworthy
+(cum util correlates +0.78 with completion time, i.e. the wrong way).
+
+**Hold window (vcs fleet, matmul ELF).** `pd1023` vs `xd2047` differ in NOTHING but
+HOLD_WINDOW_BURST and SERVE_TIMEOUT (verified by diffing the full define sets):
+
+    hold=1023  1,597,735 cyc
+    hold=2047  2,783,198 cyc      -> 2047 is +74%
+
+Every other vcs arm whose window is recoverable agrees in direction, though those are not controlled:
+
+    hold=1023  1,438,712 (pc1023)  1,574,690 (ihash0)  1,597,735 (pd1023)
+    hold=2047  2,783,198 (xd2047)  3,018,872 (f2047)
+
+The two groups do not overlap, ~1.9x apart, matching the 1.92x family-median gap already recorded
+for 511-vs-1023. So the earlier hypothesis that a LONGER window would help g54/g62 is contradicted
+on throughput: the merge-starvation mechanism is real (see the [RH] evidence) but lengthening the
+window trades fewer timeouts for longer way occupancy, and capacity dominates. HOLD_SUBS_BURST
+remains the lever the data points at.
+
+**Router remapping (fix fleet, gbarfix ELF).** `fpugir2` vs `fpug1023` differ in exactly ONE define:
+
+    NOC_ROUTER_REMAPPING=2   178,009 cyc
+    NOC_ROUTER_REMAPPING=0   200,675 cyc      -> remapping=2 is 12.7% faster
+
+Worth acting on: terapool_spatz4_fpu ships noc_router_remapping=0 while mempool_spatz4_fpu ships 3,
+so the 8x8 flavours may be leaving ~13% on the table. One pair, one workload -- wants a second.
+
+**PROVENANCE, third time today.** `xa511n` completed at 315,044 cycles and cannot be placed against
+anything: its build directory was among those reclaimed for disk space, so its knobs are gone. Same
+for most of the early vcs arms. The durable fixes are (a) pin active knobs into the config files, as
+done for group_mshr_hold_prescale_w, so they land in every build's compilevcs.sh, and (b) have the
+launcher echo its knob list into the run log, which survives build-dir reclamation.
