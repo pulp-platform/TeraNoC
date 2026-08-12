@@ -289,3 +289,25 @@ change to the drain, when the equivalence run has to be repeated anyway.
 
 All at `terapool_cluster_floonoc_wrapper.sv:305`, `.scan_data_i (/* Unconnected */)` — one per group,
 deliberately unconnected. A DFT note (an undriven scan input), not a functional defect.
+
+### Follow-up: the W110 fix was proven, and the OLD assertion had a false-negative hole
+
+The rewritten A5 assertion changes a `$fatal` condition, so it carries its own risk: if the new
+condition is wrong it fires spuriously. Modelled fifo_v3's semantics standalone and swept every
+(occupancy, inflight) state:
+
+    585 states checked
+      NEW form  0 mismatches -- encodes exactly "inflight_q == FIFO occupancy"
+      OLD form  1 mismatch   -- cnt=64 (FULL), infl=0: wanted FALSE, returned TRUE
+
+So the rewrite cannot spuriously fatal. More importantly the OLD form had a **false negative**: with
+the queue full and inflight 0, `usage_o` truncates to 0 and the comparison returned TRUE, so the
+assertion silently passed on precisely the divergence it exists to detect. A `$fatal` that does not
+fire when it should is worse than one that fires when it should not.
+
+The width fix therefore did more than clear W110 -- it restored the assertion's coverage at the
+boundary it guards.
+
+STILL UNSIMULATED (both spatz fixes): the equivalence run predates them by 5.5 hours. It reruns when
+the 8x8 lint releases the 4x4 mesh. `snitch_req.burst_len` is the lower-risk of the two (X -> 1,
+and the consumer hardcodes 1) but it does reach data_req_q.burst_len via the struct copy.
