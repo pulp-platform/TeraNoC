@@ -311,3 +311,49 @@ boundary it guards.
 STILL UNSIMULATED (both spatz fixes): the equivalence run predates them by 5.5 hours. It reruns when
 the 8x8 lint releases the 4x4 mesh. `snitch_req.burst_len` is the lower-risk of the two (X -> 1,
 and the consumer hardcodes 1) but it does reach data_req_q.burst_len via the struct copy.
+
+---
+
+## 10. NEEDS A DECISION — inferred latch in the VLSU burst path
+
+```
+SYNTH_12608  spatz_vlsu.sv:1081
+  The logic of the always block mismatches with the type of Always Block
+  (which should be "always_latch") due to latch instance \burst_mode_req_reg[1]
+```
+
+`burst_mode_req_reg[1]` is the ELABORATED latch instance name for `burst_mode_req[1]`
+(declared at `spatz_vlsu.sv:676`). Verified against the RTL:
+
+```systemverilog
+always_comb begin                                   // 1081-1204, per memory port
+  if (mem_use_port0_burst && (port != 0)) begin     // 1083-1098
+    // assigns 12 signals: mem_max_elements, mem_remaining_*, burst_len_calc,
+    // burst_use, mem_operation_valid/last, mem_counter_*
+    // ^ burst_mode_req[port] is NEVER assigned on this path
+  end else begin
+    burst_mode_req[port] = ...                      // 1146
+  end
+end
+```
+
+So whenever port-0 burst mode is active, `burst_mode_req[1]` retains its previous value rather than
+being driven, and synthesis infers a latch. **Present in both the 4x4 and 8x8 reports** — it is not
+configuration-specific (an earlier note calling it 8x8-only was wrong; it was inferred from a
+top-10 histogram that did not reach it).
+
+**Why it is more than lint hygiene.** `burst_mode_req[port]` is READ at line 1664 in the
+burst-completion path (`!burst_mode_req[port] || !burst_use[port]`). A latched value there lets
+port-1 burst state persist across a mode switch, and this is the same code with a recorded history
+of burst deadlocks and the burst+tail-store hang.
+
+**NOT fixed, deliberately.** The obvious repair is `burst_mode_req[port] = 1'b0;` in that branch,
+alongside the `burst_use[port] = 1'b0;` already there. But unlike the width/driver fixes, this
+CHANGES BEHAVIOUR: it replaces a held value with a defined one, which could equally repair a latent
+bug or perturb burst sequencing. In an area with this history it deserves its own equivalence run
+rather than being folded into a batch.
+
+Recommended sequence if you want it: apply the one-line assignment, then run the 4x4 tuned
+equivalence config with the prescaler disabled and require the usual bit-exact match over all 35
+periods. If it is NOT bit-exact, that is itself the interesting result -- it would mean the latch
+was affecting behaviour, and the diff would show where.
