@@ -53,6 +53,31 @@ code match; fix it inside A5.
 Expected: no PPA change in the final netlist (DCE removes most of it anyway) — the entire payoff is
 elaboration time and warning hygiene. That is the payoff we currently need.
 
+## Phase B0 — opt3 stage 2 (in flight, gated on its own measurement)
+
+**opt3 as committed (`970d0cd0`) buys no area.** It is a behavioural model: it masks the existing
+64-wide drain selector with `drain_published` rather than narrowing it to 16. That is deliberate —
+it prices the throughput cost before any structure is committed to — but it means the work is only
+half done, and the committed half is the half with no payoff.
+
+| Step | State | Gate |
+|---|---|---|
+| B0.1 | `opt3off` equivalence run | in flight; must be **bit-identical** to 34,715 or the masking is not inert |
+| B0.2 | `opt3on` across all four GEMM shapes | not started; needs B0.1 to pass first |
+| B0.3 | **Narrow the select tree**: 16 bank-published candidates instead of 64 entries — the actual area win | only if B0.2's throughput cost is acceptable |
+
+**The risk is real, not a formality.** Publishing one entry per bank caps *distinct entries drained
+per cycle* at `MshrBankNum` (16) against up to 32 response ports. Multicast survives — an entry is
+published, not a sub-request, so several ports can still drain different subscribers of the same
+entry — but a workload whose ready entries cluster in few banks will throttle. `1024x128x128` is the
+most informative shape here: it is the most MSHR-pressured of the four and therefore the most likely
+to expose the cap.
+
+**If B0.2 shows an unacceptable cost**, the fallback the design discussion already identified is
+*two* candidates per bank rather than one, which doubles the cap to 32 (matching the port count)
+while still cutting the selector from 64 to 32 inputs. That is a smaller area win for a much smaller
+throughput risk, and it is the version to fall back to rather than abandoning the idea.
+
 ## Phase B — area (bit-identical or provable)
 
 Re-rank after the first real area report. Ordered by confidence × size.
@@ -116,5 +141,9 @@ tile-out arc. This is the one place the report's recommendation is wrong.
 - **~6 of the review's findings were never verified** — their verify agents died on an API error.
   One of them ("unnecessary async reset on ~80% of entry flops") would be a large area item if true
   and is worth one manual pass before it is either used or dismissed.
-- **opt3 ON has never been measured.** Only the OFF equivalence is in flight. Its throughput cost —
-  capping distinct entries drained per cycle at the bank count — is a real risk, not a formality.
+- **opt3 ON has never been measured** (see Phase B0), and opt3 as committed buys no area at all.
+- **opt2's PPA benefit is likewise unmeasured.** Its cycle effect is now known to be shape-dependent
+  — `256x512x256` -0.40% and `1024x128x128` -1.49% (both faster), while `512x512x512` and
+  `128x1024x512` are trending the other way. But cycles were never the point: opt2 exists to shorten
+  the drain cone by removing its dependence on the same-cycle allocate/merge logic, and that benefit
+  appears only in a timing report. Keep the default `off` and enable per shape until there is one.
