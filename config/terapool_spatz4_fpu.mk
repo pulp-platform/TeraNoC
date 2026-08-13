@@ -204,6 +204,17 @@ group_mshr_hold_window_burst  ?= 255
 #   W=0  34629 cycles   W=4  34417 cycles  (0.61% faster), and 4 bits x MshrNum fewer flops
 #   per group -- ~16.1k at 8x8. Equivalence with W=0 proven bit-exact over all 35 periods.
 group_mshr_hold_prescale_w ?= 4
+
+# Source the response-drain eligibility scan from the REGISTERED entry array (mshr_q) instead of
+# the combinational next state (mshr_d). The scan sits at the end of the same always_comb that
+# computes mshr_d, behind 86 writes to it, so today the response path does not start at a flop:
+#   mshr_q -> [allocate/merge/admit/cache/self-invalidate] -> mshr_d -> [drain scan] -> resp_out
+# Reading mshr_q cuts that entire cone out of the path.
+#
+# Cost is purely latency: an entry that becomes drainable in cycle N is seen in N+1. Safe because
+# each sub-request has exactly one destination (tile, port), so a stale view cannot let two ports
+# drain the same sub-request. 0 = off (bit-identical to before), 1 = registered scan.
+group_mshr_drain_from_q ?= 0
 # Early-release subscriber target: a held entry issues its fetch as soon as this many
 # requesters have merged into it. Legal range [2, group_mshr_merge_reqs].
 group_mshr_hold_subs     ?= 2

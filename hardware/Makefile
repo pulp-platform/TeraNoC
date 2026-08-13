@@ -296,6 +296,7 @@ group_mshr_stall_on_resp ?=
 group_mshr_hold_prescale_w ?=
 ifneq ($(strip $(group_mshr_hold_prescale_w)),)
   vlog_defs += -DGROUP_MSHR_HOLD_PRESCALE_W=$(group_mshr_hold_prescale_w)
+  vlog_defs += -DGROUP_MSHR_DRAIN_FROM_Q=$(group_mshr_drain_from_q)
 endif
 ifneq ($(strip $(group_mshr_stall_on_resp)),)
   vlog_defs += -DGROUP_MSHR_STALL_ON_RESP=$(group_mshr_stall_on_resp)
