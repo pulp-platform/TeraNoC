@@ -66,6 +66,30 @@ half done, and the committed half is the half with no payoff.
 | B0.2 | `opt3on` across all four GEMM shapes | not started; needs B0.1 to pass first |
 | B0.3 | **Narrow the select tree**: 16 bank-published candidates instead of 64 entries — the actual area win | only if B0.2's throughput cost is acceptable |
 
+**B0.3 must be built cycle-equivalent to B0.2, and the naive narrowing is NOT.** Entries are
+bank-major (`e = bank*MshrWaysPerBank + way`) and the stage-1 selector rotates over the **64-entry**
+index space (`drain_sel_base` is 6-bit, entry space). A 16-wide bank vector rotated by a 4-bit bank
+base changes the priority order at the starting bank.
+
+Counterexample, `ways=4`, `drain_sel_base=5` (bank 1, way 1). Entry-space visit order is
+`5,6,7,8,…,63,0,1,2,3,4`, so entry 4 is visited **last**. With bank 1 publishing way 0 (entry 4) and
+bank 2 publishing entry 8: stage 1 picks **8** (position 3); a bank-rotated stage 2 starting at
+bank 1 picks **4**. Different winner, and it would surface as a small cycle drift rather than an
+obvious break.
+
+Two requirements to preserve equivalence:
+
+1. Bank base = `drain_sel_base >> log2(MshrWaysPerBank)`, **plus** a tie-break demoting the starting
+   bank to last when its published way is strictly below `drain_sel_base`'s way.
+2. The publish logic, *including the `bank_rr_q` advance*, preserved byte-for-byte. `bank_rr_d[b]`
+   advances only when bank `b` publishes; changing *when* a bank publishes diverges the RR state and
+   every subsequent cycle with it.
+
+Done this way, B0.3's equivalence target is the **B0.2 (stage-1 ON) result, not 34,715** — the
+stage-1 measurement transfers wholesale and the run becomes a strict pass/fail instead of a fresh
+four-shape characterisation. That transfer is the entire reason the behavioural model was built
+first; giving stage 2 its own simpler priority order forfeits it.
+
 **The risk is real, not a formality.** Publishing one entry per bank caps *distinct entries drained
 per cycle* at `MshrBankNum` (16) against up to 32 response ports. Multicast survives — an entry is
 published, not a sub-request, so several ports can still drain different subscribers of the same
