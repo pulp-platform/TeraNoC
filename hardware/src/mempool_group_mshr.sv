@@ -773,9 +773,30 @@ module mempool_group_mshr
     logic [BypassTrackWayW-1:0] bypass_retire_way;
     logic                       bypass_way_found;
 
+    // B3 (F22): per-(tile,way) write enable instead of one unconditional load of the whole table.
+    // The table is NumTilesPerGroup x BypassTrackWays x bypass_track_t and changes only on a
+    // bypass-alloc or a beat retire -- a few percent of cycles -- yet every bit was clocked every
+    // cycle. bypass_track_d defaults to bypass_track_q (see the always_comb below), so gating on
+    // "d differs from q" is bit-identical by construction and gives the clock-gating pass a per-way
+    // enable to key on. Same enable style the entry register block already uses.
+    logic [NumTilesPerGroup-1:0][BypassTrackWays-1:0] bypass_track_we;
+    always_comb begin
+      for (int t = 0; t < NumTilesPerGroup; t++) begin
+        for (int w = 0; w < BypassTrackWays; w++) begin
+          bypass_track_we[t][w] = (bypass_track_d[t][w] != bypass_track_q[t][w]);
+        end
+      end
+    end
     always_ff @(posedge clk_i or negedge rst_ni) begin
-      if (!rst_ni) bypass_track_q <= '0;
-      else         bypass_track_q <= bypass_track_d;
+      if (!rst_ni) begin
+        bypass_track_q <= '0;
+      end else begin
+        for (int t = 0; t < NumTilesPerGroup; t++) begin
+          for (int w = 0; w < BypassTrackWays; w++) begin
+            if (bypass_track_we[t][w]) bypass_track_q[t][w] <= bypass_track_d[t][w];
+          end
+        end
+      end
     end
 
     // Response-side match: a tag-0 (bypass) READ response from the burst-issuing core port whose
