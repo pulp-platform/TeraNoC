@@ -900,6 +900,12 @@ module mempool_group_mshr
   // asserted at elaboration, so truncation to these widths is exactly mod-N.
   localparam int unsigned MshrIdxW = idx_width(MshrNum);
   localparam int unsigned SubIdxW  = idx_width(MshrMergeReqs);
+  // B0.3 splits the entry-space rotation base into {bank, way} by bit position. idx_width() floors
+  // at 1 for a single-element axis, so with MshrBankNum==1 or MshrWaysPerBank==1 the two halves no
+  // longer tile the entry index and the split would silently select the wrong bank.
+  if (BankPublish && (MshrIdxW != (BankIdW + VictimPtrW)))
+    $error("[mempool_group_mshr] group_mshr_bank_publish needs idx_width(MshrNum)=%0d to equal BankIdW(%0d)+VictimPtrW(%0d).",
+           MshrIdxW, BankIdW, VictimPtrW);
   logic [MshrBankNum-1:0][VictimPtrW-1:0]                     bank_rr_q, bank_rr_d;
   logic [MshrBankNum-1:0][VictimPtrW-1:0]                     bank_pub_w;
   logic [MshrBankNum-1:0]                                     bank_pub_v;
@@ -2755,6 +2761,13 @@ module mempool_group_mshr
   logic [MshrIdxW-1:0]      drain_sel_base;
   logic [SubIdxW-1:0]       drain_sel_sub_base;                    // A: rotation bases
   logic [MshrNum-1:0]       drain_ent_cand;                        // A: entries offering a beat
+  // B0.3: bank-narrowed selector. With BankPublish on, at most one entry per bank is selectable,
+  // so the arbitration runs over MshrBankNum candidates instead of MshrNum.
+  logic [MshrBankNum-1:0][MshrIdxW-1:0] bank_pub_e;    // published entry id per bank (port-indep.)
+  logic [MshrBankNum-1:0]   bank_cand, bank_cand_rot, bank_cand_eff, bank_pfx, bank_first;
+  logic [BankIdW-1:0]       bank_base, bank_idx, bank_win_d, bank_win;
+  logic [VictimPtrW-1:0]    base_way;
+  logic                     bank_demote;
   logic [MshrMergeReqs-1:0] drain_sub_cand;                        // A: sub-reqs in the winner
   // PPA hoist: the (tile,port)-independent half of the drain eligibility test, computed once per
   // (entry, sub-request) instead of once per (entry, sub-request, tile, port). Packed arrays at
@@ -3485,6 +3498,7 @@ module mempool_group_mshr
         bank_rr_d[b]  = bank_rr_q[b];
         bank_pub_w[b] = '0;
         bank_pub_v[b] = 1'b0;
+        bank_pub_e[b] = '0;
         for (int k = MshrWaysPerBank - 1; k >= 0; k--) begin
           // NOT `automatic int w = ...`: an initialiser at declaration inside a procedural block
           // is ignored by synthesis (Spyglass SYNTH_89). bank_scan_w is module scope.
@@ -3496,6 +3510,7 @@ module mempool_group_mshr
         end
         if (BankPublish && bank_pub_v[b]) begin
           drain_published[b * MshrWaysPerBank + int'(bank_pub_w[b])] = 1'b1;
+          bank_pub_e[b] = MshrIdxW'(b * MshrWaysPerBank + int'(bank_pub_w[b]));
           bank_rr_d[b] = VictimPtrW'(bank_pub_w[b] + VictimPtrW'(1));
         end
       end
@@ -3536,15 +3551,28 @@ module mempool_group_mshr
             // above (drain_sub_ready / _tile / _port), so this is now two narrow equalities per
             // (entry, sub-request) instead of the full conjunction re-derived 32 times.
             drain_ent_cand = '0;
-            for (int e = 0; e < MshrNum; e++) begin
-              for (int s = 0; s < MshrMergeReqs; s++) begin
-                // opt3: with BankPublish on, only the one entry each bank published this cycle is
-                // selectable. Off => drain_published is unused and this folds to the original test.
-                if ((!BankPublish || drain_published[e]) &&
-                    drain_sub_ready[e][s] &&
-                    (drain_sub_tile[e][s] == tile_group_id_t'(tile_i)) &&
-                    (drain_sub_port[e][s] == port_i[RespPortIdW-1:0])) begin
-                  drain_ent_cand[e] = 1'b1;
+            bank_cand      = '0;
+            if (BankPublish) begin
+              // B0.3: evaluate only the MshrBankNum published entries, not all MshrNum -- the
+              // per-(tile,port) predicate work drops by MshrWaysPerBank.
+              for (int b = 0; b < MshrBankNum; b++) begin
+                for (int s = 0; s < MshrMergeReqs; s++) begin
+                  if (bank_pub_v[b] &&
+                      drain_sub_ready[bank_pub_e[b]][s] &&
+                      (drain_sub_tile[bank_pub_e[b]][s] == tile_group_id_t'(tile_i)) &&
+                      (drain_sub_port[bank_pub_e[b]][s] == port_i[RespPortIdW-1:0])) begin
+                    bank_cand[b] = 1'b1;
+                  end
+                end
+              end
+            end else begin
+              for (int e = 0; e < MshrNum; e++) begin
+                for (int s = 0; s < MshrMergeReqs; s++) begin
+                  if (drain_sub_ready[e][s] &&
+                      (drain_sub_tile[e][s] == tile_group_id_t'(tile_i)) &&
+                      (drain_sub_port[e][s] == port_i[RespPortIdW-1:0])) begin
+                    drain_ent_cand[e] = 1'b1;
+                  end
                 end
               end
             end
@@ -3562,18 +3590,54 @@ module mempool_group_mshr
             // outputs -- including drain_win_e when no candidate exists. 0 mismatches.
             // A5: one shifter over the doubled vector. Bit-identical to the old guarded pair of
             // shifters including base==0, where the guard was already semantically redundant.
-            drain_cand_rot = MshrNum'({drain_ent_cand, drain_ent_cand} >> drain_sel_base);
-            drain_pfx = drain_cand_rot;
-            for (int st = 1; st < MshrNum; st = st << 1) begin
-              drain_pfx = drain_pfx | (drain_pfx << st);
+            if (BankPublish) begin
+              // ---- B0.3: MshrBankNum-wide arbitration, EXACTLY equivalent to the MshrNum-wide one.
+              //
+              // Entries are bank-major (e = bank*MshrWaysPerBank + way) and the wide selector
+              // rotates over the ENTRY index space, so a plain bank rotation is NOT equivalent:
+              // for base = bank_base*W + base_way, the visit distance of bank b's published entry
+              // is ((b - bank_base) mod MshrBankNum)*W + (pub_way[b] - base_way). Those windows are
+              // disjoint across banks -- EXCEPT for the starting bank, whose distance goes negative
+              // (i.e. wraps to the far end) when its published way precedes base_way.
+              //
+              // So: order by rotated bank distance, but demote the starting bank to LAST when
+              // pub_way[bank_base] < base_way. It cannot simply be moved to slot MshrBankNum-1,
+              // because that slot may hold another candidate; it is handled as a last-resort
+              // fallback taken only when no other bank is a candidate.
+              bank_base = drain_sel_base[MshrIdxW-1 -: BankIdW];
+              base_way  = drain_sel_base[VictimPtrW-1:0];
+              bank_cand_rot = MshrBankNum'({bank_cand, bank_cand} >> bank_base);
+              bank_demote   = bank_pub_v[bank_base] && (bank_pub_w[bank_base] < base_way);
+              bank_cand_eff = bank_demote ? (bank_cand_rot & ~{{(MshrBankNum-1){1'b0}}, 1'b1})
+                                          : bank_cand_rot;
+              bank_pfx = bank_cand_eff;
+              for (int st = 1; st < MshrBankNum; st = st << 1) begin
+                bank_pfx = bank_pfx | (bank_pfx << st);
+              end
+              bank_first = bank_pfx & ~(bank_pfx << 1);
+              bank_idx   = '0;
+              for (int b = 0; b < MshrBankNum; b++) begin
+                if (bank_first[b]) bank_idx |= BankIdW'(b);
+              end
+              // Winner: first non-demoted bank, else the demoted starting bank, else nothing.
+              bank_win_d   = (|bank_cand_eff) ? bank_idx : '0;
+              bank_win     = BankIdW'(bank_base + bank_win_d);
+              drain_have_e = |bank_cand;
+              drain_win_e  = drain_have_e ? bank_pub_e[bank_win] : '0;
+            end else begin
+              drain_cand_rot = MshrNum'({drain_ent_cand, drain_ent_cand} >> drain_sel_base);
+              drain_pfx = drain_cand_rot;
+              for (int st = 1; st < MshrNum; st = st << 1) begin
+                drain_pfx = drain_pfx | (drain_pfx << st);
+              end
+              drain_first = drain_pfx & ~(drain_pfx << 1);
+              drain_idx   = '0;
+              for (int b = 0; b < MshrNum; b++) begin
+                if (drain_first[b]) drain_idx |= MshrIdxW'(b);
+              end
+              drain_have_e = |drain_ent_cand;
+              drain_win_e  = drain_have_e ? MshrIdxW'(drain_sel_base + drain_idx) : '0;
             end
-            drain_first = drain_pfx & ~(drain_pfx << 1);
-            drain_idx   = '0;
-            for (int b = 0; b < MshrNum; b++) begin
-              if (drain_first[b]) drain_idx |= MshrIdxW'(b);
-            end
-            drain_have_e = |drain_ent_cand;
-            drain_win_e  = drain_have_e ? MshrIdxW'(drain_sel_base + drain_idx) : '0;
             if (drain_have_e) begin
               // First eligible sub-request inside the winning entry, same rotated order.
               drain_sub_cand = '0;
