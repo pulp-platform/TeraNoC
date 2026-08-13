@@ -215,6 +215,11 @@ group_mshr_hold_prescale_w ?= 4
 # each sub-request has exactly one destination (tile, port), so a stale view cannot let two ports
 # drain the same sub-request. 0 = off (bit-identical to before), 1 = registered scan.
 group_mshr_drain_from_q ?= 0
+
+# opt3: each MSHR bank publishes ONE entry per cycle (round-robin over its ways),
+# port-independently. Preserves multicast (an entry, not a sub-request, is published)
+# but caps distinct entries drained per cycle at the bank count. 0 = off.
+group_mshr_bank_publish ?= 0
 # Early-release subscriber target: a held entry issues its fetch as soon as this many
 # requesters have merged into it. Legal range [2, group_mshr_merge_reqs].
 group_mshr_hold_subs     ?= 2

@@ -296,7 +296,17 @@ group_mshr_stall_on_resp ?=
 group_mshr_hold_prescale_w ?=
 ifneq ($(strip $(group_mshr_hold_prescale_w)),)
   vlog_defs += -DGROUP_MSHR_HOLD_PRESCALE_W=$(group_mshr_hold_prescale_w)
+endif
+# Each knob needs its OWN guard: nesting them under the prescaler's made them silently vanish for
+# any config that leaves group_mshr_hold_prescale_w unset, and expand to a malformed -DX= for any
+# config that does not define the knob itself.
+group_mshr_drain_from_q ?=
+ifneq ($(strip $(group_mshr_drain_from_q)),)
   vlog_defs += -DGROUP_MSHR_DRAIN_FROM_Q=$(group_mshr_drain_from_q)
+endif
+group_mshr_bank_publish ?=
+ifneq ($(strip $(group_mshr_bank_publish)),)
+  vlog_defs += -DGROUP_MSHR_BANK_PUBLISH=$(group_mshr_bank_publish)
 endif
 ifneq ($(strip $(group_mshr_stall_on_resp)),)
   vlog_defs += -DGROUP_MSHR_STALL_ON_RESP=$(group_mshr_stall_on_resp)

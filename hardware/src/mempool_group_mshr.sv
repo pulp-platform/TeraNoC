@@ -254,6 +254,26 @@ module mempool_group_mshr
   // recorded at the drain scan itself.
   //
   // 0 = off (default, bit-identical to before). 1 = scan the registered array.
+  // ------------------------------------------------------------------------------------------
+  // BankPublish (group_mshr_bank_publish): stage-1 banked arbitration for the head-beat drain.
+  //
+  // Each of the MshrBankNum banks publishes ONE entry per cycle, round-robin over its
+  // MshrWaysPerBank ways, PORT-INDEPENDENTLY -- so the choice is computed once and shared by all
+  // NumTilesPerGroup x (NumRemoteRespPortsPerTile-1) scan instances instead of once each.
+  //
+  // Publishing an ENTRY (not a sub-request) is what preserves multicast: several ports can still
+  // drain different subscribers of the same published entry in the same cycle, because each
+  // sub-request carries its own destination (tile,port). The cost is that at most MshrBankNum
+  // DISTINCT entries can be drained per cycle instead of up to the port count.
+  //
+  // THIS IS A BEHAVIOURAL MODEL, NOT THE FINAL STRUCTURE. It masks the existing 64-wide selector
+  // rather than narrowing it to 16, so it measures the throughput cost without yet buying the area
+  // back. Narrow the select tree only once the cost is known to be acceptable.
+  //
+  // 0 = off (default, bit-identical). 1 = one entry per bank.
+  localparam bit BankPublish =
+      `ifdef GROUP_MSHR_BANK_PUBLISH `GROUP_MSHR_BANK_PUBLISH `else 1'b0 `endif;
+
   localparam bit DrainFromQ =
       `ifdef GROUP_MSHR_DRAIN_FROM_Q `GROUP_MSHR_DRAIN_FROM_Q `else 1'b0 `endif;
   localparam int unsigned HoldCntTicks =
@@ -871,6 +891,10 @@ module mempool_group_mshr
   logic [AllocRrW-1:0]      alloc_rr_q, alloc_rr_d;
   // (B) M3 drain: rotate the MSHR-entry scan axis (MshrNum entries).
   localparam int unsigned DrainMshrRrW = idx_width(MshrNum);
+  logic [MshrBankNum-1:0][VictimPtrW-1:0]                     bank_rr_q, bank_rr_d;
+  logic [MshrBankNum-1:0][VictimPtrW-1:0]                     bank_pub_w;
+  logic [MshrBankNum-1:0]                                     bank_pub_v;
+  int                                                         bank_scan_w;
   logic [DrainMshrRrW-1:0]  drain_mshr_rr_q, drain_mshr_rr_d;
   // (C) L3 drain: rotate the sub_req scan axis (MshrMergeReqs sub-requests). A
   //     separate base from (B) so the two axes do not rotate in lockstep.
@@ -2014,6 +2038,7 @@ module mempool_group_mshr
   `FF(alloc_rr_q,      alloc_rr_d,      '0)
   `FF(drain_mshr_rr_q, drain_mshr_rr_d, '0)
   `FF(subreq_rr_q,     subreq_rr_d,     '0)
+  `FF(bank_rr_q,       bank_rr_d,       '0)
 
   // Hold-the-fetch replay base: same free-running pattern; compiled out with the feature.
   if (HoldWindowMax != 0) begin : gen_hold_replay_rr
@@ -2712,6 +2737,9 @@ module mempool_group_mshr
   // select, so only one arm is built.
   mempool_group_mshr_t [MshrNum-1:0]                          drain_scan_ent;
   logic [MshrNum-1:0]                                         drain_scan_valid;
+  // opt3 stage-1: per-bank round-robin publish. bank_rr_q advances one way per cycle per bank.
+  logic [MshrNum-1:0]                                         drain_published;
+  logic [MshrNum-1:0]                                         drain_ent_any;
   logic [MshrNum-1:0]                                         drain_ent_ok;
   logic [MshrNum-1:0][MshrMergeReqs-1:0]                      drain_sub_ready;
   tile_group_id_t [MshrNum-1:0][MshrMergeReqs-1:0]            drain_sub_tile;
@@ -3409,6 +3437,34 @@ module mempool_group_mshr
         end
       end
 
+      // ---- opt3 stage 1: one entry published per bank, round-robin, PORT-INDEPENDENT ----
+      // Computed once here, shared by every (tile,port) instance below. The entry index is
+      // bank-major (e = bank*MshrWaysPerBank + way), so each bank owns a contiguous slice.
+      // The k loop descends so that k=0 -- the way AT the rotation pointer -- is assigned last
+      // and therefore wins, giving round-robin priority from the pointer upward.
+      for (int e = 0; e < MshrNum; e++) begin
+        drain_ent_any[e]   = |drain_sub_ready[e];
+        drain_published[e] = 1'b0;          // cleared per ENTRY, never per bank
+      end
+      for (int b = 0; b < MshrBankNum; b++) begin
+        bank_rr_d[b]  = bank_rr_q[b];
+        bank_pub_w[b] = '0;
+        bank_pub_v[b] = 1'b0;
+        for (int k = MshrWaysPerBank - 1; k >= 0; k--) begin
+          // NOT `automatic int w = ...`: an initialiser at declaration inside a procedural block
+          // is ignored by synthesis (Spyglass SYNTH_89). bank_scan_w is module scope.
+          bank_scan_w = (int'(bank_rr_q[b]) + k) % MshrWaysPerBank;
+          if (drain_ent_any[b * MshrWaysPerBank + bank_scan_w]) begin
+            bank_pub_w[b] = VictimPtrW'(bank_scan_w);
+            bank_pub_v[b] = 1'b1;
+          end
+        end
+        if (BankPublish && bank_pub_v[b]) begin
+          drain_published[b * MshrWaysPerBank + int'(bank_pub_w[b])] = 1'b1;
+          bank_rr_d[b] = VictimPtrW'((int'(bank_pub_w[b]) + 1) % MshrWaysPerBank);
+        end
+      end
+
       // Select one sub-request per response port.
       for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
         for (int port_i = 1; port_i < NumRemoteRespPortsPerTile; port_i++) begin
@@ -3447,7 +3503,10 @@ module mempool_group_mshr
             drain_ent_cand = '0;
             for (int e = 0; e < MshrNum; e++) begin
               for (int s = 0; s < MshrMergeReqs; s++) begin
-                if (drain_sub_ready[e][s] &&
+                // opt3: with BankPublish on, only the one entry each bank published this cycle is
+                // selectable. Off => drain_published is unused and this folds to the original test.
+                if ((!BankPublish || drain_published[e]) &&
+                    drain_sub_ready[e][s] &&
                     (drain_sub_tile[e][s] == tile_group_id_t'(tile_i)) &&
                     (drain_sub_port[e][s] == port_i[RespPortIdW-1:0])) begin
                   drain_ent_cand[e] = 1'b1;
