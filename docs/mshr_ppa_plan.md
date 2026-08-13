@@ -108,10 +108,10 @@ Re-rank after the first real area report. Ordered by confidence × size.
 
 | # | Change | Expected | Risk |
 |---|---|---|---|
-| B1 | F8: swap both drain arbiters to the allocator's mask + LSB-isolate form (`:1762-1777`); select `elig_all[drain_win_e]` instead of re-evaluating the predicate on a 64:1 struct read | ~350-450k GE/group pre-opt | low — in-file precedent with a transferable equivalence argument (`:1717-1722`) |
+| B1 | F8, **PARTIAL — `4c4526cd` did the second half only**: both sub-scans now select from the hoisted vectors instead of re-reading the winning entry through a full-entry MshrNum:1 struct mux. The mask + LSB-isolate arbiter swap (`:1762-1777`), where most of the estimated area sits, is **NOT done** — the rotate-then-prefix structure is unchanged. | ~350-450k GE/group pre-opt, most of it still on the table | low — in-file precedent with a transferable equivalence argument (`:1717-1722`) |
 | B2 | F7: meta-overlap mask AND/OR-reduce → two-sided modular range test | ~129k → ~72-92k GE/group (**~2x, not the report's 2.6x**) | medium — needs the exhaustive proof over 32 bases × 32 lens, matching `:986-987`'s precedent |
 | B3 | F22: per-way write enable on `bypass_track_q` | 1,088 flops/group stop clocking unconditionally | low — `d` defaults to `q`, so enable is bit-identical |
-| B4 | F15: `resp_buf` → latch-based SCM | ~2-2.4k DFF-area-eq/group | **backend-flow risk** — hold-time fixing + scan insertion; defer until timing closes |
+| ~~B4~~ | ~~F15: `resp_buf` → latch-based SCM~~ | ~~2-2.4k DFF-area-eq/group~~ | **DECLINED 2026-08-14 — keep `resp_buf` in flip-flops.** The saving is modest and it is the only Phase B item that changes the storage primitive rather than the logic, so it cannot be proven inert in simulation and carries hold-time-fixing and scan-insertion risk into the backend flow. Not deferred — dropped. |
 
 Explicitly **not** doing: SRAM for `resp_buf`. The drain needs 32 concurrent asynchronous read ports;
 no macro provides that. The report is right to rule it out.
