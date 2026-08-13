@@ -1052,48 +1052,18 @@ module mempool_group_mshr
     map_resp_port_id = mapped_port;
   endfunction
 
-  // Occupancy mask of one modulo-meta_id range [base, base+len-1] over the whole meta space.
+  // Meta-range overlap between a request and an entry.
   //
-  // This replaced meta_range_overlap(), which answered "do these two ranges overlap?" by
-  // ENUMERATING all MaxBurstWords offsets of range A and testing each for membership in B --
-  // MaxBurstWords add+subtract+compare units per call. That call sat in gen_req_meta_ovlp, which
-  // is replicated NumTilesPerGroup x active req ports x MshrNum = 2048 times at 8x8, making it the
-  // largest combinational structure in the module.
+  // History: this began as meta_range_overlap(), which ENUMERATED all MaxBurstWords offsets of one
+  // range and tested each for membership in the other -- replicated
+  // NumTilesPerGroup x active req ports x MshrNum = 2048 times, the largest combinational
+  // structure in the module. That became a pair of MetaSpace-wide occupancy masks with the test
+  // |(mask_a & mask_b), which hoisted the entry-side mask out of the (tile,port) replication.
   //
-  // As masks the test is |(mask_a & mask_b), and -- the actual win -- mask_b depends only on the
-  // ENTRY, so it is built once per entry instead of once per (tile, port, entry). Note the meta
-  // space is 2**$bits(meta_id_t) = 8 while MaxBurstWords is 16, so any len >= MetaSpace covers the
-  // whole space; the mask form gets that for free where the enumeration needed all 16 iterations.
-  //
-  // Proven EXHAUSTIVELY equivalent to the old function over the complete input space --
-  // 8 x 8 bases x 17 x 17 lengths = 18496 combinations, 0 mismatches.
-  localparam int unsigned MetaSpace = 1 << $bits(meta_id_t);
-  function automatic logic [MetaSpace-1:0] meta_range_mask(input meta_id_t base,
-                                                           input logic [BurstLenWidth-1:0] len);
-    meta_range_mask = '0;
-    for (int k = 0; k < MetaSpace; k++) begin
-      if ((meta_id_t'(k) - base) < len) meta_range_mask[k] = 1'b1;
-    end
-  endfunction
-
-  // Entry-side masks: one per entry, NOT per requester -- this is what removes the replication.
-  logic [MshrNum-1:0][MetaSpace-1:0] mshr_meta_mask;
-  always_comb begin
-    for (int e = 0; e < MshrNum; e++) begin
-      mshr_meta_mask[e] = meta_range_mask(mshr_q[e].sub_reqs[0].meta_id_base, mshr_q[e].burst_len);
-    end
-  end
-
-  // Request-side masks: one per (tile, request port).
-  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:0][MetaSpace-1:0] req_meta_mask;
-  always_comb begin
-    req_meta_mask = '0;
-    for (int t = 0; t < NumTilesPerGroup; t++) begin
-      for (int p = 1; p < NumRemoteReqPortsPerTile; p++) begin
-        req_meta_mask[t][p] = meta_range_mask(req_in[t][p].wdata.meta_id, req_len[t][p]);
-      end
-    end
-  end
+  // B2 (F7) removes the masks entirely: two cyclic intervals intersect iff one's start lies inside
+  // the other, so the test is two modular subtract-compares and needs no mask at all. Both mask
+  // builders and the MetaSpace-wide AND/OR-reduce network are gone with it. The test itself lives
+  // at gen_req_meta_ovlp; see the equivalence proof and the load-bearing length guards there.
 
   assign scan_data_o = scan_data_i;
   assign csr_trace_any_i = 1'b1;
@@ -1678,7 +1648,22 @@ module mempool_group_mshr
               (mshr_q[mshr_i].sub_reqs[0].core_id == req_in[tile_i][port_i].wdata.core_id) &&
               // Keep same-entry hits legal; block only cross-entry overlaps.
               !same_addr_excl &&
-              |(req_meta_mask[tile_i][port_i] & mshr_meta_mask[mshr_i]);
+              // B2 (F7): two-sided modular range test in place of a MetaSpace-wide mask AND +
+              // OR-reduce.  Two cyclic intervals intersect iff one's start lies inside the other.
+              // Proven exhaustively (scripts/proof_meta_overlap.py, 1,183,744 cases at M=64, also
+              // checked at M=32 and M=8) -- matching the precedent set for the mask form itself.
+              //
+              // The LENGTH GUARDS ARE LOAD-BEARING.  Without them the test reports overlap when
+              // either length is zero, where the mask correctly reports none (an empty interval
+              // intersects nothing).  Today an invalid entry cannot reach here because the test is
+              // already gated on mshr_q_valid and on the entry state -- but that is a non-local
+              // invariant, and burst_len is 0 for a cleared entry, so the guards stay.
+              (mshr_q[mshr_i].burst_len != '0) &&
+              (req_len[tile_i][port_i] != '0) &&
+              ((meta_id_t'(mshr_q[mshr_i].sub_reqs[0].meta_id_base -
+                           req_in[tile_i][port_i].wdata.meta_id) < req_len[tile_i][port_i]) ||
+               (meta_id_t'(req_in[tile_i][port_i].wdata.meta_id -
+                           mshr_q[mshr_i].sub_reqs[0].meta_id_base) < mshr_q[mshr_i].burst_len));
         end
         assign req_hit_mshr[tile_i][port_i] = |req_hit_way[tile_i][port_i];
         assign req_addr_hit_drain[tile_i][port_i] = |req_addr_hit_drain_way[tile_i][port_i];
