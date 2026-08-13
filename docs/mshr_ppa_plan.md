@@ -141,6 +141,50 @@ tile-out arc. This is the one place the report's recommendation is wrong.
 | D3 | After elaboration: `sizeof_collection [get_cells -hier *stat_*]` | If non-zero, D2 was not optional. |
 | D4 | `backend_4x4.mk` comment says hold=511 while the assignment is 2047 | Stale comment; fix with D1. |
 
+
+## RESULTS — Phase A and Phase B verified (2026-08-13)
+
+**All six equivalence arms returned 34,715 cyc, 35/35 periods, 0 differing.** Every commit in the
+series is either provably inert or measured; nothing diverged.
+
+| commit | change | verdict |
+|---|---|---|
+| `9ab3fcfd` | A1-A4: drain2 hoist, dead arrays, `CacheReclaimable` guards, dead drain branch | BIT-IDENTICAL |
+| `52009dd3` | A5: natural-width scan indices, `%` -> truncation, single-shifter rotate | BIT-IDENTICAL |
+| `ed1e5dd2` | B0.3: bank-narrowed selector | BIT-IDENTICAL **both paths** (OFF vs reference, ON vs stage-1) |
+| `4c4526cd` | B1: head-beat sub-scan selects from hoisted vectors | BIT-IDENTICAL |
+| `25aa35f9` | B3: per-way write enable on the retag table | BIT-IDENTICAL |
+| `deccf966` | B2: modular range test replaces the mask network | BIT-IDENTICAL |
+
+**B0.3's two-stage split worked as designed.** Stage-1 ON and stage-2 ON are byte-identical at
+34,538 cyc over 35 periods, so narrowing the drain arbitration 4x (64 candidates -> 16) cost nothing
+and the stage-1 measurements transfer intact. The equivalence is not luck: the naive narrowing picks
+a different winner at the rotation boundary, and the demote-the-starting-bank tie-break is what makes
+the two agree.
+
+### Measured effect of the two behaviour-changing knobs
+
+Efficiency is `ideal / actual` with `ideal = M*N*P / 1024` — determined by the data size, not measured.
+The TB's own `util` counter is **not** used for ranking: `busy` is FPU-lane *occupancy*, which is not
+conserved across runs of identical work, and on the 1024x128x128 pair it ranked opt2 above opt3 while
+the clock said the opposite.
+
+| shape | ideal cyc | baseline | opt2 ON | opt3 ON |
+|---|---|---|---|---|
+| `256x512x256` | 32,768 | 34,715 (94.39%) | 34,577 (94.77%, -0.40%) | 34,538 (94.88%, **-0.51%**) |
+| `1024x128x128` | 16,384 | 60,447 (27.10%) | 59,548 (27.51%, -1.49%) | 59,114 (27.72%, **-2.21%**) |
+| `128x1024x512` | 65,536 | 67,529 (97.05%) | running | running |
+| `512x512x512` | 131,072 | running | running | running |
+
+opt3 leads on both completed shapes. Note `256x512x256` and `128x1024x512` sit at 94-97% of the FPU
+roofline, so there is little headroom to win there regardless of mechanism.
+
+### Still not measured
+
+The backend premise remains untested — no timing report, no area report, no Presto elaboration
+figure. VCS *parse* CPU time for this file fell 15% (0.508s -> 0.434s) while the file grew 188 lines,
+which is suggestive but is a different tool from the one that stalled.
+
 ## Verification protocol (non-negotiable — every one of these has burned us)
 
 1. **Matched pair or nothing.** Two builds may differ by exactly one change. The R-MCAST
