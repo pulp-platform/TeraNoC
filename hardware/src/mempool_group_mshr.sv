@@ -118,6 +118,16 @@ module mempool_group_mshr
            DrainBeatsPerEntry, NumRemoteRespPortsPerTile - 1, DrainBeatsPerEntry);
   if (PD2 && !DrainMultiPort)
     $error("[mempool_group_mshr] ParityDrain (group_mshr_drain_beats=2) requires DrainMultiPort=1.");
+  // The rotated scan indices wrap by TRUNCATION to idx_width() bits rather than by `%`. Since
+  // idx_width() is $clog2(), truncation equals mod-N only when N is a power of two -- for any other
+  // N it silently wraps at the next power of two instead, corrupting the scan order. Fail loudly.
+  if (MshrNum & (MshrNum - 1))
+    $error("[mempool_group_mshr] group_mshr_num (%0d) must be a power of two.", MshrNum);
+  if (MshrMergeReqs & (MshrMergeReqs - 1))
+    $error("[mempool_group_mshr] group_mshr_merge_reqs (%0d) must be a power of two.", MshrMergeReqs);
+  if (MshrWaysPerBank & (MshrWaysPerBank - 1))
+    $error("[mempool_group_mshr] group_mshr_ways_per_bank (%0d) must be a power of two.",
+           MshrWaysPerBank);
   // Hold-the-fetch (request-hold merge window, docs/mshr_request_hold_design.md): a mergeable
   // allocation is consumed locally and its NoC fetch is withheld for up to HoldWindow cycles,
   // releasing EARLY the moment sub_reqs_num reaches HoldSubs. Since merging is legal until the
@@ -886,10 +896,14 @@ module mempool_group_mshr
   logic [AllocRrW-1:0]      alloc_rr_q, alloc_rr_d;
   // (B) M3 drain: rotate the MSHR-entry scan axis (MshrNum entries).
   localparam int unsigned DrainMshrRrW = idx_width(MshrNum);
+  // A5: natural widths for the rotated scan indices. Power-of-two MshrNum/MshrMergeReqs is
+  // asserted at elaboration, so truncation to these widths is exactly mod-N.
+  localparam int unsigned MshrIdxW = idx_width(MshrNum);
+  localparam int unsigned SubIdxW  = idx_width(MshrMergeReqs);
   logic [MshrBankNum-1:0][VictimPtrW-1:0]                     bank_rr_q, bank_rr_d;
   logic [MshrBankNum-1:0][VictimPtrW-1:0]                     bank_pub_w;
   logic [MshrBankNum-1:0]                                     bank_pub_v;
-  int                                                         bank_scan_w;
+  logic [VictimPtrW-1:0]                                      bank_scan_w;
   logic [DrainMshrRrW-1:0]  drain_mshr_rr_q, drain_mshr_rr_d;
   // (C) L3 drain: rotate the sub_req scan axis (MshrMergeReqs sub-requests). A
   //     separate base from (B) so the two axes do not rotate in lockstep.
@@ -2734,7 +2748,12 @@ module mempool_group_mshr
   // previously relied on `automatic` scoping to reuse the names `drain_base`/`subreq_base`.
   // At module scope that would alias, so each branch gets its own.
   //   A = DrainMultiPort priority-encoder path   B = PD2 second-beat path   C = single-port path
-  int                       drain_sel_base,  drain_sel_sub_base;   // A: rotation bases
+  // A5: natural width, unsigned. These were 32-bit signed `int`, which made every wrap a signed
+  // 32-bit modulo and every array index a signed part-select (the VER-318 flood). All values are
+  // provably in [0, MshrNum) / [0, MshrMergeReqs), and both moduli are guarded power-of-two above,
+  // so truncation to idx_width bits is exactly the old `%`.
+  logic [MshrIdxW-1:0]      drain_sel_base;
+  logic [SubIdxW-1:0]       drain_sel_sub_base;                    // A: rotation bases
   logic [MshrNum-1:0]       drain_ent_cand;                        // A: entries offering a beat
   logic [MshrMergeReqs-1:0] drain_sub_cand;                        // A: sub-reqs in the winner
   // PPA hoist: the (tile,port)-independent half of the drain eligibility test, computed once per
@@ -2757,17 +2776,19 @@ module mempool_group_mshr
   logic [MshrNum-1:0][MshrMergeReqs-1:0]                      drain2_sub_ready;
   tile_group_id_t [MshrNum-1:0][MshrMergeReqs-1:0]            drain2_sub_tile;
   logic [MshrNum-1:0][RespPortIdW-1:0]                        drain2_sub_port;
-  int                       drain_win_e,     drain_win_s;
+  logic [MshrIdxW-1:0]      drain_win_e;
+  logic [SubIdxW-1:0]       drain_win_s;
   logic                     drain_have_e,    drain_have_s;
-  int                       drain_scan_s;                          // A: rotated scan index
+  logic [SubIdxW-1:0]       drain_scan_s;                          // A: rotated scan index
   logic [MshrNum-1:0]       drain_cand_rot;                        // A: candidates rotated to base
   logic [MshrNum-1:0]       drain_pfx, drain_first;                // A: prefix-OR, isolated LSB
-  int unsigned              drain_idx;                             // A: index within the rotation
+  logic [MshrIdxW-1:0]      drain_idx;                             // A: index within the rotation
   logic [MshrNum-1:0]       drain2_cand;                           // A: 2nd-slot entry candidates
   logic [MshrNum-1:0]       drain2_cand_rot;                       // A: rotated to base
   logic [MshrNum-1:0]       drain2_pfx, drain2_first;              // A: prefix-OR, isolated LSB
-  int unsigned              drain2_idx;                            // A: index within the rotation
-  int                       drain2_base, drain2_sub_base, drain2_mshr_i, drain2_s;   // B
+  logic [MshrIdxW-1:0]      drain2_idx;                            // A: index within the rotation
+  logic [MshrIdxW-1:0]      drain2_base, drain2_mshr_i;            // B
+  logic [SubIdxW-1:0]       drain2_sub_base, drain2_s;             // B
 
   always_comb begin
     int unsigned merge_new_idx;
@@ -2939,7 +2960,7 @@ module mempool_group_mshr
                 // read exclusively by the reclaim scan, which is gated on CacheReclaimable.
                 if (CacheVictimRR && CacheReclaimable) begin
                   evict_vid = int'(req_alloc_found_mshr_id[tile_i][port_i]);
-                  evict_vw  = evict_vid % MshrWaysPerBank;
+                  evict_vw  = evict_vid & unsigned'(MshrWaysPerBank - 1);
                   if (mshr_q_valid[evict_vid] && (mshr_q[evict_vid].state == MSHR_CACHED)) begin
                     victim_rr_d[evict_vid / MshrWaysPerBank] =
                         (evict_vw + 1 >= MshrWaysPerBank) ? '0 : VictimPtrW'(evict_vw + 1);
@@ -3467,7 +3488,7 @@ module mempool_group_mshr
         for (int k = MshrWaysPerBank - 1; k >= 0; k--) begin
           // NOT `automatic int w = ...`: an initialiser at declaration inside a procedural block
           // is ignored by synthesis (Spyglass SYNTH_89). bank_scan_w is module scope.
-          bank_scan_w = (int'(bank_rr_q[b]) + k) % MshrWaysPerBank;
+          bank_scan_w = VictimPtrW'(bank_rr_q[b] + VictimPtrW'(k));
           if (drain_ent_any[b * MshrWaysPerBank + bank_scan_w]) begin
             bank_pub_w[b] = VictimPtrW'(bank_scan_w);
             bank_pub_v[b] = 1'b1;
@@ -3475,7 +3496,7 @@ module mempool_group_mshr
         end
         if (BankPublish && bank_pub_v[b]) begin
           drain_published[b * MshrWaysPerBank + int'(bank_pub_w[b])] = 1'b1;
-          bank_rr_d[b] = VictimPtrW'((int'(bank_pub_w[b]) + 1) % MshrWaysPerBank);
+          bank_rr_d[b] = VictimPtrW'(bank_pub_w[b] + VictimPtrW'(1));
         end
       end
 
@@ -3508,8 +3529,8 @@ module mempool_group_mshr
             //     then the first eligible sub-request inside it. Two small rotated priority encodes
             //     (MshrNum-wide, then MshrMergeReqs-wide) reproduce that, at ~log2 depth instead of
             //     512 sequential stages.
-            drain_sel_base     = EnableRrFairness ? int'(drain_mshr_rr_q) : 0;
-            drain_sel_sub_base = EnableRrFairness ? int'(subreq_rr_q) : 0;
+            drain_sel_base     = EnableRrFairness ? MshrIdxW'(drain_mshr_rr_q) : '0;
+            drain_sel_sub_base = EnableRrFairness ? SubIdxW'(subreq_rr_q) : '0;
             // Per-entry: does this entry offer any sub-request eligible for THIS port?
             // PPA: the five port-independent terms and the PD2 port ternary are precomputed once
             // above (drain_sub_ready / _tile / _port), so this is now two narrow equalities per
@@ -3539,21 +3560,20 @@ module mempool_group_mshr
             // Equivalence proven exhaustively before the rewrite: all MshrNum rotation
             // bases x 25600 candidate vectors (corner, random and sparse), comparing BOTH
             // outputs -- including drain_win_e when no candidate exists. 0 mismatches.
-            drain_cand_rot = (drain_sel_base == 0)
-                           ? drain_ent_cand
-                           : ((drain_ent_cand >> drain_sel_base) |
-                              (drain_ent_cand << (MshrNum - drain_sel_base)));
+            // A5: one shifter over the doubled vector. Bit-identical to the old guarded pair of
+            // shifters including base==0, where the guard was already semantically redundant.
+            drain_cand_rot = MshrNum'({drain_ent_cand, drain_ent_cand} >> drain_sel_base);
             drain_pfx = drain_cand_rot;
             for (int st = 1; st < MshrNum; st = st << 1) begin
               drain_pfx = drain_pfx | (drain_pfx << st);
             end
             drain_first = drain_pfx & ~(drain_pfx << 1);
-            drain_idx   = 0;
+            drain_idx   = '0;
             for (int b = 0; b < MshrNum; b++) begin
-              if (drain_first[b]) drain_idx |= unsigned'(b);
+              if (drain_first[b]) drain_idx |= MshrIdxW'(b);
             end
             drain_have_e = |drain_ent_cand;
-            drain_win_e  = drain_have_e ? int'((drain_sel_base + drain_idx) % MshrNum) : 0;
+            drain_win_e  = drain_have_e ? MshrIdxW'(drain_sel_base + drain_idx) : '0;
             if (drain_have_e) begin
               // First eligible sub-request inside the winning entry, same rotated order.
               drain_sub_cand = '0;
@@ -3568,9 +3588,9 @@ module mempool_group_mshr
                   drain_sub_cand[s] = 1'b1;
                 end
               end
-              drain_have_s = 1'b0; drain_win_s = 0;
+              drain_have_s = 1'b0; drain_win_s = '0;
               for (int k = 0; k < MshrMergeReqs; k++) begin
-                drain_scan_s = (drain_sel_sub_base + k) % MshrMergeReqs;
+                drain_scan_s = SubIdxW'(drain_sel_sub_base + SubIdxW'(k));
                 if (!drain_have_s && drain_sub_cand[drain_scan_s]) begin
                   drain_have_s = 1'b1; drain_win_s = drain_scan_s;
                 end
@@ -3578,7 +3598,7 @@ module mempool_group_mshr
               if (drain_have_s) begin
                 resp_sel_valid[tile_i][port_i]      = 1'b1;
                 resp_sel_mshr_id[tile_i][port_i]    = mshr_id_t'(drain_win_e);
-                resp_sel_subreq_idx[tile_i][port_i] = drain_win_s[idx_width(MshrMergeReqs)-1:0];
+                resp_sel_subreq_idx[tile_i][port_i] = drain_win_s;   // already SubIdxW wide
               end
             end
           end
@@ -3677,10 +3697,10 @@ module mempool_group_mshr
             resp_sel2_mshr_id[tile_i][port_i]    = '0;
             resp_sel2_subreq_idx[tile_i][port_i] = '0;
             if (!port_taken[tile_i][port_i] && !resp_sel_valid[tile_i][port_i]) begin
-              drain2_base     = EnableRrFairness ? int'(drain_mshr_rr_q) : 0;
+              drain2_base     = EnableRrFairness ? MshrIdxW'(drain_mshr_rr_q) : '0;
               // Hoisted: the sub-request base does not depend on kk/ks, but was previously
               // re-evaluated inside the inner loop on every unrolled iteration.
-              drain2_sub_base = EnableRrFairness ? int'(subreq_rr_q) : 0;
+              drain2_sub_base = EnableRrFairness ? SubIdxW'(subreq_rr_q) : '0;
               // Entry candidates for the second slot: does this entry offer a beat2 sub-request for
               // THIS port? Built with CONSTANT indices, so no entry-array mux is needed here.
               //
@@ -3716,24 +3736,21 @@ module mempool_group_mshr
                 end
               end
               // Rotated first-set entry, parallel prefix (log2(MshrNum) doubling steps).
-              drain2_cand_rot = (drain2_base == 0)
-                              ? drain2_cand
-                              : ((drain2_cand >> drain2_base) |
-                                 (drain2_cand << (MshrNum - drain2_base)));
+              drain2_cand_rot = MshrNum'({drain2_cand, drain2_cand} >> drain2_base);
               drain2_pfx = drain2_cand_rot;
               for (int st = 1; st < MshrNum; st = st << 1) begin
                 drain2_pfx = drain2_pfx | (drain2_pfx << st);
               end
               drain2_first = drain2_pfx & ~(drain2_pfx << 1);
-              drain2_idx   = 0;
+              drain2_idx   = '0;
               for (int b = 0; b < MshrNum; b++) begin
-                if (drain2_first[b]) drain2_idx |= unsigned'(b);
+                if (drain2_first[b]) drain2_idx |= MshrIdxW'(b);
               end
               if (|drain2_cand) begin
-                drain2_mshr_i = int'((drain2_base + drain2_idx) % MshrNum);
+                drain2_mshr_i = MshrIdxW'(drain2_base + drain2_idx);
                 // First eligible sub-request inside the winning entry, same rotated order.
                 for (int ks = 0; ks < MshrMergeReqs; ks++) begin
-                  drain2_s = (drain2_sub_base + ks) % MshrMergeReqs;
+                  drain2_s = SubIdxW'(drain2_sub_base + SubIdxW'(ks));
                   // Reuse the hoisted vectors instead of re-reading mshr_d[drain2_mshr_i] -- a 4-bit
                   // select in place of a full-entry MshrNum:1 struct mux (F8's second half).
                   if (!resp_sel2_valid[tile_i][port_i] &&
@@ -3742,7 +3759,7 @@ module mempool_group_mshr
                       (drain2_sub_port[drain2_mshr_i] == port_i[RespPortIdW-1:0])) begin
                     resp_sel2_valid[tile_i][port_i]      = 1'b1;
                     resp_sel2_mshr_id[tile_i][port_i]    = mshr_id_t'(drain2_mshr_i);
-                    resp_sel2_subreq_idx[tile_i][port_i] = drain2_s[idx_width(MshrMergeReqs)-1:0];
+                    resp_sel2_subreq_idx[tile_i][port_i] = drain2_s;   // already SubIdxW wide
                   end
                 end
               end
