@@ -644,7 +644,9 @@ module mempool_group_mshr
   mshr_id_t[NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]               resp_mshr_id;
   logic    [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]               resp_from_mshr;
   logic    [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]               resp_from_bypass;
+`ifndef TARGET_SYNTHESIS
   mshr_id_t[NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]               resp_mshr_id_dbg;
+`endif
   logic    [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]               port_taken;
 
   // Request decode and merge lookup (per request port).
@@ -712,7 +714,6 @@ module mempool_group_mshr
   mshr_id_t  [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]             resp_sel_mshr_id;
   logic      [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]
              [idx_width(MshrMergeReqs)-1:0]                                    resp_sel_subreq_idx;
-  logic      [MshrNum-1:0][SubReqCountW-1:0]                                   drain_count;
   logic      [MshrNum-1:0][BurstLenWidth-1:0]                                  resp_beat_offset;
   // ParityDrain second-slot scheduling ('0/unused when DrainBeatsPerEntry == 1).
   logic      [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]             resp_sel2_valid;
@@ -857,12 +858,6 @@ module mempool_group_mshr
   logic      [MshrNum-1:0]                                                     resp_head_beat_pending;
   logic      [MshrNum-1:0][RespBufCountW-1:0]                                  resp_cnt_after_pop;
   // Response drain scheduling (single-response per MSHR).
-  logic      [MshrNum-1:0]                                                     drain_subreq_found;
-  logic      [idx_width(MshrMergeReqs)-1:0]                                    drain_subreq_idx [MshrNum-1:0];
-  tile_group_id_t[MshrNum-1:0]                                                 drain_dst_tile;
-  logic      [RespPortIdW-1:0]                                                 drain_dst_port [MshrNum-1:0];
-  logic      [MshrNum-1:0]                                                     drain_port_found;
-  logic      [MshrNum-1:0][MshrMergeReqs-1:0]                                  subreq_claimed;
 
   // ---------------------------------------------------------------------------
   // Round-robin fairness bases (audit M2'/M3/L3). Each is a registered counter
@@ -879,8 +874,8 @@ module mempool_group_mshr
   // EnableRrFairness: 0 forces base=0 -> legacy fixed lowest-index order.
   // rr_arb_tree is deliberately not used: the allocator's contenders map to banks
   // via the data-dependent req_bank[t][p] (would need a 16x32 candidate gather),
-  // and the drain scan has cross-port subreq_claimed coupling + a per-(tile,port)
-  // tile_id/port_id filter over 64x8 pairs -- neither fits a fixed-input arbiter.
+  // and the drain scan has a per-(tile,port) tile_id/port_id filter over 64x8
+  // pairs -- neither fits a fixed-input arbiter.
   // ---------------------------------------------------------------------------
   // (A) M2' allocator: rotate the requester (tile,port) priority axis. Active req
   //     ports are indices 1..NumRemoteReqPortsPerTile-1, flattened to one index.
@@ -1654,17 +1649,24 @@ module mempool_group_mshr
   // mshr_hit_req[e]: is entry e address-hit by some request this cycle? Used by the per-bank free-way
   // reclaim guard to avoid evicting a CACHED entry that a request is about to merge into. Scatter the
   // bank-scoped per-request way hits to absolute entry ids (decoder + OR, no address comparators).
-  always_comb begin
-    mshr_hit_req = '0;
-    for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
-      for (int port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin
-        for (int way_i = 0; way_i < MshrWaysPerBank; way_i++) begin
-          if (req_hit_way[tile_i][port_i][way_i]) begin
-            mshr_hit_req[int'(req_bank[tile_i][port_i]) * MshrWaysPerBank + way_i] = 1'b1;
+  // Generate-scoped on CacheReclaimable: the ONLY reader is the pass-2 reclaim guard below, which
+  // is itself gated on CacheReclaimable. A procedural `if` would still elaborate this 32-port x
+  // 4-way dynamic-index scatter before folding it away; generate scope means it is never built.
+  if (CacheReclaimable) begin : gen_mshr_hit_req
+    always_comb begin
+      mshr_hit_req = '0;
+      for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
+        for (int port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin
+          for (int way_i = 0; way_i < MshrWaysPerBank; way_i++) begin
+            if (req_hit_way[tile_i][port_i][way_i]) begin
+              mshr_hit_req[int'(req_bank[tile_i][port_i]) * MshrWaysPerBank + way_i] = 1'b1;
+            end
           end
         end
       end
     end
+  end else begin : gen_mshr_hit_req_tie
+    assign mshr_hit_req = '0;
   end
 
   // Select the first matching way per request to avoid multi-merge; absolute id = req_bank*ways + way.
@@ -2021,7 +2023,12 @@ module mempool_group_mshr
   end
 `endif
 `endif
-  `FF(victim_rr_q, victim_rr_d, '0)
+  // 16 x VictimPtrW flops that only the CacheReclaimable pass-2 scan reads; tie them off otherwise.
+  if (CacheReclaimable && CacheVictimRR) begin : gen_victim_rr
+    `FF(victim_rr_q, victim_rr_d, '0)
+  end else begin : gen_victim_rr_tie
+    assign victim_rr_q = '0;
+  end
 
   // Round-robin fairness bases: free-running +1 mod-N every cycle, reset '0.
   // Each _d depends ONLY on its own _q (pure mod-N increment), never on any
@@ -2744,6 +2751,12 @@ module mempool_group_mshr
   logic [MshrNum-1:0][MshrMergeReqs-1:0]                      drain_sub_ready;
   tile_group_id_t [MshrNum-1:0][MshrMergeReqs-1:0]            drain_sub_tile;
   logic [MshrNum-1:0][MshrMergeReqs-1:0][RespPortIdW-1:0]     drain_sub_port;
+  // ParityDrain second-slot equivalents. drain2_sub_port is indexed by ENTRY only: both beats of an
+  // entry share one parity port, so it does not vary per sub-request.
+  logic [MshrNum-1:0]                                         drain2_ent_ok;
+  logic [MshrNum-1:0][MshrMergeReqs-1:0]                      drain2_sub_ready;
+  tile_group_id_t [MshrNum-1:0][MshrMergeReqs-1:0]            drain2_sub_tile;
+  logic [MshrNum-1:0][RespPortIdW-1:0]                        drain2_sub_port;
   int                       drain_win_e,     drain_win_s;
   logic                     drain_have_e,    drain_have_s;
   int                       drain_scan_s;                          // A: rotated scan index
@@ -2755,7 +2768,6 @@ module mempool_group_mshr
   logic [MshrNum-1:0]       drain2_pfx, drain2_first;              // A: prefix-OR, isolated LSB
   int unsigned              drain2_idx;                            // A: index within the rotation
   int                       drain2_base, drain2_sub_base, drain2_mshr_i, drain2_s;   // B
-  int                       drain3_base, drain3_sub_base, drain3_mshr_i, drain3_s;   // C
 
   always_comb begin
     int unsigned merge_new_idx;
@@ -2794,7 +2806,9 @@ module mempool_group_mshr
     resp_out_valid = '0;
     resp_from_mshr = '0;
     resp_from_bypass = '0;
+`ifndef TARGET_SYNTHESIS
     resp_mshr_id_dbg = '0;
+`endif
     resp_in_ready = '1;
     mshr_resp_inflight = '0;
 
@@ -2921,7 +2935,9 @@ module mempool_group_mshr
                 // At most one alloc fires per bank per cycle (bank_alloc_taken), so this
                 // per-bank write never conflicts. /,% are shift/bit-select for the power-of-two
                 // ways-per-bank here, not a divider.
-                if (CacheVictimRR) begin
+                // ... and only when pass 2 can actually consume the pointer: the RR victim start is
+                // read exclusively by the reclaim scan, which is gated on CacheReclaimable.
+                if (CacheVictimRR && CacheReclaimable) begin
                   evict_vid = int'(req_alloc_found_mshr_id[tile_i][port_i]);
                   evict_vw  = evict_vid % MshrWaysPerBank;
                   if (mshr_q_valid[evict_vid] && (mshr_q[evict_vid].state == MSHR_CACHED)) begin
@@ -3392,9 +3408,7 @@ module mempool_group_mshr
         end
       end
       for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
-        drain_count[mshr_i] = '0;
         for (int s = 0; s < MshrMergeReqs; s++) begin
-          subreq_claimed[mshr_i][s] = 1'b0;
         end
       end
 
@@ -3472,23 +3486,23 @@ module mempool_group_mshr
             // RR fairness (audit M3/L3): rotate the entry visit by drain_mshr_rr and the sub_req visit
             // by subreq_rr (separate bases) so high-index entries/sub_reqs are not starved. Bounded
             // wait: a pending (entry,sub_req) is a CONTINUOUS candidate (held in DRAIN_RESP until fully
-            // drained), so the marching base reaches it within N. The eligibility predicate, the
-            // per-PHYSICAL-index subreq_claimed cross-port guard, and resp_sel_* are byte-identical;
-            // only the visit order rotates.
+            // drained), so the marching base reaches it within N. The eligibility predicate and
+            // resp_sel_* are byte-identical; only the visit order rotates.
             // TIMING REWRITE (same selection; see the equivalence argument).
             //
             // The legacy form walked all MshrNum entries x MshrMergeReqs sub-requests in rotated
             // order carrying resp_sel_valid, i.e. a 128 x 4 = 512-deep serial first-match chain PER
-            // PORT, and additionally carried subreq_claimed ACROSS the 32 ports -- chaining the
-            // ports to each other as well.
+            // PORT, and additionally carried a `subreq_claimed` flag ACROSS the 32 ports -- chaining
+            // the ports to each other as well.
             //
-            // (1) subreq_claimed is DEAD. A candidate (entry,s) has exactly ONE destination:
-            //     its tile comes from sub_reqs[s].tile_id and its port from either
-            //     map_resp_port_id(sub_reqs[s].port_id) (single) or 1+(beat_offset&1) (PD2 burst).
-            //     No two ports can ever evaluate the same (entry,s), so the flag could never block
-            //     anything; only resp_sel_valid (one pick per port) ever mattered. Dropping it makes
-            //     the 32 ports independent. It is still written below so the existing debug view and
-            //     any waveform reference keep working.
+            // (1) That cross-port flag was DEAD, and has now been removed entirely. A candidate
+            //     (entry,s) has exactly ONE destination: its tile comes from sub_reqs[s].tile_id and
+            //     its port from either map_resp_port_id(sub_reqs[s].port_id) (single) or
+            //     1+(beat_offset&1) (PD2 burst). No two ports can ever evaluate the same (entry,s),
+            //     so the flag could never block anything; only resp_sel_valid (one pick per port)
+            //     ever mattered. Dropping it makes the 32 ports independent.
+            //     THIS INVARIANT IS LOAD-BEARING for the hoisted scans -- see the head-beat and
+            //     drain2 predicate hoists, which rely on it to be port-order-independent.
             // (2) Within a port the scan is entry-major then sub-request-major in fixed rotated
             //     orders, so it is exactly: pick the first ENTRY that has any eligible sub-request,
             //     then the first eligible sub-request inside it. Two small rotated priority encodes
@@ -3565,7 +3579,6 @@ module mempool_group_mshr
                 resp_sel_valid[tile_i][port_i]      = 1'b1;
                 resp_sel_mshr_id[tile_i][port_i]    = mshr_id_t'(drain_win_e);
                 resp_sel_subreq_idx[tile_i][port_i] = drain_win_s[idx_width(MshrMergeReqs)-1:0];
-                subreq_claimed[drain_win_e][drain_win_s]        = 1'b1;  // debug view only; not a guard
               end
             end
           end
@@ -3599,7 +3612,9 @@ module mempool_group_mshr
                 meta_id_t'(resp_beat_offset[resp_sel_mshr_id[tile_i][port_i]]);
             resp_out[tile_i][port_i].rdata.amo = '0;  // sub-requests are loads by construction (req_is_load)
             resp_from_mshr[tile_i][port_i] = 1'b1;
+`ifndef TARGET_SYNTHESIS
             resp_mshr_id_dbg[tile_i][port_i] = resp_sel_mshr_id[tile_i][port_i];
+`endif
 
             if (resp_out_ready[tile_i][port_i]) begin
               mshr_d[resp_sel_mshr_id[tile_i][port_i]].beat_pending[
@@ -3618,8 +3633,6 @@ module mempool_group_mshr
                 mshr_d[resp_sel_mshr_id[tile_i][port_i]].sub_reqs[
                     resp_sel_subreq_idx[tile_i][port_i]].valid = 1'b0;
               end
-              drain_count[resp_sel_mshr_id[tile_i][port_i]] =
-                  drain_count[resp_sel_mshr_id[tile_i][port_i]] + 1'b1;
             end
           end
         end
@@ -3631,6 +3644,33 @@ module mempool_group_mshr
       // head selection left free. Serving the same (entry, sub) on both ports in one cycle is
       // the intended 2-wide delivery. Entire block const-folds out when PD2=0.
       if (PD2) begin
+        // ---- Hoist the port-independent half of the second-slot test (mirror of the head-beat
+        // hoist above). Computed ONCE here and shared by all NumTilesPerGroup x (ports-1) select
+        // instances instead of re-evaluated in each.
+        //
+        // WHY THIS IS SAFE, and it is not the same argument as the head-beat one:
+        // the PD2 SELECT loop below writes only drain2_* scratch and resp_sel2_*, and closes before
+        // the separate DRIVE loop that clears beat_pending2. So every select iteration already
+        // observes identical entry state -- the hoist is bit-identical by construction, not by an
+        // appeal to the one-destination-per-sub-request invariant.
+        //
+        // Placed AFTER the head-beat drive on purpose: the head drive clears sub_reqs[].valid for
+        // burst_len==1 entries, and hoisting to the top of the process would freeze the predicate
+        // ahead of that. Here it captures exactly the state the per-port scan used to read.
+        for (int e = 0; e < MshrNum; e++) begin
+          drain2_ent_ok[e]   = mshr_d_valid[e] &&
+                               (mshr_d[e].state == MSHR_DRAIN_RESP) &&
+                               (mshr_d[e].burst_len != BurstLenWidth'(1)) &&
+                               (mshr_d[e].resp_buf_cnt >= RespBufCountW'(2)) &&
+                               mshr_d[e].beat2_armed;
+          // Entry-level, not per-sub-request: both beats of an entry share one parity port.
+          drain2_sub_port[e] = RespPortIdW'(1) + RespPortIdW'(resp_beat_offset2[e][0]);
+          for (int s = 0; s < MshrMergeReqs; s++) begin
+            drain2_sub_ready[e][s] = drain2_ent_ok[e] && mshr_d[e].sub_reqs[s].valid &&
+                                     mshr_d[e].beat_pending2[s];
+            drain2_sub_tile[e][s]  = mshr_d[e].sub_reqs[s].tile_id;
+          end
+        end
         for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
           for (int port_i = 1; port_i < NumRemoteRespPortsPerTile; port_i++) begin
             resp_sel2_valid[tile_i][port_i]      = 1'b0;
@@ -3654,31 +3694,24 @@ module mempool_group_mshr
               // pair in rotated order, which is exactly the first entry offering any eligible
               // sub-request followed by the first eligible sub-request inside it. Same shape as the
               // head-beat selection above, and the same exhaustively-proven prefix encode.
-              // PPA: same hoist as the head-beat scan -- the seven port-independent terms and the
-              // second-slot destination port are precomputed once per (entry, sub-request) in
-              // here. This scan is the SECOND 256-pair sweep inside the same (tile,port) loops, so
-              // the module was doing 512 per instance -- 16,384 per group at 8x8, not 8,192.
-              // NOT hoisted, deliberately. The head-beat scan can be lifted out of the
-              // (tile,port) loop because each sub-request has exactly one destination port, so no
-              // two instances contend for it. THAT INVARIANT DOES NOT HOLD HERE: the second-slot
-              // index is chosen per (tile,port) and the loop CLEARS beat_pending2 as it goes
-              // (see the write further down this same loop). Precomputing this test once would
-              // let every later port see a slot an earlier port already claimed.
+              // PPA: hoisted, like the head-beat scan -- the entry-invariant terms and the
+              // second-slot destination port are precomputed once above, outside these loops.
+              // This scan is the SECOND 256-pair sweep inside the same (tile,port) loops, so the
+              // module was doing 512 per instance -- 16,384 per group, not 8,192.
+              //
+              // An earlier revision of this comment claimed the hoist was UNSAFE here, on the
+              // grounds that "the loop CLEARS beat_pending2 as it goes". It does not: the clear
+              // lives in the DRIVE loop, which is a SEPARATE (tile,port) loop that begins only
+              // after this select loop has closed. The select loop writes nothing this predicate
+              // reads, so all iterations see identical state. Verified by enumerating every
+              // left-hand side in the select loop body.
               drain2_cand = '0;
               for (int e = 0; e < MshrNum; e++) begin
-                if (mshr_d_valid[e] &&
-                    (mshr_d[e].state == MSHR_DRAIN_RESP) &&
-                    (mshr_d[e].burst_len != BurstLenWidth'(1)) &&
-                    (mshr_d[e].resp_buf_cnt >= RespBufCountW'(2)) &&
-                    mshr_d[e].beat2_armed) begin
-                  for (int s = 0; s < MshrMergeReqs; s++) begin
-                    if (mshr_d[e].sub_reqs[s].valid &&
-                        mshr_d[e].beat_pending2[s] &&
-                        (mshr_d[e].sub_reqs[s].tile_id == tile_group_id_t'(tile_i)) &&
-                        ((RespPortIdW'(1) + RespPortIdW'(resp_beat_offset2[e][0])) ==
-                         port_i[RespPortIdW-1:0])) begin
-                      drain2_cand[e] = 1'b1;
-                    end
+                for (int s = 0; s < MshrMergeReqs; s++) begin
+                  if (drain2_sub_ready[e][s] &&
+                      (drain2_sub_tile[e][s] == tile_group_id_t'(tile_i)) &&
+                      (drain2_sub_port[e] == port_i[RespPortIdW-1:0])) begin
+                    drain2_cand[e] = 1'b1;
                   end
                 end
               end
@@ -3701,12 +3734,12 @@ module mempool_group_mshr
                 // First eligible sub-request inside the winning entry, same rotated order.
                 for (int ks = 0; ks < MshrMergeReqs; ks++) begin
                   drain2_s = (drain2_sub_base + ks) % MshrMergeReqs;
+                  // Reuse the hoisted vectors instead of re-reading mshr_d[drain2_mshr_i] -- a 4-bit
+                  // select in place of a full-entry MshrNum:1 struct mux (F8's second half).
                   if (!resp_sel2_valid[tile_i][port_i] &&
-                      mshr_d[drain2_mshr_i].sub_reqs[drain2_s].valid &&
-                      mshr_d[drain2_mshr_i].beat_pending2[drain2_s] &&
-                      (mshr_d[drain2_mshr_i].sub_reqs[drain2_s].tile_id == tile_group_id_t'(tile_i)) &&
-                      ((RespPortIdW'(1) + RespPortIdW'(resp_beat_offset2[drain2_mshr_i][0])) ==
-                       port_i[RespPortIdW-1:0])) begin
+                      drain2_sub_ready[drain2_mshr_i][drain2_s] &&
+                      (drain2_sub_tile[drain2_mshr_i][drain2_s] == tile_group_id_t'(tile_i)) &&
+                      (drain2_sub_port[drain2_mshr_i] == port_i[RespPortIdW-1:0])) begin
                     resp_sel2_valid[tile_i][port_i]      = 1'b1;
                     resp_sel2_mshr_id[tile_i][port_i]    = mshr_id_t'(drain2_mshr_i);
                     resp_sel2_subreq_idx[tile_i][port_i] = drain2_s[idx_width(MshrMergeReqs)-1:0];
@@ -3734,11 +3767,12 @@ module mempool_group_mshr
                   meta_id_t'(resp_beat_offset2[drain2_sel_e2]);
               resp_out[tile_i][port_i].rdata.amo = '0;  // sub-requests are loads by construction (req_is_load)
               resp_from_mshr[tile_i][port_i] = 1'b1;
+`ifndef TARGET_SYNTHESIS
               resp_mshr_id_dbg[tile_i][port_i] = drain2_sel_e2;
+`endif
               port_taken[tile_i][port_i] = 1'b1;
               if (resp_out_ready[tile_i][port_i]) begin
                 mshr_d[drain2_sel_e2].beat_pending2[resp_sel2_subreq_idx[tile_i][port_i]] = 1'b0;
-                drain_count[drain2_sel_e2] = drain_count[drain2_sel_e2] + 1'b1;
               end
             end
           end
@@ -3749,80 +3783,6 @@ module mempool_group_mshr
         resp_sel2_subreq_idx = '0;
       end
 
-    end else begin
-      // Original behavior: one sub-request per MSHR per cycle.
-      // (ParityDrain is only implemented for the DrainMultiPort=1 drain; keep its selects idle.)
-      resp_sel2_valid      = '0;
-      resp_sel2_mshr_id    = '0;
-      resp_sel2_subreq_idx = '0;
-      for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
-        for (int port_i = 1; port_i < NumRemoteRespPortsPerTile; port_i++) begin
-          // M4 (audit): bypass MUST take the port (non-backpressurable); MSHR drain is buffered and
-          // bounded by finite bypass arrivals -- strict priority, not rotated. See the DrainMultiPort=1
-          // path above for the full rationale. (This =0 path is inactive when DrainMultiPort=1.)
-          port_taken[tile_i][port_i] = resp_in_valid[tile_i][port_i] &&
-                                       !resp_is_mshr[tile_i][port_i];
-        end
-      end
-
-      // RR fairness (audit M3): rotate the entry visit (mirror of the DrainMultiPort=1 path; inactive
-      // when DrainMultiPort=1, kept aligned so the two paths do not silently diverge).
-      drain3_base     = EnableRrFairness ? int'(drain_mshr_rr_q) : 0;
-      // Hoisted out of both loops: neither base depends on kk or ks.
-      drain3_sub_base = EnableRrFairness ? int'(subreq_rr_q) : 0;
-      for (int kk = 0; kk < MshrNum; kk++) begin
-        drain3_mshr_i = (drain3_base + kk) % MshrNum;
-        drain_subreq_found[drain3_mshr_i] = 1'b0;
-        drain_subreq_idx[drain3_mshr_i] = '0;
-        drain_dst_tile[drain3_mshr_i] = '0;
-        drain_dst_port[drain3_mshr_i] = '0;
-        drain_port_found[drain3_mshr_i] = 1'b0;
-        if (mshr_d_valid[drain3_mshr_i] && (mshr_d[drain3_mshr_i].resp_buf_cnt != '0) &&
-            mshr_d[drain3_mshr_i].state == MSHR_DRAIN_RESP) begin
-          // RR fairness (audit L3): rotate the sub_req visit, keep the first-match break.
-          for (int ks = 0; ks < MshrMergeReqs; ks++) begin
-            drain3_s = (drain3_sub_base + ks) % MshrMergeReqs;
-            if (mshr_d[drain3_mshr_i].sub_reqs[drain3_s].valid &&
-                mshr_d[drain3_mshr_i].beat_pending[drain3_s]) begin
-              drain_subreq_found[drain3_mshr_i] = 1'b1;
-              drain_subreq_idx[drain3_mshr_i] = drain3_s[idx_width(MshrMergeReqs)-1:0];
-              break;
-            end
-          end
-
-          if (drain_subreq_found[drain3_mshr_i]) begin
-            drain_dst_tile[drain3_mshr_i] = mshr_d[drain3_mshr_i].sub_reqs[drain_subreq_idx[drain3_mshr_i]].tile_id;
-            drain_dst_port[drain3_mshr_i] =
-                map_resp_port_id(mshr_d[drain3_mshr_i].sub_reqs[drain_subreq_idx[drain3_mshr_i]].port_id);
-            if (!port_taken[drain_dst_tile[drain3_mshr_i]][drain_dst_port[drain3_mshr_i]]) begin
-              drain_port_found[drain3_mshr_i] = 1'b1;
-            end
-
-            if (drain_port_found[drain3_mshr_i]) begin
-              resp_out_valid[drain_dst_tile[drain3_mshr_i]][drain_dst_port[drain3_mshr_i]] = 1'b1;
-              resp_out[drain_dst_tile[drain3_mshr_i]][drain_dst_port[drain3_mshr_i]].wen = 1'b0;
-              resp_out[drain_dst_tile[drain3_mshr_i]][drain_dst_port[drain3_mshr_i]].rdata.data =
-                  mshr_d[drain3_mshr_i].resp_buf[mshr_d[drain3_mshr_i].resp_buf_rd_ptr].data;
-              resp_out[drain_dst_tile[drain3_mshr_i]][drain_dst_port[drain3_mshr_i]].rdata.core_id =
-                  mshr_d[drain3_mshr_i].sub_reqs[drain_subreq_idx[drain3_mshr_i]].core_id;
-              resp_out[drain_dst_tile[drain3_mshr_i]][drain_dst_port[drain3_mshr_i]].rdata.meta_id =
-                  mshr_d[drain3_mshr_i].sub_reqs[drain_subreq_idx[drain3_mshr_i]].meta_id_base +
-                  meta_id_t'(resp_beat_offset[drain3_mshr_i]);
-              resp_out[drain_dst_tile[drain3_mshr_i]][drain_dst_port[drain3_mshr_i]].rdata.amo = '0;
-              resp_from_mshr[drain_dst_tile[drain3_mshr_i]][drain_dst_port[drain3_mshr_i]] = 1'b1;
-              resp_mshr_id_dbg[drain_dst_tile[drain3_mshr_i]][drain_dst_port[drain3_mshr_i]] = mshr_id_t'(drain3_mshr_i);
-
-              if (resp_out_ready[drain_dst_tile[drain3_mshr_i]][drain_dst_port[drain3_mshr_i]]) begin
-                mshr_d[drain3_mshr_i].beat_pending[drain_subreq_idx[drain3_mshr_i]] = 1'b0;
-                if (mshr_d[drain3_mshr_i].burst_len == BurstLenWidth'(1)) begin
-                  mshr_d[drain3_mshr_i].sub_reqs[drain_subreq_idx[drain3_mshr_i]].valid = 1'b0;
-                end
-              end
-              port_taken[drain_dst_tile[drain3_mshr_i]][drain_dst_port[drain3_mshr_i]] = 1'b1;
-            end
-          end
-        end
-      end
     end
 
     // Finalize response draining per beat.
