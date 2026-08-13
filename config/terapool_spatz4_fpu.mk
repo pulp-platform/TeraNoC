@@ -214,7 +214,25 @@ group_mshr_hold_prescale_w ?= 4
 # Cost is purely latency: an entry that becomes drainable in cycle N is seen in N+1. Safe because
 # each sub-request has exactly one destination (tile, port), so a stale view cannot let two ports
 # drain the same sub-request. 0 = off (bit-identical to before), 1 = registered scan.
-group_mshr_drain_from_q ?= 0
+#
+# DEFAULT IS 1 BECAUSE THE 0 PATH IS NOT PHYSICALLY FEASIBLE, not because it is faster.
+# At 0 the drain arbitration is rooted behind the whole mshr_d update network (~132 dynamic-index
+# writes into the 64-entry array, in program order) and does not close timing. At 1 it is rooted at
+# flop outputs. This is a closure requirement; the cycle effect is the price, not the reason.
+#
+# Measured cycle cost at 4x4 (matched pairs, same ELF, single define apart):
+#     256x512x256    34,715 -> 34,577   -0.40%   (faster)
+#     1024x128x128   60,447 -> 59,548   -1.49%   (faster)
+#     128x1024x512   67,529 -> 68,713   +1.75%   (SLOWER -- the near-roofline shape, 97% -> 95%)
+#     512x512x512    pending
+# So the worst case is +1.75% cycles. Since wall-clock is cycles x period, enabling this pays for
+# itself as long as the registered scan buys more than ~1.75% of Fmax -- and if the 0 path cannot
+# close at all, the comparison is against a design that does not exist.
+#
+# NOTE FOR FUTURE EQUIVALENCE RUNS: the 34,715-cycle reference was taken at drain_from_q=0. With
+# this default at 1 the baseline for 256x512x256 is 34,577; do not compare a new arm against 34,715
+# unless it explicitly sets group_mshr_drain_from_q=0.
+group_mshr_drain_from_q ?= 1
 
 # opt3: each MSHR bank publishes ONE entry per cycle (round-robin over its ways),
 # port-independently. Preserves multicast (an entry, not a sub-request, is published)
