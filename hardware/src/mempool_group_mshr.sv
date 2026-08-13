@@ -3640,15 +3640,19 @@ module mempool_group_mshr
             end
             if (drain_have_e) begin
               // First eligible sub-request inside the winning entry, same rotated order.
+              // B1: select from the hoisted vectors rather than re-deriving the predicate from
+              // mshr_d[drain_win_e]. The old form was a full-entry MshrNum:1 struct mux per
+              // (tile,port) -- F8's "select elig_all[drain_win_e]" -- and is replaced by a
+              // MshrMergeReqs-wide read of values already computed once per entry.
+              //
+              // drain_sub_ready additionally carries drain_ent_ok, which the old predicate did not
+              // test. That is redundant, not a change: drain_win_e is a winning candidate, so its
+              // entry-level terms already hold. Same argument as the drain2 sub-scan.
               drain_sub_cand = '0;
               for (int s = 0; s < MshrMergeReqs; s++) begin
-                if (mshr_d[drain_win_e].sub_reqs[s].valid && mshr_d[drain_win_e].beat_pending[s] &&
-                    (mshr_d[drain_win_e].sub_reqs[s].tile_id == tile_group_id_t'(tile_i)) &&
-                    ((PD2 && (mshr_d[drain_win_e].burst_len != BurstLenWidth'(1)))
-                         ? ((RespPortIdW'(1) + RespPortIdW'(resp_beat_offset[drain_win_e][0])) ==
-                            port_i[RespPortIdW-1:0])
-                         : (map_resp_port_id(mshr_d[drain_win_e].sub_reqs[s].port_id) ==
-                            port_i[RespPortIdW-1:0]))) begin
+                if (drain_sub_ready[drain_win_e][s] &&
+                    (drain_sub_tile[drain_win_e][s] == tile_group_id_t'(tile_i)) &&
+                    (drain_sub_port[drain_win_e][s] == port_i[RespPortIdW-1:0])) begin
                   drain_sub_cand[s] = 1'b1;
                 end
               end
