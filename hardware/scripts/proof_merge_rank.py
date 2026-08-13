@@ -78,7 +78,7 @@ def run(nports, nentries, MERGE_REQS, trials, rng):
                 break
     return bad
 
-if __name__ == "__main__":
+def run_slot_proof():
     rng = random.Random(20260813)
     total_bad = 0
     # This config: 16 tiles x 2 req ports = 32 merging ports, MshrMergeReqs = 8.
@@ -107,7 +107,7 @@ if __name__ == "__main__":
                             print(f"    MISMATCH MR={MR} start={start} t={targets} r={ready}")
                             print(f"      serial={s}  parallel={p}")
     print(f"  exhaustive small case: {'MATCHES' if ex_bad == 0 else f'{ex_bad} MISMATCHES'}")
-    sys.exit(1 if (total_bad or ex_bad) else 0)
+    return total_bad + ex_bad
 
 
 # ---------------------------------------------------------------------------
@@ -157,4 +157,8 @@ def run_state_proof(trials=200000, seed=20260814):
     return bad
 
 if __name__ == "__main__":
-    sys.exit(1 if run_state_proof() else 0)
+    print("  === section 1: slot assignment and count accumulation ===")
+    bad1 = run_slot_proof()
+    print("\n  === section 2: state transitions ===")
+    bad2 = run_state_proof()
+    sys.exit(1 if (bad1 or bad2) else 0)
