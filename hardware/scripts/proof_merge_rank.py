@@ -156,9 +156,89 @@ def run_state_proof(trials=200000, seed=20260814):
           f"{'ALL MATCH' if bad == 0 else f'{bad} MISMATCHES'}")
     return bad
 
-if __name__ == "__main__":
+def _main():
+    # NOTE: section 3 lives below and used to sit behind its OWN `if __name__` block, which the
+    # sys.exit() here made unreachable -- the same defect fd655237 fixed for sections 1/2. One
+    # entry point now, so adding a section cannot silently stop it from running.
     print("  === section 1: slot assignment and count accumulation ===")
     bad1 = run_slot_proof()
     print("\n  === section 2: state transitions ===")
     bad2 = run_state_proof()
-    sys.exit(1 if (bad1 or bad2) else 0)
+    bad3 = _section3_report()
+    sys.exit(1 if (bad1 or bad2 or bad3) else 0)
+
+
+# =============================================================================
+# SECTION 3 (added 2026-08-14, after an external review found a REAL bug this
+# script had missed): BOUNDED-WIDTH rank and slot.
+#
+# Why sections 1-2 could not see it. They model rank and slot as Python ints --
+# unbounded. The shipped RTL stored both in SubReqCountW = idx_width(MergeReqs+1)
+# bits, and computed the rank as SubReqCountW'($countones(<32-bit mask>)). So a
+# rank above the field range WRAPPED, slot = sub_reqs_num + rank wrapped again,
+# and the capacity check ran on the wrapped value: a slot that wrapped to a small
+# number PASSES the check and overwrites a LIVE sub_reqs[] record, orphaning the
+# owner's response. Modelling the arithmetic as unbounded hides exactly this.
+#
+# Lesson worth keeping: an equivalence proof must model the WIDTHS the RTL uses,
+# not just the algorithm. This section fails against the old widths and passes
+# against the fix (saturate rank at MergeReqs; size rank/slot for 2*MergeReqs).
+# =============================================================================
+
+def _w(n):
+    import math
+    return max(1, math.ceil(math.log2(n)))
+
+
+def section3(merge_reqs, alloc_slots=32, trials=200000, buggy=False, seed=99):
+    """Return the first counterexample where the bounded form corrupts a live slot."""
+    import random
+    rnd = random.Random(seed)
+    sub_w = _w(merge_reqs + 1)
+    if buggy:
+        rank_w = slot_w = sub_w                      # the shipped widths
+    else:
+        rank_w = slot_w = _w(2 * merge_reqs + 1)     # the fix
+    cnt_w = _w(alloc_slots + 1)
+
+    for _ in range(trials):
+        num = rnd.randint(0, merge_reqs)             # registered sub_reqs_num
+        true_rank = rnd.randint(0, alloc_slots - 1)  # capacity-BLIND, so it can be large
+
+        if buggy:
+            rank = true_rank % (1 << rank_w)
+        else:
+            raw = true_rank % (1 << cnt_w)
+            rank = merge_reqs if raw >= merge_reqs else raw   # saturate
+
+        slot = (num + rank) % (1 << slot_w)
+        accepted = (slot + 1) <= merge_reqs
+
+        # Reference: unbounded arithmetic, the intended behaviour.
+        ref_slot = num + true_rank
+        ref_accepted = (ref_slot + 1) <= merge_reqs
+
+        if accepted != ref_accepted or (accepted and slot != ref_slot):
+            return dict(merge_reqs=merge_reqs, sub_reqs_num=num, true_rank=true_rank,
+                        rank=rank, slot=slot, accepted=accepted,
+                        ref_slot=ref_slot, ref_accepted=ref_accepted,
+                        corrupts_live_slot=accepted and slot < num)
+    return None
+
+
+def _section3_report():
+    print("\n  === section 3: bounded-width rank/slot ===")
+    any_fix_fail = False
+    for mr in (4, 8, 16):
+        bad = section3(mr, buggy=True)
+        good = section3(mr, buggy=False)
+        print(f"\n  merge_reqs={mr}")
+        print(f"    OLD widths   {'FAIL (bug reproduced) -> ' + str(bad) if bad else 'pass -- raise trials'}")
+        print(f"    FIXED widths {'pass' if good is None else 'FAIL -> ' + str(good)}")
+        if good is not None:
+            any_fix_fail = True
+    return any_fix_fail
+
+
+if __name__ == '__main__':
+    _main()

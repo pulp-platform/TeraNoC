@@ -328,6 +328,32 @@ module mempool_group_mshr
   if ((RespWaitSubsSingle || !CacheReclaimable) && (ServeTimeout == 0))
     $error("[mempool_group_mshr] group_mshr_resp_wait_subs_single=1 or group_mshr_cache_reclaimable=0 requires group_mshr_serve_timeout > 0 (no release path otherwise).");
   localparam int unsigned SubReqCountW     = idx_width(MshrMergeReqs + 1);
+  // C1 FIX (2026-08-14): the merge rank and slot need their OWN width, not SubReqCountW.
+  //
+  // The bug: merge_rank was SubReqCountW and took `SubReqCountW'($countones(mask))` over a
+  // NumAllocSlots-wide (32) mask, so a rank above SubReqCountW's range wrapped mod 2**SubReqCountW;
+  // merge_slot = sub_reqs_num + rank then wrapped again. The capacity check runs on the WRAPPED
+  // slot, so a wrapped-to-small slot PASSES and the port overwrites a live sub_reqs[] record --
+  // destroying the owner's tile/core/meta, which then never receives its response. Reachable at
+  // every shipping merge_reqs (4/8/16), because req_merge_ready is unconditionally 1 and
+  // req_merge_valid tests only an address/state hit, so the rank mask is capacity-BLIND and counts
+  // ports that could never be accepted.
+  //
+  // Why the pre-C1 form was safe: it read the RUNNING mshr_d[..].sub_reqs_num, which the capacity
+  // check itself clamps at MshrMergeReqs, so no value could ever exceed the field.
+  //
+  // Fix, in two parts, both needed:
+  //   (a) SATURATE the rank at MshrMergeReqs. Exact, not approximate: a port with >= MshrMergeReqs
+  //       earlier same-entry ports has slot >= rank >= MshrMergeReqs, so it fails
+  //       (slot + 1) <= MshrMergeReqs no matter what the true rank is. Every rank at or above the
+  //       cap is therefore behaviourally identical, and clamping loses nothing.
+  //   (b) Size rank and slot to hold 2*MshrMergeReqs, since slot = sub_reqs_num + rank and both
+  //       terms reach MshrMergeReqs after (a). Saturation alone is NOT sufficient -- at
+  //       merge_reqs=4 a saturated rank of 4 plus sub_reqs_num 4 still overflows SubReqCountW.
+  localparam int unsigned MergeRankW      = idx_width(2 * MshrMergeReqs + 1);
+  localparam int unsigned MergeCountW     = idx_width(NumTilesPerGroup *
+                                              ((NumRemoteReqPortsPerTile > 1) ?
+                                               (NumRemoteReqPortsPerTile - 1) : 1) + 1);
   // served_cnt only has to reach the larger sharing target, where it saturates.
   localparam int unsigned ServedCntMax     = (HoldSubsSingle > HoldSubsBurst)
                                              ? HoldSubsSingle : HoldSubsBurst;
@@ -725,7 +751,7 @@ module mempool_group_mshr
   // of only the first gives the same result). Prerequisite verified against this file: state,
   // sub_reqs_num and served_cnt are written ZERO times before the merge door, so mshr_d == mshr_q
   // for exactly the fields read here.
-  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][SubReqCountW-1:0]                merge_rank;
+  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MergeRankW-1:0]                  merge_rank;
   logic                                                                                           amo_invalidate;
 
   // Request allocation (banked allocator bookkeeping).
@@ -940,7 +966,8 @@ module mempool_group_mshr
   // C1: sized by NumAllocSlots, so these must follow it -- declaring them beside req_merge_* (which
   // is ~200 lines earlier) put them ahead of their own width parameter.
   logic [NumAllocSlots-1:0] merge_same_mask;   // earlier ports targeting the SAME entry
-  logic [SubReqCountW-1:0]  merge_slot;        // q.sub_reqs_num + this port's rank
+  logic [MergeRankW-1:0]    merge_slot;        // q.sub_reqs_num + this port's rank (cannot wrap)
+  logic [MergeCountW-1:0]   merge_rank_raw;    // untruncated population count, before saturation
   logic [AllocRrW-1:0]      alloc_rr_q, alloc_rr_d;
   // (B) M3 drain: rotate the MSHR-entry scan axis (MshrNum entries).
   localparam int unsigned DrainMshrRrW = idx_width(MshrNum);
@@ -2924,7 +2951,10 @@ module mempool_group_mshr
             end
           end
         end
-        merge_rank[t][p] = SubReqCountW'($countones(merge_same_mask));
+        // Saturate rather than truncate -- see MergeRankW above for why this is exact.
+        merge_rank_raw   = MergeCountW'($countones(merge_same_mask));
+        merge_rank[t][p] = (merge_rank_raw >= MergeCountW'(MshrMergeReqs)) ?
+                           MergeRankW'(MshrMergeReqs) : MergeRankW'(merge_rank_raw);
       end
     end
 
@@ -2947,9 +2977,9 @@ module mempool_group_mshr
                          merge_rank[tile_i][port_i];
             req_in_ready[tile_i][port_i] =
                 req_merge_ready[tile_i][port_i] &&
-                ((merge_slot + SubReqCountW'(1)) <= MshrMergeReqs);
+                ((merge_slot + MergeRankW'(1)) <= MergeRankW'(MshrMergeReqs));
             if (req_in_ready[tile_i][port_i]) begin
-              if ((merge_slot + SubReqCountW'(1)) <= MshrMergeReqs) begin
+              if ((merge_slot + MergeRankW'(1)) <= MergeRankW'(MshrMergeReqs)) begin
 `ifndef TARGET_SYNTHESIS
                 if (EnableRespCache &&
                     (mshr_q[req_merge_mshr_id[tile_i][port_i]].state == MSHR_CACHED)) begin
@@ -2968,8 +2998,9 @@ module mempool_group_mshr
                     req_in[tile_i][port_i].wdata.meta_id;
                 // Ports are visited in increasing order, so the LAST accepted port -- the one with the
                 // highest rank -- writes the correct final count. No separate accumulator needed.
+                // Guarded by the capacity check above, so this always fits SubReqCountW.
                 mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num =
-                    merge_slot + SubReqCountW'(1);
+                    SubReqCountW'(merge_slot + MergeRankW'(1));
                 // Cache self-invalidate: count this merged sub-request toward the sharing target.
                 mshr_d[req_merge_mshr_id[tile_i][port_i]].served_cnt =
                     mshr_q[req_merge_mshr_id[tile_i][port_i]].served_cnt +
@@ -2991,7 +3022,7 @@ module mempool_group_mshr
                 end else if (
                     RespWaitSubsSingle &&
                     (mshr_q[req_merge_mshr_id[tile_i][port_i]].state == MSHR_RESP_HOLD) &&
-                    ((merge_slot + SubReqCountW'(1)) >=
+                    ((merge_slot + MergeRankW'(1)) >=
                      SubReqCountW'(HoldSubsSingle))) begin
                   // The merge that landed this cycle reached the response-release target.
                   mshr_d[req_merge_mshr_id[tile_i][port_i]].state = MSHR_DRAIN_RESP;
