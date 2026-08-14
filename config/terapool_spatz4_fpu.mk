@@ -53,7 +53,26 @@ noc_routing_algorithm ?= 0
 
 # NoC remapping configuration
 # 0: no remapping, 1: req remapping, 2: resp remapping 3: req+resp remapping
-noc_router_remapping ?= 0
+#
+# 2 (response remapping) is the default as of 2026-08-14, by decision -- it aligns 4x4 with
+# terapool_spatz4_fpu_backend_8x8.mk, which has pinned 2 for some time, so both meshes now differ
+# in the thing under test rather than in the remapper as well.
+#
+# CAVEAT, recorded so this is not mistaken for a measured optimum. The note in
+# terapool_spatz4_fpu_8x8_gbar511r2.mk states that remapping=2 has NO throughput evidence at 8x8:
+# its reputation comes from arm FGIR2's 85.2% utilisation plateau -- the best in that sweep -- but
+# plateau correlates +0.82 with being SLOWER across all eight completions there, and no remap=2 arm
+# had ever finished. fpugir2 also reached ~90.5% cumulative and then DEGRADED to 86.8% after ~35
+# periods, with a different group stalling each period. That evidence is 8x8 and about throughput;
+# it says nothing about 4x4 or about area.
+#
+# What it does cost physically: gen_resp_remapping in mempool_group_floonoc_wrapper.sv:576
+# elaborates only for values 2 and 3, so this adds the response remapper to every group. That is a
+# real area delta the backend will now see -- intended, but it is a change to what gets synthesised.
+#
+# The three in-flight PPA sweeps were all built with 0 and are NOT comparable to builds made after
+# this commit. Re-baseline before comparing across it.
+noc_router_remapping ?= 2
 
 # Hash-based port spreading at tile level (bitmask)
 #   bit0 (1): req port hash     — spread req across remote req ports

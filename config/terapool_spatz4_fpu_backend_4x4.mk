@@ -7,7 +7,7 @@
 #   mesh          4x4, num_cores 256, num_groups 16, 1 core/tile
 #   NoC channels  baseline: rd 0 + rdwr 2 request, 2 response
 #   MSHR hold     2047 (window_burst and serve_timeout)
-#   router remap  0 (off)
+#   router remap  2 (response remapping, inherited from the base)
 #
 # ONLY THE HOLD WINDOW DIFFERS FROM THE BASE FLAVOUR. terapool_spatz4_fpu.mk already ships every
 # other value this config needs, and its own comments name them as the 512x512x512 presets:
@@ -16,7 +16,7 @@
 #   group_mshr_hold_subs_single = 4   "512x512x512 (default): A 4-way, B 4-way"
 #   group_mshr_hold_subs_burst  = 4
 #   group_mshr_bank_shift_burst = 7   "512x512x512 (default): P/split_p_count = 512/4 = 128 -> 7"
-#   noc_router_remapping        = 0
+#   noc_router_remapping        = 2   (base default since 2026-08-14)
 #   channel_config_mode         = baseline  (rd 0 + rdwr 2, resp 2)
 #
 # So this file sets two knobs and inherits the rest. Do NOT copy the base's values in here: a

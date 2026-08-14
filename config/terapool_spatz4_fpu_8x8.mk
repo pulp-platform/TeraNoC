@@ -53,7 +53,17 @@ noc_routing_algorithm ?= 0
 
 # NoC remapping configuration
 # 0: no remapping, 1: req remapping, 2: resp remapping 3: req+resp remapping
-noc_router_remapping ?= 0
+#
+# 2 as of 2026-08-14, matching terapool_spatz4_fpu.mk -- one value at every mesh, so 4x4 and 8x8
+# differ in the thing under test and not in the remapper as well. See the base flavour for the
+# full caveat: remapping=2 has NO throughput evidence at 8x8 (FGIR2's 85.2% plateau is its whole
+# reputation, and plateau correlates +0.82 with being SLOWER across the eight completions there),
+# and it adds gen_resp_remapping to every group.
+#
+# CONSEQUENCE: terapool_spatz4_fpu_8x8_r2.mk pinned `:= 2` as its ONLY difference from this file,
+# so that flavour is now identical to this one. Its header still claims one knob differs -- it no
+# longer does.
+noc_router_remapping ?= 2
 
 # Hash-based port spreading at tile level (bitmask)
 #   bit0 (1): req port hash     — spread req across remote req ports
