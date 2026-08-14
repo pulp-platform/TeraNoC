@@ -718,7 +718,6 @@ module mempool_group_mshr
   // sub_reqs_num and served_cnt are written ZERO times before the merge door, so mshr_d == mshr_q
   // for exactly the fields read here.
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][SubReqCountW-1:0]                merge_rank;
-  logic      [NumAllocSlots-1:0]                                                                   merge_same_mask;
   logic                                                                                           amo_invalidate;
 
   // Request allocation (banked allocator bookkeeping).
@@ -930,6 +929,10 @@ module mempool_group_mshr
                                               (NumRemoteReqPortsPerTile - 1) : 1;
   localparam int unsigned NumAllocSlots     = NumTilesPerGroup * NumReqPortsActive;
   localparam int unsigned AllocRrW          = idx_width(NumAllocSlots);
+  // C1: sized by NumAllocSlots, so these must follow it -- declaring them beside req_merge_* (which
+  // is ~200 lines earlier) put them ahead of their own width parameter.
+  logic [NumAllocSlots-1:0] merge_same_mask;   // earlier ports targeting the SAME entry
+  logic [SubReqCountW-1:0]  merge_slot;        // q.sub_reqs_num + this port's rank
   logic [AllocRrW-1:0]      alloc_rr_q, alloc_rr_d;
   // (B) M3 drain: rotate the MSHR-entry scan axis (MshrNum entries).
   localparam int unsigned DrainMshrRrW = idx_width(MshrNum);
@@ -2827,7 +2830,6 @@ module mempool_group_mshr
 
   always_comb begin
     int unsigned merge_new_idx;
-    logic [SubReqCountW-1:0] merge_slot;   // C1: q.sub_reqs_num + this port's rank
     // Defaults
     mshr_d      = mshr_q;
     // Clock-gate write flags. Set on the same line as the write they describe (see the entry
