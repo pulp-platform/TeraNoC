@@ -625,10 +625,6 @@ module mempool_group_mshr
   int unsigned   alloc_victim_rw;
   int unsigned   evict_vid;
   int unsigned   evict_vw;
-  int unsigned   replay_e;
-  int unsigned   replay_rp;
-  int unsigned   replay_rt;
-  logic          replay_hold_done;
   mshr_id_t      drain2_sel_e2;
   mshr_id_t      resp_tag_cand;
   mshr_id_t      rsn_tag_cand;
@@ -940,6 +936,27 @@ module mempool_group_mshr
   // asserted at elaboration, so truncation to these widths is exactly mod-N.
   localparam int unsigned MshrIdxW = idx_width(MshrNum);
   localparam int unsigned SubIdxW  = idx_width(MshrMergeReqs);
+
+  // C3 (F9): per-lane parallel first-match for the hold-the-fetch replay.
+  //
+  // The walker used to visit all MshrNum entries in rotated order, reading req_out_valid at the
+  // owner lane and conditionally writing it -- so stage k+1 observed stage k's claim. A true
+  // MshrNum-deep serial priority chain ending at req_out/req_out_valid, i.e. straight into the NoC
+  // request spill register, with no pipeline stage in between.
+  //
+  // Every entry owns exactly ONE lane (sub_reqs[0].tile_id/port_id), so entries never contend
+  // ACROSS lanes -- only within one, which is precisely what the chain serialised. Each lane can
+  // therefore pick its own winner independently: the first hold-done entry it owns, in the same
+  // rotated order. Same winner, depth MshrNum -> ~log2(MshrNum).
+  //
+  // Same transformation this file already applies at the alloc arbiter (:1710-1722) and the drain
+  // scan, using the mask + LSB-isolate form from B1.
+  logic [MshrNum-1:0]                                        replay_ready;    // hold-done + eligible
+  tile_group_id_t [MshrNum-1:0]                              replay_own_t;
+  logic [MshrNum-1:0][RespPortIdW-1:0]                       replay_own_p;
+  logic [MshrNum-1:0]                                        replay_rr_mask;
+  logic [MshrNum-1:0]                                        replay_cand, replay_hi, replay_lo, replay_win_oh;
+  logic [MshrIdxW-1:0]                                       replay_win_e;
   // B0.3 splits the entry-space rotation base into {bank, way} by bit position. idx_width() floors
   // at 1 for a single-element axis, so with MshrBankNum==1 or MshrWaysPerBank==1 the two halves no
   // longer tile the entry index and the split would silently select the wrong bank.
@@ -3135,31 +3152,52 @@ module mempool_group_mshr
     // lane ever presents a retractable/mutating valid.
     // ------------------------------------------------------------
     if (HoldWindowMax != 0) begin
-      for (int k = 0; k < MshrNum; k++) begin
-        replay_e = 32'(hold_replay_rr_q) + 32'(k);
-        if (replay_e >= MshrNum) replay_e -= MshrNum;
-        if (mshr_d_valid[replay_e] && (mshr_d[replay_e].state == MSHR_WAIT_RESP) &&
-            !mshr_d[replay_e].issued) begin
-          replay_hold_done = (mshr_d[replay_e].hold_cnt == '0) ||
-                      (mshr_d[replay_e].sub_reqs_num >=
-                       SubReqCountW'((mshr_d[replay_e].burst_len == BurstLenWidth'(1)) ?
-                                     HoldSubsSingle : HoldSubsBurst));
-          replay_rt = 32'(mshr_d[replay_e].sub_reqs[0].tile_id);
-          replay_rp = 32'(mshr_d[replay_e].sub_reqs[0].port_id);
-          if (replay_hold_done && !req_out_valid[replay_rt][replay_rp] &&
-              req_out_ready[replay_rt][replay_rp]) begin
-            req_out_valid[replay_rt][replay_rp]         = 1'b1;
-            req_out[replay_rt][replay_rp]               = '0;
-            req_out[replay_rt][replay_rp].wdata.meta_id = mshr_d[replay_e].sub_reqs[0].meta_id_base;
-            req_out[replay_rt][replay_rp].wdata.core_id = mshr_d[replay_e].sub_reqs[0].core_id;
-            req_out[replay_rt][replay_rp].wen           = 1'b0;
-            req_out[replay_rt][replay_rp].be            = '1;
-            req_out[replay_rt][replay_rp].tgt_group_id  = mshr_d[replay_e].tgt_group_id;
-            req_out[replay_rt][replay_rp].tgt_addr      = mshr_d[replay_e].base_addr;
-            req_out[replay_rt][replay_rp].burst_len     = mshr_d[replay_e].burst_len;
-            req_out[replay_rt][replay_rp].mshr_tag      =
-                MshrTagWidth'(replay_e) + MshrTagWidth'(1);
-            mshr_d[replay_e].issued              = 1'b1;
+      // C3 step 1: hold-done and owner lane per ENTRY -- lane-independent, so computed once
+      // instead of re-derived inside a chain.
+      for (int e = 0; e < MshrNum; e++) begin
+        replay_ready[e] = mshr_d_valid[e] && (mshr_d[e].state == MSHR_WAIT_RESP) &&
+                          !mshr_d[e].issued &&
+                          ((mshr_d[e].hold_cnt == '0) ||
+                           (mshr_d[e].sub_reqs_num >=
+                            SubReqCountW'((mshr_d[e].burst_len == BurstLenWidth'(1)) ?
+                                          HoldSubsSingle : HoldSubsBurst)));
+        replay_own_t[e] = mshr_d[e].sub_reqs[0].tile_id;
+        replay_own_p[e] = mshr_d[e].sub_reqs[0].port_id;
+        replay_rr_mask[e] = MshrIdxW'(e) >= MshrIdxW'(hold_replay_rr_q);
+      end
+      // C3 step 2: each lane picks its own winner, in parallel. Lanes are disjoint by construction
+      // (one owner lane per entry), so no lane can steal another's candidate.
+      for (int t = 0; t < NumTilesPerGroup; t++) begin
+        for (int p = 1; p < NumRemoteReqPortsPerTile; p++) begin
+          if (!req_out_valid[t][p] && req_out_ready[t][p]) begin
+            replay_cand = '0;
+            for (int e = 0; e < MshrNum; e++) begin
+              if (replay_ready[e] && (replay_own_t[e] == tile_group_id_t'(t)) &&
+                  (replay_own_p[e] == RespPortIdW'(p))) begin
+                replay_cand[e] = 1'b1;
+              end
+            end
+            if (|replay_cand) begin
+              replay_hi     = replay_cand &  replay_rr_mask;
+              replay_lo     = replay_cand & ~replay_rr_mask;
+              replay_win_oh = (replay_hi != '0) ? (replay_hi & (~replay_hi + MshrNum'(1)))
+                                                : (replay_lo & (~replay_lo + MshrNum'(1)));
+              replay_win_e  = '0;
+              for (int b = 0; b < MshrNum; b++) begin
+                if (replay_win_oh[b]) replay_win_e |= MshrIdxW'(b);
+              end
+              req_out_valid[t][p]               = 1'b1;
+              req_out[t][p]                     = '0;
+              req_out[t][p].wdata.meta_id       = mshr_d[replay_win_e].sub_reqs[0].meta_id_base;
+              req_out[t][p].wdata.core_id       = mshr_d[replay_win_e].sub_reqs[0].core_id;
+              req_out[t][p].wen                 = 1'b0;
+              req_out[t][p].be                  = '1;
+              req_out[t][p].tgt_group_id        = mshr_d[replay_win_e].tgt_group_id;
+              req_out[t][p].tgt_addr            = mshr_d[replay_win_e].base_addr;
+              req_out[t][p].burst_len           = mshr_d[replay_win_e].burst_len;
+              req_out[t][p].mshr_tag            = MshrTagWidth'(replay_win_e) + MshrTagWidth'(1);
+              mshr_d[replay_win_e].issued       = 1'b1;
+            end
           end
         end
       end
