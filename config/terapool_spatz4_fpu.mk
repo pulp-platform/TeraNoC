@@ -191,7 +191,14 @@ group_mshr_hold_window   ?= 0
 # A 0 window = that class issues its fetch the same cycle (no hold). (The uniform
 # value above only applies to a class that has no override.)
 group_mshr_hold_window_single ?= 0
-group_mshr_hold_window_burst  ?= 255
+# STANDING DECISION 2026-08-14: 2047 everywhere, 4x4 and 8x8 alike. Previously the tree carried
+# five different values (base 255, backend_4x4 511, 8x8 1023, plus 511/2047 experiment flavours),
+# so "the hold window" meant something different in almost every run and cross-config comparisons
+# were not like-for-like. One value ends that.
+# Silicon cost of 2047 over 255: hold_cnt widens 4 -> 7 bits (HoldCntTicks = 2047>>4 = 127), i.e.
+# +192 flops/group, ~3k cluster-wide. The replay walker exists for ANY non-zero window, so its
+# cost is unchanged by this.
+group_mshr_hold_window_burst  ?= 2047
 # Prescaler for the hold/serve countdown, in BITS. Each entry stores its window in ticks of
 # 2**W cycles instead of cycles, so hold_cnt loses W bits and toggles 2**W times less often;
 # entry e takes its tick when the shared prescaler equals e[W-1:0], which spreads expiries
@@ -381,7 +388,7 @@ group_mshr_resp_hold_probe ?= 1000
 # Reuses the hold_cnt field (mutually exclusive states), so no extra flops; only its width grows to
 # cover the larger of the two windows. Required whenever group_mshr_resp_wait_subs_single=1 or
 # group_mshr_cache_reclaimable=0, since both remove the release paths that used to bound the wait.
-group_mshr_serve_timeout ?= 255
+group_mshr_serve_timeout ?= 2047   # tracks the hold window; reuses the same hold_cnt field, so no extra flops
 
 # Same-address request arriving in the SAME CYCLE as that entry's response.
 # 1 = STALL and retry (default). 0 = legacy, which allocated a SECOND entry for the same address.

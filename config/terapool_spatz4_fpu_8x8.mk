@@ -191,7 +191,7 @@ group_mshr_hold_window   ?= 0
 # A 0 window = that class issues its fetch the same cycle (no hold). (The uniform
 # value above only applies to a class that has no override.)
 group_mshr_hold_window_single ?= 0
-group_mshr_hold_window_burst  ?= 1023
+group_mshr_hold_window_burst  ?= 2047   # standing decision 2026-08-14: 2047 at every mesh
 # Prescaler for the hold/serve countdown, in BITS. Each entry stores its window in ticks of
 # 2**W cycles instead of cycles, so hold_cnt loses W bits and toggles 2**W times less often;
 # entry e takes its tick when the shared prescaler equals e[W-1:0], which spreads expiries
@@ -347,7 +347,7 @@ group_mshr_resp_hold_probe ?= 1000
 # Reuses the hold_cnt field (mutually exclusive states), so no extra flops; only its width grows to
 # cover the larger of the two windows. Required whenever group_mshr_resp_wait_subs_single=1 or
 # group_mshr_cache_reclaimable=0, since both remove the release paths that used to bound the wait.
-group_mshr_serve_timeout ?= 1023
+group_mshr_serve_timeout ?= 2047
 
 # Same-address request arriving in the SAME CYCLE as that entry's response.
 # 1 = STALL and retry (default). 0 = legacy, which allocated a SECOND entry for the same address.

@@ -28,15 +28,11 @@
 # baseline, so it needs no override here -- but if you ever need a non-default channel split,
 # pass it as a MAKE ARGUMENT, e.g. `channel_config_mode=enhanced`, not as a pre-assignment.)
 #
-# NOTE ON hold=511 (requested value; recorded, not overridden). Campaign evidence says shorter
-# hold windows complete faster: at 8x8 the matched pairs D/E/F show hold 1023 costing +22/+82/
-# +108% in completion cycles versus 511, and the 4x4 hold-the-fetch W-sweep was net-negative
-# (3836 -> 3986/4209/4229 cycles as the window grew). The shipped 4x4 default is 255. 511 is
-# therefore one step longer than both the default and the best-measured setting. That is a
-# defensible choice for a backend run -- the timer is one bit wider (9 vs 8) and the point of the
-# run is PPA on a representative design, not peak throughput -- but it should be a deliberate
-# choice rather than an inherited one.
-group_mshr_hold_window_burst := 511
-group_mshr_serve_timeout     := 511
+# hold=2047, per the standing decision of 2026-08-14 (see terapool_spatz4_fpu.mk). This file
+# previously pinned 511 with a note arguing that shorter windows complete faster -- that note is
+# superseded: the value is now uniform across 4x4 and 8x8 so that configs differ in the thing under
+# test and not in the hold window as well.
+group_mshr_hold_window_burst := 2047
+group_mshr_serve_timeout     := 2047
 
 include $(MEMPOOL_DIR)/config/terapool_spatz4_fpu.mk
