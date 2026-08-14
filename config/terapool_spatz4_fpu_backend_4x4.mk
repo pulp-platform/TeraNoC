@@ -6,7 +6,7 @@
 #
 #   mesh          4x4, num_cores 256, num_groups 16, 1 core/tile
 #   NoC channels  baseline: rd 0 + rdwr 2 request, 2 response
-#   MSHR hold     511 (window_burst and serve_timeout)
+#   MSHR hold     2047 (window_burst and serve_timeout)
 #   router remap  0 (off)
 #
 # ONLY THE HOLD WINDOW DIFFERS FROM THE BASE FLAVOUR. terapool_spatz4_fpu.mk already ships every
@@ -34,5 +34,15 @@
 # test and not in the hold window as well.
 group_mshr_hold_window_burst := 2047
 group_mshr_serve_timeout     := 2047
+
+# Synthesis insurance. The stats blocks are contained three ways -- `pragma translate_off`, this
+# parameter, and `ifndef VERILATOR` -- and all eight stats always_ff sit inside translate_off, so
+# they should never reach a netlist. But this file's own history records a bare translate_off guard
+# leaking into synthesis once (mempool_group_mshr.sv:2458-2464), and the base flavour defaults this
+# to 1 because simulation wants the counters. Cost of being wrong is silent area in every group;
+# cost of setting it is nothing the backend needs. After elaboration, confirm with
+#   sizeof_collection [get_cells -hier *stat_*]
+# and if that is non-zero the guard leaked again and translate_off is not sufficient on its own.
+group_mshr_enable_stats      := 0
 
 include $(MEMPOOL_DIR)/config/terapool_spatz4_fpu.mk
