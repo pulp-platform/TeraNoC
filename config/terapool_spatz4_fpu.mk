@@ -243,8 +243,31 @@ group_mshr_drain_from_q ?= 1
 
 # opt3: each MSHR bank publishes ONE entry per cycle (round-robin over its ways),
 # port-independently. Preserves multicast (an entry, not a sub-request, is published)
-# but caps distinct entries drained per cycle at the bank count. 0 = off.
-group_mshr_bank_publish ?= 0
+# but caps distinct entries drained per cycle at the bank count.
+#
+# DEFAULT 1 FOR PHYSICAL FEASIBILITY, and the frontend cost is NOT small -- read before changing.
+# With B0.3 (ed1e5dd2) this narrows the drain arbitration 4x: MshrBankNum(16) candidates instead of
+# MshrNum(64), in both the per-(tile,port) predicate work and the rotate/prefix tree. B0.3 is proven
+# cycle-identical to the stage-1 behavioural model (34,538 cyc, 35/35 periods byte-identical), so
+# the narrowing itself is free -- the cost below belongs entirely to the publish cap.
+#
+# Measured at 4x4, hold=255, drain_from_q=0, matched pairs against the same baseline:
+#     256x512x256    34,715 -> 34,538   -0.51%   faster
+#     1024x128x128   60,447 -> 59,114   -2.21%   faster
+#     128x1024x512   67,529 -> 68,096   +0.84%
+#     512x512x512   153,446 -> 185,972  +21.20%  <-- see below
+#
+# THE 512x512x512 REGRESSION IS A DEFECT, NOT A TRADE-OFF, AND IT IS UNRESOLVED. Per-group data:
+# fifteen of sixteen groups sit within +-1 pp of baseline; group 8 alone falls from 91.94% to
+# 67.91%, collapsing at ~cyc 62,000, running at 30-45% for ~76,000 cycles, then recovering fully at
+# ~cyc 142,000. A capacity cap would depress all groups slightly; this is one group starving, which
+# points at the per-bank round-robin publish rather than the 16-entry cap. Root cause not found.
+#
+# Enabled anyway on the same grounds as drain_from_q: the drain arbitration has to shrink for the
+# design to close, and a frontend cost is the price. If the g8 starvation is fixed the cost should
+# fall; if it cannot be, the recorded fallback is TWO candidates per bank (cap 32 = the port count,
+# selector still halves 64 -> 32) -- see docs/mshr_ppa_plan.md B0.3.
+group_mshr_bank_publish ?= 1
 # Early-release subscriber target: a held entry issues its fetch as soon as this many
 # requesters have merged into it. Legal range [2, group_mshr_merge_reqs].
 group_mshr_hold_subs     ?= 2
