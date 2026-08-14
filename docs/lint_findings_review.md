@@ -33,6 +33,74 @@ report is just a phase change, not a completed run.
 
 ---
 
+# 2026-08-14 run — the MSHR PPA series (28 commits, `87e9446c`..`f7a7e90f`)
+
+`terapool_20260814_173616`, goals `Design_Read` + `lint_rtl`, run against the `zexin/mshr_ppa`
+worktree. `sg_shell` exited cleanly, **no `RULE CHECKING ABORTED`** — the tb-exclusion filter
+(`Makefile:797`) worked, so rules genuinely ran on 3,130 source files.
+
+## Verdict: clean for the handoff
+
+| | |
+|---|---|
+| Errors anywhere in the design | **9** — all in Spatz / snitch / vendored (`spatz_decoder.sv` ×6, `type.v`, `spatz_mempool_cc.sv`, `snitch_icache_lookup_serial.sv`) |
+| Errors in `mempool_group_mshr.sv` | **0** |
+| Warnings in `mempool_group_mshr.sv` | 123, all triaged below |
+
+**No finding in the 28 commits is a defect.** Each was verified against the RTL, not accepted from
+the rule text — per the standing rule that Spyglass read-not-set / set-not-read are known-false in
+this tree.
+
+| rule | n | verdict | basis |
+|---|---:|---|---|
+| `W415a` multiple assignment in one `always_comb` | 105 | **FALSE POSITIVE** | default-then-override is the idiom the whole file is built on; last-wins is defined SV semantics, not a race |
+| `W362` width mismatch in `<` | 5 | **FALSE POSITIVE** | arithmetic checked — see below |
+| `W216` range select on a loop variable | 5 | **benign** | `port_i[RespPortIdW-1:0]` inside `for` loops (`:3668,3679,3761,3907,3936`) |
+| `W528` set but not read | 5 | **FALSE POSITIVE** ×2 verified | see below |
+| `W240` input declared but not read | 3 | **pre-existing** | `testmode_i` `:83`, `scan_enable_i` `:85`, `group_id_i` `:89` — tie-offs |
+
+### `W528` on `merge_same_mask` — C1's signal, and it is live
+
+Written `:2917`/`:2923`, **read at `:2927`** by `SubReqCountW'($countones(merge_same_mask))`, which
+*is* C1's parallel merge rank. Spyglass does not see a read through a system function. C1 is not
+dead code.
+
+### `W528` on `victim_rr_d`
+
+Written `:2883`/`:3065`, consumed at `:2102` through the `` `FF `` macro into `victim_rr_q`. The rule
+does not expand macros. Standard pattern throughout this file.
+
+### `W362` — needed real arithmetic, and it is clean
+
+Flags `(meta_id - meta_id_base) < burst_len` at `:1579`, `:1593`, `:3279` as "left 6 bits, right 5".
+
+`MetaIdWidth = 6` (from `snitch_pkg`) and `BurstLenWidth = $clog2(MaxBurstWords+1) = $clog2(17) = 5`.
+So the subtraction evaluates at **6 bits — exactly the meta-id space** — which is what makes the
+wraparound in the modular range test correct, and the 5-bit `burst_len` (max 31) zero-extends
+safely into 6. Benign.
+
+Worth noting for future edits: B2's *new* test at `:1689` writes the same idiom with an explicit
+`meta_id_t'` cast, so it is correct by construction regardless of context widening. The three sites
+above are **pre-existing** and happen to be correct without it. Adding the cast there would be
+uniformity, not a fix — there is no bug to repair.
+
+### Not fixed, deliberately: 6 unguarded sim-only constructs
+
+`$error` `:2004`, four `assert property` `:2064-2096`, `$fatal` `:4853` sit outside any
+`translate_off`. DC and Genus ignore concurrent assertions and `initial` blocks, so these are not
+synthesis hazards. Left alone rather than churn RTL that is mid-verification; worth wrapping when
+the file is next touched.
+
+### Stats containment (backend item D2/D3) — checked, no leak
+
+The stats logic is guarded three ways — `pragma translate_off`, `EnableStats`, and
+`` `ifndef VERILATOR`` — and all **8** stats `always_ff` blocks sit inside `translate_off`.
+`config/terapool_spatz4_fpu_backend_4x4.mk` now also pins `group_mshr_enable_stats := 0`. Still
+confirm after elaboration with `sizeof_collection [get_cells -hier *stat_*]`; non-zero means the
+guard leaked, which this file's history records happening once.
+
+---
+
 ## 1. FALSE POSITIVE — division by zero, `hardware/src/mempool_tile.sv:19`
 
 ```
@@ -148,12 +216,25 @@ cleaned by de-duplicating the define list the Makefile builds.
 The `lint_rtl` goal finished (project `terapool_20260811_120634`, 38,304 findings). The class you
 flagged is present in volume. **Every Error-severity finding has been checked against the RTL below.**
 
-### W123 "read but never set" — Error, 40 findings — 39 FALSE POSITIVE, 1 genuine-but-benign
+### W123 "read but never set" — Error, 40 findings — 6 FALSE POSITIVE, 34 genuine (33 benign)
+
+> **Corrected 2026-08-12.** The two `mshr_tag` rows were previously marked FALSE POSITIVE here.
+> That verdict was wrong — both cited a real driver of a **different array index**. The group's
+> remote ports are declared `[NumRemote*PortsPerTile-1:1]` while the internal arrays are `[N-1:0]`,
+> and the port→array loops start at `r = 1`, so index `[0]` — the local intra-group path, driven
+> field-by-field at `mempool_group.sv:314-330` — never receives `mshr_tag` from anywhere.
+> Wrapper `:566` drives `tcdm_slave_req_i`, which lands on ports **1+**; `mempool_tile.sv:727`
+> drives `bank_resp_payload[b].mshr_tag`, a different signal.
+>
+> **Benign** because port `[0]` never reaches the MSHR (its connection loops also start at `r = 1`),
+> so the `mshr_tag == '0` qualifiers never see it, and the tile ties its own outbound local tag to
+> zero (`mempool_tile.sv:1201,1207`). **FIXED 2026-08-12** in `5ca5c22` with two tie-offs; the
+> 4×4 re-lint reports 0 (see §12).
 
 | signals | count | verdict | evidence |
 |---|---|---|---|
-| `tcdm_slave_req[0][N].mshr_tag` | 16 | **FALSE POSITIVE** | driven in `mempool_group_floonoc_wrapper.sv:566` from the NoC request header (`floo_tcdm_req_from_router_after_xbar[i][j].hdr.mshr_tag`) |
-| `tcdm_master_resp[0][N].mshr_tag` | 16 | **FALSE POSITIVE** | driven in `mempool_tile.sv:727` (`bank_resp_payload[b].mshr_tag = meta_out.mshr_tag`, "echo MSHR id back") and carried at wrapper `:733` |
+| `tcdm_slave_req[0][N].mshr_tag` | 16 | **GENUINE, benign — fixed** | port `[0]` is the LOCAL path; see the note above |
+| `tcdm_master_resp[0][N].mshr_tag` | 16 | **GENUINE, benign — fixed** | port `[0]` is the LOCAL path; see the note above |
 | `decoder_req_i.{instr,rd,rs1,rs2,rsd,vtype.vsew}` | 6 | **FALSE POSITIVE** | all assigned in `spatz_controller.sv:177-187` (default `'0` at 177, fields at 182-187) and wired to the decoder at `:165` |
 | `snitch_req.burst_len[4:0]` | 1 | **GENUINE, benign** | see below |
 
@@ -357,3 +438,67 @@ Recommended sequence if you want it: apply the one-line assignment, then run the
 equivalence config with the prescaler disabled and require the usual bit-exact match over all 35
 periods. If it is NOT bit-exact, that is itself the interesting result -- it would mean the latch
 was affecting behaviour, and the diff would show where.
+
+---
+
+## 11. THE 8×8 RUN — `terapool_20260812_015943`, finished 2026-08-12 10:23
+
+*(Reconstructed 2026-08-13 from the session record after the working copy was destroyed.)*
+
+Ran on the real 8×8 mesh (guard confirmed `mesh 8x8, 65 routers, 64 groups`), post-fix RTL.
+**Completed cleanly — no abort, no fatal, not OOM-killed**, despite peaking at 593 GB RSS during
+design flattening (1.34 billion instances).
+
+```
+Reported Messages:   0 Fatals,   48 Errors,  38086 Warnings,   9 Infos
+```
+
+| count | rule | file | verdict |
+|---|---|---|---|
+| 32 | W123 | `hardware/src/mempool_group.sv` | genuine, benign — `mshr_tag` on local port `[0]` (§7) |
+| 6 | W123 | `spatz_decoder.sv` | false positive — driven in `spatz_controller.sv:177-187` |
+| 1 | W123 | `spatz_mempool_cc.sv` | false positive *now* — fix is in the analysed source, see below |
+| 1 | InferLatch | `spatz_vlsu.sv` | §10 |
+| 1 | SYNTH_5273 | `deps/tech_cells_generic/tc_sram.sv` | vendored |
+| 4 | ErrorAnalyzeBBox | vendored black boxes | vendored |
+| 2 | ELAB_6312 | `deps/axi/axi_demux{,_simple}.sv` | vendored |
+
+**`mempool_group_mshr.sv`: 0 Errors.** The backend cleanup holds at 4× the mesh size.
+
+### The `snitch_req.burst_len` fix is in the source but the finding persists
+
+- the driver is present — `spatz_mempool_cc.sv:348`
+- the analysed file is the right one — `working_dir/spatz/...` (the Bender.local override, not the
+  stale `hardware/deps/spatz` copy), mtime **01:58:45**
+- Spyglass read it **after** the fix — `Design_Read/spyglass.log` timestamped **04:53**
+
+Likely mechanism: `snitch_req` has its other fields driven by module **output-port connections**
+(`:187-192`) while `burst_len` is driven by a **continuous assign**, and the rule appears not to
+merge those two driver kinds across one struct. Recorded as a tool limitation — but *unexplained*,
+not *understood*, so a recurrence is expected rather than a regression.
+
+---
+
+## 12. VERIFICATION OF THE TWO FIXES — 4×4 lint `terapool_20260812_141427`
+
+Both fixes applied and committed (`5ca5c22` main, `f427541` spatz — **two separate git repos**, the
+latter being the `Bender.local` override). Re-linted at 4×4 on the fixed tree, 14:14 → 16:18:
+
+```
+[4x4] mshr_tag W123 (was 32): 0        <- fix 1 cleared
+[4x4] burst_mode_req latch  : 0        <- fix 2 cleared
+Reported Messages:  0 Fatals,  15 Errors,  19559 Warnings,  9 Infos
+```
+
+**Errors 48 → 15.** Every survivor is pre-existing and outside `hardware/src/`; one of the 15 is
+not a defect at all but a cross-reference line pointing at `SignalUsageReport.rpt`, which is why
+Spyglass reports 15 while a path-based grep counts 14.
+
+**Nothing in `hardware/src/` is at Error severity any more.**
+
+Two limits on how far to read this:
+- 4×4 and 8×8 counts are **not** directly comparable; the Warnings drop 38,086 → 19,559 is mostly
+  the smaller mesh, not the fixes.
+- **The behavioural equivalence originally claimed here has been WITHDRAWN.** Both builds used for
+  it predate the two fix commits, so they compared two pre-fix builds. Neither fix has yet been
+  simulated in a build that contains it — see the WORKLOG entry of 2026-08-13 03:30.
