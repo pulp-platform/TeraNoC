@@ -1,7 +1,7 @@
 # Copyright 2021 ETH Zurich and University of Bologna.
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: SHL-0.51
-# 4x4 flavour for the 128x1024x512 GEMM (96.8% util in docs/benchmarks/gemm_results.md).
+# 4x4 flavour for the 128x256x512 GEMM (90.6% util in docs/benchmarks/gemm_results.md).
 #
 # Values are scripts/gemm_autotune.py output, not hand-picked. DERIVED, not a fork:
 # assigned BEFORE the include; every base definition is `?=`.
@@ -12,7 +12,7 @@
 group_mshr_hold_window_burst := 0
 group_mshr_bank_burst_bits       := 1
 group_mshr_bank_shift_burst      := 5
-group_mshr_bank_shift_single     := 10
+group_mshr_bank_shift_single     := 8
 group_mshr_hold_subs_burst       := 2
 group_mshr_hold_subs_single      := 16
 group_mshr_hold_window_burst     := 0
