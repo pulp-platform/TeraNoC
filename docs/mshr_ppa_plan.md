@@ -235,3 +235,83 @@ which is suggestive but is a different tool from the one that stalled.
   `128x1024x512` are trending the other way. But cycles were never the point: opt2 exists to shorten
   the drain cone by removing its dependence on the same-cycle allocate/merge logic, and that benefit
   appears only in a timing report. Keep the default `off` and enable per shape until there is one.
+
+---
+
+# Phase E — the 2026-08-14 residual review (scheduled, starts when the current tests clear)
+
+Source: `tsmc7/docs/mshr_vlsu_residual_review_2026-08-14.md`. Its critical finding (E1, the C1
+rank/slot truncation) is **already fixed** in `7737baee`; the review also independently refuted its
+own "F10 FIXED" verdict on the same grounds, with a bit-accurate model finding 78 diverging cases.
+Everything below is what remains.
+
+Ordered by (saving x confidence) / risk. **E1a and E1b first: they are config flips in our own
+`hardware/Makefile`, no RTL edit, and both are backed by assertions that our runs have already been
+validating.**
+
+## E1a/E1b — two knobs we ship the wrong way
+
+| # | knob | ships | flip to | saving | risk |
+|---|---|:--:|:--:|---|---|
+| E1a | `spatz_vlsu_commit_qmin` | 0 | **1** | ~2,232 DFF/core ≈ **571k cluster** | none — config only |
+| E1b | `spatz_rob_cnt_idvalid` | 0 | **1** | 256 DFF + ~1.5k GE/core ≈ 65k DFF + 380k GE cluster | none — config only |
+
+**E1a.** `i_fifo_commit_insn` is `DEPTH = NrOutstandingLoads = 64`, but the push is gated on
+`!mem_insn_pending_q[mem_spatz_req.id]` (`spatz_vlsu.sv:549`), that bitmap has exactly
+`NrParallelInstructions = 4` bits, and a bit clears only when *that* entry pops (`:575`). So at most
+4 entries are ever resident and slots 4..63 are unreachable storage. The bound is documented in-file
+(`:79-85`), guarded at elaboration (`$error`, `:508`) and at runtime (`commit_q_never_blocks`,
+`:517-519`).
+
+**E1b.** Each ROB keeps a 64-bit free-id bitmap read through two 64:1 muxes. IDs are allocated as a
+contiguous ring, so `status_cnt_q <= NumWords-2` is equivalent — the module header (`:25-29`)
+documents exactly this. Invariant sim-checked by `cnt_ptr_coherent` / `pop_no_underflow`.
+
+**Why the risk is "none", empirically.** Both assertions are armed in **both** elaborations, so they
+have been running in every simulation at the legacy depth. Scanned **98 run logs** across all three
+sweeps and every equivalence arm: **zero fires**. These bounds are measured, not merely argued.
+
+## E2 — three cleanups in `mempool_group_mshr.sv`
+
+| # | change | why |
+|---|---|---|
+| E2a | delete `drain_published` | written `:3634`/`:3651`, **read nowhere** — 64 dead flops/group plus a dynamic-index decode from the `:3651` write |
+| E2b | narrow `merge_new_idx` (`:2897`) from `int unsigned` to the slot width | it is assigned `merge_slot`, which `7737baee` made `MergeRankW` wide; a 32-bit index into a 4-entry array |
+| E2c | hoist the port-invariant published-entry vectors out of the per-port loop | 32x replication before CSE (review R3) |
+
+All three should be bit-identical; verify against the ELF-corrected target **34,596**, not 34,715.
+
+## E3 — the stride multipliers (its own change, its own run)
+
+`spatz_vlsu.sv:634-673`: `offset = mem_counter_q[port] * stride`. The burst arm is reachable only
+under `mem_use_port0_burst`, which requires `!mem_is_strided`, so **stride is structurally 1 there**;
+unit-stride accesses take `stride = 1` as well. So 4-5 multipliers per core spend their life
+multiplying by one.
+
+Two costs: ~6-12.5k GE/core (~1.5-3.2M cluster), and ~10 logic levels on the deepest request-side
+address cone (`multiply -> 32-bit rs1 add -> mask -> i_spatz_mem_req_register`). The timing half is
+the more interesting one for a 1 GHz N7 close.
+
+Fix: drop the multiply on the burst/unit-stride path, keep one strided-only multiplier per port.
+Bit-identical in all reachable states, but it is a Spatz RTL edit — schedule it separately with its
+own equivalence run rather than bundling it with E1/E2.
+
+## Declined
+
+- **R15** (narrow the VLSU operation-queue payload, ~190 flops/core). The unused `data_o` bits have
+  no fanout, so DC/FC delete them anyway — the review says so itself. Real-netlist recovery ~0.
+- **R13** (drop the async reset on ROB data arrays, ~2.1M resettable flops). Touches reset
+  architecture across the design for area that is not currently binding. Revisit only if reset
+  routing or area becomes the limiter.
+
+## Entry condition
+
+Do not start until the in-flight work clears, so nothing lands mid-measurement:
+
+- the three 23-shape sweeps (opt2 / opt3 / C2)
+- the C1-fix equivalence arm (target **34,596**)
+- the `128x128x512` pathology re-run
+- the four `win2047` arms
+
+And **re-run Spyglass** after E2: the last lint predates `7737baee`, whose width changes are exactly
+what W362-class rules react to.
