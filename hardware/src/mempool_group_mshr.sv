@@ -2822,8 +2822,17 @@ module mempool_group_mshr
   logic [MshrNum-1:0]       drain_pfx, drain_first;                // A: prefix-OR, isolated LSB
   logic [MshrIdxW-1:0]      drain_idx;                             // A: index within the rotation
   logic [MshrNum-1:0]       drain2_cand;                           // A: 2nd-slot entry candidates
-  logic [MshrNum-1:0]       drain2_cand_rot;                       // A: rotated to base
-  logic [MshrNum-1:0]       drain2_pfx, drain2_first;              // A: prefix-OR, isolated LSB
+  logic [MshrNum-1:0]       drain2_first;                          // one-hot winner, ABSOLUTE index
+  // B1: mask + LSB-isolate, the allocator's form (:1762-1777). Replaces the variable barrel rotate
+  // plus log2(MshrNum)-step prefix-OR. Same winner -- first candidate at-or-after the base, wrapping
+  // -- but with no variable shifter and no prefix network, and the result is already in absolute
+  // index space so the `base + idx` add disappears too.
+  //
+  // This is the arbiter that still matters: the head-beat MshrNum-wide selector is the else-arm of
+  // `if (BankPublish)` and folds away at the shipping default, whereas drain2 is ungated and runs
+  // MshrNum-wide in every config, x NumTilesPerGroup x (ports-1) instances.
+  logic [MshrNum-1:0]       drain2_rr_mask;                        // 1 = entry is at/above the base
+  logic [MshrNum-1:0]       drain2_hi, drain2_lo;
   logic [MshrIdxW-1:0]      drain2_idx;                            // A: index within the rotation
   logic [MshrIdxW-1:0]      drain2_base, drain2_mshr_i;            // B
   logic [SubIdxW-1:0]       drain2_sub_base, drain2_s;             // B
@@ -3852,19 +3861,23 @@ module mempool_group_mshr
                   end
                 end
               end
-              // Rotated first-set entry, parallel prefix (log2(MshrNum) doubling steps).
-              drain2_cand_rot = MshrNum'({drain2_cand, drain2_cand} >> drain2_base);
-              drain2_pfx = drain2_cand_rot;
-              for (int st = 1; st < MshrNum; st = st << 1) begin
-                drain2_pfx = drain2_pfx | (drain2_pfx << st);
+              // B1: hi/lo split about the rotation base, then isolate the lowest set bit of each.
+              // hi holds candidates at-or-above the base, so its lowest bit is the first candidate
+              // at-or-after it; if hi is empty the scan wraps and lo's lowest bit wins. Identical
+              // selection to the rotate-then-prefix form, and the winner is already absolute.
+              for (int e = 0; e < MshrNum; e++) begin
+                drain2_rr_mask[e] = EnableRrFairness ? (MshrIdxW'(e) >= drain2_base) : 1'b1;
               end
-              drain2_first = drain2_pfx & ~(drain2_pfx << 1);
+              drain2_hi    = drain2_cand &  drain2_rr_mask;
+              drain2_lo    = drain2_cand & ~drain2_rr_mask;
+              drain2_first = (drain2_hi != '0) ? (drain2_hi & (~drain2_hi + MshrNum'(1)))
+                                               : (drain2_lo & (~drain2_lo + MshrNum'(1)));
               drain2_idx   = '0;
               for (int b = 0; b < MshrNum; b++) begin
                 if (drain2_first[b]) drain2_idx |= MshrIdxW'(b);
               end
               if (|drain2_cand) begin
-                drain2_mshr_i = MshrIdxW'(drain2_base + drain2_idx);
+                drain2_mshr_i = drain2_idx;   // already absolute -- no base add
                 // First eligible sub-request inside the winning entry, same rotated order.
                 for (int ks = 0; ks < MshrMergeReqs; ks++) begin
                   drain2_s = SubIdxW'(drain2_sub_base + SubIdxW'(ks));
