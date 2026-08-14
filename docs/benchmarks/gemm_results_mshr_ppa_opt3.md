@@ -1,6 +1,6 @@
 # GEMM benchmark results — MSHR PPA re-baseline, opt3 ON
 
-Generated 2026-08-14 16:36. **Re-runnable**: `python3 scripts/gen_sweep_doc_opt3.py` refreshes this file as arms complete.
+Generated 2026-08-14 17:13. **Re-runnable**: `python3 scripts/gen_sweep_doc_opt3.py` refreshes this file as arms complete.
 
 Companion to `gemm_results.md`, which this re-measures. Same kernel, same shapes, same
 `ideal = M·N·P / 1024` definition — so the two tables are directly comparable.
@@ -44,6 +44,29 @@ passed        hold_window_burst=2047  serve_timeout=2047  hold_prescale_w=0
 Resolved MSHR defines (per-shape values in the table; the rest are constant):
 
 ```
+GROUP_MSHR_BANK_BURST_BITS = 1
+GROUP_MSHR_BANK_HASH = 3
+GROUP_MSHR_BANK_PUBLISH = 1
+GROUP_MSHR_BANK_SHIFT = 5
+GROUP_MSHR_BYPASS_PROBE = 1
+GROUP_MSHR_CACHE_RECLAIMABLE = 0
+GROUP_MSHR_CACHE_SELF_INVAL = 1
+GROUP_MSHR_CACHE_VICTIM_RR = 1
+GROUP_MSHR_DRAIN_BEATS = 2
+GROUP_MSHR_DRAIN_FROM_Q = 1
+GROUP_MSHR_ENABLE_SINGLE = 1
+GROUP_MSHR_ENABLE_STATS = 1
+GROUP_MSHR_HOLD_PRESCALE_W = 0
+GROUP_MSHR_HOLD_SUBS = 2
+GROUP_MSHR_HOLD_WINDOW = 0
+GROUP_MSHR_HOLD_WINDOW_SINGLE = 0
+GROUP_MSHR_NUM = 64
+GROUP_MSHR_RESP_HOLD_PROBE = 1000
+GROUP_MSHR_RESP_WAIT_SUBS_SINGLE = 1
+GROUP_MSHR_SERVE_TIMEOUT = 2047
+GROUP_MSHR_STALL_ON_RESP = 1
+GROUP_MSHR_STATS_PERIOD = 2000
+GROUP_MSHR_WAYS_PER_BANK = 4
 ```
 
 Per-shape knobs come from `scripts/gemm_autotune.py` via
@@ -62,28 +85,28 @@ killed. The pin is a disable, not a tuning value.
 | M×N×P | ideal | ss | sb | A-sh | B-sh | merge | win | ELF | old cyc | old % | new cyc | new % | delta |
 |---|---:|---:|---:|---:|---:|---:|---:|:---|---:|---:|---:|---:|---:|
 | 128x1024x512 | 65,536 | 10 | 5 | 16 | 1 | 16 | 0 | `1149dab0` | 67,693 | 96.8% | _0p_ | — | — |
-| 256x1024x256 | 65,536 | 10 | 5 | 8 | 2 | 8 | 2047 | `046f329e` | 68,253 | 96.0% | _0p_ | — | — |
-| 128x512x512 | 32,768 | 9 | 5 | 16 | 1 | 16 | 0 | `edd55ba5` | 34,489 | 95.0% | _0p_ | — | — |
-| 256x512x256 | 32,768 | 9 | 5 | 8 | 2 | 8 | 2047 | `09e2cdf8` | 34,821 | 94.1% | _0p_ | — | — |
+| 256x1024x256 | 65,536 | 10 | 5 | 8 | 2 | 8 | 2047 | `046f329e` | 68,253 | 96.0% | _1p_ | — | — |
+| 128x512x512 | 32,768 | 9 | 5 | 16 | 1 | 16 | 0 | `edd55ba5` | 34,489 | 95.0% | _1p_ | — | — |
+| 256x512x256 | 32,768 | 9 | 5 | 8 | 2 | 8 | 2047 | `09e2cdf8` | 34,821 | 94.1% | _1p_ | — | — |
 | 256x512x512 | 65,536 | 9 | 6 | 8 | 2 | 8 | 2047 | `1f7a3ed8` | 71,218 | 92.0% | _0p_ | — | — |
-| 128x256x512 | 16,384 | 8 | 5 | 16 | 1 | 16 | 0 | `a0dd1086` | 18,082 | 90.6% | _0p_ | — | — |
-| 256x256x256 | 16,384 | 8 | 5 | 8 | 2 | 8 | 2047 | `eff18904` | 18,177 | 90.1% | _0p_ | — | — |
+| 128x256x512 | 16,384 | 8 | 5 | 16 | 1 | 16 | 0 | `a0dd1086` | 18,082 | 90.6% | _1p_ | — | — |
+| 256x256x256 | 16,384 | 8 | 5 | 8 | 2 | 8 | 2047 | `eff18904` | 18,177 | 90.1% | _1p_ | — | — |
 | 512x256x256 | 32,768 | 8 | 6 | 4 | 4 | 4 | 2047 | `4bfabeee` | 37,632 | 87.1% | _0p_ | — | — |
-| 512x512x128 | 32,768 | 9 | 5 | 4 | 4 | 4 | 2047 | `aec98132` | 38,325 | 85.5% | _0p_ | — | — |
+| 512x512x128 | 32,768 | 9 | 5 | 4 | 4 | 4 | 2047 | `aec98132` | 38,325 | 85.5% | _2p_ | — | — |
 | 512x512x512 | 131,072 | 9 | 7 | 4 | 4 | 4 | 2047 | `97c85346` | 153,707 | 85.3% | _0p_ | — | — |
 | 512x256x512 | 65,536 | 8 | 7 | 4 | 4 | 4 | 2047 | `2903acbf` | 78,314 | 83.7% | _0p_ | — | — |
-| 128x128x512 | 8,192 | 7 | 5 | 16 | 1 | 16 | 0 | `f4e7253a` | 9,792 | 83.7% | _0p_ | — | — |
-| 256x128x256 | 8,192 | 7 | 5 | 8 | 2 | 8 | 2047 | `55b75bcd` | 10,014 | 81.8% | _0p_ | — | — |
-| 512x256x128 | 16,384 | 8 | 5 | 4 | 4 | 4 | 2047 | `30c8a832` | 20,155 | 81.3% | _0p_ | — | — |
-| 512x128x256 | 16,384 | 7 | 6 | 4 | 4 | 4 | 2047 | `15e8ddef` | 20,307 | 80.7% | _0p_ | — | — |
+| 128x128x512 | 8,192 | 7 | 5 | 16 | 1 | 16 | 0 | `f4e7253a` | 9,792 | 83.7% | _1p_ | — | — |
+| 256x128x256 | 8,192 | 7 | 5 | 8 | 2 | 8 | 2047 | `55b75bcd` | 10,014 | 81.8% | _2p_ | — | — |
+| 512x256x128 | 16,384 | 8 | 5 | 4 | 4 | 4 | 2047 | `30c8a832` | 20,155 | 81.3% | _3p_ | — | — |
+| 512x128x256 | 16,384 | 7 | 6 | 4 | 4 | 4 | 2047 | `15e8ddef` | 20,307 | 80.7% | _1p_ | — | — |
 | 512x128x512 | 32,768 | 7 | 7 | 4 | 4 | 4 | 2047 | `6045d69e` | 42,767 | 76.6% | _0p_ | — | — |
-| 512x128x128 | 8,192 | 7 | 5 | 4 | 4 | 4 | 2047 | `bb2834ad` | 11,111 | 73.7% | _0p_ | — | — |
-| 256x64x256 | 4,096 | 6 | 5 | 8 | 2 | 8 | 2047 | `52e63dfe` | 6,050 | 67.7% | _0p_ | — | — |
-| 512x64x256 | 8,192 | 6 | 6 | 4 | 4 | 4 | 2047 | `fa6007d0` | 12,183 | 67.2% | _0p_ | — | — |
+| 512x128x128 | 8,192 | 7 | 5 | 4 | 4 | 4 | 2047 | `bb2834ad` | 11,111 | 73.7% | _3p_ | — | — |
+| 256x64x256 | 4,096 | 6 | 5 | 8 | 2 | 8 | 2047 | `52e63dfe` | 6,050 | 67.7% | _3p_ | — | — |
+| 512x64x256 | 8,192 | 6 | 6 | 4 | 4 | 4 | 2047 | `fa6007d0` | 12,183 | 67.2% | _2p_ | — | — |
 | 512x64x512 | 16,384 | 6 | 7 | 4 | 4 | 4 | 2047 | `fe1ebb97` | 24,616 | 66.6% | _0p_ | — | — |
-| 256x32x512 | 4,096 | 5 | 6 | 8 | 2 | 8 | 2047 | `afc79e88` | 6,752 | 60.7% | _0p_ | — | — |
+| 256x32x512 | 4,096 | 5 | 6 | 8 | 2 | 8 | 2047 | `afc79e88` | 6,752 | 60.7% | _1p_ | — | — |
 | 512x32x512 | 8,192 | 5 | 7 | 4 | 4 | 4 | 2047 | `9209f128` | 16,238 | 50.4% | _0p_ | — | — |
-| 256x32x256 | 2,048 | 5 | 5 | 8 | 2 | 8 | 2047 | `697a398d` | 4,081 | 50.2% | _0p_ | — | — |
+| 256x32x256 | 2,048 | 5 | 5 | 8 | 2 | 8 | 2047 | `697a398d` | 4,081 | 50.2% | _4p_ | — | — |
 
 **0 of 23 complete.**
 

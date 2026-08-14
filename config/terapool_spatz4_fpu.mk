@@ -268,6 +268,23 @@ group_mshr_drain_from_q ?= 1
 # fall; if it cannot be, the recorded fallback is TWO candidates per bank (cap 32 = the port count,
 # selector still halves 64 -> 32) -- see docs/mshr_ppa_plan.md B0.3.
 group_mshr_bank_publish ?= 1
+
+# C2: bypass the request-input spill register. The tile already registers its request output, and
+# only wire assigns separate the two -- so this stage is a second register back-to-back with the
+# first, costing 32 x 166 = 5,312 flops/group (~85k cluster) for no data-path benefit.
+#
+# It was gated on C1: bypassing exposes the tile's spill to req_in_ready, which used to carry the
+# up-to-32-deep serial merge read-modify-write. C1 replaced that with a prefix rank against the
+# registered array, so the ready path is shallow now.
+#
+# NOT bit-identical -- it removes a pipeline stage, so request arrival shifts by a cycle. Needs a
+# performance run, not an equivalence run. 0 = bypassed (the saving), 1 = spill present.
+#
+# The other three spills stay: req_out is the only register between the replay path and the NoC,
+# resp_out is documented deadlock-relevant (mempool_group_mshr.sv:1067-1072) and feeds a
+# fall_through_register that is combinational when empty, and bypassing resp_in would compose the
+# router output crossbar onto the capture->drain arc.
+group_mshr_spill_req_in ?= 0
 # Early-release subscriber target: a held entry issues its fetch as soon as this many
 # requesters have merged into it. Legal range [2, group_mshr_merge_reqs].
 group_mshr_hold_subs     ?= 2

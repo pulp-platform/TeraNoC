@@ -308,6 +308,10 @@ group_mshr_bank_publish ?=
 ifneq ($(strip $(group_mshr_bank_publish)),)
   vlog_defs += -DGROUP_MSHR_BANK_PUBLISH=$(group_mshr_bank_publish)
 endif
+group_mshr_spill_req_in ?=
+ifneq ($(strip $(group_mshr_spill_req_in)),)
+  vlog_defs += -DGROUP_MSHR_SPILL_REQ_IN=$(group_mshr_spill_req_in)
+endif
 ifneq ($(strip $(group_mshr_stall_on_resp)),)
   vlog_defs += -DGROUP_MSHR_STALL_ON_RESP=$(group_mshr_stall_on_resp)
 endif

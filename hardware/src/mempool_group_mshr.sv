@@ -60,7 +60,19 @@ module mempool_group_mshr
   // Stats print period in cycles while trace is active (0 disables periodic prints).
   parameter int unsigned StatsPeriod = `ifdef GROUP_MSHR_STATS_PERIOD `GROUP_MSHR_STATS_PERIOD `else 0 `endif,
   // Spill register enables (0 = pass-through).
-  parameter bit SpillReqIn     = 1'b1,
+  // C2 (F5/F6): the request-input spill is data-path redundant -- the TILE already registers its
+  // request output with its own spill_register (mempool_tile.sv:838), and between that and this one
+  // there is nothing but two wire assigns (mempool_group.sv:216, :569). Two registers back to back,
+  // zero logic between them. Bypassing removes 32 x 166 = 5,312 flops/group (~85k cluster).
+  //
+  // It was gated on C1, not on the data path: bypassing re-exposes the tile's spill to this module's
+  // req_in_ready, which used to carry the up-to-32-deep serial merge chain. C1 replaced that with a
+  // prefix rank against the registered array, so the ready path is now shallow and the bypass is
+  // safe to take.
+  //
+  // NOT bit-identical: removing a pipeline stage shifts request arrival by a cycle, so this needs a
+  // PERFORMANCE run, not an equivalence run. 0 = bypassed (no flops), 1 = spill present.
+  parameter bit SpillReqIn     = `ifdef GROUP_MSHR_SPILL_REQ_IN `GROUP_MSHR_SPILL_REQ_IN `else 1'b1 `endif,
   parameter bit SpillReqOut    = 1'b1,
   parameter bit SpillRespIn    = 1'b1,
   parameter bit SpillRespOut   = 1'b1

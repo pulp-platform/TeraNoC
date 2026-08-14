@@ -8,7 +8,7 @@ the infrastructure that produces them**.
 
 ---
 
-## The four documents
+## The documents
 
 | document | what it is |
 |---|---|
@@ -16,6 +16,59 @@ the infrastructure that produces them**.
 | [`gemm_results_table.txt`](gemm_results_table.txt) | The same table as plain text, for diffing and quoting. |
 | [`verilator_simulation.md`](verilator_simulation.md) | How to build and run these benchmarks fast. |
 | [`matmul_bottleneck_report.md`](matmul_bottleneck_report.md) | Microarchitectural analysis of where matmul cycles go — the motivation for the design work in `docs/`. |
+| **PPA sweeps** — the three `gemm_results_mshr_ppa*.md` files | Re-measurements of the same shapes on the post-PPA RTL. See below. |
+
+---
+
+## How the four result files relate
+
+`gemm_results.md` is the **reference**, measured 2026-08-03 on pre-PPA RTL. The three
+`gemm_results_mshr_ppa*.md` files re-measure **the same 23 shapes with the same kernel,
+the same ELFs and the same `ideal = M·N·P / 1024` definition**, so every table is
+directly comparable, cell for cell.
+
+They form a **chain, one knob apart at each link** — which is the point. Each file's
+delta against the one above it isolates a single change:
+
+| # | file | RTL base | `drain_from_q`<br>(opt2) | `bank_publish`<br>(opt3) | `spill_req_in`<br>(C2) | hold window |
+|---|---|---|:--:|:--:|:--:|---|
+| 0 | `gemm_results.md` | pre-PPA | 0 | 0 | 1 | 255 |
+| 1 | `gemm_results_mshr_ppa.md` | `8ca4f060` | **1** | 0 | 1 | **2047**\* |
+| 2 | `gemm_results_mshr_ppa_opt3.md` | `1d5a5756` | 1 | **1** | 1 | 2047\* |
+| 3 | `gemm_results_mshr_ppa_c2.md` | + B1b, C3, C2 | 1 | 1 | **0** | 2047\* |
+
+\* except four shapes whose flavour pins `hold_window_burst := 0` — see any of the three
+files for why (B shared 1-way makes the early-release condition unreachable).
+
+**Which delta answers which question:**
+
+- **0 → 1** — the verified-inert RTL work (A1–A5, B0.3, B1, B2, B3) plus opt2 plus the
+  hold-window change, all at once. Says where the tree stands; **attributes nothing**,
+  because three things moved together.
+- **1 → 2** — **opt3 alone.** The two sets differ only in `bank_publish`.
+- **2 → 3** — **C2 alone.** The two sets differ only in `spill_req_in`.
+
+Read the CONFOUND section in files 2 and 3 before quoting either pairwise delta: each set
+was built from a later commit than the one above it, and those commits are only
+*claimed* bit-identical until their equivalence runs land.
+
+**Why the chain instead of one table.** Bundled deltas are unattributable, and this
+campaign has already been bitten by that — the hold-window change was 255 → 2047 at the
+same moment as nine RTL commits, and 2047 was later measured at **+725%** on
+`1024x128x128`. One knob per link is what makes a regression traceable to its cause.
+
+**opt2 and opt3 are on by default** and are not optional: the `drain_from_q=0` path does
+not close timing. So files 2 and 3 describe the shipping configuration; file 1 is a
+diagnostic baseline, not a config anyone should build.
+
+**Bit-identity.** A1–A5, B0.3, B1, B2, B3, C1 and C3 were each verified to reproduce
+34,715 cycles exactly on `256x512x256` — they are pure area/timing rewrites. **C2 is the
+exception**: it removes a pipeline stage, so its sweep is a measurement, not an
+equivalence check.
+
+Each PPA file is generated, not hand-written — `python3 scripts/gen_sweep_doc.py`,
+`gen_sweep_doc_opt3.py`, `gen_sweep_doc_c2.py`. Re-run any of them to refresh as arms
+complete; do not edit the `.md` in place.
 
 ---
 

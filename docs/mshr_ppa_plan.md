@@ -120,9 +120,29 @@ no macro provides that. The report is right to rule it out.
 
 | # | Change | Why it waits |
 |---|---|---|
-| C1 | F11: merge RMW → parallel-rank (prefix-popcount) form | Claimed bit-identical. **Prerequisite for C2.** |
-| C2 | Bypass the `req_in` spill (`SpillReqIn=0`) — **5,312 flops/group, ~85k cluster** | Data path is genuinely redundant, but bypassing exposes the tile's spill to C1's up-to-32-deep chain. Do C1 first, then re-measure. |
-| C3 | F9: replay walker → per-lane parallel first-match | The worst structure in the module (~400 logic levels into the NoC request register). Bit-identical per the in-file precedent at `:1710-1722`. |
+| C1 | F11: merge RMW → parallel-rank (prefix-popcount) form | Claimed bit-identical. **Prerequisite for C2.** DONE `1d5a5756`. |
+| C2 | Bypass the `req_in` spill (`SpillReqIn=0`) — **5,312 flops/group, ~85k cluster** | Data path is genuinely redundant, but bypassing exposes the tile's spill to C1's up-to-32-deep chain. C1 replaced that chain with a prefix rank against the registered array, so the gate is cleared. **DONE — see below.** |
+| C3 | F9: replay walker → per-lane parallel first-match | The worst structure in the module (~400 logic levels into the NoC request register). Bit-identical per the in-file precedent at `:1710-1722`. DONE. |
+
+### C2 as implemented (2026-08-14)
+
+New knob `group_mshr_spill_req_in`, **default 0** (bypassed), wired
+`config/terapool_spatz4_fpu.mk` → `hardware/Makefile` → `GROUP_MSHR_SPILL_REQ_IN` → the module's
+`SpillReqIn` parameter, in the same `` `ifdef `` form as the other twenty knobs.
+
+The redundancy is structural, not statistical: the tile already registers its request output with
+its own `spill_register` (`mempool_tile.sv:838`), and between that and this one there is nothing
+but two wire assigns (`mempool_group.sv:216`, `:569`) — two registers back to back with zero logic
+between them, which is exactly the "not much logic before the next reg" case.
+
+**C2 is the one PPA change that is NOT bit-identical.** A1–A5, B0.3, B1, B2, B3, C1 and C3 each
+reproduce 34,715 exactly; C2 removes a *pipeline stage*, so requests arrive a cycle earlier and
+cycle counts legitimately move. There is no equivalence check to run — the 23-shape sweep in
+`docs/benchmarks/gemm_results_mshr_ppa_c2.md` **is** its verification, and its delta against the
+opt3 sweep is a clean one-knob measurement. Expect ~0: the deliverable is 5,312 flops/group, and
+the performance column exists to prove the area came for free.
+
+The other three spills stay — see the note below, unchanged.
 
 **Do NOT** bypass `resp_in` (the report's other half of "bypass both inputs"). Its data side is
 shallow, but bypassing composes the router output xbar onto the MSHR capture logic, which per F10

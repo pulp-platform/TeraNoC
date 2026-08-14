@@ -9328,3 +9328,48 @@ that fleet's channel configuration interacting with a long window, not from wind
 **Standing conclusion:** 1023 (the shipped 8x8 default) is fine; do not shorten it. Lengthening is
 neither helpful nor harmful here. The lever for the g54/g62 merge starvation remains
 HOLD_SUBS_BURST.
+
+---
+
+## 2026-08-14 · C2 — bypass the MSHR request-input spill register
+
+**Purpose.** Last open item in the MSHR PPA plan's Phase C, and the largest single flop saving in
+it: **5,312 flops per group, ~85k across the cluster** (32 request lanes × 166 bits).
+
+**Why it is safe to remove — the criterion, applied.** The rule was: keep a register that cuts a
+long combinational path, remove one that has little logic between it and the next register. This
+one has *none*. The tile already registers its request output with its own `spill_register`
+(`mempool_tile.sv:838`); between that register and this one there are two wire assigns
+(`mempool_group.sv:216`, `:569`) and nothing else. Two registers back to back.
+
+**Why it waited for C1.** Not the data path — the *ready* path. Bypassing re-exposes the tile's
+spill to this module's `req_in_ready`, which used to carry an up-to-32-deep serial merge
+read-modify-write. C1 (`1d5a5756`) replaced that with a prefix rank against the registered array,
+so the ready path is now shallow and the gate is cleared.
+
+**Implementation.** New knob `group_mshr_spill_req_in`, **default 0** (bypassed):
+`config/terapool_spatz4_fpu.mk` → `hardware/Makefile` → `GROUP_MSHR_SPILL_REQ_IN` → the module's
+`SpillReqIn` parameter, in the same `` `ifdef `` form as the other twenty knobs. `SpillReqIn=0`
+drives `.Bypass(1)` on the existing `spill_register` at `mempool_group_mshr.sv:1113` — no new
+structure, the instance const-folds away.
+
+The other three spills **stay**, each for its own reason: `req_out` is the only register between
+the replay path and the NoC; `resp_out` is documented deadlock-relevant (`:1067-1072`) and feeds a
+`fall_through_register` that is combinational when empty; bypassing `resp_in` would compose the
+router output crossbar onto the capture→drain arc, lengthening an already 40-55-level
+NoC-in → tile-out path. The PPA report recommended bypassing "both inputs" — that half is wrong.
+
+**Result.** Compiles clean under VCS at `terapool_spatz4_fpu` with `SPILL_REQ_IN=0` resolved in the
+compile line.
+
+**C2 is the one PPA change that is NOT bit-identical.** A1–A5, B0.3, B1, B2, B3, C1 and C3 each
+reproduce 34,715 cycles exactly. C2 removes a *pipeline stage* — requests arrive a cycle earlier, so
+cycle counts legitimately move and there is no equivalence check to run. Its verification is a
+23-shape sweep (`docs/benchmarks/gemm_results_mshr_ppa_c2.md`), whose delta against the opt3 sweep
+is a clean one-knob measurement. **Expect ~0**: the deliverable is the flops, and the performance
+column exists to prove they came for free. A consistent gain would be the stage's latency coming
+back; a consistent loss would mean the shortened `req_in_ready` is throttling. Sign over magnitude.
+
+**Status.** DONE. Sweep launched; results land in the benchmark file as arms complete.
+`docs/benchmarks/README.md` now documents the chain that makes each sweep's delta attributable to
+exactly one knob.

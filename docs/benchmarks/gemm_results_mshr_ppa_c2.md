@@ -1,0 +1,139 @@
+# GEMM benchmark results — MSHR PPA re-baseline, opt2 + opt3 + C2 (req-in spill bypassed)
+
+Generated 2026-08-14 17:10. **Re-runnable**: `python3 scripts/gen_sweep_doc_c2.py` refreshes this file as arms complete.
+
+Third of three PPA sweeps over the same 23 shapes. See
+[`README.md`](README.md) for how the files relate; in short:
+
+| file | `bank_publish` (opt3) | `spill_req_in` (C2) |
+|---|---|---|
+| `gemm_results_mshr_ppa.md` | 0 | 1 |
+| `gemm_results_mshr_ppa_opt3.md` | **1** | 1 |
+| **this file** | **1** | **0** |
+
+So **the delta against the opt3 file is C2 measured alone** — that is the number to quote
+for C2. The delta against `gemm_results.md` says where the tree stands overall and bundles
+everything since 2026-08-03.
+
+## What C2 is
+
+`SpillReqIn = 0` bypasses the MSHR's request-input spill register. The tile already
+registers its request output (`mempool_tile.sv:838`) and only two wire assigns separate the
+two (`mempool_group.sv:216`, `:569`) — two registers back to back with no logic between
+them. Bypassing removes **32 × 166 = 5,312 flops per group**, ~85k across the cluster.
+
+It was gated on C1, not on the data path: the bypass re-exposes the tile's spill to this
+module's `req_in_ready`, which used to carry an up-to-32-deep serial merge read-modify-write.
+C1 replaced that with a prefix rank against the registered array, so the ready path is now
+shallow and the bypass is safe to take.
+
+**This is the one PPA change that is NOT bit-identical.** A1–A5, B0.3, B1, B2, B3, C1 and C3
+were each verified to reproduce 34,715 cycles exactly. C2 removes a pipeline stage, so
+requests arrive a cycle earlier and cycle counts legitimately move — there is no equivalence
+check to run, and this sweep IS its verification.
+
+**The other three spills stay.** `req_out` is the only register between the replay path and
+the NoC; `resp_out` is documented deadlock-relevant (`mempool_group_mshr.sv:1067-1072`) and
+feeds a `fall_through_register` that is combinational when empty; bypassing `resp_in` would
+compose the router output crossbar onto the capture→drain arc.
+
+## Configuration
+
+Common to all 23 arms:
+
+```
+base config   terapool_spatz4_fpu.mk — 256 cores, 16 groups, 4x4 mesh, Spatz vlen=512
+kernel        apps/spatz_apps/sp-fmatmul-opt-burst-merge
+ELF           one private per shape, md5-verified distinct (column below)
+simulator     VCS, +notracer, no waveforms
+passed        hold_window_burst=2047  serve_timeout=2047  hold_prescale_w=0
+              drain_from_q=1  bank_publish=1  spill_req_in=0
+```
+
+All three of `drain_from_q`, `bank_publish` and `spill_req_in` are passed **explicitly**
+rather than inherited from the flavour default, and the launcher aborts an arm whose compile
+line lacks `GROUP_MSHR_SPILL_REQ_IN=0`. A silently-absent define would make this sweep a
+duplicate of the opt3 one, and the delta would read as "C2 is free" when C2 was never in it.
+
+Resolved MSHR defines (per-shape values in the table; the rest are constant):
+
+```
+```
+
+Per-shape knobs come from `scripts/gemm_autotune.py` via
+`config/terapool_spatz4_fpu_gemm<shape>.mk`. `hold_subs_single/_burst` = A-sh / B-sh
+clamped to `[2, merge]`.
+
+**Four shapes pin `hold_window_burst := 0`** — `128x1024x512`, `128x512x512`,
+`128x256x512`, `128x128x512`. All have **B shared 1-way**, so `hold_subs_burst` clamps to 2
+and a 1-way-shared line can never supply 2 subscribers: the early-release condition is
+unreachable and any non-zero window becomes a guaranteed full-window stall on every burst
+allocation. Forcing 2047 on `128x1024x512` measured **+803%** before that arm was killed.
+The pin is a disable, not a tuning value.
+
+## Confound, stated up front
+
+These arms build from `a63abb52`, which adds **B1b, C3 and C2** over the opt3 sweep's base.
+B1b and C3 are claimed bit-identical and their equivalence runs are in flight. If both
+verify, opt3-sweep → this sweep is a clean single-knob comparison. If either does not, the
+delta bundles that commit too and both sets need rebuilding from a common base.
+
+## Results
+
+| M×N×P | ideal | ss | sb | A-sh | B-sh | merge | win | ELF | old cyc | old % | opt3 cyc | C2 cyc | C2 % | Δ vs old | **Δ vs opt3** |
+|---|---:|---:|---:|---:|---:|---:|---:|:---|---:|---:|---:|---:|---:|---:|---:|
+| 128x1024x512 | 65,536 | 10 | 5 | 16 | 1 | 16 | 0 | `1149dab0` | 67,693 | 96.8% | — | _0p_ | — | — | **—** |
+| 256x1024x256 | 65,536 | 10 | 5 | 8 | 2 | 8 | 2047 | `046f329e` | 68,253 | 96.0% | — | _0p_ | — | — | **—** |
+| 128x512x512 | 32,768 | 9 | 5 | 16 | 1 | 16 | 0 | `edd55ba5` | 34,489 | 95.0% | — | _0p_ | — | — | **—** |
+| 256x512x256 | 32,768 | 9 | 5 | 8 | 2 | 8 | 2047 | `09e2cdf8` | 34,821 | 94.1% | — | _0p_ | — | — | **—** |
+| 256x512x512 | 65,536 | 9 | 6 | 8 | 2 | 8 | 2047 | `1f7a3ed8` | 71,218 | 92.0% | — | _0p_ | — | — | **—** |
+| 128x256x512 | 16,384 | 8 | 5 | 16 | 1 | 16 | 0 | `a0dd1086` | 18,082 | 90.6% | — | _0p_ | — | — | **—** |
+| 256x256x256 | 16,384 | 8 | 5 | 8 | 2 | 8 | 2047 | `eff18904` | 18,177 | 90.1% | — | _0p_ | — | — | **—** |
+| 512x256x256 | 32,768 | 8 | 6 | 4 | 4 | 4 | 2047 | `4bfabeee` | 37,632 | 87.1% | — | _0p_ | — | — | **—** |
+| 512x512x128 | 32,768 | 9 | 5 | 4 | 4 | 4 | 2047 | `aec98132` | 38,325 | 85.5% | — | _0p_ | — | — | **—** |
+| 512x512x512 | 131,072 | 9 | 7 | 4 | 4 | 4 | 2047 | `97c85346` | 153,707 | 85.3% | — | _0p_ | — | — | **—** |
+| 512x256x512 | 65,536 | 8 | 7 | 4 | 4 | 4 | 2047 | `2903acbf` | 78,314 | 83.7% | — | _0p_ | — | — | **—** |
+| 128x128x512 | 8,192 | 7 | 5 | 16 | 1 | 16 | 0 | `f4e7253a` | 9,792 | 83.7% | — | _0p_ | — | — | **—** |
+| 256x128x256 | 8,192 | 7 | 5 | 8 | 2 | 8 | 2047 | `55b75bcd` | 10,014 | 81.8% | — | _0p_ | — | — | **—** |
+| 512x256x128 | 16,384 | 8 | 5 | 4 | 4 | 4 | 2047 | `30c8a832` | 20,155 | 81.3% | — | _0p_ | — | — | **—** |
+| 512x128x256 | 16,384 | 7 | 6 | 4 | 4 | 4 | 2047 | `15e8ddef` | 20,307 | 80.7% | — | _0p_ | — | — | **—** |
+| 512x128x512 | 32,768 | 7 | 7 | 4 | 4 | 4 | 2047 | `6045d69e` | 42,767 | 76.6% | — | _0p_ | — | — | **—** |
+| 512x128x128 | 8,192 | 7 | 5 | 4 | 4 | 4 | 2047 | `bb2834ad` | 11,111 | 73.7% | — | _0p_ | — | — | **—** |
+| 256x64x256 | 4,096 | 6 | 5 | 8 | 2 | 8 | 2047 | `52e63dfe` | 6,050 | 67.7% | — | _0p_ | — | — | **—** |
+| 512x64x256 | 8,192 | 6 | 6 | 4 | 4 | 4 | 2047 | `fa6007d0` | 12,183 | 67.2% | — | _0p_ | — | — | **—** |
+| 512x64x512 | 16,384 | 6 | 7 | 4 | 4 | 4 | 2047 | `fe1ebb97` | 24,616 | 66.6% | — | _0p_ | — | — | **—** |
+| 256x32x512 | 4,096 | 5 | 6 | 8 | 2 | 8 | 2047 | `afc79e88` | 6,752 | 60.7% | — | _0p_ | — | — | **—** |
+| 512x32x512 | 8,192 | 5 | 7 | 4 | 4 | 4 | 2047 | `9209f128` | 16,238 | 50.4% | — | _0p_ | — | — | **—** |
+| 256x32x256 | 2,048 | 5 | 5 | 8 | 2 | 8 | 2047 | `697a398d` | 4,081 | 50.2% | — | _0p_ | — | — | **—** |
+
+**0 of 23 complete.**
+
+`ideal = M·N·P / 1024` (MACs ÷ 1024 FMA lanes = 256 cores × 4 FPU). Efficiency is
+`ideal / actual`; the denominator comes from the data size, never from simulation.
+
+## Reading this table
+
+**Do not rank on the TB's `[FPU] util`.** It samples `spatz_vfu.fpu_busy_q` — lane
+*occupancy*, which is not conserved across runs of identical work. On the `1024x128x128`
+opt2/opt3 pair it ranked the arm that finished **434 cycles later** as higher. Rank on
+completion cycles, or equivalently on `ideal/actual`.
+
+**C2 is an area change first.** Its job is 5,312 flops per group; the performance column
+exists to prove it did not cost anything, not to claim a speedup. A mean near zero is the
+success condition. A consistent gain would be the pipeline stage's latency coming back, and
+a consistent loss would mean the shortened `req_in_ready` path is throttling — either way
+the sign matters more than the magnitude.
+
+## Verification
+
+Every arm is cross-checked before its result is accepted:
+
+- `GROUP_MSHR_SPILL_REQ_IN=0` asserted in the compile line — the arm aborts without it
+- `merge_reqs`, `hold_subs_single/burst`, `bank_shift_single/burst` against `gemm_results.md`
+- `hold_window_burst` = 0 where B-sh = 1, else 2047
+- `drain_from_q` = 1 and `bank_publish` = 1 on every arm
+- ELF md5 against the build record, and its `.M/.N/.P` header against the shape name
+- each **running process**'s `+PRELOAD` path and simv symlink read from `/proc/<pid>/cmdline`
+- `hardware/generated/` confirmed 4×4 — it is shared across build dirs and encodes the mesh
+- zero uncommitted changes under `hardware/src`, so every arm is reproducible from git
+
