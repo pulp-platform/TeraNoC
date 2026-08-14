@@ -1,6 +1,6 @@
 # GEMM benchmark results — MSHR PPA re-baseline, opt3 ON
 
-Generated 2026-08-14 17:13. **Re-runnable**: `python3 scripts/gen_sweep_doc_opt3.py` refreshes this file as arms complete.
+Generated 2026-08-14 18:20. **Re-runnable**: `python3 scripts/gen_sweep_doc_opt3.py` refreshes this file as arms complete.
 
 Companion to `gemm_results.md`, which this re-measures. Same kernel, same shapes, same
 `ideal = M·N·P / 1024` definition — so the two tables are directly comparable.
@@ -80,35 +80,48 @@ is unreachable and any non-zero window becomes a guaranteed full-window stall on
 burst allocation. Forcing 2047 on `128x1024x512` measured **+803%** before that arm was
 killed. The pin is a disable, not a tuning value.
 
+**⚠️ CONFOUND on those same four shapes — their `old cyc` comparison is NOT single-variable.**
+The launcher passed `hold_window_burst` and `serve_timeout` as one string and skipped both where
+the flavour pinned the window, so `serve_timeout` inherited the base default of **2047** on these
+four while `gemm_results.md` was measured at **255** (`4d3d9d17`). Their delta-vs-old therefore
+bundles the RTL change with a 255->2047 timeout change — and 2047 measured +725% on
+`1024x128x128` and +803% on `128x1024x512`, so that term can be large. `128x128x512` reads
+**+34.2%** here and a `serve_timeout=255` control is running to isolate it.
+
+**The pairwise deltas are unaffected.** All three sweeps set `serve_timeout=2047` identically on
+these shapes, so opt3-alone and C2-alone remain clean single-knob comparisons; only the column
+against `gemm_results.md` is confounded, and only on these four rows. The other 19 shapes passed
+both knobs explicitly and are fine.
+
 ## Results
 
 | M×N×P | ideal | ss | sb | A-sh | B-sh | merge | win | ELF | old cyc | old % | new cyc | new % | delta |
 |---|---:|---:|---:|---:|---:|---:|---:|:---|---:|---:|---:|---:|---:|
-| 128x1024x512 | 65,536 | 10 | 5 | 16 | 1 | 16 | 0 | `1149dab0` | 67,693 | 96.8% | _0p_ | — | — |
-| 256x1024x256 | 65,536 | 10 | 5 | 8 | 2 | 8 | 2047 | `046f329e` | 68,253 | 96.0% | _1p_ | — | — |
-| 128x512x512 | 32,768 | 9 | 5 | 16 | 1 | 16 | 0 | `edd55ba5` | 34,489 | 95.0% | _1p_ | — | — |
-| 256x512x256 | 32,768 | 9 | 5 | 8 | 2 | 8 | 2047 | `09e2cdf8` | 34,821 | 94.1% | _1p_ | — | — |
-| 256x512x512 | 65,536 | 9 | 6 | 8 | 2 | 8 | 2047 | `1f7a3ed8` | 71,218 | 92.0% | _0p_ | — | — |
-| 128x256x512 | 16,384 | 8 | 5 | 16 | 1 | 16 | 0 | `a0dd1086` | 18,082 | 90.6% | _1p_ | — | — |
-| 256x256x256 | 16,384 | 8 | 5 | 8 | 2 | 8 | 2047 | `eff18904` | 18,177 | 90.1% | _1p_ | — | — |
-| 512x256x256 | 32,768 | 8 | 6 | 4 | 4 | 4 | 2047 | `4bfabeee` | 37,632 | 87.1% | _0p_ | — | — |
-| 512x512x128 | 32,768 | 9 | 5 | 4 | 4 | 4 | 2047 | `aec98132` | 38,325 | 85.5% | _2p_ | — | — |
-| 512x512x512 | 131,072 | 9 | 7 | 4 | 4 | 4 | 2047 | `97c85346` | 153,707 | 85.3% | _0p_ | — | — |
-| 512x256x512 | 65,536 | 8 | 7 | 4 | 4 | 4 | 2047 | `2903acbf` | 78,314 | 83.7% | _0p_ | — | — |
-| 128x128x512 | 8,192 | 7 | 5 | 16 | 1 | 16 | 0 | `f4e7253a` | 9,792 | 83.7% | _1p_ | — | — |
-| 256x128x256 | 8,192 | 7 | 5 | 8 | 2 | 8 | 2047 | `55b75bcd` | 10,014 | 81.8% | _2p_ | — | — |
-| 512x256x128 | 16,384 | 8 | 5 | 4 | 4 | 4 | 2047 | `30c8a832` | 20,155 | 81.3% | _3p_ | — | — |
-| 512x128x256 | 16,384 | 7 | 6 | 4 | 4 | 4 | 2047 | `15e8ddef` | 20,307 | 80.7% | _1p_ | — | — |
-| 512x128x512 | 32,768 | 7 | 7 | 4 | 4 | 4 | 2047 | `6045d69e` | 42,767 | 76.6% | _0p_ | — | — |
-| 512x128x128 | 8,192 | 7 | 5 | 4 | 4 | 4 | 2047 | `bb2834ad` | 11,111 | 73.7% | _3p_ | — | — |
-| 256x64x256 | 4,096 | 6 | 5 | 8 | 2 | 8 | 2047 | `52e63dfe` | 6,050 | 67.7% | _3p_ | — | — |
-| 512x64x256 | 8,192 | 6 | 6 | 4 | 4 | 4 | 2047 | `fa6007d0` | 12,183 | 67.2% | _2p_ | — | — |
-| 512x64x512 | 16,384 | 6 | 7 | 4 | 4 | 4 | 2047 | `fe1ebb97` | 24,616 | 66.6% | _0p_ | — | — |
-| 256x32x512 | 4,096 | 5 | 6 | 8 | 2 | 8 | 2047 | `afc79e88` | 6,752 | 60.7% | _1p_ | — | — |
-| 512x32x512 | 8,192 | 5 | 7 | 4 | 4 | 4 | 2047 | `9209f128` | 16,238 | 50.4% | _0p_ | — | — |
-| 256x32x256 | 2,048 | 5 | 5 | 8 | 2 | 8 | 2047 | `697a398d` | 4,081 | 50.2% | _4p_ | — | — |
+| 128x1024x512 | 65,536 | 10 | 5 | 16 | 1 | 16 | 0 | `1149dab0` | 67,693 | 96.8% | _6p_ | — | — |
+| 256x1024x256 | 65,536 | 10 | 5 | 8 | 2 | 8 | 2047 | `046f329e` | 68,253 | 96.0% | _10p_ | — | — |
+| 128x512x512 | 32,768 | 9 | 5 | 16 | 1 | 16 | 0 | `edd55ba5` | 34,489 | 95.0% | _6p_ | — | — |
+| 256x512x256 | 32,768 | 9 | 5 | 8 | 2 | 8 | 2047 | `09e2cdf8` | 34,821 | 94.1% | _9p_ | — | — |
+| 256x512x512 | 65,536 | 9 | 6 | 8 | 2 | 8 | 2047 | `1f7a3ed8` | 71,218 | 92.0% | _8p_ | — | — |
+| 128x256x512 | 16,384 | 8 | 5 | 16 | 1 | 16 | 0 | `a0dd1086` | 18,082 | 90.6% | _6p_ | — | — |
+| 256x256x256 | 16,384 | 8 | 5 | 8 | 2 | 8 | 2047 | `eff18904` | 18,177 | 90.1% | _8p_ | — | — |
+| 512x256x256 | 32,768 | 8 | 6 | 4 | 4 | 4 | 2047 | `4bfabeee` | 37,632 | 87.1% | _8p_ | — | — |
+| 512x512x128 | 32,768 | 9 | 5 | 4 | 4 | 4 | 2047 | `aec98132` | 38,325 | 85.5% | _11p_ | — | — |
+| 512x512x512 | 131,072 | 9 | 7 | 4 | 4 | 4 | 2047 | `97c85346` | 153,707 | 85.3% | _7p_ | — | — |
+| 512x256x512 | 65,536 | 8 | 7 | 4 | 4 | 4 | 2047 | `2903acbf` | 78,314 | 83.7% | _8p_ | — | — |
+| 128x128x512 | 8,192 | 7 | 5 | 16 | 1 | 16 | 0 | `f4e7253a` | 9,792 | 83.7% | _6p_ | — | — |
+| 256x128x256 | 8,192 | 7 | 5 | 8 | 2 | 8 | 2047 | `55b75bcd` | 10,014 | 81.8% | 9,831 | 83.3% | -1.8% |
+| 512x256x128 | 16,384 | 8 | 5 | 4 | 4 | 4 | 2047 | `30c8a832` | 20,155 | 81.3% | _11p_ | — | — |
+| 512x128x256 | 16,384 | 7 | 6 | 4 | 4 | 4 | 2047 | `15e8ddef` | 20,307 | 80.7% | _9p_ | — | — |
+| 512x128x512 | 32,768 | 7 | 7 | 4 | 4 | 4 | 2047 | `6045d69e` | 42,767 | 76.6% | _8p_ | — | — |
+| 512x128x128 | 8,192 | 7 | 5 | 4 | 4 | 4 | 2047 | `bb2834ad` | 11,111 | 73.7% | 11,493 | 71.3% | +3.4% |
+| 256x64x256 | 4,096 | 6 | 5 | 8 | 2 | 8 | 2047 | `52e63dfe` | 6,050 | 67.7% | 5,804 | 70.6% | -4.1% |
+| 512x64x256 | 8,192 | 6 | 6 | 4 | 4 | 4 | 2047 | `fa6007d0` | 12,183 | 67.2% | 11,898 | 68.9% | -2.3% |
+| 512x64x512 | 16,384 | 6 | 7 | 4 | 4 | 4 | 2047 | `fe1ebb97` | 24,616 | 66.6% | _7p_ | — | — |
+| 256x32x512 | 4,096 | 5 | 6 | 8 | 2 | 8 | 2047 | `afc79e88` | 6,752 | 60.7% | 6,584 | 62.2% | -2.5% |
+| 512x32x512 | 8,192 | 5 | 7 | 4 | 4 | 4 | 2047 | `9209f128` | 16,238 | 50.4% | _11p_ | — | — |
+| 256x32x256 | 2,048 | 5 | 5 | 8 | 2 | 8 | 2047 | `697a398d` | 4,081 | 50.2% | 3,859 | 53.1% | -5.4% |
 
-**0 of 23 complete.**
+**6 of 23 complete.** mean **-2.1%** · best -5.4% · worst +3.4%
 
 `ideal = M·N·P / 1024` (MACs ÷ 1024 FMA lanes = 256 cores × 4 FPU). Efficiency is
 `ideal / actual`; the denominator comes from the data size, never from simulation.
