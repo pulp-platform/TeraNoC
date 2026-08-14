@@ -703,6 +703,22 @@ module mempool_group_mshr
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                                 req_merge_valid;
   mshr_id_t  [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                                 req_merge_mshr_id;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                                 req_merge_ready;
+  // C1 (F11a): prefix rank of same-target merging ports. Replaces the serial read-modify-write on
+  // sub_reqs_num, where port p read the value every earlier port left behind -- an up-to-32-deep
+  // chain of 64:1 mux + increment + compare + demux-write ending at req_in_ready.
+  //
+  // rank(p) = #{q < p : q merges into the SAME entry}. Port p then writes slot q.num + rank and is
+  // ready iff q.num + rank + 1 <= MshrMergeReqs, all evaluated against the REGISTERED array.
+  //
+  // Proven equivalent in hardware/scripts/proof_merge_rank.py: slot assignment + count over 100k
+  // random 32-port configurations and an exhaustive small case (a rejected port never steals a rank
+  // because rejection is always a SUFFIX -- the count only grows); state transitions over 200k
+  // configurations (both arms write identical values, so firing from every qualifying port instead
+  // of only the first gives the same result). Prerequisite verified against this file: state,
+  // sub_reqs_num and served_cnt are written ZERO times before the merge door, so mshr_d == mshr_q
+  // for exactly the fields read here.
+  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][SubReqCountW-1:0]                merge_rank;
+  logic      [NumAllocSlots-1:0]                                                                   merge_same_mask;
   logic                                                                                           amo_invalidate;
 
   // Request allocation (banked allocator bookkeeping).
@@ -2811,6 +2827,7 @@ module mempool_group_mshr
 
   always_comb begin
     int unsigned merge_new_idx;
+    logic [SubReqCountW-1:0] merge_slot;   // C1: q.sub_reqs_num + this port's rank
     // Defaults
     mshr_d      = mshr_q;
     // Clock-gate write flags. Set on the same line as the write they describe (see the entry
@@ -2852,6 +2869,25 @@ module mempool_group_mshr
     resp_in_ready = '1;
     mshr_resp_inflight = '0;
 
+    // C1: rank each merging port against the earlier ports targeting the same entry. Built as a
+    // mask + population count rather than an accumulate-in-a-loop, so it maps to an adder tree
+    // instead of reintroducing the 32-deep serial chain this change exists to remove.
+    for (int t = 0; t < NumTilesPerGroup; t++) begin
+      for (int p = 1; p < NumRemoteReqPortsPerTile; p++) begin
+        merge_same_mask = '0;
+        for (int t2 = 0; t2 < NumTilesPerGroup; t2++) begin
+          for (int p2 = 1; p2 < NumRemoteReqPortsPerTile; p2++) begin
+            if (((t2 < t) || ((t2 == t) && (p2 < p))) &&
+                req_merge_valid[t2][p2] && req_merge_ready[t2][p2] &&
+                (req_merge_mshr_id[t2][p2] == req_merge_mshr_id[t][p])) begin
+              merge_same_mask[t2 * NumReqPortsActive + (p2 - 1)] = 1'b1;
+            end
+          end
+        end
+        merge_rank[t][p] = SubReqCountW'($countones(merge_same_mask));
+      end
+    end
+
     // ------------------------------------------------------------
     // Request path: merge loads, allocate MSHR, or bypass to NoC
     // ------------------------------------------------------------
@@ -2865,21 +2901,23 @@ module mempool_group_mshr
           end
           if (req_merge_valid[tile_i][port_i]) begin
             // Merge hit: accept without touching NoC.
+            // C1: slot and capacity come from the REGISTERED count plus this port's rank, not from
+            // the value earlier ports left in mshr_d.
+            merge_slot = mshr_q[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num +
+                         merge_rank[tile_i][port_i];
             req_in_ready[tile_i][port_i] =
                 req_merge_ready[tile_i][port_i] &&
-                ((mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num +
-                  SubReqCountW'(1)) <= MshrMergeReqs);
+                ((merge_slot + SubReqCountW'(1)) <= MshrMergeReqs);
             if (req_in_ready[tile_i][port_i]) begin
-              if ((mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num +
-                   SubReqCountW'(1)) <= MshrMergeReqs) begin
+              if ((merge_slot + SubReqCountW'(1)) <= MshrMergeReqs) begin
 `ifndef TARGET_SYNTHESIS
                 if (EnableRespCache &&
-                    (mshr_d[req_merge_mshr_id[tile_i][port_i]].state == MSHR_CACHED)) begin
+                    (mshr_q[req_merge_mshr_id[tile_i][port_i]].state == MSHR_CACHED)) begin
                   mshr_d[req_merge_mshr_id[tile_i][port_i]].cache_hit_cnt =
                       mshr_d[req_merge_mshr_id[tile_i][port_i]].cache_hit_cnt + 1'b1;
                 end
 `endif
-                merge_new_idx = mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num;
+                merge_new_idx = merge_slot;
                 mshr_id_we[req_merge_mshr_id[tile_i][port_i]] = 1'b1;
                 mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[merge_new_idx].valid = 1'b1;
                 mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[merge_new_idx].tile_id = tile_i;
@@ -2888,13 +2926,16 @@ module mempool_group_mshr
                     req_in[tile_i][port_i].wdata.core_id;
                 mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[merge_new_idx].meta_id_base =
                     req_in[tile_i][port_i].wdata.meta_id;
+                // Ports are visited in increasing order, so the LAST accepted port -- the one with the
+                // highest rank -- writes the correct final count. No separate accumulator needed.
                 mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num =
-                    mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num + SubReqCountW'(1);
+                    merge_slot + SubReqCountW'(1);
                 // Cache self-invalidate: count this merged sub-request toward the sharing target.
                 mshr_d[req_merge_mshr_id[tile_i][port_i]].served_cnt =
-                    mshr_d[req_merge_mshr_id[tile_i][port_i]].served_cnt + ServedCntW'(1);
+                    mshr_q[req_merge_mshr_id[tile_i][port_i]].served_cnt +
+                    ServedCntW'(merge_rank[tile_i][port_i]) + ServedCntW'(1);
                 if (EnableRespCache &&
-                    (mshr_d[req_merge_mshr_id[tile_i][port_i]].state == MSHR_CACHED)) begin
+                    (mshr_q[req_merge_mshr_id[tile_i][port_i]].state == MSHR_CACHED)) begin
                   mshr_d[req_merge_mshr_id[tile_i][port_i]].state = MSHR_DRAIN_RESP;
                   mshr_d[req_merge_mshr_id[tile_i][port_i]].beats_left = BurstLenWidth'(1);
                   mshr_d[req_merge_mshr_id[tile_i][port_i]].beat_pending = '0;
@@ -2909,8 +2950,8 @@ module mempool_group_mshr
 `endif
                 end else if (
                     RespWaitSubsSingle &&
-                    (mshr_d[req_merge_mshr_id[tile_i][port_i]].state == MSHR_RESP_HOLD) &&
-                    (mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num >=
+                    (mshr_q[req_merge_mshr_id[tile_i][port_i]].state == MSHR_RESP_HOLD) &&
+                    ((merge_slot + SubReqCountW'(1)) >=
                      SubReqCountW'(HoldSubsSingle))) begin
                   // The merge that landed this cycle reached the response-release target.
                   mshr_d[req_merge_mshr_id[tile_i][port_i]].state = MSHR_DRAIN_RESP;
