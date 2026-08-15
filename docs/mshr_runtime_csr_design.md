@@ -85,10 +85,42 @@ fed by the same decoded request. One flop bank per group.
 | 2 | `CFG_HOLD_SUBS_BURST` | 3 | elaborated `HoldSubsBurst` | 1 = this class bypasses |
 | 3 | `CFG_HOLD_WINDOW_SINGLE` | 11 | elaborated | clamped to `HoldWindowHwMax` |
 | 4 | `CFG_HOLD_WINDOW_BURST` | 11 | elaborated | clamped |
+| 8 | `CFG_SERVE_TIMEOUT` | 11 | elaborated `ServeTimeout` | **response-side**, not the same thing as the hold window — see below |
 | 5 | `CFG_BANK_SHIFT_SINGLE` | 3 | elaborated | encoded, see §4 |
 | 6 | `CFG_BANK_SHIFT_BURST` | 2 | elaborated | encoded |
 | 7 | `CFG_BANK_BURST_BITS` | 1 | elaborated | encoded |
 | 15 | `CFG_STATUS` (RO) | 16 | — | sticky error bits, §5 |
+
+### `hold_window_*` vs `serve_timeout` — different mechanisms, one counter
+
+These are easy to conflate and were conflated once already, at real cost: the four B-share=1 shapes
+inherited `serve_timeout = 2047` while `gemm_results.md` was measured at 255, and the resulting
+two-variable comparison read as a fake +34%/+41% RTL regression.
+
+| | `hold_window_single/burst` | `serve_timeout` |
+|---|---|---|
+| side | **request** | **response** |
+| live state | `WAIT_RESP && !issued` | `RESP_HOLD`, and `CACHED` below target |
+| on expiry | issue the withheld NoC fetch | `RESP_HOLD` -> deliver to whoever is present (`:3393`); `CACHED` -> self-invalidate and free the way (`:4051`) |
+| per-type | yes (single / burst) | no, one value |
+| CSR | idx 3 / idx 4 | **idx 8** |
+
+They share the physical `hold_cnt` field because the request-side hold lives only in
+`WAIT_RESP && !issued`, which is mutually exclusive with both response-side states (`:232-234`).
+So the CSR pair costs no extra storage — but the counter width must cover **both**:
+
+```
+HoldCntMax = max(HoldWindowHwMax, ServeTimeoutHwMax)     // = 2047 with both bounded at 2047
+```
+
+**Two constraints the CSR file must enforce**, because software can otherwise write a configuration
+the hardware forbids at elaboration:
+
+1. `ServeTimeout == 0` is illegal when `RespWaitSubsSingle || !CacheReclaimable` — there is an
+   elaboration `$error` at `:328`. A runtime write of 0 under those conditions must be **rejected**
+   and set the `CFG_STATUS` sticky bit, not silently accepted. Without the timeout an entry whose
+   serve target is never reached pins its way forever.
+2. Neither value may exceed its hardware bound; clamp and flag rather than truncate silently.
 
 **Every reset value is the value that config elaborates today.** An unconfigured run must be
 bit-identical to the current design — that is the first verification gate (§V1).
@@ -203,6 +235,7 @@ now.
 #define MSHR_CSR_BANK_SHIFT_SINGLE  5
 #define MSHR_CSR_BANK_SHIFT_BURST   6
 #define MSHR_CSR_BANK_BURST_BITS    7
+#define MSHR_CSR_SERVE_TIMEOUT      8   // response-side; NOT the hold window
 #define MSHR_CSR_STATUS            15
 
 // DERIVED, never hardcoded -- 16384 at 16 groups, 65536 at 64. A hardcoded <<14
@@ -239,6 +272,7 @@ void mshr_cfg_apply(const mshr_cfg_t *c) {
     mshr_cfg_write(g, MSHR_CSR_HOLD_SUBS_BURST,   c->hold_subs_burst);
     mshr_cfg_write(g, MSHR_CSR_HOLD_WINDOW_SINGLE,c->hold_window_single);
     mshr_cfg_write(g, MSHR_CSR_HOLD_WINDOW_BURST, c->hold_window_burst);
+    mshr_cfg_write(g, MSHR_CSR_SERVE_TIMEOUT,     c->serve_timeout);
     mshr_cfg_write(g, MSHR_CSR_ENABLE, 1);    // arm last
   }
   barrier_all();
