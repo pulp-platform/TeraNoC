@@ -1,6 +1,6 @@
 # GEMM benchmark results — the four pinned shapes at `hold_window_burst = 2047`
 
-Generated 2026-08-15 03:21. **Re-runnable**: `python3 scripts/gen_win2047_doc.py`.
+Generated 2026-08-15 20:15. **Re-runnable**: `python3 scripts/gen_win2047_doc.py`.
 
 ## Why this file exists
 
@@ -16,11 +16,11 @@ isolation** — not the truncation bug, which was separately shown not to affect
 | M×N×P | ideal | ref (win=0) | opt3 (win=0) | **win=2047** | vs ref | vs opt3 |
 |---|---:|---:|---:|---:|---:|---:|
 | 128x128x512 | 8,192 | 9,792 | 165,585 | **185,505** | **+1,794%** | +12% |
-| 128x256x512 | 16,384 | 18,082 | 25,498 | _258p, 7.6% util_ | — | — |
-| 128x512x512 | 32,768 | 34,489 | 46,256 | _247p, 7.3% util_ | — | — |
-| 128x1024x512 | 65,536 | 67,693 | — | _265p, 4.6% util_ | — | — |
+| 128x256x512 | 16,384 | 18,082 | 25,498 | **362,019** | **+1,902%** | +1320% |
+| 128x512x512 | 32,768 | 34,489 | 46,256 | **725,967** | **+2,005%** | +1469% |
+| 128x1024x512 | 65,536 | 67,693 | 139,129 | **1,325,094** | **+1,858%** | +852% |
 
-**1 of 4 complete.** mean **+1,794%** vs reference.
+**4 of 4 complete.** mean **+1,890%** vs reference.
 
 ## Why it is this bad, and why the pin exists
 

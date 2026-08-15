@@ -9373,3 +9373,51 @@ back; a consistent loss would mean the shortened `req_in_ready` is throttling. S
 **Status.** DONE. Sweep launched; results land in the benchmark file as arms complete.
 `docs/benchmarks/README.md` now documents the chain that makes each sweep's delta attributable to
 exactly one knob.
+
+## 2026-08-15 · win2047 family closed, and a base split the hold-curve arms fell through
+
+**Purpose.** Finish the four pinned-shape arms at `hold_window_burst = 2047`, reclaim disk from
+finished campaign builds, and make the hold-curve's 99,879 attributable.
+
+**win2047 — DONE, 4/4.** The last arm, `128x1024x512`, came in at **1,325,094** cycles against a
+67,693 reference (**+1,858%**); family mean **+1,890%**. `docs/benchmarks/gemm_results_hold_window_2047.md`
+regenerated. The mechanism is unchanged and now measured on every member: B is shared 1-way, so
+`hold_subs_burst` clamps to 2, a 1-way line can never supply 2 subscribers, the early-release
+condition is unreachable, and every burst allocation waits the full window. The pin is a disable,
+not a tuning value.
+
+**Disk.** 190 finished build directories removed across the worktree and main tree, **274 GB**
+reclaimed (579 GB → 853 GB free). The protected set was derived from the live process table — any
+directory that was a running process's cwd, any reachable from a live `run_*/` simv symlink, the
+four main-tree QuestaSim GUI runs, and the `4x4_sw_dev` tree. No results were touched:
+`gen_sweep_doc_phase.py` reads only the `/tmp` logs, and raw transcripts live in `run_*/transcript_mm`.
+
+**The finding: `spill_req_in` splits the campaign into two populations.** C2 (`f7a7e90f`,
+2026-08-14 **17:15**) changed the default from an *absent* define to an explicit `0`. The RTL
+fallback for absent is **1** (`mempool_group_mshr.sv:75`), and that same line states the knob is not
+bit-identical — it removes a pipeline stage and shifts request arrival by a cycle. So:
+
+| family | built | `SpillReqIn` |
+|---|---|---|
+| `sweep_`, `sweepO3_` | pre-C2 | 1 |
+| **hold-curve** (`h0_base` ×3, `hsingle2047`) | 08-14 12:25–12:40 | **1** |
+| `sweepC2_`, `phaseE1_`, `win2047_` | post-C2 | 0 |
+
+The chain is intact — C2 legitimately owns the 1→0 delta, and its sweep header says so. But the
+hold-curve arms were built ~4.5 h before the commit, so **`hsingle2047`'s 99,879 differs from
+sweepC2's 130,792 in three knobs, not two**: `hold_window_single` 0→2047, `bank_publish` 1→0, and
+`spill_req_in` 0→1. The −23.6% was never attributable to the single window.
+
+**Result.** The factorial over (`hold_window_single`, `bank_publish`) was rebuilt on the *current*
+campaign base (`spill=0`), gated on a 28-define diff against sweepC2's own `128x1024x512` build log.
+That costs one extra arm — the (2047, publish=0) corner has to be re-measured on-chain — and leaves
+the (0, publish=1) corner as sweepC2's existing 130,792. All three new arms passed the gate.
+
+**Two lessons.** (1) The gate caught this before a cycle was simulated; a hand-picked subset check
+would not have. (2) The *audit* pattern must be as loose as the gate's: an ad-hoc sweep using
+`grep '\+define\+GROUP_MSHR_SPILL_REQ_IN='` matched **zero** lines in all 102 build logs — the
+`+define+` prefix is not present in them — and reported the campaign as uniformly `SpillReqIn=1`,
+the exact inverse of the truth. A too-strict pattern fails silently and uniformly, which reads as a
+clean finding rather than a broken filter.
+
+**Status.** win2047 DONE. Factorial RUNNING (3 arms, ~19% in). CSR gates V1/V3 at 98%/95%.
