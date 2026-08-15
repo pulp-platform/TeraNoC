@@ -235,3 +235,49 @@ which is suggestive but is a different tool from the one that stalled.
   `128x1024x512` are trending the other way. But cycles were never the point: opt2 exists to shorten
   the drain cone by removing its dependence on the same-cycle allocate/merge logic, and that benefit
   appears only in a timing report. Keep the default `off` and enable per shape until there is one.
+
+---
+
+## Phase E addendum (2026-08-15) — two hypotheses REFUTED, and what is actually open
+
+**The C1 truncation bug is real but explains none of the observed behaviour.**
+
+`128x128x512` under opt3, re-run with the fix and a config gate on the FULL define set (all 29
+defines plus an explicitly pinned `SPILL_REQ_IN=1`, since that knob's default had moved):
+
+| | cycles | samples < 5% util |
+|---|---:|---|
+| unfixed | 165,585 | 152/165 |
+| **C1-fixed** | **165,585** | **152/165** |
+
+Byte-identical. Two claims are therefore withdrawn:
+
+1. ~~"The truncation bug is a candidate for the `128x128x512` collapse."~~ **REFUTED.** The collapse
+   is something else in `bank_publish=1` on this shape and is **unexplained**.
+2. ~~"C2 was masking the truncation bug on `merge_reqs=16` shapes."~~ **REFUTED** — it rested on the
+   same hypothesis. C2's -89.7% / -15.2% / -9.3% on the three B-share=1 shapes is real and
+   **unexplained**, against -0.01% across 17 ordinary shapes.
+
+**What the result does establish.** It is a fifth equivalence point: the fix is bit-identical at
+`merge_reqs=16` as well as at 8 (34,596 arm). And the wrap **never fired in any run of this
+campaign** — the bug is a genuine latent silicon-hang risk, fixed prophylactically, not the cause of
+anything we measured. Keep the fix; stop attributing observations to it.
+
+**Open, and the next thing to do.** Two symptoms share one knob (`bank_publish=1`, default ON):
+- `128x128x512` opt3: 13,138 -> 165,585 (+1,160%), 92% of samples below 5% util
+- the g8 pathology on `512x512x512` at hold 255 (+21.2%), which did NOT reproduce at hold 2047 (-1.93%)
+
+opt3 is separable — the bank-narrowed drain selector (B0.3) and the per-bank round-robin publish are
+independent halves. **Bisect those two on `128x128x512` rather than proposing another mechanism.**
+The last two mechanisms proposed from symptom-shape alone were both wrong.
+
+### Also measured: the hold window at 2047 on the pinned shapes
+
+`128x128x512` at `hold_window_burst=2047` (on the fix): **185,505 cyc, +1,794% vs reference** — worse
+than the window=0 opt3 arm, so the window costs on top of whatever else is wrong. Exactly what the
+mechanism predicts: B shared 1-way -> `hold_subs_burst` clamps to 2 -> a 1-way line can never supply
+2 subscribers -> early release unreachable -> every burst allocation waits the full window.
+
+Note the previously-quoted **"+803%"** for this class came from an arm killed mid-run that never
+produced a FINAL. The measured figure is +1,794%; the old estimate was low by more than half. Do not
+cite killed-run extrapolations as measurements.
