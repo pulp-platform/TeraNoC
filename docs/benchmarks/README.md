@@ -52,6 +52,26 @@ Read the CONFOUND section in files 2 and 3 before quoting either pairwise delta:
 was built from a later commit than the one above it, and those commits are only
 *claimed* bit-identical until their equivalence runs land.
 
+### Phase files (E1 onward)
+
+From Phase E the campaign continues the same way, one file per phase, each measured against the
+phase before it:
+
+| file | phase | measured against |
+|---|---|---|
+| `gemm_results_mshr_ppa_e1.md` | commit-FIFO depth + ROB counter (config only) | `sweepC2` |
+| `gemm_results_mshr_ppa_e2.md` | MSHR cleanups | `phaseE1` |
+| `gemm_results_mshr_ppa_e3.md` | VLSU stride multipliers | `phaseE2` |
+
+These are produced by **one** generator, `scripts/gen_sweep_doc_phase.py <tag> <base> <out> <title>
+<changed>`, and **one** sweep runner, `sweep_generic.sh <tag> "<knobs>"` — not by copying. The three
+original generators were hand-copied, drifted apart, and when the `serve_timeout` bundling bug was
+found each copy had to be patched separately (one needed a different anchor because its wording had
+diverged). One copy each from here on.
+
+Each phase's own file records the **compiled define set read back from that arm's build log**, not
+the launcher's intent — the distinction that caught three invalid runs on 2026-08-14.
+
 **Why the chain instead of one table.** Bundled deltas are unattributable, and this
 campaign has already been bitten by that — the hold-window change was 255 → 2047 at the
 same moment as nine RTL commits, and 2047 was later measured at **+725%** on
