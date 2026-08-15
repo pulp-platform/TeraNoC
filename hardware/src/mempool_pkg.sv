@@ -663,6 +663,7 @@ package mempool_pkg;
     `ifdef GROUP_MSHR_CACHE_RECLAIMABLE `GROUP_MSHR_CACHE_RECLAIMABLE `else 1'b0 `endif;
   localparam bit MshrServeTimeoutNonZero = MshrRespWaitSubsSingle || !MshrCacheReclaimable;
 
+  localparam integer unsigned MshrCfgHoldCntMax = 2047; // hardware bound on window / serve_timeout
   localparam integer unsigned MshrCfgHoldCntW   = 11;  // bound 2047, matches today's shipping max
   localparam integer unsigned MshrCfgSubsW      = 4;   // [1, MshrMergeReqs]; 1 == "bypass this class"
   localparam integer unsigned MshrCfgShiftW     = 4;   // raw shift; the RTL muxes over a small range

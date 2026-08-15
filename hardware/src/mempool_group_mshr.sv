@@ -242,8 +242,18 @@ module mempool_group_mshr
   // width has to cover whichever window is larger.
   localparam int unsigned ServeTimeout =
     `ifdef GROUP_MSHR_SERVE_TIMEOUT `GROUP_MSHR_SERVE_TIMEOUT `else 0 `endif;
-  localparam int unsigned HoldCntMax =
+  // The counter must be sized for the LARGEST value that can ever be loaded, and at
+  // MshrCfgRuntime=1 that is the hardware bound, NOT the elaborated default -- software can write
+  // any value up to MshrCfgHoldCntMax at any time.
+  //
+  // Getting this wrong is the same defect class as the C1 rank truncation: a field sized from one
+  // source and fed from another. Concretely, a config elaborating hold_window=0 gives HoldCntW=1, so
+  // a software write of 2047 would load hold_ticks() = 1'(2047) = 1 -- a 2047-cycle window silently
+  // becoming a single tick, with nothing to indicate it.
+  localparam int unsigned HoldCntElabMax =
     (HoldWindowMax > ServeTimeout) ? HoldWindowMax : ServeTimeout;
+  localparam int unsigned HoldCntMax =
+    mempool_pkg::MshrCfgRuntime ? mempool_pkg::MshrCfgHoldCntMax : HoldCntElabMax;
   // HOLD PRESCALER. hold_cnt used to tick every cycle, so it needed enough bits for the whole
   // window in cycles ($clog2(1024) = 10) and up to MshrNum counters toggled every cycle. A shared
   // prescaler divides the tick rate by 2**HoldPrescaleW, so each entry stores the window in TICKS.
@@ -1340,8 +1350,19 @@ module mempool_group_mshr
           // the single arm to a GENUINE single (req_len_raw==1); a misaligned burst then has
           // req_can_merge=0 and bypasses to the NoC with its original burst_len intact, so the
           // owner still receives all N beats and no non-owner can merge in.
+          // RUNTIME BYPASS. req_can_merge is the single eligibility gate -- req_merge_valid
+          // (:1926) and req_alloc_cand both AND with it -- so clearing it means the request
+          // neither merges nor allocates and goes straight to the NoC. That makes this the one
+          // correct place for both bypass rules:
+          //   * CFG_ENABLE = 0  -> the whole MSHR is bypassed. This is its RESET state, so init,
+          //     DMA and I$ warm-up never occupy a way or a response-cache line.
+          //   * hold_subs_* = 1 -> that CLASS does not merge, so bypass it. A 1-way-shared operand
+          //     (B at M=128) has nothing to merge with, and holding it only guarantees a
+          //     full-window stall -- what the per-shape hold_window_burst := 0 pin approximated.
+          // Both fold away at MshrCfgRuntime=0, where cfg_bypass_* are constant 0.
           req_can_merge[tile_i][port_i] =
               req_is_load[tile_i][port_i] &&
+              !(req_is_single[tile_i][port_i] ? cfg_bypass_single : cfg_bypass_burst) &&
               ((EnableMshrSingleReq       && req_is_single[tile_i][port_i] &&
                 (req_len_raw[tile_i][port_i] == BurstLenWidth'(1))) ||
                (EnableMshrNonFullBurstReq && req_is_non_full_burst[tile_i][port_i]) ||
