@@ -9421,3 +9421,16 @@ the exact inverse of the truth. A too-strict pattern fails silently and uniforml
 clean finding rather than a broken filter.
 
 **Status.** win2047 DONE. Factorial RUNNING (3 arms, ~19% in). CSR gates V1/V3 at 98%/95%.
+
+## 2026-08-16 · Phase E1 closed: 23/23, every arm bit-identical
+
+**Result.** `512x512x512` landed at **154,734** — exactly its sweepC2 reference — closing Phase E1 at
+23 of 23. **Every one of the 23 arms is +0.00%.** Not "within noise": bit-identical cycle counts.
+
+`spatz_vlsu_commit_qmin=1` and `spatz_rob_cnt_idvalid=1` are conclusively **cycle-inert** on
+sp-fmatmul across the whole shape space -- 128..512 in M, 32..1024 in N, 128..512 in P, and all three
+B-share classes. Both were config-only (no RTL edit), so this also re-validates that the sweep
+harness reproduces a configuration exactly: 23 independent builds and runs, 23 exact matches.
+
+**Status.** DONE. E2/E3 involve RTL edits and are deliberately NOT auto-queued -- each needs its edit
+made and its equivalence checked against 34,596 before a sweep is worth spending.
