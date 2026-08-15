@@ -85,7 +85,7 @@ fed by the same decoded request. One flop bank per group.
 | 2 | `CFG_HOLD_SUBS_BURST` | 3 | elaborated `HoldSubsBurst` | 1 = this class bypasses |
 | 3 | `CFG_HOLD_WINDOW_SINGLE` | 11 | elaborated | clamped to `HoldWindowHwMax` |
 | 4 | `CFG_HOLD_WINDOW_BURST` | 11 | elaborated | clamped |
-| 8 | `CFG_SERVE_TIMEOUT` | 11 | elaborated `ServeTimeout` | **response-side**, not the same thing as the hold window — see below |
+| 8 | `CFG_SERVE_TIMEOUT` | 11 | elaborated `ServeTimeout` | **response-side, SINGLE-request only** — never arms for bursts. See below. |
 | 5 | `CFG_BANK_SHIFT_SINGLE` | 3 | elaborated | encoded, see §4 |
 | 6 | `CFG_BANK_SHIFT_BURST` | 2 | elaborated | encoded |
 | 7 | `CFG_BANK_BURST_BITS` | 1 | elaborated | encoded |
@@ -102,7 +102,8 @@ two-variable comparison read as a fake +34%/+41% RTL regression.
 | side | **request** | **response** |
 | live state | `WAIT_RESP && !issued` | `RESP_HOLD`, and `CACHED` below target |
 | on expiry | issue the withheld NoC fetch | `RESP_HOLD` -> deliver to whoever is present (`:3393`); `CACHED` -> self-invalidate and free the way (`:4051`) |
-| per-type | yes (single / burst) | no, one value |
+| per-type | yes (single / burst) | one value, but **single-only in effect** |
+| applies to bursts? | yes, `hold_window_burst` | **NO** — both arming sites are guarded on `burst_len == 1` (`:3390`, `:4037`) |
 | CSR | idx 3 / idx 4 | **idx 8** |
 
 They share the physical `hold_cnt` field because the request-side hold lives only in
@@ -112,6 +113,23 @@ So the CSR pair costs no extra storage — but the counter width must cover **bo
 ```
 HoldCntMax = max(HoldWindowHwMax, ServeTimeoutHwMax)     // = 2047 with both bounded at 2047
 ```
+
+**`serve_timeout` never arms for burst entries.** Both sites that load it are explicitly gated:
+
+```systemverilog
+:3390  RespWaitSubsSingle && burst_len == 1 && sub_reqs_num < HoldSubsSingle  -> RESP_HOLD
+:4037  EnableRespCache && cacheable && burst_len == 1                        -> CACHED
+```
+
+A burst entry can enter neither state, so the timeout is a **single-request** backstop despite its
+general-sounding name. This matters for reading the 2026-08-14 confound correctly: on the four
+B-share=1 shapes it is the **A traffic** (16-way-shared single-word loads, `hold_subs_single = 16`)
+that sits in `RESP_HOLD` waiting for subscribers, and `serve_timeout` decides when it gives up. The
+B bursts are unaffected by it — their cost came from `hold_window_burst`, a different knob on the
+request side.
+
+Consider renaming to `serve_timeout_single` when this lands, or at minimum documenting it at the
+parameter (`:228-236` describes the states but not that both are single-only).
 
 **Two constraints the CSR file must enforce**, because software can otherwise write a configuration
 the hardware forbids at elaboration:
