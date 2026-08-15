@@ -52,6 +52,7 @@ sources:
   # Level 2
   - hardware/src/floo_remapper.sv
   - hardware/src/routing_table_pkg.sv
+  - hardware/src/mempool_group_mshr_cfg.sv
   - hardware/src/mempool_group_mshr.sv
   - hardware/src/mempool_group_barrier.sv
   - hardware/src/mempool_group.sv

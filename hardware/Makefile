@@ -312,6 +312,15 @@ group_mshr_spill_req_in ?=
 ifneq ($(strip $(group_mshr_spill_req_in)),)
   vlog_defs += -DGROUP_MSHR_SPILL_REQ_IN=$(group_mshr_spill_req_in)
 endif
+# Runtime-configurable MSHR (docs/mshr_runtime_csr_design.md). 0 = every CSR const-folds to its
+# elaborated default and the hold block still folds away on shapes that pin the window to 0 --
+# bit-identical to the pre-CSR design, and what a fixed-function tapeout wants. 1 = software-writable
+# through the group-barrier port. Development and characterisation builds want 1: it turns a
+# sweep-per-config into configs-per-simulation.
+group_mshr_cfg_runtime ?=
+ifneq ($(strip $(group_mshr_cfg_runtime)),)
+  vlog_defs += -DGROUP_MSHR_CFG_RUNTIME=$(group_mshr_cfg_runtime)
+endif
 ifneq ($(strip $(group_mshr_stall_on_resp)),)
   vlog_defs += -DGROUP_MSHR_STALL_ON_RESP=$(group_mshr_stall_on_resp)
 endif

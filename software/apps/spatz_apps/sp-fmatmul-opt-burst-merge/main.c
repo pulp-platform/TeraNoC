@@ -67,6 +67,7 @@
 #include "runtime.h"
 #include "synchronization.h"
 #include "encoding.h"
+#include "mshr_cfg.h"
 #endif
 
 #define USE_DMA
@@ -420,6 +421,41 @@ int main() {
     }
   }
   mempool_barrier(num_cores);
+#endif
+
+#if MSHR_RUNTIME_CFG
+  // -----------------------------------------------------------------------------------------
+  // Group MSHR runtime configuration (docs/mshr_runtime_csr_design.md).
+  //
+  // Placed HERE deliberately: after the I$ warm-up, before the timed region. The MSHR ships
+  // DISABLED out of reset, so everything above -- init, DMA, warm-up -- bypasses it and never
+  // occupies a way or a response-cache line during a phase whose locality does not matter.
+  //
+  // Every group owns its own MSHR and there is no broadcast, so all NUM_GROUPS are programmed,
+  // one designated writer each, in parallel; the barrier makes the configuration visible to every
+  // core before the first timed access.
+  {
+    static const mshr_cfg_t mshr_cfg = {
+        .hold_subs_single   = MSHR_CFG_HOLD_SUBS_SINGLE,
+        .hold_subs_burst    = MSHR_CFG_HOLD_SUBS_BURST,
+        .hold_window_single = MSHR_CFG_HOLD_WINDOW_SINGLE,
+        .hold_window_burst  = MSHR_CFG_HOLD_WINDOW_BURST,
+        .serve_timeout      = MSHR_CFG_SERVE_TIMEOUT,
+        .bank_shift_single  = MSHR_CFG_BANK_SHIFT_SINGLE,
+        .bank_shift_burst   = MSHR_CFG_BANK_SHIFT_BURST,
+        .bank_burst_bits    = MSHR_CFG_BANK_BURST_BITS,
+    };
+    uint32_t mshr_st = 0;
+    if (mshr_cfg_is_group_writer()) mshr_st = mshr_cfg_apply_group(&mshr_cfg);
+    mempool_barrier(num_cores);
+    // Non-zero status means the configuration IN EFFECT is not the one requested -- a refused
+    // bank-hash write, an out-of-range value, a rejected serve_timeout. Fail loudly: a silent
+    // config mismatch is exactly what invalidated three measurement runs on 2026-08-14.
+    if (mshr_st != 0) {
+      printf("[MSHR] cfg REJECTED status=0x%x group=%d -- MEASUREMENT INVALID\n",
+             (unsigned)mshr_st, (int)mshr_cfg_my_group());
+    }
+  }
 #endif
 
   for (uint32_t i = 0; i < measure_iterations; ++i) {

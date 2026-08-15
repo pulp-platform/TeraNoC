@@ -106,7 +106,15 @@ module mempool_group_mshr
   // MSHR -> Group
   output `STRUCT_VECT(tcdm_master_resp_t, [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1])  group_mshr_resp_o,
   output logic                            [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]  group_mshr_resp_valid_o,
-  input  logic                            [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]  group_mshr_resp_ready_i
+  input  logic                            [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]  group_mshr_resp_ready_i,
+  // Runtime configuration (docs/mshr_runtime_csr_design.md). At MshrCfgRuntime=0 every field is a
+  // constant driven by mempool_group_mshr_cfg, so the reads below const-fold exactly as the
+  // localparams they replace and the netlist is unchanged.
+  input  mempool_pkg::mshr_cfg_t                                                          cfg_i,
+  // Any entry valid. The CSR file uses it to REFUSE a bank-hash change while entries are resident:
+  // the bank index both places an entry and looks it up, so re-hashing mid-flight makes a lookup
+  // probe the wrong bank and a second entry is allocated for a line that already has one.
+  output logic                                                                            mshr_busy_o
 );
 
   localparam int unsigned RespPortIdW      = idx_width(NumRemoteRespPortsPerTile);
@@ -328,6 +336,26 @@ module mempool_group_mshr
   if ((RespWaitSubsSingle || !CacheReclaimable) && (ServeTimeout == 0))
     $error("[mempool_group_mshr] group_mshr_resp_wait_subs_single=1 or group_mshr_cache_reclaimable=0 requires group_mshr_serve_timeout > 0 (no release path otherwise).");
   localparam int unsigned SubReqCountW     = idx_width(MshrMergeReqs + 1);
+
+  // ------------------------------------------------------------------------------------------
+  // RUNTIME CONFIG SELECT. Each signal is the localparam when MshrCfgRuntime = 0 -- so it folds to
+  // a constant and nothing downstream changes -- and the CSR field when 1. Read THESE at the use
+  // sites, never the localparams.
+  //
+  // Only compare operands and shift amounts appear here. Anything that sizes an array or a struct
+  // (MshrNum, MshrWaysPerBank, MshrMergeReqs, RespBufWords) stays elaboration-time by construction.
+  // ------------------------------------------------------------------------------------------
+  logic [mempool_pkg::MshrCfgSubsW-1:0]    cfg_hold_subs_single, cfg_hold_subs_burst;
+  logic [mempool_pkg::MshrCfgHoldCntW-1:0] cfg_hold_window_single, cfg_hold_window_burst;
+  logic [mempool_pkg::MshrCfgHoldCntW-1:0] cfg_serve_timeout;
+  logic [mempool_pkg::MshrCfgShiftW-1:0]   cfg_bank_shift_single, cfg_bank_shift_burst;
+  logic                                    cfg_bank_burst_bits, cfg_mshr_enable;
+  // R3: hold_subs == 1 means "this class does not merge -- bypass it". That gives the value the
+  // auto-tuner naturally produces for a 1-way-shared operand (B at M=128) the right meaning instead
+  // of clamping it up to 2 and then always timing out, which is what the per-shape
+  // `hold_window_burst := 0` pin was approximating.
+  logic                                    cfg_bypass_single, cfg_bypass_burst;
+
   // C1 FIX (2026-08-14): the merge rank and slot need their OWN width, not SubReqCountW.
   //
   // The bug: merge_rank was SubReqCountW and took `SubReqCountW'($countones(mask))` over a
@@ -424,6 +452,29 @@ module mempool_group_mshr
   // the burst branch degenerates to the plain contiguous field, like a single.
   localparam int unsigned BankBurstBits =
     `ifdef GROUP_MSHR_BANK_BURST_BITS `GROUP_MSHR_BANK_BURST_BITS `else 1 `endif;
+  // Drive the runtime-config selects. MshrCfgRuntime is a compile-time constant, so each ternary
+  // collapses at elaboration: at 0 these ARE the localparams and every downstream expression is
+  // structurally what it was before the CSRs existed.
+  assign cfg_mshr_enable        = mempool_pkg::MshrCfgRuntime ? cfg_i.enable : 1'b1;
+  assign cfg_hold_subs_single   = mempool_pkg::MshrCfgRuntime ? cfg_i.hold_subs_single
+                                                              : mempool_pkg::MshrCfgSubsW'(HoldSubsSingle);
+  assign cfg_hold_subs_burst    = mempool_pkg::MshrCfgRuntime ? cfg_i.hold_subs_burst
+                                                              : mempool_pkg::MshrCfgSubsW'(HoldSubsBurst);
+  assign cfg_hold_window_single = mempool_pkg::MshrCfgRuntime ? cfg_i.hold_window_single
+                                                              : mempool_pkg::MshrCfgHoldCntW'(HoldWindowSingle);
+  assign cfg_hold_window_burst  = mempool_pkg::MshrCfgRuntime ? cfg_i.hold_window_burst
+                                                              : mempool_pkg::MshrCfgHoldCntW'(HoldWindowBurst);
+  assign cfg_serve_timeout      = mempool_pkg::MshrCfgRuntime ? cfg_i.serve_timeout
+                                                              : mempool_pkg::MshrCfgHoldCntW'(ServeTimeout);
+  assign cfg_bank_shift_single  = mempool_pkg::MshrCfgRuntime ? cfg_i.bank_shift_single
+                                                              : mempool_pkg::MshrCfgShiftW'(BankSelShiftSingle);
+  assign cfg_bank_shift_burst   = mempool_pkg::MshrCfgRuntime ? cfg_i.bank_shift_burst
+                                                              : mempool_pkg::MshrCfgShiftW'(BankSelShiftBurst);
+  assign cfg_bank_burst_bits    = mempool_pkg::MshrCfgRuntime ? cfg_i.bank_burst_bits
+                                                              : (BankBurstBits != 0);
+  // A class bypasses when its merge target is 1 (nothing to merge with) or the MSHR is disabled.
+  assign cfg_bypass_single      = !cfg_mshr_enable || (cfg_hold_subs_single == mempool_pkg::MshrCfgSubsW'(1));
+  assign cfg_bypass_burst       = !cfg_mshr_enable || (cfg_hold_subs_burst  == mempool_pkg::MshrCfgSubsW'(1));
   localparam int unsigned BankInTileW  = idx_width(mempool_pkg::NumBanksPerTile);
   localparam int unsigned GroupBits    = idx_width(NumGroups);
   // Reconstructed linear word address width = full addr_key + the re-inserted group field.
@@ -453,8 +504,14 @@ module mempool_group_mshr
   // it and stays a pure function of {group,addr}. Splitting single from burst costs ZERO merging:
   // req_hit_way already requires burst_len equality (:1197) and the CACHED arm requires req_len==1
   // (:1203), so a single and a burst for the same line can never merge in the first place.
+  // The three hash fields arrive as ARGUMENTS rather than being read from localparams, so the body
+  // is identical whether they are constants (MshrCfgRuntime=0: every caller passes the same constant
+  // and the part-selects fold back to wires) or CSR fields.
   function automatic logic [BankIdW-1:0] mshr_bank_of(input tcdm_addr_t addr_key, input group_id_t grp,
-                                                      input logic is_single);
+                                                      input logic is_single,
+                                                      input logic [mempool_pkg::MshrCfgShiftW-1:0] sh_single,
+                                                      input logic [mempool_pkg::MshrCfgShiftW-1:0] sh_burst,
+                                                      input logic burst_bits);
     logic [BankIdW-1:0]              b;
     logic [$bits(tcdm_addr_t)-1:0]   mix;
     logic [WordAddrW-1:0]            word_addr;
@@ -473,12 +530,14 @@ module mempool_group_mshr
                     addr_key[TileIdBits-1:0],                                  // tile
                     addr_key[TileIdBits +: BankInTileW] };                     // bank_in_tile (low)
       if (is_single) begin
-        b = word_addr[BankSelShiftSingle +: BankIdW];
-      end else if (BankBurstBits == 0) begin
-        b = word_addr[BankSelShiftBurst +: BankIdW];
+        b = word_addr[sh_single +: BankIdW];
+      end else if (!burst_bits) begin
+        b = word_addr[sh_burst +: BankIdW];
       end else begin
-        b = { word_addr[BankSelShiftBurst +: BankIdW - BankBurstBits],
-              word_addr[BurstAlignBits   +: BankBurstBits] };
+        // BankBurstBits is 0 or 1 in every shipping config, so the split field is the high
+        // BankIdW-1 bits from sh_burst plus one bit just above the burst boundary.
+        b = { word_addr[sh_burst +: BankIdW - 1],
+              word_addr[BurstAlignBits +: 1] };
       end
     end else if (BankHash == 0) begin
       // Legacy: each bank bit is the XOR of a fixed stride-BankIdW subset of address bits.
@@ -676,6 +735,11 @@ module mempool_group_mshr
   mempool_group_mshr_t [MshrNum-1:0]                                           mshr_q;
   logic                [MshrNum-1:0]                                           mshr_d_valid;
   logic                [MshrNum-1:0]                                           mshr_q_valid;
+  // Occupancy, exported so the CSR file can refuse a bank-hash change while entries are resident.
+  // Declared HERE, not with the other cfg selects ~200 lines earlier: mshr_q_valid does not exist
+  // yet at that point. Placing a use before its declaration is the Error-[IND] this file has already
+  // hit three times (B0.3, C1, and the first C1-fix attempt).
+  assign mshr_busy_o = |mshr_q_valid;
   // Hold-the-fetch replay walk start pointer (rotates every cycle for fairness among held
   // entries contending for the same outbound lane). Tied off when the feature is compiled out.
   mshr_id_t                                                                    hold_replay_rr_q;
@@ -1403,7 +1467,7 @@ module mempool_group_mshr
            (mshr_q[mshr_i].burst_len == BurstLenWidth'(1)) &&
            (mshr_q[mshr_i].resp_buf_cnt != '0) &&
            (mshr_q[mshr_i].sub_reqs_num != '0) &&
-           (mshr_q[mshr_i].sub_reqs_num < SubReqCountW'(HoldSubsSingle))))
+           (mshr_q[mshr_i].sub_reqs_num < SubReqCountW'(cfg_hold_subs_single))))
         else $fatal(1,
                     "MSHR invalid RESP_HOLD entry: mshr=%0d len=%0d resp=%0d subreqs=%0d",
                     mshr_i, mshr_q[mshr_i].burst_len, mshr_q[mshr_i].resp_buf_cnt,
@@ -1646,7 +1710,8 @@ module mempool_group_mshr
         // misaligned burst is forced to req_len=1 and must bank like a single (see BankSelShift*).
         assign req_bank[tile_i][port_i] =
             mshr_bank_of(req_addr_key[tile_i][port_i], req_in[tile_i][port_i].tgt_group_id,
-                         req_is_single[tile_i][port_i]);
+                         req_is_single[tile_i][port_i],
+                         cfg_bank_shift_single, cfg_bank_shift_burst, cfg_bank_burst_bits);
       end
     end
   endgenerate
@@ -2243,7 +2308,7 @@ module mempool_group_mshr
         if (mshr_d_valid[e] && mshr_d[e].issued &&
             mshr_q_valid[e] && !mshr_q[e].issued &&
             (((mshr_d[e].burst_len == BurstLenWidth'(1)) ?
-               HoldWindowSingle : HoldWindowBurst) != 0)) begin
+               cfg_hold_window_single : cfg_hold_window_burst) != 0)) begin
           if (mshr_d[e].hold_cnt == '0) mshr_issue_timeout_dbg[e] = 1'b1;
           else                          mshr_issue_subs_dbg[e]    = 1'b1;
         end
@@ -2348,7 +2413,7 @@ module mempool_group_mshr
               $display({"[RH STUCK] cyc=%0d g=%0d e=%0d bank=%0d addr=0x%0h tgt_g=%0d ",
                         "subs=%0d/%0d byp=%0d stl=%0d peers=%0d bank[inv=%0d wait=%0d drain=%0d hold=%0d cached=%0d]"},
                        rh_cyc, group_id_i, e, bk, mshr_q[e].base_addr, mshr_q[e].tgt_group_id,
-                       mshr_q[e].sub_reqs_num, HoldSubsSingle,
+                       mshr_q[e].sub_reqs_num, cfg_hold_subs_single,
                        rh_byp[e], rh_stl[e], peers,
                        n_inv, n_wait, n_drain, n_hold, n_cach);
               for (int s = 0; s < MshrMergeReqs; s++) begin
@@ -3023,7 +3088,7 @@ module mempool_group_mshr
                     RespWaitSubsSingle &&
                     (mshr_q[req_merge_mshr_id[tile_i][port_i]].state == MSHR_RESP_HOLD) &&
                     ((merge_slot + MergeRankW'(1)) >=
-                     SubReqCountW'(HoldSubsSingle))) begin
+                     SubReqCountW'(cfg_hold_subs_single))) begin
                   // The merge that landed this cycle reached the response-release target.
                   mshr_d[req_merge_mshr_id[tile_i][port_i]].state = MSHR_DRAIN_RESP;
                   mshr_d[req_merge_mshr_id[tile_i][port_i]].beats_left = BurstLenWidth'(1);
@@ -3062,7 +3127,7 @@ module mempool_group_mshr
               // HoldWindowBurst. A 0 window for this class -> take the normal issue path (a held
               // door with a 0 window would never issue -> deadlock).
               if ((((req_len[tile_i][port_i] == BurstLenWidth'(1)) ?
-                     HoldWindowSingle : HoldWindowBurst) != 0) &&
+                     cfg_hold_window_single : cfg_hold_window_burst) != 0) &&
                   req_can_merge[tile_i][port_i] &&
                   req_alloc_found[tile_i][port_i]) begin
                 // Hold-the-fetch: allocate the entry but WITHHOLD its NoC fetch (the replay walker
@@ -3138,10 +3203,10 @@ module mempool_group_mshr
                 // mark it issued immediately.
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].hold_cnt =
                     hold_ticks((req_len[tile_i][port_i] == BurstLenWidth'(1)) ?
-                               HoldWindowSingle : HoldWindowBurst);
+                               cfg_hold_window_single : cfg_hold_window_burst);
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].issued =
                     (((req_len[tile_i][port_i] == BurstLenWidth'(1)) ?
-                      HoldWindowSingle : HoldWindowBurst) == 0);
+                      cfg_hold_window_single : cfg_hold_window_burst) == 0);
                 mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].sub_reqs_num =
                     SubReqCountW'(1);
                 // Cache self-invalidate: the owner is the first served sub-request.
@@ -3203,7 +3268,7 @@ module mempool_group_mshr
                           ((mshr_d[e].hold_cnt == '0) ||
                            (mshr_d[e].sub_reqs_num >=
                             SubReqCountW'((mshr_d[e].burst_len == BurstLenWidth'(1)) ?
-                                          HoldSubsSingle : HoldSubsBurst)));
+                                          cfg_hold_subs_single : cfg_hold_subs_burst)));
         replay_own_t[e] = mshr_d[e].sub_reqs[0].tile_id;
         replay_own_p[e] = mshr_d[e].sub_reqs[0].port_id;
         replay_rr_mask[e] = MshrIdxW'(e) >= MshrIdxW'(hold_replay_rr_q);
@@ -3269,7 +3334,7 @@ module mempool_group_mshr
         if (mshr_d_valid[e] && (mshr_d[e].state == MSHR_CACHED) &&
             (mshr_d[e].sub_reqs_num == '0) &&
             (mshr_d[e].served_cnt >=
-             ServedCntW'((mshr_d[e].burst_len == BurstLenWidth'(1)) ? HoldSubsSingle : HoldSubsBurst))) begin
+             ServedCntW'((mshr_d[e].burst_len == BurstLenWidth'(1)) ? cfg_hold_subs_single : cfg_hold_subs_burst))) begin
           mshr_d_valid[e] = 1'b0;
           mshr_d[e]       = '0;
           mshr_wr_all[e] = 1'b1;
@@ -3387,10 +3452,10 @@ module mempool_group_mshr
           if (RespWaitSubsSingle && !amo_invalidate &&
               (mshr_d[resp_mshr_id[tile_i][port_i]].burst_len == BurstLenWidth'(1)) &&
               (mshr_d[resp_mshr_id[tile_i][port_i]].sub_reqs_num <
-               SubReqCountW'(HoldSubsSingle))) begin
+               SubReqCountW'(cfg_hold_subs_single))) begin
             mshr_d[resp_mshr_id[tile_i][port_i]].state = MSHR_RESP_HOLD;
             // Arm the serve-target timeout (0 => never expires; the countdown below is skipped).
-            mshr_d[resp_mshr_id[tile_i][port_i]].hold_cnt = hold_ticks(ServeTimeout);
+            mshr_d[resp_mshr_id[tile_i][port_i]].hold_cnt = hold_ticks(cfg_serve_timeout);
           end else begin
             mshr_d[resp_mshr_id[tile_i][port_i]].state = MSHR_DRAIN_RESP;
           end
@@ -3463,7 +3528,7 @@ module mempool_group_mshr
     // response capture and the store/AMO forced-drain passes so it observes this cycle's state and
     // never fights them. Entirely const-folded away when ServeTimeout == 0.
     // ------------------------------------------------------------
-    if (ServeTimeout != 0) begin
+    if (cfg_serve_timeout != 0) begin
       for (int e = 0; e < MshrNum; e++) begin
         if (mshr_d_valid[e] && (mshr_d[e].state == MSHR_RESP_HOLD)) begin
           if (mshr_d[e].hold_cnt != '0) begin
@@ -4048,7 +4113,7 @@ module mempool_group_mshr
             // is not an allocation victim either -- so its way would be pinned for good. A cache
             // HIT re-enters DRAIN_RESP and returns here, which refreshes the window, so a
             // frequently-used line keeps its way and only an idle one ages out.
-            mshr_d[mshr_i].hold_cnt = hold_ticks(ServeTimeout);
+            mshr_d[mshr_i].hold_cnt = hold_ticks(cfg_serve_timeout);
           end else begin
             // Pop the drained head beat.
             if (mshr_d[mshr_i].resp_buf_cnt != '0) begin
@@ -4219,12 +4284,12 @@ module mempool_group_mshr
           // timeout_single. (Same bug class as the mshr_issue_timeout_dbg wave signals, fixed there.)
           if ((HoldWindowMax != 0) && mshr_q_valid[e] && mshr_q[e].issued && !stat_issued_shadow_q[e]) begin
             if (mshr_q[e].burst_len == BurstLenWidth'(1)) begin
-              if (HoldWindowSingle != 0) begin
+              if (cfg_hold_window_single != 0) begin
                 if (mshr_q[e].hold_cnt == '0) rc_hold_to_s_inc    = rc_hold_to_s_inc + 1'b1;
                 else                          rc_hold_early_s_inc = rc_hold_early_s_inc + 1'b1;
               end
             end else begin
-              if (HoldWindowBurst != 0) begin
+              if (cfg_hold_window_burst != 0) begin
                 if (mshr_q[e].hold_cnt == '0) rc_hold_to_b_inc    = rc_hold_to_b_inc + 1'b1;
                 else                          rc_hold_early_b_inc = rc_hold_early_b_inc + 1'b1;
               end
@@ -4864,12 +4929,14 @@ module mempool_group_mshr
         @(posedge clk_i) disable iff (!rst_ni)
         mshr_q_valid[mshr_i] |->
           (mshr_bank_of(mshr_q[mshr_i].base_addr, mshr_q[mshr_i].tgt_group_id,
-                        mshr_q[mshr_i].burst_len == BurstLenWidth'(1)) ==
+                        mshr_q[mshr_i].burst_len == BurstLenWidth'(1),
+                        cfg_bank_shift_single, cfg_bank_shift_burst, cfg_bank_burst_bits) ==
            BankIdW'(mshr_i / MshrWaysPerBank)))
         else $fatal(1, "MSHR entry %0d not in its address bank (got %0d, expected %0d)",
                     mshr_i,
                     mshr_bank_of(mshr_q[mshr_i].base_addr, mshr_q[mshr_i].tgt_group_id,
-                                 mshr_q[mshr_i].burst_len == BurstLenWidth'(1)),
+                                 mshr_q[mshr_i].burst_len == BurstLenWidth'(1),
+                                 cfg_bank_shift_single, cfg_bank_shift_burst, cfg_bank_burst_bits),
                     mshr_i / MshrWaysPerBank);
     end
   endgenerate

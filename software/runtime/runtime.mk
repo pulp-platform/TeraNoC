@@ -121,6 +121,21 @@ DEFINES += -DXQUEUE_SIZE=$(xqueue_size)
 # alias the window) and by barrier-using apps (GBAR_BASE_WORD). MUST match GroupBarrierWord
 # in hardware/src/mempool_group.sv.
 DEFINES += -DGROUP_BARRIER_WORD=$(group_barrier_word)
+
+# --- Group MSHR runtime configuration -------------------------------------------------------
+# The software values come from the SAME make variables the hardware elaborates from, so the CSR
+# writes and the RTL defaults can never disagree. Enabled only when the hardware was built with
+# group_mshr_cfg_runtime=1; otherwise the kernel's config block compiles out entirely and the
+# behaviour is exactly the pre-CSR design.
+DEFINES += -DMSHR_RUNTIME_CFG=$(if $(filter 1,$(group_mshr_cfg_runtime)),1,0)
+DEFINES += -DMSHR_CFG_HOLD_SUBS_SINGLE=$(if $(group_mshr_hold_subs_single),$(group_mshr_hold_subs_single),2)
+DEFINES += -DMSHR_CFG_HOLD_SUBS_BURST=$(if $(group_mshr_hold_subs_burst),$(group_mshr_hold_subs_burst),2)
+DEFINES += -DMSHR_CFG_HOLD_WINDOW_SINGLE=$(if $(group_mshr_hold_window_single),$(group_mshr_hold_window_single),0)
+DEFINES += -DMSHR_CFG_HOLD_WINDOW_BURST=$(if $(group_mshr_hold_window_burst),$(group_mshr_hold_window_burst),0)
+DEFINES += -DMSHR_CFG_SERVE_TIMEOUT=$(if $(group_mshr_serve_timeout),$(group_mshr_serve_timeout),0)
+DEFINES += -DMSHR_CFG_BANK_SHIFT_SINGLE=$(if $(group_mshr_bank_shift_single),$(group_mshr_bank_shift_single),5)
+DEFINES += -DMSHR_CFG_BANK_SHIFT_BURST=$(if $(group_mshr_bank_shift_burst),$(group_mshr_bank_shift_burst),5)
+DEFINES += -DMSHR_CFG_BANK_BURST_BITS=$(if $(group_mshr_bank_burst_bits),$(group_mshr_bank_burst_bits),1)
 DEFINES += -DNUM_GROUP_BARRIERS=$(shell awk 'BEGIN{print $(num_cores)/$(num_groups)}')
 # Per-build extra defines (app/kernel A/B knobs), e.g.
 #   make <app> config=<cfg> EXTRA_DEFINES="-DGBAR_PLOOP=1 -DKERNEL_SIZE=4"
