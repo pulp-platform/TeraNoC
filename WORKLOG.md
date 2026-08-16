@@ -9434,3 +9434,43 @@ harness reproduces a configuration exactly: 23 independent builds and runs, 23 e
 
 **Status.** DONE. E2/E3 involve RTL edits and are deliberately NOT auto-queued -- each needs its edit
 made and its equivalence checked against 34,596 before a sweep is worth spending.
+
+## 2026-08-16 · Runtime-configurable group MSHR: verified, and the 23-shape CSR sweep launched
+
+**Purpose.** Close out the runtime-CSR feature (user's 4 ideas + 2 refinements) and measure it.
+
+**Result — every functional gate green.** Full record in `docs/mshr_runtime_csr_verification.md`.
+
+| gate | result |
+|---|---|
+| V1 `cfg_runtime=0` bit-identical | PASS 34,596 == 34,596 |
+| V2 (retasked) cost of leaving it unconfigured | **+55.6%** (53,835 vs 34,596) |
+| V3 CSR == elaborated constants | PASS — MSHR work counters byte-identical; +0.77% cold-start |
+| V4 CSR-driven burst bypass | PASS — alloc_burst=0, singles still merging |
+| V5a out-of-range write refused | PASS — status=0x2 (RANGE) |
+| V5b bank-hash-stable SVA | PASS — never fired |
+| V6 lint | running |
+
+**Two real bugs, both found by V3, both in the same six-line decode.** `bank == 3` fell through to
+`OP_WR_MASK`, so every CSR write clobbered a barrier struct's mask; and `bar_op` tested `!wen` before
+the bank, so every CFG_STATUS read became a barrier ARRIVAL. Both produced the identical 16-stuck
+signature (one per group's designated writer), which is why fixing only the write side looked like
+no fix at all. Neither was reachable before -- every prior campaign arm ran `cfg_runtime=0`, where
+`bank == 3` never occurs. Fixed with `OP_EXT_ACK` + `req_ext_rd_i`/`ack_rd_q`.
+
+**V3's pass criterion was wrong and was changed deliberately.** "Exactly 34,547" tests a *drop-in
+transparent* feature. With off-by-default the MSHR enters the timed region COLD, so a small positive
+delta is guaranteed by the design. The criterion that tests the actual claim is identical MSHR work
+counters -- and all four match exactly (merged_single 860160, merged_burst/alloc_single/alloc_burst
+122880 each). The +265 cyc is the measured price of off-by-default.
+
+**Two RTL changes on top**, both user-approved: `HoldSubs` guard relaxed to `[1, MshrMergeReqs]` (1 is
+the defined bypass encoding and was already legal at runtime), and `ServedCntMax` sized from
+`MshrMergeReqs` under `MshrCfgRuntime` -- the sibling of the `HoldCntMax` truncation fix. Verified
+inert: **0 of 23 shapes change**, because every flavour happens to set `hold_subs_single ==
+merge_reqs`. An accident, not an invariant.
+
+**Status.** 23-shape `sweepCSR` running, referenced against phaseE1 so its delta is exactly this
+phase. Every arm is gated on a full define diff vs phaseE1 (only CFG_RUNTIME may differ) AND on
+`[MSHRCFG] all 16 groups ENABLED` -- without the latter an unconfigured arm would silently measure a
+bypassed MSHR and read as a catastrophic regression. Expect ~+0.8% (cold start), not 0.

@@ -121,6 +121,33 @@ DEFINES += -DXQUEUE_SIZE=$(xqueue_size)
 # alias the window) and by barrier-using apps (GBAR_BASE_WORD). MUST match GroupBarrierWord
 # in hardware/src/mempool_group.sv.
 DEFINES += -DGROUP_BARRIER_WORD=$(group_barrier_word)
+
+# --- Group MSHR runtime configuration -------------------------------------------------------
+# The software values come from the SAME make variables the hardware elaborates from, so the CSR
+# writes and the RTL defaults can never disagree. Enabled only when the hardware was built with
+# group_mshr_cfg_runtime=1; otherwise the kernel's config block compiles out entirely and the
+# behaviour is exactly the pre-CSR design.
+DEFINES += -DMSHR_RUNTIME_CFG=$(if $(filter 1,$(group_mshr_cfg_runtime)),1,0)
+# I$ warm-up. DEFAULT 1 -- do not change it for anything whose cycle count will be quoted.
+# 0 skips the short reduced-N kernel pass before the timed region, which removes ~14k cycles of
+# pre-phase. That is ~29% of a 256x512x256 run but ~79% of a 256x32x256 one, so it is a large
+# debug-iteration win on small shapes and worthless on large ones.
+#
+# It is a make knob (not just a C #ifndef) SO THAT IT LANDS IN THE COMPILE LINE. Every sweep gate
+# diffs the emitted define set, so an arm built with warm-up off can never be silently compared
+# against one built with it on -- the same discipline that spill_req_in needed the hard way.
+DEFINES += -DICACHE_WARMUP=$(if $(icache_warmup),$(icache_warmup),1)
+# V5a negative test of the MSHR CSR reject path. DEBUG ONLY -- default 0, and it lands in the
+# compile line so a sweep gate cannot confuse a negtest binary with a perf one.
+DEFINES += -DMSHR_CFG_NEGTEST=$(if $(mshr_cfg_negtest),$(mshr_cfg_negtest),0)
+DEFINES += -DMSHR_CFG_HOLD_SUBS_SINGLE=$(if $(group_mshr_hold_subs_single),$(group_mshr_hold_subs_single),2)
+DEFINES += -DMSHR_CFG_HOLD_SUBS_BURST=$(if $(group_mshr_hold_subs_burst),$(group_mshr_hold_subs_burst),2)
+DEFINES += -DMSHR_CFG_HOLD_WINDOW_SINGLE=$(if $(group_mshr_hold_window_single),$(group_mshr_hold_window_single),0)
+DEFINES += -DMSHR_CFG_HOLD_WINDOW_BURST=$(if $(group_mshr_hold_window_burst),$(group_mshr_hold_window_burst),0)
+DEFINES += -DMSHR_CFG_SERVE_TIMEOUT=$(if $(group_mshr_serve_timeout),$(group_mshr_serve_timeout),0)
+DEFINES += -DMSHR_CFG_BANK_SHIFT_SINGLE=$(if $(group_mshr_bank_shift_single),$(group_mshr_bank_shift_single),5)
+DEFINES += -DMSHR_CFG_BANK_SHIFT_BURST=$(if $(group_mshr_bank_shift_burst),$(group_mshr_bank_shift_burst),5)
+DEFINES += -DMSHR_CFG_BANK_BURST_BITS=$(if $(group_mshr_bank_burst_bits),$(group_mshr_bank_burst_bits),1)
 DEFINES += -DNUM_GROUP_BARRIERS=$(shell awk 'BEGIN{print $(num_cores)/$(num_groups)}')
 # Per-build extra defines (app/kernel A/B knobs), e.g.
 #   make <app> config=<cfg> EXTRA_DEFINES="-DGBAR_PLOOP=1 -DKERNEL_SIZE=4"

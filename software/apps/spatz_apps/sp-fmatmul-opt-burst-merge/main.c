@@ -67,6 +67,7 @@
 #include "runtime.h"
 #include "synchronization.h"
 #include "encoding.h"
+#include "mshr_cfg.h"
 #endif
 
 #define USE_DMA
@@ -420,6 +421,77 @@ int main() {
     }
   }
   mempool_barrier(num_cores);
+#endif
+
+#if MSHR_RUNTIME_CFG
+  // -----------------------------------------------------------------------------------------
+  // Group MSHR runtime configuration (docs/mshr_runtime_csr_design.md).
+  //
+  // Placed HERE deliberately: after the I$ warm-up, before the timed region. The MSHR ships
+  // DISABLED out of reset, so everything above -- init, DMA, warm-up -- bypasses it and never
+  // occupies a way or a response-cache line during a phase whose locality does not matter.
+  //
+  // Every group owns its own MSHR and there is no broadcast, so all NUM_GROUPS are programmed,
+  // one designated writer each, in parallel; the barrier makes the configuration visible to every
+  // core before the first timed access.
+  {
+    static const mshr_cfg_t mshr_cfg = {
+        .hold_subs_single   = MSHR_CFG_HOLD_SUBS_SINGLE,
+        .hold_subs_burst    = MSHR_CFG_HOLD_SUBS_BURST,
+        .hold_window_single = MSHR_CFG_HOLD_WINDOW_SINGLE,
+        .hold_window_burst  = MSHR_CFG_HOLD_WINDOW_BURST,
+        .serve_timeout      = MSHR_CFG_SERVE_TIMEOUT,
+        .bank_shift_single  = MSHR_CFG_BANK_SHIFT_SINGLE,
+        .bank_shift_burst   = MSHR_CFG_BANK_SHIFT_BURST,
+        .bank_burst_bits    = MSHR_CFG_BANK_BURST_BITS,
+    };
+    uint32_t mshr_st = 0;
+    if (mshr_cfg_is_group_writer()) mshr_st = mshr_cfg_apply_group(&mshr_cfg);
+    mempool_barrier(num_cores);
+    // Non-zero status means the configuration IN EFFECT is not the one requested -- a refused
+    // bank-hash write, an out-of-range value, a rejected serve_timeout. Fail loudly: a silent
+    // config mismatch is exactly what invalidated three measurement runs on 2026-08-14.
+    if (mshr_st != 0) {
+      printf("[MSHR] cfg REJECTED status=0x%x group=%d -- MEASUREMENT INVALID\n",
+             (unsigned)mshr_st, (int)mshr_cfg_my_group());
+    }
+
+#if MSHR_CFG_NEGTEST
+    // V5a -- NEGATIVE test of the reject-and-report path. Deterministic, unlike a "write the bank
+    // hash while the MSHR is busy" test, which cannot guarantee entries are resident at the instant
+    // of the write. Here the value is out of range by construction, so the refusal is not racy.
+    //
+    // bank_shift_single is legal only in [5,10] (mempool_group_mshr_cfg.sv:95). Writing 99 must:
+    //   * be DROPPED  -- the old hash stays in effect, and
+    //   * set MSHR_STATUS_RANGE in the sticky status.
+    // A silently ACCEPTED out-of-range write is the failure this whole status mechanism exists to
+    // prevent, so the test fails loudly in BOTH directions.
+    if (mshr_cfg_is_group_writer()) {
+      const uint32_t g = mshr_cfg_my_group(), tl = mshr_cfg_peer_tile();
+      mshr_cfg_write(g, tl, MSHR_CSR_STATUS, 0);              // clear first: isolate this write
+      mshr_cfg_write(g, tl, MSHR_CSR_BANK_SHIFT_SINGLE, 99);  // out of range -> must be refused
+      __asm__ volatile("fence" ::: "memory");
+      uint32_t st = mshr_cfg_status(g, tl);
+      // REFUSED is the property under test, and the RTL has two legitimate ways to refuse:
+      // mshr_busy_i is checked BEFORE the range check (mempool_group_mshr_cfg.sv:118-120), so with
+      // the MSHR already enabled a bank-hash write can come back BANK_BUSY rather than RANGE.
+      // Treating only RANGE as a pass would call a correct refusal a failure.
+      const uint32_t refused = st & (MSHR_STATUS_RANGE | MSHR_STATUS_BANK_BUSY);
+      // ONE printf, from ONE core. 16 group writers printing concurrently interleave
+      // character-by-character on the shared UART and the contention storm wedged the run to ~5%
+      // utilisation with 8364 stuck requests. Only group 0 reports the normal case; a FAILING group
+      // still speaks up, because a garbled failure is better than a silent one.
+      if (g == 0)
+        printf("[V5A] %s status=0x%x (RANGE=%d BANK_BUSY=%d)\n",
+               refused ? "PASS out-of-range write refused" : "FAIL out-of-range write ACCEPTED",
+               (unsigned)st, (st & MSHR_STATUS_RANGE) ? 1 : 0, (st & MSHR_STATUS_BANK_BUSY) ? 1 : 0);
+      else if (!refused)
+        printf("[V5A] FAIL group=%d ACCEPTED out-of-range write, status=0x%x\n", (int)g, (unsigned)st);
+      mshr_cfg_write(g, tl, MSHR_CSR_STATUS, 0);              // leave status clean for the run
+    }
+    mempool_barrier(num_cores);
+#endif
+  }
 #endif
 
   for (uint32_t i = 0; i < measure_iterations; ++i) {

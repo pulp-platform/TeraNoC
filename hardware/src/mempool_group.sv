@@ -285,6 +285,16 @@ module mempool_group
   tile_group_id_t bar_req_ini;
   tile_addr_t     bar_req_tgt_addr;
   tcdm_payload_t  bar_req_wdata;
+  // Group MSHR runtime configuration, written through the barrier port's bank==3 op encoding.
+  // Declared here (not inside gen_group_barrier) so the MSHR instantiation can connect them in
+  // every arm; with the barrier disabled they stay tied off and the CSR file folds to its defaults.
+  logic        bar_is_cfg, bar_ext_rd;
+  logic        mshr_cfg_wr_valid;
+  logic [3:0]  mshr_cfg_wr_idx;
+  logic [31:0] mshr_cfg_wr_data;
+  mshr_cfg_t   mshr_cfg;
+  logic [31:0] mshr_cfg_status;
+  logic        mshr_busy;
   strb_t          bar_req_be;
   logic           bar_resp_valid, bar_resp_ready, bar_resp_wen;
   tile_group_id_t bar_resp_ini;
@@ -480,7 +490,36 @@ module mempool_group
     assign bar_word   = bar_req_tgt_addr[TCDMAddrMemWidth + BankW - 1 : BankW];  // word field
     assign bar_bank   = bar_req_tgt_addr[BankW-1 : 0];                           // bank field = op
     assign bar_struct = BarStructW'(bar_word - TCDMAddrMemWidth'(GroupBarrierWord));
-    assign bar_op     = (!bar_req_wen)      ? 2'd0
+    // Bank encoding 3 carries the group MSHR CSR file, reusing bar_struct as the CSR index: 16 CSRs
+    // x 32 bits on an ALREADY-DECODED group-level port, so no new address space and no new crossbar
+    // decode. See docs/mshr_runtime_csr_design.md.
+    //
+    // CORRECTION (2026-08-15). An earlier version of this comment said struct N with bank 1 and
+    // struct N with bank 3 "never collide because the op distinguishes them". That was FALSE and it
+    // hung the design: banks 0/2/3 all fell into the same `else` and issued OP_WR_MASK, so a CSR
+    // write executed mask_d[bar_struct] = data on the BARRIER, clobbering the struct whose index
+    // equalled the CSR index. Claiming a spare *field value* is not enough -- the consumer's decode
+    // has to be given the new case too, which is what OP_EXT_ACK (2'd3) below does.
+    assign mshr_cfg_wr_valid = bar_req_valid && bar_req_ready && bar_req_wen &&
+                               (bar_bank == BankW'(3));
+    assign mshr_cfg_wr_idx   = 4'(bar_struct);
+    assign mshr_cfg_wr_data  = 32'(bar_req_wdata.data);
+    // bank 3 MUST get its own encoding, for BOTH directions.
+    //
+    // Write side: bank 3 used to fall through to 2'd2 (OP_WR_MASK), so every MSHR CSR write also
+    // overwrote barrier struct bar_struct's mask -- and bar_struct is the CSR index, so writing
+    // CSRs 0..8,15 clobbered barrier structs 0..8,15, and mempool_barrier() hung on a mask nobody set.
+    //
+    // Read side: a read (wen=0) hit the FIRST ternary and became OP_ARRIVE regardless of bank, so
+    // the CFG_STATUS read-back at the end of mshr_cfg_apply_group() was a barrier ARRIVAL. One core
+    // per group arrived at a struct needing all 16, nothing ever released, and the read never
+    // returned -- 16 stuck loads, one per group. Both were found by V3 on 2026-08-15; fixing only
+    // the write side left the design hung in exactly the same shape, which is why the read side is
+    // called out separately here.
+    assign bar_is_cfg = (bar_bank == BankW'(3));
+    assign bar_ext_rd = bar_is_cfg && !bar_req_wen;
+    assign bar_op     = bar_is_cfg              ? 2'd3   // OP_EXT_ACK, read or write
+                      : (!bar_req_wen)          ? 2'd0
                       : (bar_bank == BankW'(1)) ? 2'd1
                       : 2'd2;
 
@@ -503,6 +542,7 @@ module mempool_group
       .req_valid_i    (bar_req_valid      ),
       .req_ini_addr_i (bar_req_ini        ),
       .req_op_i       (bar_op             ),
+      .req_ext_rd_i   (bar_ext_rd         ),
       .req_struct_i   (bar_struct         ),
       .req_cfg_data_i (bar_req_wdata.data[NumTilesPerGroup-1:0]),
       .req_ready_o    (bar_req_ready      ),
@@ -529,11 +569,28 @@ module mempool_group
     assign bar_resp_valid = bar_core_resp_valid;
     assign bar_resp_ini   = bar_core_resp_ini;
     assign bar_resp_wen   = bar_core_resp_wen;
+    // Track whether the ack currently in flight belongs to a CSR READ, so its response carries the
+    // status word. req_ready is gated on !ack_pending, so at most one is outstanding and a single
+    // flag suffices. A barrier release still writes back the dummy zero it always did.
+    logic cfg_rd_pend_q;
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni)                                    cfg_rd_pend_q <= 1'b0;
+      else if (bar_req_valid && bar_req_ready && bar_ext_rd) cfg_rd_pend_q <= 1'b1;
+      else if (bar_resp_valid && bar_resp_ready)      cfg_rd_pend_q <= 1'b0;
+    end
     assign bar_resp_rdata = '{meta_id: meta_store_q[bar_core_resp_ini].meta_id,
                               core_id: meta_store_q[bar_core_resp_ini].core_id,
-                              amo: '0, data: '0};
+                              amo: '0,
+                              data: cfg_rd_pend_q ? mshr_cfg_status : '0};
   end else begin : gen_no_group_barrier
-    // Barrier port present but never selected (bar_sel forced 0); tie it off.
+    // Barrier port present but never selected (bar_sel forced 0); tie it off. The MSHR CSR write
+    // port rides the same decode, so it ties off here too -- the CSR file then folds to its
+    // elaborated defaults, which is exactly the pre-CSR behaviour.
+    assign mshr_cfg_wr_valid = 1'b0;
+    assign mshr_cfg_wr_idx   = '0;
+    assign mshr_cfg_wr_data  = '0;
+    assign bar_is_cfg     = 1'b0;
+    assign bar_ext_rd     = 1'b0;
     assign bar_req_ready  = 1'b1;
     assign bar_resp_valid = 1'b0;
     assign bar_resp_ini   = '0;
@@ -910,6 +967,32 @@ module mempool_group
   /**********************
    *  Group-level MSHR  *
    *********************/
+  // Runtime configuration file. At MshrCfgRuntime=0 this has no storage and no write port: every
+  // field const-folds to the elaborated default, so the build is bit-identical to the pre-CSR
+  // design and the hold block still folds away on shapes that pin the window to 0.
+  mempool_group_mshr_cfg #(
+    .CfgRuntime               (MshrCfgRuntime         ),
+    .DefHoldSubsSingle        (MshrDefHoldSubsSingle  ),
+    .DefHoldSubsBurst         (MshrDefHoldSubsBurst   ),
+    .DefHoldWindowSingle      (MshrDefHoldWindowSingle),
+    .DefHoldWindowBurst       (MshrDefHoldWindowBurst ),
+    .DefServeTimeout          (MshrDefServeTimeout    ),
+    .DefBankShiftSingle       (MshrDefBankShiftSingle ),
+    .DefBankShiftBurst        (MshrDefBankShiftBurst  ),
+    .DefBankBurstBits         (MshrDefBankBurstBits   ),
+    .MergeReqs                (MshrDefMergeReqs       ),
+    .ServeTimeoutMustBeNonZero(MshrServeTimeoutNonZero)
+  ) i_group_mshr_cfg (
+    .clk_i       (clk_i            ),
+    .rst_ni      (rst_ni           ),
+    .wr_valid_i  (mshr_cfg_wr_valid),
+    .wr_idx_i    (mshr_cfg_wr_idx  ),
+    .wr_data_i   (mshr_cfg_wr_data ),
+    .mshr_busy_i (mshr_busy        ),
+    .cfg_o       (mshr_cfg         ),
+    .status_o    (mshr_cfg_status  )
+  );
+
   if (EnableGroupMshr) begin : gen_group_mshr
     mempool_group_mshr #(
       .NumGroups                (NumGroups                ),
@@ -935,9 +1018,12 @@ module mempool_group
       .mshr_noc_resp_ready_o    (mshr_noc_resp_ready      ),
       .group_mshr_resp_o        (group_mshr_resp          ),
       .group_mshr_resp_valid_o  (group_mshr_resp_valid    ),
-      .group_mshr_resp_ready_i  (group_mshr_resp_ready    )
+      .group_mshr_resp_ready_i  (group_mshr_resp_ready    ),
+      .cfg_i                    (mshr_cfg                 ),
+      .mshr_busy_o              (mshr_busy                )
     );
   end else begin : gen_group_mshr_bypass
+    assign mshr_busy = 1'b0;
     assign mshr_noc_req        = group_mshr_req;
     assign mshr_noc_req_valid  = group_mshr_req_valid;
     assign group_mshr_req_ready = mshr_noc_req_ready;

@@ -608,4 +608,96 @@ package mempool_pkg;
 `endif
 
 
+  /**********************************
+   *  GROUP MSHR RUNTIME CONFIG     *
+   **********************************/
+  // Software-writable group MSHR configuration (docs/mshr_runtime_csr_design.md). Written through
+  // the group-barrier port's unused op encoding (bank field == 3), so no new address space and no
+  // new crossbar decode. One instance per group.
+  //
+  // Only knobs that are COMPARE OPERANDS or SHIFT AMOUNTS are here. Anything that sizes an array or
+  // a struct -- MshrNum, MshrWaysPerBank, MshrMergeReqs, RespBufWords, DrainBeats -- stays an
+  // elaboration parameter and is absent by construction.
+  //
+  // The whole struct const-folds to the elaborated constants when MshrCfgRuntime = 0, so a
+  // fixed-function build is bit-identical to the pre-CSR design and keeps the hold-block const-fold.
+  // MshrCfgRuntime: 0 = every CSR const-folds to its default and the file has no storage, so the
+  // build is bit-identical to the pre-CSR design AND the hold block still folds away on shapes that
+  // pin the window to 0. 1 = software-writable. Development/characterisation want 1.
+  localparam bit MshrCfgRuntime =
+    `ifdef GROUP_MSHR_CFG_RUNTIME `GROUP_MSHR_CFG_RUNTIME `else 1'b0 `endif;
+
+  // Reset values for the CSR file. These MIRROR mempool_group_mshr.sv's own localparam chains and
+  // must stay identical to them -- the reset state is what makes an unconfigured run reproduce the
+  // pre-CSR design exactly (verification gate V1). Each `ifdef chain below is copied verbatim from
+  // the MSHR; if one changes there, change it here.
+  localparam integer unsigned MshrDefMergeReqs =
+    `ifdef GROUP_MSHR_MERGE_REQS `GROUP_MSHR_MERGE_REQS `else 8 `endif;
+  localparam integer unsigned MshrDefHoldWindow =
+    `ifdef GROUP_MSHR_HOLD_WINDOW `GROUP_MSHR_HOLD_WINDOW `else 0 `endif;
+  localparam integer unsigned MshrDefHoldWindowSingle =
+    `ifdef GROUP_MSHR_HOLD_WINDOW_SINGLE `GROUP_MSHR_HOLD_WINDOW_SINGLE `else MshrDefHoldWindow `endif;
+  localparam integer unsigned MshrDefHoldWindowBurst =
+    `ifdef GROUP_MSHR_HOLD_WINDOW_BURST `GROUP_MSHR_HOLD_WINDOW_BURST `else MshrDefHoldWindow `endif;
+  localparam integer unsigned MshrDefHoldSubs =
+    `ifdef GROUP_MSHR_HOLD_SUBS `GROUP_MSHR_HOLD_SUBS `else 2 `endif;
+  localparam integer unsigned MshrDefHoldSubsSingle =
+    `ifdef GROUP_MSHR_HOLD_SUBS_SINGLE `GROUP_MSHR_HOLD_SUBS_SINGLE `else MshrDefHoldSubs `endif;
+  localparam integer unsigned MshrDefHoldSubsBurst =
+    `ifdef GROUP_MSHR_HOLD_SUBS_BURST `GROUP_MSHR_HOLD_SUBS_BURST `else MshrDefHoldSubs `endif;
+  localparam integer unsigned MshrDefServeTimeout =
+    `ifdef GROUP_MSHR_SERVE_TIMEOUT `GROUP_MSHR_SERVE_TIMEOUT `else 0 `endif;
+  localparam integer unsigned MshrDefBankSelShift =
+    `ifdef GROUP_MSHR_BANK_SHIFT `GROUP_MSHR_BANK_SHIFT `else 5 `endif;
+  localparam integer unsigned MshrDefBankShiftSingle =
+    `ifdef GROUP_MSHR_BANK_SHIFT_SINGLE `GROUP_MSHR_BANK_SHIFT_SINGLE `else MshrDefBankSelShift `endif;
+  localparam integer unsigned MshrDefBankShiftBurst =
+    `ifdef GROUP_MSHR_BANK_SHIFT_BURST `GROUP_MSHR_BANK_SHIFT_BURST `else MshrDefBankSelShift `endif;
+  localparam integer unsigned MshrDefBankBurstBits =
+    `ifdef GROUP_MSHR_BANK_BURST_BITS `GROUP_MSHR_BANK_BURST_BITS `else 1 `endif;
+  // Mirrors the MSHR guard at mempool_group_mshr.sv:328: serve_timeout == 0 pins a CACHED way
+  // forever when the serve target is never reached and the entry is not an eviction victim.
+  localparam bit MshrRespWaitSubsSingle =
+    `ifdef GROUP_MSHR_RESP_WAIT_SUBS_SINGLE `GROUP_MSHR_RESP_WAIT_SUBS_SINGLE `else 1'b0 `endif;
+  localparam bit MshrCacheReclaimable =
+    `ifdef GROUP_MSHR_CACHE_RECLAIMABLE `GROUP_MSHR_CACHE_RECLAIMABLE `else 1'b0 `endif;
+  localparam bit MshrServeTimeoutNonZero = MshrRespWaitSubsSingle || !MshrCacheReclaimable;
+
+  localparam integer unsigned MshrCfgHoldCntMax = 2047; // hardware bound on window / serve_timeout
+  localparam integer unsigned MshrCfgHoldCntW   = 11;  // bound 2047, matches today's shipping max
+  localparam integer unsigned MshrCfgSubsW      = 4;   // [1, MshrMergeReqs]; 1 == "bypass this class"
+  localparam integer unsigned MshrCfgShiftW     = 4;   // raw shift; the RTL muxes over a small range
+
+  typedef struct packed {
+    logic                            enable;              // 0 = every request bypasses the MSHR
+    logic [MshrCfgSubsW-1:0]         hold_subs_single;    // 1 => singles bypass (no merging wanted)
+    logic [MshrCfgSubsW-1:0]         hold_subs_burst;     // 1 => bursts bypass
+    logic [MshrCfgHoldCntW-1:0]      hold_window_single;  // request-side hold, single entries
+    logic [MshrCfgHoldCntW-1:0]      hold_window_burst;   // request-side hold, burst entries
+    logic [MshrCfgHoldCntW-1:0]      serve_timeout;       // response-side, SINGLE-ONLY (RESP_HOLD/CACHED)
+    logic [MshrCfgShiftW-1:0]        bank_shift_single;   // bank-hash address bit select, singles
+    logic [MshrCfgShiftW-1:0]        bank_shift_burst;    // ... bursts
+    logic                            bank_burst_bits;     // BankBurstBits (0 or 1)
+  } mshr_cfg_t;
+
+  // CSR indices, mirrored by software/runtime/mshr_cfg.h -- keep the two in step.
+  localparam integer unsigned MSHR_CSR_ENABLE             = 0;
+  localparam integer unsigned MSHR_CSR_HOLD_SUBS_SINGLE   = 1;
+  localparam integer unsigned MSHR_CSR_HOLD_SUBS_BURST    = 2;
+  localparam integer unsigned MSHR_CSR_HOLD_WINDOW_SINGLE = 3;
+  localparam integer unsigned MSHR_CSR_HOLD_WINDOW_BURST  = 4;
+  localparam integer unsigned MSHR_CSR_BANK_SHIFT_SINGLE  = 5;
+  localparam integer unsigned MSHR_CSR_BANK_SHIFT_BURST   = 6;
+  localparam integer unsigned MSHR_CSR_BANK_BURST_BITS    = 7;
+  localparam integer unsigned MSHR_CSR_SERVE_TIMEOUT      = 8;
+  localparam integer unsigned MSHR_CSR_STATUS             = 15;
+
+  // CFG_STATUS sticky error bits. Software reads this after configuring; a set bit means the
+  // configuration in effect is NOT the one requested -- the exact class of silent mismatch that
+  // cost three invalid measurement runs on 2026-08-14.
+  localparam integer unsigned MSHR_STATUS_BANK_BUSY   = 0;  // bank-hash write refused: MSHR not empty
+  localparam integer unsigned MSHR_STATUS_RANGE       = 1;  // a value was out of range and clamped
+  localparam integer unsigned MSHR_STATUS_TIMEOUT_ZERO= 2;  // serve_timeout=0 refused (would pin a way)
+  localparam integer unsigned MSHR_STATUS_BAD_INDEX   = 3;  // write to an undefined CSR index
+
 endpackage : mempool_pkg

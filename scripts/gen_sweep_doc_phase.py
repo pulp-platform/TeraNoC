@@ -50,6 +50,7 @@ def periods(p):
         1 for ln in open(p, errors='ignore') if ln.lstrip('# ').startswith('[FPU] bench'))
 
 
+elf_suffix = sys.argv[6] if len(sys.argv) > 6 else ''
 shapes = [s.strip() for s in open(T + 'sweep_shapes.txt') if s.strip()]
 defs = {}
 for probe in (f'_defs_{tag}_256x512x256.txt', f'_defs_{tag}_256x256x256.txt'):
@@ -68,7 +69,10 @@ for s in shapes:
     ideal = M * N * P / 1024
     new = final(f'mx_{tag}_{s}_run.log')
     bas = final(f'mx_{base_tag}_{s}_run.log')
-    elf = W + f'hardware/matmul_4x4_{s}.elf'
+    # Provenance must name the binary that ACTUALLY ran. The CSR sweep preloads
+    # matmul_4x4_<shape>_csr.elf (CSR writes compiled in); recording the plain ELF's md5 here
+    # would document a file the arm never touched.
+    elf = W + f'hardware/matmul_4x4_{s}{elf_suffix}.elf'
     md5 = hashlib.md5(open(elf, 'rb').read()).hexdigest()[:8] if os.path.exists(elf) else '-'
     bs = f"{bas:,}" if bas else "—"
     if new:
