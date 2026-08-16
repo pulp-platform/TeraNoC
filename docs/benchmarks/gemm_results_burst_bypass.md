@@ -40,13 +40,23 @@ Efficiency is `ideal / actual` with `ideal = M·N·P / 1024` (4×4, 1024 FPU lan
 | M×N×P | ideal | phaseE1 cyc | **bypass cyc** | Δ | eff phaseE1 | **eff bypass** |
 |---|---:|---:|---:|---:|---:|---:|
 | 128x128x512 | 8,192 | 16,995 | **9,401** | **−44.68%** | 48.2% | **87.1%** |
-| 128x256x512 | 16,384 | 21,614 | _running_ | — | 75.8% | — |
+| 128x256x512 | 16,384 | 21,614 | **17,627** | **−18.45%** | 75.8% | **92.9%** |
 | 128x512x512 | 32,768 | 41,943 | _running_ | — | 78.1% | — |
 | 128x1024x512 | 65,536 | 130,792 | _running_ | — | 50.1% | — |
 
 `_running_` means no FINAL yet; it is not a result.
 
-## 128x128x512 — verified, not just faster
+**The win shrinks as N grows** (−44.7% → −18.5%), which is the expected direction: a larger N means
+more FP work per burst miss, so the wasted allocation amortises. Both arms nonetheless land at
+87–93% of roofline, up from 48–76%. Whether the trend continues is what the two running arms answer.
+
+## Verification — both completed arms, not just faster
+
+A 1.81× speedup is exactly the shape of result that a **lost-work** bug produces, and this campaign
+has already been bitten once by that (the `MshrCfgSubsW=4` truncation manufactured a fake 43% "win"
+on this same family). So the cycle counts alone were not accepted.
+
+### 128x128x512
 
 A 1.81× speedup is exactly the shape of result that a **lost-work** bug produces, and this campaign
 has already been bitten once by that (the `MshrCfgSubsW=4` truncation manufactured a fake 43% "win"
@@ -75,6 +85,22 @@ head period (73.97%) and the tail (52.93%), not steady-state stall.
 
 Sanity checks that came back clean: `Mismatch in route selection!` appears exactly once in *both*
 arms (background, not introduced here); no assertion, error, or mismatch output otherwise.
+
+### 128x256x512
+
+The same signature, independently:
+
+| | phaseE1 | bypass | |
+|---|---:|---:|:--|
+| FPU busy lane-cycles | 16,880,884 | 16,857,588 | −0.14% — **same work retired** |
+| `alloc_single` | 30,716 | 30,720 | +0.01% |
+| `merged_single` | 460,634 | 460,800 | +0.04% |
+| `alloc_burst` | **122,721** | **0** | bursts now bypass |
+| `merged_burst` | **0** | **0** | ← again, zero merges to lose |
+
+122,721 burst allocations, zero merges — twice the count of the smaller shape, same useless outcome.
+Two independent shapes now show `merged_burst = 0` under the clamped setting, which makes this a
+property of `share_b = 1` rather than a quirk of one geometry.
 
 ## Consequence for the autotuner
 
