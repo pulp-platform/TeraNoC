@@ -86,7 +86,7 @@ for s in shapes:
             bt = "—"
         rows.append((s, t, ideal, f"{new:,}", f"{100*ideal/new:.1f}%", f"{a:+.1f}%", bt, md5, bs))
     else:
-        rows.append((s, t, ideal, f"_{periods(f'mx_{tag}_{s}_run.log')}p_", "—", "—", "—", md5, bs))
+        rows.append((s, t, ideal, f"_running ({periods(f'mx_{tag}_{s}_run.log')} periods)_", "—", "—", "—", md5, bs))
 
 now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
 L = []
@@ -104,7 +104,19 @@ A(f"Part of the chained PPA campaign — see [`README.md`](README.md). The **`Δ
 A("")
 A("## Results")
 A("")
-A(f"| M×N×P | ideal | A-sh | B-sh | merge | ELF | old cyc | old % | {base_tag} cyc | new cyc | new % | Δ vs old | **Δ vs {base_tag}** |")
+A("Column guide — the three cycle columns are three DIFFERENT measurements, which is easy to misread:")
+A("")
+A("| column | what it is |")
+A("|---|---|")
+A(f"| `baseline cyc` | pre-campaign reference from `gemm_results.md` (2026-08-03) |")
+A(f"| `{base_tag} cyc` | the phase immediately before this one |")
+A(f"| **`THIS PHASE cyc`** | **this sweep's result** |")
+A(f"| `Δ vs baseline` | bundles every change since 2026-08-03 |")
+A(f"| **`Δ vs {base_tag}`** | **this phase alone — the number to quote** |")
+A("")
+A("`_running (N periods)_` means the arm has not produced a FINAL yet; it is not a result.")
+A("")
+A(f"| M×N×P | ideal | A-sh | B-sh | merge | ELF | baseline cyc | baseline % | {base_tag} cyc | **THIS PHASE cyc** | this % | Δ vs baseline | **Δ vs {base_tag}** |")
 A("|---|---:|---:|---:|---:|:--|---:|---:|---:|---:|---:|---:|---:|")
 for s, t, ideal, new, newpct, a, b, md5, bs in rows:
     A(f"| {s} | {ideal:,.0f} | {t['ash']} | {t['bsh']} | {t['merge']} | `{md5}` | "
