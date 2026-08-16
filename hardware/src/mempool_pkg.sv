@@ -665,7 +665,18 @@ package mempool_pkg;
 
   localparam integer unsigned MshrCfgHoldCntMax = 2047; // hardware bound on window / serve_timeout
   localparam integer unsigned MshrCfgHoldCntW   = 11;  // bound 2047, matches today's shipping max
-  localparam integer unsigned MshrCfgSubsW      = 4;   // [1, MshrMergeReqs]; 1 == "bypass this class"
+  // MUST hold MshrMergeReqs, whose largest shipped value is 16 -- so 5 bits, not 4.
+  //
+  // At 4 bits this silently truncated: subs_ok range-checks the FULL 32-bit write (so 16 <= 16
+  // passes), and the very next line casts to MshrCfgSubsW, turning 16 into 0. Every 128x*x512
+  // shape pins hold_subs_single = 16, so all four wrote 0, the merge-admission compare
+  // (sub_reqs_num < cfg_hold_subs_single) was never true, and singles stopped merging: measured
+  // merged_single 230,224 -> 179,222 with alloc_single 15,356 -> 48,816 on 128x128x512. It read as
+  // a 43% "improvement" because that shape happens to run faster with merging crippled.
+  //
+  // Third instance of one bug class -- after HoldCntW and ServedCntMax -- and the only one that
+  // fires in a shipped configuration. The others were latent.
+  localparam integer unsigned MshrCfgSubsW      = 5;   // [1, MshrMergeReqs]; 1 == "bypass this class"
   localparam integer unsigned MshrCfgShiftW     = 4;   // raw shift; the RTL muxes over a small range
 
   typedef struct packed {
