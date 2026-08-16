@@ -1,6 +1,6 @@
 # GEMM benchmark results — Phase CSR — runtime-configurable group MSHR, software-enabled
 
-Generated 2026-08-16 20:19 from `36e9ea76`. **Re-runnable**: `python3 scripts/gen_sweep_doc_phase.py sweepCSR phaseE1 gemm_results_mshr_ppa_csr.md "Phase CSR — runtime-configurable group MSHR, software-enabled" "group_mshr_cfg_runtime=1: the MSHR ships DISABLED and software programs+enables it before the timed region"`.
+Generated 2026-08-16 20:39 from `36e9ea76`. **Re-runnable**: `python3 scripts/gen_sweep_doc_phase.py sweepCSR phaseE1 gemm_results_mshr_ppa_csr.md "Phase CSR — runtime-configurable group MSHR, software-enabled" "group_mshr_cfg_runtime=1: the MSHR ships DISABLED and software programs+enables it before the timed region"`.
 
 **What changed in this phase:** group_mshr_cfg_runtime=1: the MSHR ships DISABLED and software programs+enables it before the timed region
 
@@ -22,7 +22,7 @@ Column guide — the three cycle columns are three DIFFERENT measurements, which
 
 | M×N×P | ideal | A-sh | B-sh | merge | ELF | baseline cyc | baseline % | phaseE1 cyc | **THIS PHASE cyc** | this % | Δ vs baseline | **Δ vs phaseE1** |
 |---|---:|---:|---:|---:|:--|---:|---:|---:|---:|---:|---:|---:|
-| 128x1024x512 | 65,536 | 16 | 1 | 16 | `b347f729` | 67,693 | 96.8% | 130,792 | _running (68 periods)_ | — | — | **—** |
+| 128x1024x512 | 65,536 | 16 | 1 | 16 | `b347f729` | 67,693 | 96.8% | 130,792 | _running (73 periods)_ | — | — | **—** |
 | 256x1024x256 | 65,536 | 8 | 2 | 8 | `b132b25e` | 68,253 | 96.0% | 68,410 | 68,379 | 95.8% | +0.2% | **-0.05%** |
 | 128x512x512 | 32,768 | 16 | 1 | 16 | `3585610a` | 34,489 | 95.0% | 41,943 | 45,969 | 71.3% | +33.3% | **+9.60%** |
 | 256x512x256 | 32,768 | 8 | 2 | 8 | `40ec869f` | 34,821 | 94.1% | 34,547 | 34,812 | 94.1% | -0.0% | **+0.77%** |
@@ -31,7 +31,7 @@ Column guide — the three cycle columns are three DIFFERENT measurements, which
 | 256x256x256 | 16,384 | 8 | 2 | 8 | `1f770128` | 18,177 | 90.1% | 17,984 | 18,115 | 90.4% | -0.3% | **+0.73%** |
 | 512x256x256 | 32,768 | 4 | 4 | 4 | `42a4a176` | 37,632 | 87.1% | 38,260 | 38,730 | 84.6% | +2.9% | **+1.23%** |
 | 512x512x128 | 32,768 | 4 | 4 | 4 | `2c8d9b30` | 38,325 | 85.5% | 38,885 | 39,612 | 82.7% | +3.4% | **+1.87%** |
-| 512x512x512 | 131,072 | 4 | 4 | 4 | `51cf3dbc` | 153,707 | 85.3% | 154,734 | _running (156 periods)_ | — | — | **—** |
+| 512x512x512 | 131,072 | 4 | 4 | 4 | `51cf3dbc` | 153,707 | 85.3% | 154,734 | 155,036 | 84.5% | +0.9% | **+0.20%** |
 | 512x256x512 | 65,536 | 4 | 4 | 4 | `4ed3124f` | 78,314 | 83.7% | 79,653 | 280,917 | 23.3% | +258.7% | **+252.68%** |
 | 128x128x512 | 8,192 | 16 | 1 | 16 | `5cbaf0b3` | 9,792 | 83.7% | 16,995 | _running (0 periods)_ | — | — | **—** |
 | 256x128x256 | 8,192 | 8 | 2 | 8 | `506c097b` | 10,014 | 81.8% | 9,944 | 9,906 | 82.7% | -1.1% | **-0.38%** |
@@ -46,11 +46,11 @@ Column guide — the three cycle columns are three DIFFERENT measurements, which
 | 512x32x512 | 8,192 | 4 | 4 | 4 | `126121b3` | 16,238 | 50.4% | 15,088 | 15,471 | 53.0% | -4.7% | **+2.54%** |
 | 256x32x256 | 2,048 | 8 | 2 | 8 | `11b4dcfc` | 4,081 | 50.2% | 3,771 | 3,667 | 55.8% | -10.1% | **-2.76%** |
 
-**20 of 23 complete**, 20 paired against `phaseE1`.
+**21 of 23 complete**, 21 paired against `phaseE1`.
 
-- **this phase, the 18 arms within ±10%: mean +0.87%, median +0.52%** · range -2.76% .. +9.60%
-- **2 arm(s) outside ±10%, reported as defects and EXCLUDED from the mean above:** +252.7%, +27.6%. Including them the mean would read +14.79%, which one arm dominates.
-- whole tree vs `gemm_results.md`: mean +16.4%
+- **this phase, the 19 arms within ±10%: mean +0.83%, median +0.31%** · range -2.76% .. +9.60%
+- **2 arm(s) outside ±10%, reported as defects and EXCLUDED from the mean above:** +252.7%, +27.6%. Including them the mean would read +14.10%, which one arm dominates.
+- whole tree vs `gemm_results.md`: mean +15.6%
 
 `ideal = M·N·P / 1024` (MACs ÷ 1024 FMA lanes = 256 cores × 4 FPU). Efficiency is `ideal / actual`;
 the denominator comes from the data size, never from simulation. **Do not rank on the TB's
