@@ -86,7 +86,7 @@ for s in shapes:
             bt = "—"
         rows.append((s, t, ideal, f"{new:,}", f"{100*ideal/new:.1f}%", f"{a:+.1f}%", bt, md5, bs))
     else:
-        rows.append((s, t, ideal, f"_{periods(f'mx_{tag}_{s}_run.log')}p_", "—", "—", "—", md5, bs))
+        rows.append((s, t, ideal, f"_running ({periods(f'mx_{tag}_{s}_run.log')} periods)_", "—", "—", "—", md5, bs))
 
 now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
 L = []
@@ -104,7 +104,19 @@ A(f"Part of the chained PPA campaign — see [`README.md`](README.md). The **`Δ
 A("")
 A("## Results")
 A("")
-A(f"| M×N×P | ideal | A-sh | B-sh | merge | ELF | old cyc | old % | {base_tag} cyc | new cyc | new % | Δ vs old | **Δ vs {base_tag}** |")
+A("Column guide — the three cycle columns are three DIFFERENT measurements, which is easy to misread:")
+A("")
+A("| column | what it is |")
+A("|---|---|")
+A(f"| `baseline cyc` | pre-campaign reference from `gemm_results.md` (2026-08-03) |")
+A(f"| `{base_tag} cyc` | the phase immediately before this one |")
+A(f"| **`THIS PHASE cyc`** | **this sweep's result** |")
+A(f"| `Δ vs baseline` | bundles every change since 2026-08-03 |")
+A(f"| **`Δ vs {base_tag}`** | **this phase alone — the number to quote** |")
+A("")
+A("`_running (N periods)_` means the arm has not produced a FINAL yet; it is not a result.")
+A("")
+A(f"| M×N×P | ideal | A-sh | B-sh | merge | ELF | baseline cyc | baseline % | {base_tag} cyc | **THIS PHASE cyc** | this % | Δ vs baseline | **Δ vs {base_tag}** |")
 A("|---|---:|---:|---:|---:|:--|---:|---:|---:|---:|---:|---:|---:|")
 for s, t, ideal, new, newpct, a, b, md5, bs in rows:
     A(f"| {s} | {ideal:,.0f} | {t['ash']} | {t['bsh']} | {t['merge']} | `{md5}` | "
@@ -113,7 +125,19 @@ A("")
 if d_base:
     A(f"**{len(d_old)} of {len(shapes)} complete**, {len(d_base)} paired against `{base_tag}`.")
     A("")
-    A(f"- **this phase alone: mean {sum(d_base)/len(d_base):+.2f}%** · best {min(d_base):+.2f}% · worst {max(d_base):+.2f}%")
+    # Report the DISTRIBUTION, not a bare mean. A single collapsed arm dominates: on the CSR sweep
+    # one arm at +252.7% pulled the mean of 20 to +14.79% while 18 arms sat inside +/-3.5%. Median
+    # plus an explicit outlier split says what a mean cannot.
+    _hi = [x for x in d_base if abs(x) > 10.0]
+    _ok = [x for x in d_base if abs(x) <= 10.0] or d_base
+    _srt = sorted(_ok)
+    _med = _srt[len(_srt)//2] if len(_srt) % 2 else (_srt[len(_srt)//2 - 1] + _srt[len(_srt)//2]) / 2
+    A(f"- **this phase, the {len(_ok)} arms within \u00b110%: mean {sum(_ok)/len(_ok):+.2f}%, "
+      f"median {_med:+.2f}%** \u00b7 range {min(_ok):+.2f}% .. {max(_ok):+.2f}%")
+    if _hi:
+        A(f"- **{len(_hi)} arm(s) outside \u00b110%, reported as defects and EXCLUDED from the mean above:** "
+          + ", ".join(f"{x:+.1f}%" for x in sorted(_hi, reverse=True))
+          + f". Including them the mean would read {sum(d_base)/len(d_base):+.2f}%, which one arm dominates.")
     A(f"- whole tree vs `gemm_results.md`: mean {sum(d_old)/len(d_old):+.1f}%")
 elif d_old:
     A(f"**{len(d_old)} of {len(shapes)} complete**, none paired yet.")
