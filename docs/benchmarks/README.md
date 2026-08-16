@@ -180,3 +180,11 @@ Chain position: `phaseE1` + `group_mshr_cfg_runtime=1`. Read its "How to read th
 section before quoting anything from it: the per-shape scatter is alignment jitter, the mean is
 unstable until the sweep completes, and four B-share=1 arms plus two collapsed arms need separate
 treatment. Verification record: `../mshr_runtime_csr_verification.md`.
+
+## `gemm_results_8x8_1024core.md` — the 8×8 / 1024-core campaign
+
+**Not part of the 4×4 chain and not comparable to it**: different mesh, core count, lane count and
+shape (2048×512×512 on 64 groups). Recovered from the published artifact after the build directories
+were reclaimed, so it is the durable record of that campaign. Carries the determinism result (renamed
+configs complete at byte-identical cycle counts, so there is no noise floor), the 14.1% barrier-fix
+figure, and the retraction of the utilisation-versus-throughput correlation.
