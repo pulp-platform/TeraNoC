@@ -1,6 +1,6 @@
 # GEMM benchmark results — Phase CSR — runtime-configurable group MSHR, software-enabled
 
-Generated 2026-08-16 17:22 from `e131b5fd`. **Re-runnable**: `python3 scripts/gen_sweep_doc_phase.py sweepCSR phaseE1 gemm_results_mshr_ppa_csr.md "Phase CSR — runtime-configurable group MSHR, software-enabled" "group_mshr_cfg_runtime=1: the MSHR ships DISABLED and software programs+enables it before the timed region"`.
+Generated 2026-08-16 18:39 from `36e9ea76`. **Re-runnable**: `python3 scripts/gen_sweep_doc_phase.py sweepCSR phaseE1 gemm_results_mshr_ppa_csr.md "Phase CSR — runtime-configurable group MSHR, software-enabled" "group_mshr_cfg_runtime=1: the MSHR ships DISABLED and software programs+enables it before the timed region"`.
 
 **What changed in this phase:** group_mshr_cfg_runtime=1: the MSHR ships DISABLED and software programs+enables it before the timed region
 
@@ -22,7 +22,7 @@ Column guide — the three cycle columns are three DIFFERENT measurements, which
 
 | M×N×P | ideal | A-sh | B-sh | merge | ELF | baseline cyc | baseline % | phaseE1 cyc | **THIS PHASE cyc** | this % | Δ vs baseline | **Δ vs phaseE1** |
 |---|---:|---:|---:|---:|:--|---:|---:|---:|---:|---:|---:|---:|
-| 128x1024x512 | 65,536 | 16 | 1 | 16 | `b347f729` | 67,693 | 96.8% | 130,792 | _running (50 periods)_ | — | — | **—** |
+| 128x1024x512 | 65,536 | 16 | 1 | 16 | `b347f729` | 67,693 | 96.8% | 130,792 | _running (58 periods)_ | — | — | **—** |
 | 256x1024x256 | 65,536 | 8 | 2 | 8 | `b132b25e` | 68,253 | 96.0% | 68,410 | 68,379 | 95.8% | +0.2% | **-0.05%** |
 | 128x512x512 | 32,768 | 16 | 1 | 16 | `3585610a` | 34,489 | 95.0% | 41,943 | 45,969 | 71.3% | +33.3% | **+9.60%** |
 | 256x512x256 | 32,768 | 8 | 2 | 8 | `40ec869f` | 34,821 | 94.1% | 34,547 | 34,812 | 94.1% | -0.0% | **+0.77%** |
@@ -31,7 +31,7 @@ Column guide — the three cycle columns are three DIFFERENT measurements, which
 | 256x256x256 | 16,384 | 8 | 2 | 8 | `1f770128` | 18,177 | 90.1% | 17,984 | 18,115 | 90.4% | -0.3% | **+0.73%** |
 | 512x256x256 | 32,768 | 4 | 4 | 4 | `42a4a176` | 37,632 | 87.1% | 38,260 | 38,730 | 84.6% | +2.9% | **+1.23%** |
 | 512x512x128 | 32,768 | 4 | 4 | 4 | `2c8d9b30` | 38,325 | 85.5% | 38,885 | 39,612 | 82.7% | +3.4% | **+1.87%** |
-| 512x512x512 | 131,072 | 4 | 4 | 4 | `51cf3dbc` | 153,707 | 85.3% | 154,734 | _running (123 periods)_ | — | — | **—** |
+| 512x512x512 | 131,072 | 4 | 4 | 4 | `51cf3dbc` | 153,707 | 85.3% | 154,734 | _running (136 periods)_ | — | — | **—** |
 | 512x256x512 | 65,536 | 4 | 4 | 4 | `4ed3124f` | 78,314 | 83.7% | 79,653 | 280,917 | 23.3% | +258.7% | **+252.68%** |
 | 128x128x512 | 8,192 | 16 | 1 | 16 | `5cbaf0b3` | 9,792 | 83.7% | 16,995 | _running (0 periods)_ | — | — | **—** |
 | 256x128x256 | 8,192 | 8 | 2 | 8 | `506c097b` | 10,014 | 81.8% | 9,944 | 9,906 | 82.7% | -1.1% | **-0.38%** |

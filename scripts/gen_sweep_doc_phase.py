@@ -15,7 +15,10 @@ import re, os, sys, hashlib, subprocess, datetime
 tag, base_tag, out_name, title, changed = sys.argv[1:6]
 W = '/usr/scratch/fenga1/zexifu/mshr_ppa_wt/'
 T = '/tmp/claude-620771/'
-OUT = W + 'docs/benchmarks/' + out_name
+# Docs live in the MAIN repo, not the worktree. The worktree holds builds and runs; a doc
+# written there is invisible to anyone reading the checkout, which happened twice.
+MAIN = '/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC/'
+OUT = MAIN + 'docs/benchmarks/' + out_name
 
 tab = {}
 for ln in open(W + 'docs/benchmarks/gemm_results.md'):
