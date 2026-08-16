@@ -9497,3 +9497,104 @@ back; a consistent loss would mean the shortened `req_in_ready` is throttling. S
 **Status.** DONE. Sweep launched; results land in the benchmark file as arms complete.
 `docs/benchmarks/README.md` now documents the chain that makes each sweep's delta attributable to
 exactly one knob.
+
+## 2026-08-15 · win2047 family closed, and a base split the hold-curve arms fell through
+
+**Purpose.** Finish the four pinned-shape arms at `hold_window_burst = 2047`, reclaim disk from
+finished campaign builds, and make the hold-curve's 99,879 attributable.
+
+**win2047 — DONE, 4/4.** The last arm, `128x1024x512`, came in at **1,325,094** cycles against a
+67,693 reference (**+1,858%**); family mean **+1,890%**. `docs/benchmarks/gemm_results_hold_window_2047.md`
+regenerated. The mechanism is unchanged and now measured on every member: B is shared 1-way, so
+`hold_subs_burst` clamps to 2, a 1-way line can never supply 2 subscribers, the early-release
+condition is unreachable, and every burst allocation waits the full window. The pin is a disable,
+not a tuning value.
+
+**Disk.** 190 finished build directories removed across the worktree and main tree, **274 GB**
+reclaimed (579 GB → 853 GB free). The protected set was derived from the live process table — any
+directory that was a running process's cwd, any reachable from a live `run_*/` simv symlink, the
+four main-tree QuestaSim GUI runs, and the `4x4_sw_dev` tree. No results were touched:
+`gen_sweep_doc_phase.py` reads only the `/tmp` logs, and raw transcripts live in `run_*/transcript_mm`.
+
+**The finding: `spill_req_in` splits the campaign into two populations.** C2 (`f7a7e90f`,
+2026-08-14 **17:15**) changed the default from an *absent* define to an explicit `0`. The RTL
+fallback for absent is **1** (`mempool_group_mshr.sv:75`), and that same line states the knob is not
+bit-identical — it removes a pipeline stage and shifts request arrival by a cycle. So:
+
+| family | built | `SpillReqIn` |
+|---|---|---|
+| `sweep_`, `sweepO3_` | pre-C2 | 1 |
+| **hold-curve** (`h0_base` ×3, `hsingle2047`) | 08-14 12:25–12:40 | **1** |
+| `sweepC2_`, `phaseE1_`, `win2047_` | post-C2 | 0 |
+
+The chain is intact — C2 legitimately owns the 1→0 delta, and its sweep header says so. But the
+hold-curve arms were built ~4.5 h before the commit, so **`hsingle2047`'s 99,879 differs from
+sweepC2's 130,792 in three knobs, not two**: `hold_window_single` 0→2047, `bank_publish` 1→0, and
+`spill_req_in` 0→1. The −23.6% was never attributable to the single window.
+
+**Result.** The factorial over (`hold_window_single`, `bank_publish`) was rebuilt on the *current*
+campaign base (`spill=0`), gated on a 28-define diff against sweepC2's own `128x1024x512` build log.
+That costs one extra arm — the (2047, publish=0) corner has to be re-measured on-chain — and leaves
+the (0, publish=1) corner as sweepC2's existing 130,792. All three new arms passed the gate.
+
+**Two lessons.** (1) The gate caught this before a cycle was simulated; a hand-picked subset check
+would not have. (2) The *audit* pattern must be as loose as the gate's: an ad-hoc sweep using
+`grep '\+define\+GROUP_MSHR_SPILL_REQ_IN='` matched **zero** lines in all 102 build logs — the
+`+define+` prefix is not present in them — and reported the campaign as uniformly `SpillReqIn=1`,
+the exact inverse of the truth. A too-strict pattern fails silently and uniformly, which reads as a
+clean finding rather than a broken filter.
+
+**Status.** win2047 DONE. Factorial RUNNING (3 arms, ~19% in). CSR gates V1/V3 at 98%/95%.
+
+## 2026-08-16 · Phase E1 closed: 23/23, every arm bit-identical
+
+**Result.** `512x512x512` landed at **154,734** — exactly its sweepC2 reference — closing Phase E1 at
+23 of 23. **Every one of the 23 arms is +0.00%.** Not "within noise": bit-identical cycle counts.
+
+`spatz_vlsu_commit_qmin=1` and `spatz_rob_cnt_idvalid=1` are conclusively **cycle-inert** on
+sp-fmatmul across the whole shape space -- 128..512 in M, 32..1024 in N, 128..512 in P, and all three
+B-share classes. Both were config-only (no RTL edit), so this also re-validates that the sweep
+harness reproduces a configuration exactly: 23 independent builds and runs, 23 exact matches.
+
+**Status.** DONE. E2/E3 involve RTL edits and are deliberately NOT auto-queued -- each needs its edit
+made and its equivalence checked against 34,596 before a sweep is worth spending.
+
+## 2026-08-16 · Runtime-configurable group MSHR: verified, and the 23-shape CSR sweep launched
+
+**Purpose.** Close out the runtime-CSR feature (user's 4 ideas + 2 refinements) and measure it.
+
+**Result — every functional gate green.** Full record in `docs/mshr_runtime_csr_verification.md`.
+
+| gate | result |
+|---|---|
+| V1 `cfg_runtime=0` bit-identical | PASS 34,596 == 34,596 |
+| V2 (retasked) cost of leaving it unconfigured | **+55.6%** (53,835 vs 34,596) |
+| V3 CSR == elaborated constants | PASS — MSHR work counters byte-identical; +0.77% cold-start |
+| V4 CSR-driven burst bypass | PASS — alloc_burst=0, singles still merging |
+| V5a out-of-range write refused | PASS — status=0x2 (RANGE) |
+| V5b bank-hash-stable SVA | PASS — never fired |
+| V6 lint | running |
+
+**Two real bugs, both found by V3, both in the same six-line decode.** `bank == 3` fell through to
+`OP_WR_MASK`, so every CSR write clobbered a barrier struct's mask; and `bar_op` tested `!wen` before
+the bank, so every CFG_STATUS read became a barrier ARRIVAL. Both produced the identical 16-stuck
+signature (one per group's designated writer), which is why fixing only the write side looked like
+no fix at all. Neither was reachable before -- every prior campaign arm ran `cfg_runtime=0`, where
+`bank == 3` never occurs. Fixed with `OP_EXT_ACK` + `req_ext_rd_i`/`ack_rd_q`.
+
+**V3's pass criterion was wrong and was changed deliberately.** "Exactly 34,547" tests a *drop-in
+transparent* feature. With off-by-default the MSHR enters the timed region COLD, so a small positive
+delta is guaranteed by the design. The criterion that tests the actual claim is identical MSHR work
+counters -- and all four match exactly (merged_single 860160, merged_burst/alloc_single/alloc_burst
+122880 each). The +265 cyc is the measured price of off-by-default.
+
+**Two RTL changes on top**, both user-approved: `HoldSubs` guard relaxed to `[1, MshrMergeReqs]` (1 is
+the defined bypass encoding and was already legal at runtime), and `ServedCntMax` sized from
+`MshrMergeReqs` under `MshrCfgRuntime` -- the sibling of the `HoldCntMax` truncation fix. Verified
+inert: **0 of 23 shapes change**, because every flavour happens to set `hold_subs_single ==
+merge_reqs`. An accident, not an invariant.
+
+**Status.** 23-shape `sweepCSR` running, referenced against phaseE1 so its delta is exactly this
+phase. Every arm is gated on a full define diff vs phaseE1 (only CFG_RUNTIME may differ) AND on
+`[MSHRCFG] all 16 groups ENABLED` -- without the latter an unconfigured arm would silently measure a
+bypassed MSHR and read as a catastrophic regression. Expect ~+0.8% (cold start), not 0.

@@ -165,3 +165,18 @@ make -o update-floogen <verilator-target> config=terapool_spatz4_fpu \
 
 Matrix dimensions come from `software/apps/spatz_apps/<app>/script/matmul.json`
 via `gen_data.py`; the app must be rebuilt after changing them.
+
+## `gemm_results_bankpub_window_2x2.md` — the `bank_publish` × `hold_window_single` factorial
+
+Not part of the chain: four builds of **one** shape (`128x1024x512`), differing in two knobs. It
+exists to answer the opt3 bisect that `mshr_ppa_plan.md` called for. Result: the collapse needs
+**both** `bank_publish=1` and `hold_window_single=0` — either knob alone escapes it, and the two are
+strongly sub-additive, so they are two routes out of one pathology rather than two wins. The shipping
+default is the corner that has both.
+
+## `gemm_results_mshr_ppa_csr.md` — runtime-configurable MSHR
+
+Chain position: `phaseE1` + `group_mshr_cfg_runtime=1`. Read its "How to read the per-shape deltas"
+section before quoting anything from it: the per-shape scatter is alignment jitter, the mean is
+unstable until the sweep completes, and four B-share=1 arms plus two collapsed arms need separate
+treatment. Verification record: `../mshr_runtime_csr_verification.md`.

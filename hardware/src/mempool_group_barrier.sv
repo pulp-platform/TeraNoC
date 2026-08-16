@@ -66,7 +66,10 @@ module mempool_group_barrier #(
   // Request (from the LIC barrier port, decoded by the mempool_group adapter).
   input  logic                        req_valid_i,
   input  logic [IniW-1:0]             req_ini_addr_i,   // requesting core (= tile, 1 core/tile)
-  input  logic [1:0]                  req_op_i,         // OP_ARRIVE / OP_WR_TARGET / OP_WR_MASK
+  input  logic [1:0]                  req_op_i,         // OP_ARRIVE / OP_WR_TARGET / OP_WR_MASK / OP_EXT_ACK
+  // Only meaningful with OP_EXT_ACK: 1 = the foreign access is a READ, so its response must write
+  // back (resp_wen=0) and the adapter supplies the data. 0 = a foreign write, ack only.
+  input  logic                        req_ext_rd_i,
   input  logic [StructW-1:0]          req_struct_i,     // which barrier struct
   input  logic [NumCoresPerGroup-1:0] req_cfg_data_i,   // config value (target: low CntW bits; mask: all)
   output logic                        req_ready_o,
@@ -88,6 +91,15 @@ module mempool_group_barrier #(
   localparam logic [1:0] OP_ARRIVE    = 2'd0;
   localparam logic [1:0] OP_WR_TARGET = 2'd1;
   localparam logic [1:0] OP_WR_MASK   = 2'd2;
+  // Requests that ride this port but are NOT barrier operations -- today, the group MSHR CSR
+  // writes (bank==3), which reuse this already-decoded port purely as a transport. They must
+  // acknowledge, so the issuing core's store retires, and must touch NO barrier state.
+  //
+  // This encoding exists because bank 3 previously fell through to OP_WR_MASK, so every CSR write
+  // also executed mask_d[req_struct_i] = req_cfg_data_i -- overwriting the mask of the barrier
+  // struct whose index happened to equal the CSR index. mempool_barrier() then waited on a mask
+  // it never set and the group hung. Caught by V3 on 2026-08-15.
+  localparam logic [1:0] OP_EXT_ACK   = 2'd3;
 
   // ---- registered state ------------------------------------------------------
   logic [NumBarriers-1:0][CntW-1:0]             target_q,  target_d;    // SW-set, persists
@@ -121,6 +133,9 @@ module mempool_group_barrier #(
   logic [31:0]                  bar_release_cnt_dbg, bar_release_cnt_d; // releases counted
   logic [15:0]                  bar_spread_max_dbg, bar_spread_max_d;   // worst seen
   logic                                          ack_pend_q, ack_pend_d; // config-write ack pending
+  // Set with ack_pend when the accepted request was an OP_EXT_ACK READ (an MSHR CSR read).
+  // Such a response must write back, so resp_wen must be 0 -- unlike a foreign WRITE ack.
+  logic                                          ack_rd_q,   ack_rd_d;
   logic [IniW-1:0]                              ack_ini_q,  ack_ini_d;
 
   // ---- combinational ---------------------------------------------------------
@@ -144,6 +159,7 @@ module mempool_group_barrier #(
     rel_rem_d   = rel_rem_q;
     arrived_d   = arrived_q;
     ack_pend_d  = ack_pend_q;
+    ack_rd_d    = ack_rd_q;
     ack_ini_d   = ack_ini_q;
 
     // accept a request unless an ack is still pending (throttles back-to-back
@@ -175,6 +191,11 @@ module mempool_group_barrier #(
           mask_d[req_struct_i] = req_cfg_data_i;
           ack_pend_d = 1'b1; ack_ini_d = req_ini_addr_i;
         end
+        OP_EXT_ACK: begin
+          // Not a barrier operation: acknowledge only. Deliberately touches no barrier state --
+          // req_struct_i here is a foreign index (an MSHR CSR number), not a barrier struct.
+          ack_pend_d = 1'b1; ack_ini_d = req_ini_addr_i; ack_rd_d = req_ext_rd_i;
+        end
         default: begin // OP_ARRIVE
           count_d[req_struct_i] = count_q[req_struct_i] + 1'b1;
           arrived_d[req_struct_i][req_ini_addr_i] = 1'b1;  // this core is now releasable
@@ -200,7 +221,8 @@ module mempool_group_barrier #(
     // response: config-write ACK has priority over a release (acks are rare/setup).
     // With Bcast the LIC port carries ACKs only; releases leave on rel_vec_o.
     resp_valid_o    = ack_pend_q || (!EnableBcast && releasing_q && rel_have);
-    resp_wen_o      = ack_pend_q;                       // 1 = write ack, 0 = read release
+    // 1 = write ack (no writeback), 0 = read release OR foreign READ (both write back).
+    resp_wen_o      = ack_pend_q && !ack_rd_q;
     resp_ini_addr_o = ack_pend_q ? ack_ini_q : rel_target;
 
     ack_fire = ack_pend_q && resp_ready_i;
@@ -259,7 +281,7 @@ module mempool_group_barrier #(
       age_q <= '0; bar_spread_sum_dbg <= '0; bar_release_cnt_dbg <= '0; bar_spread_max_dbg <= '0;
       wd_q <= {NumBarriers{WdW'(WatchdogLimit)}}; wd_fire_q <= '0;
       releasing_q <= 1'b0; rel_struct_q <= '0; rel_rem_q <= '0; arrived_q <= '0;
-      ack_pend_q <= 1'b0; ack_ini_q <= '0;
+      ack_pend_q <= 1'b0; ack_ini_q <= '0; ack_rd_q <= 1'b0;
     end else begin
       target_q <= target_d; mask_q <= mask_d; count_q <= count_d;
       age_q <= age_d; bar_spread_sum_dbg <= bar_spread_sum_d;
@@ -267,7 +289,7 @@ module mempool_group_barrier #(
       wd_q <= wd_d; wd_fire_q <= wd_fire_d;
       releasing_q <= releasing_d; rel_struct_q <= rel_struct_d; rel_rem_q <= rel_rem_d;
       arrived_q <= arrived_d;
-      ack_pend_q <= ack_pend_d; ack_ini_q <= ack_ini_d;
+      ack_pend_q <= ack_pend_d; ack_ini_q <= ack_ini_d; ack_rd_q <= ack_rd_d;
     end
   end
 

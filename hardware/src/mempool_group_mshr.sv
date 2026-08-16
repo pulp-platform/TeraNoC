@@ -329,12 +329,20 @@ module mempool_group_mshr
       if (hold_ticks == '0) hold_ticks = HoldCntW'(1);
     end
   endfunction
-  if ((HoldSubs < 2) || (HoldSubs > MshrMergeReqs))
-    $error("[mempool_group_mshr] group_mshr_hold_subs (%0d) must be in [2, MshrMergeReqs].",
+  // Lower bound is 1, not 2: 1 is the defined "bypass this class" encoding, matched by the runtime
+  // range check (mempool_group_mshr_cfg.sv: subs_ok = [1, MergeReqs]) and by
+  // cfg_bypass_{single,burst} at :486-487. The old [2, ...] guard predated that semantics and made a
+  // legal runtime value illegal as a reset value -- so a flavour could not ship a bypassed class,
+  // and elaborating what software is allowed to write failed the build. At 1 the class never
+  // allocates an entry, so the subscriber/hold/self-invalidate machinery is simply not exercised for
+  // it; nothing downstream needs >= 2. (ServedCntW is safe: worst case both == 1 gives a 1-bit
+  // counter, and both classes bypass so it is unused.)
+  if ((HoldSubs < 1) || (HoldSubs > MshrMergeReqs))
+    $error("[mempool_group_mshr] group_mshr_hold_subs (%0d) must be in [1, MshrMergeReqs].",
            HoldSubs);
-  if ((HoldSubsSingle < 2) || (HoldSubsSingle > MshrMergeReqs) ||
-      (HoldSubsBurst  < 2) || (HoldSubsBurst  > MshrMergeReqs))
-    $error("[mempool_group_mshr] group_mshr_hold_subs_single/burst (%0d/%0d) must be in [2, MshrMergeReqs].",
+  if ((HoldSubsSingle < 1) || (HoldSubsSingle > MshrMergeReqs) ||
+      (HoldSubsBurst  < 1) || (HoldSubsBurst  > MshrMergeReqs))
+    $error("[mempool_group_mshr] group_mshr_hold_subs_single/burst (%0d/%0d) must be in [1, MshrMergeReqs].",
            HoldSubsSingle, HoldSubsBurst);
   if (RespWaitSubsSingle && !EnableMshrSingleReq)
     $error("[mempool_group_mshr] group_mshr_resp_wait_subs_single requires scalar MSHRs.");
@@ -393,8 +401,23 @@ module mempool_group_mshr
                                               ((NumRemoteReqPortsPerTile > 1) ?
                                                (NumRemoteReqPortsPerTile - 1) : 1) + 1);
   // served_cnt only has to reach the larger sharing target, where it saturates.
-  localparam int unsigned ServedCntMax     = (HoldSubsSingle > HoldSubsBurst)
+  //
+  // ⚠ WITH RUNTIME CSRs THE ELABORATED VALUES ARE ONLY THE RESET VALUES. Software may later write
+  // any hold_subs in [1, MshrMergeReqs], and :3358 casts that RUNTIME value to ServedCntW. Sizing
+  // this width from the elaborated defaults would truncate the comparison the moment software wrote
+  // something larger than the default -- e.g. defaults 2/2 give a 2-bit counter (max 3), so a write
+  // of 16 casts to 0 and the self-invalidate compare becomes always-true, silently destroying
+  // merging. That is the exact defect already fixed for the hold window at HoldCntMax (:253-256);
+  // this is its sibling.
+  //
+  // It happened to be unreachable because every shipped flavour sets hold_subs_single == merge_reqs,
+  // so the elaborated max already spanned the runtime range -- an accident, not an invariant, and
+  // nothing enforced it. Sizing from MshrMergeReqs removes the dependence on that coincidence.
+  // MshrCfgRuntime = 0 still folds to the old width, so a fixed-function build is unchanged.
+  localparam int unsigned ServedCntElabMax = (HoldSubsSingle > HoldSubsBurst)
                                              ? HoldSubsSingle : HoldSubsBurst;
+  localparam int unsigned ServedCntMax     = mempool_pkg::MshrCfgRuntime ? MshrMergeReqs
+                                                                         : ServedCntElabMax;
   localparam int unsigned ServedCntW       = idx_width(ServedCntMax + 1);
   localparam int unsigned RespBufCountW    = idx_width(RespBufWords + 1);
   localparam int unsigned RespBufPtrW      = idx_width(RespBufWords);

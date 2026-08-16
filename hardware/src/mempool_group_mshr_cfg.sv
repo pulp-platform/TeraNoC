@@ -88,6 +88,21 @@ module mempool_group_mshr_cfg
     mshr_cfg_t   cfg_q, cfg_d;
     logic [31:0] status_q, status_d;
 
+    // ⚠ THE FIELD MUST BE ABLE TO HOLD WHAT THE RANGE CHECK ADMITS.
+    // subs_ok validates the full 32-bit write, and the accept path then casts to MshrCfgSubsW. If
+    // the field is narrower than MergeReqs, a value that PASSES the check is silently truncated on
+    // the way in. That is exactly what happened at MshrCfgSubsW=4 with MergeReqs=16: every
+    // 128x*x512 shape wrote 16, stored 0, and stopped merging singles -- measured merged_single
+    // 230,224 -> 179,222 with alloc_single 15,356 -> 48,816, which read as a 43% "improvement".
+    // Third instance of this bug class after HoldCntW and ServedCntMax, and the only one that fired
+    // in a shipped configuration. Catch it at elaboration rather than in a benchmark table.
+    if ((32'd1 << MshrCfgSubsW) <= MergeReqs)
+      $error("[mshr_cfg] MshrCfgSubsW=%0d cannot represent MergeReqs=%0d; a legal write would truncate.",
+             MshrCfgSubsW, MergeReqs);
+    if ((32'd1 << MshrCfgHoldCntW) <= HoldCntHwMax)
+      $error("[mshr_cfg] MshrCfgHoldCntW=%0d cannot represent HoldCntHwMax=%0d; a legal write would truncate.",
+             MshrCfgHoldCntW, HoldCntHwMax);
+
     // Range checks. Each mirrors an elaboration guard in mempool_group_mshr.sv.
     logic subs_ok, cnt_ok, shift_s_ok, shift_b_ok, tmo_ok;
     assign subs_ok    = (wr_data_i >= 32'd1) && (wr_data_i <= MergeReqs);

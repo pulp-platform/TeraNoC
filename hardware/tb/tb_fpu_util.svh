@@ -557,6 +557,50 @@
       $display("[FPU FINAL] benchmark region never active (csr_trace_any_global stayed low) -- no utilisation sampled");
   end
 
+
+  // ---------------------------------------------------------------------------------------------
+  // [MSHRCFG] -- did software actually turn the group MSHR on?
+  //
+  // With group_mshr_cfg_runtime=1 the MSHR resets to enable=0 BY DESIGN: init, DMA and I$ warm-up
+  // must not occupy ways. Software is then required to enable it (mshr_cfg_apply_group) before the
+  // timed region. If it does not, nothing crashes -- the benchmark simply runs with the MSHR
+  // bypassed, which measured +55.6% on 256x512x256 (53,835 vs 34,596 cyc).
+  //
+  // That is a SILENTLY SLOW run, the same failure class as the 8x8 group barrier that was a no-op
+  // for days. So the TB checks it once, at the instant the benchmark region opens, and says so
+  // loudly. Costs nothing in synthesis -- this whole file is translate_off.
+`ifdef GROUP_MSHR_CFG_RUNTIME
+  logic [NumGroups-1:0] fu_mshr_en;
+  generate
+    for (genvar gx = 0; gx < NumX; gx++) begin : gen_fu_mshren_gx
+      for (genvar gy = 0; gy < NumY; gy++) begin : gen_fu_mshren_gy
+        assign fu_mshr_en[NumY*gx+gy] =
+          dut.i_mempool_cluster.gen_groups_x[gx].gen_groups_y[gy]
+             .gen_rtl_group.i_group.i_mempool_group.gen_group_mshr.i_group_mshr.cfg_mshr_enable;
+      end
+    end
+  endgenerate
+
+  logic fu_bench_q;
+  always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      fu_bench_q <= 1'b0;
+    end else begin
+      fu_bench_q <= csr_trace_any_global;
+      if (csr_trace_any_global && !fu_bench_q) begin   // benchmark region just opened
+        // GROUP_MSHR_CFG_RUNTIME is defined even when its VALUE is 0, so distinguish on the
+        // package parameter: only a runtime build can be left un-enabled by software.
+        if (&fu_mshr_en)
+          $display("[MSHRCFG] cyc=%0d all %0d groups ENABLED (%s)", fu_cycle, NumGroups,
+                   mempool_pkg::MshrCfgRuntime ? "runtime, software-configured" : "fixed-function");
+        else
+          $display("[MSHRCFG WARN] cyc=%0d MSHR DISABLED in %0d of %0d groups at benchmark start (en=%b) -- software never configured it; this run measures a BYPASSED MSHR and its cycle count is NOT comparable",
+                   fu_cycle, NumGroups - $countones(fu_mshr_en), NumGroups, fu_mshr_en);
+      end
+    end
+  end
+`endif  // GROUP_MSHR_CFG_RUNTIME
+
 `endif  // TARGET_SPATZ
 `endif  // VERILATOR
 // pragma translate_on
