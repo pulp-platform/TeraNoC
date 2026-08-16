@@ -1,6 +1,6 @@
 # GEMM shape status — every shape, every phase, side by side
 
-Generated 2026-08-16 22:03. **Re-runnable**: `python3 scripts/gen_shape_status.py`.
+Generated 2026-08-16 22:52. **Re-runnable**: `python3 scripts/gen_shape_status.py`.
 
 
 The other `gemm_results_*.md` files are a **chain**: each measures one phase against the phase
@@ -63,7 +63,7 @@ Sorted by current efficiency, best first.
 | 256x128x256 | 8,192 | 10,014 | 10,018 | 9,831 | 9,944 | 9,944 | 9,906 | — | — | **9,944** | E1 | **82.4%** | 9,831 | opt3 |
 | 512x256x512 | 65,536 | 78,314 | 79,499 | 80,468 | 79,653 | 79,653 | 280,917 | — | — | **79,653** | E1 | **82.3%** | 79,499 | opt2 |
 | 512x128x256 | 16,384 | 20,307 | 20,812 | 20,575 | 20,538 | 20,538 | 21,065 | — | — | **20,538** | E1 | **79.8%** | = |  |
-| 128x512x512 | 32,768 | 34,489 | 46,106 | 46,256 | 41,943 | 41,943 | 45,969 | _run_ | — | **41,943** | E1 | **78.1%** | = |  |
+| 128x512x512 | 32,768 | 34,489 | 46,106 | 46,256 | 41,943 | 41,943 | 45,969 | 34,041 | — | **41,943** | E1 | **78.1%** | 34,041 | BYP |
 | 512x128x512 | 32,768 | 42,767 | 42,500 | 42,554 | 42,743 | 42,743 | 42,578 | — | — | **42,743** | E1 | **76.7%** | 42,500 | opt2 |
 | 128x256x512 | 16,384 | 18,082 | 25,606 | 25,498 | 21,614 | 21,614 | 27,579 | 17,627 | _run_ | **21,614** | E1 | **75.8%** | 17,627 | BYP |
 | 512x128x128 | 8,192 | 11,111 | 12,233 | 11,493 | 11,144 | 11,144 | 11,179 | — | — | **11,144** | E1 | **73.5%** | = |  |
@@ -73,7 +73,7 @@ Sorted by current efficiency, best first.
 | 256x32x512 | 4,096 | 6,752 | 6,563 | 6,584 | 6,598 | 6,598 | 6,826 | — | — | **6,598** | E1 | **62.1%** | 6,563 | opt2 |
 | 256x32x256 | 2,048 | 4,081 | _inc_ | 3,859 | 3,771 | 3,771 | 3,667 | — | — | **3,771** | E1 | **54.3%** | 3,667 | CSR |
 | 512x32x512 | 8,192 | 16,238 | 15,037 | 15,213 | 15,088 | 15,088 | 15,471 | — | — | **15,088** | E1 | **54.3%** | 15,037 | opt2 |
-| 128x1024x512 | 65,536 | 67,693 | 75,614 | 139,129 | 130,792 | 130,792 | _run_ | _run_ | — | **130,792** | E1 | **50.1%** | 75,614 | opt2 |
+| 128x1024x512 | 65,536 | 67,693 | 75,614 | 139,129 | 130,792 | 130,792 | 219,562 | _run_ | — | **130,792** | E1 | **50.1%** | 75,614 | opt2 |
 | 128x128x512 | 8,192 | 9,792 | 13,138 | 165,585 | 16,995 | 16,995 | — | 9,401 | — | **16,995** | E1 | **48.2%** | 9,401 | BYP |
 
 `=` in the `best` column means current *is* the best ever measured for that shape.
@@ -84,8 +84,8 @@ Sorted by current efficiency, best first.
 - Current efficiency: median **78.1%**, range 48.2%–95.8%.
 - Current result comes from: `E1` ×23.
 - **12 of 23** are faster than the 2026-08-03 baseline; 11 are not.
-- Enabling the runtime CSR (`CSR`) costs a median **+0.73%** over 21 shapes, but the spread is what matters: `512x256x512` +252.7%, `128x256x512` +27.6%, `128x512x512` +9.6%.
-- **16 shapes are slower now than their best-ever arm.** Largest gaps: `128x128x512` 1.81× (E1 16,995 vs BYP 9,401), `128x1024x512` 1.73× (E1 130,792 vs opt2 75,614), `128x256x512` 1.23× (E1 21,614 vs BYP 17,627), `512x512x128` 1.05× (E1 38,885 vs opt3 36,959).
-- Burst bypass (`BYP`), on the `share_b = 1` family: `128x256x512` -18.4% vs current, `128x128x512` -44.7% vs current.
+- Enabling the runtime CSR (`CSR`) costs a median **+0.75%** over 22 shapes, but the spread is what matters: `512x256x512` +252.7%, `128x1024x512` +67.9%, `128x256x512` +27.6%.
+- **17 shapes are slower now than their best-ever arm.** Largest gaps: `128x128x512` 1.81× (E1 16,995 vs BYP 9,401), `128x1024x512` 1.73× (E1 130,792 vs opt2 75,614), `128x512x512` 1.23× (E1 41,943 vs BYP 34,041), `128x256x512` 1.23× (E1 21,614 vs BYP 17,627).
+- Burst bypass (`BYP`), on the `share_b = 1` family: `128x512x512` -18.8% vs current, `128x256x512` -18.4% vs current, `128x128x512` -44.7% vs current.
 
 Generated from `[FPU FINAL]` in the per-arm run logs. Re-run the script after any new arm lands rather than editing this table by hand.

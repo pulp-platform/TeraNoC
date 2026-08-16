@@ -41,14 +41,19 @@ Efficiency is `ideal / actual` with `ideal = M·N·P / 1024` (4×4, 1024 FPU lan
 |---|---:|---:|---:|---:|---:|---:|
 | 128x128x512 | 8,192 | 16,995 | **9,401** | **−44.68%** | 48.2% | **87.1%** |
 | 128x256x512 | 16,384 | 21,614 | **17,627** | **−18.45%** | 75.8% | **92.9%** |
-| 128x512x512 | 32,768 | 41,943 | _running_ | — | 78.1% | — |
+| 128x512x512 | 32,768 | 41,943 | **34,041** | **−18.84%** | 78.1% | **96.3%** |
 | 128x1024x512 | 65,536 | 130,792 | _running_ | — | 50.1% | — |
 
 `_running_` means no FINAL yet; it is not a result.
 
-**The win shrinks as N grows** (−44.7% → −18.5%), which is the expected direction: a larger N means
-more FP work per burst miss, so the wasted allocation amortises. Both arms nonetheless land at
-87–93% of roofline, up from 48–76%. Whether the trend continues is what the two running arms answer.
+**The win does NOT keep shrinking.** After −44.7% at N=128 and −18.5% at N=256 the obvious reading
+was that a larger N amortises the wasted allocation and the benefit decays to nothing; N=512 came in
+at **−18.8%**, slightly *larger* than N=256. So the cost is not a fixed overhead being amortised —
+it scales with the work, which is what a per-burst-miss penalty should do. The three arms land at
+**87.1% / 92.9% / 96.3%** of roofline against 48.2% / 75.8% / 78.1%.
+
+**96.3% is the highest efficiency measured anywhere in this campaign**, against a previous best of
+95.8% (`256x1024x256`) — and it comes from a shape that sits at 78.1% on the shipping default.
 
 ## Verification — both completed arms, not just faster
 
@@ -99,8 +104,21 @@ The same signature, independently:
 | `merged_burst` | **0** | **0** | ← again, zero merges to lose |
 
 122,721 burst allocations, zero merges — twice the count of the smaller shape, same useless outcome.
-Two independent shapes now show `merged_burst = 0` under the clamped setting, which makes this a
-property of `share_b = 1` rather than a quirk of one geometry.
+
+### 128x512x512
+
+| | phaseE1 | bypass | |
+|---|---:|---:|:--|
+| FPU busy lane-cycles | 33,774,128 | 33,631,728 | −0.42% — **same work retired** |
+| `alloc_single` | 61,433 | 61,440 | +0.01% |
+| `merged_single` | 921,431 | 921,600 | +0.02% |
+| `alloc_burst` | **245,540** | **0** | bursts now bypass |
+| `merged_burst` | **0** | **0** | ← third shape, still zero |
+
+Three independent shapes now show `merged_burst = 0` under the clamped setting, with `alloc_burst`
+scaling 61,344 → 122,721 → 245,540 — exactly doubling with N, and never merging once. That makes
+this a property of `share_b = 1` rather than a quirk of one geometry, and it is why the benefit does
+not decay with N: the waste grows at the same rate as the work.
 
 ## Consequence for the autotuner
 
@@ -110,10 +128,24 @@ allowed to take the derived `share_b = 1` rather than being lifted to 2, and the
 
 ## Open thread worth pulling
 
-Two of the three runtime-CSR outliers are in this same `128x*x512` family (`128x256x512` +27.6%,
-`128x512x512` +9.6%). If the CSR cold-start cost on those shapes is *paid on burst entries that were
-never going to merge*, then bypassing bursts should remove that cost too. This is a hypothesis, not
-a result — the third and largest outlier, `512x256x512` at +252.7%, is **B-share=4** and cannot be
-explained this way, so at most this accounts for two of the three.
+The CSR sweep is now complete at 22 arms, and **every measured member of this family is an outlier**:
 
-Testing it needs a `cfg_runtime=1` × `hold_subs_burst=1` arm on `128x256x512`, which is not yet run.
+| shape | B-share | CSR Δ vs phaseE1 |
+|---|---:|---:|
+| `512x256x512` | 4 | **+252.7%** |
+| `128x1024x512` | 1 | **+67.9%** |
+| `128x256x512` | 1 | **+27.6%** |
+| `128x512x512` | 1 | **+9.6%** |
+
+Those are the *only* four arms above +5%; the other 18 sit at a median of +0.31% with a maximum of
++3.46%. Three of the four are `share_b = 1` — that is all three family members that have a CSR arm
+(`128x128x512` has none) — so the family is 3-for-3, and only one shape outside it regresses at all.
+
+If the runtime-CSR cost on those shapes is *paid on burst entries that were never going to merge*,
+then bypassing bursts should remove it. That is a hypothesis, not a result, and it cannot be the
+whole story: the largest outlier, `512x256x512`, is **B-share=4** and needs a different explanation.
+
+The test is a `cfg_runtime=1` × `hold_subs_burst=1` arm on `128x256x512` — running now as
+`csrbypass_128x256x512`, on the *same* `build_sweepCSR_128x256x512` binary. Under `cfg_runtime=1`
+the value software writes over the CSR wins (`mempool_group_mshr.sv:494`), so the RTL is
+bit-identical and the CSR write is the only variable.
