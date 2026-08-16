@@ -92,6 +92,7 @@ for s in shapes:
     bt = min(done, key=done.get) if done else None
     rows.append(dict(shape=s, ideal=ideal, base=base.get(s), vals=vals,
                      cur=cur, curtag=curtag, best=done.get(bt), besttag=bt,
+                     dbase=(100.0 * (cur - base[s]) / base[s]) if (cur and base.get(s)) else None,
                      eff=(100.0 * ideal / cur) if cur else None,
                      befff=(100.0 * ideal / done[bt]) if bt else None))
 rows.sort(key=lambda r: -(r['eff'] or 0))
@@ -149,21 +150,28 @@ something — treat a large gap as a regression to explain, not as headroom.
 Sorted by current efficiency, best first.
 """)
 hdr = ['M×N×P', 'ideal', 'baseline'] + [lab for _, lab, _ in COLS] + \
-      ['**current**', 'from', '**eff**', 'best', 'from']
+      ['**current**', 'from', '**eff**', '**Δ vs base**', 'best', 'from']
 L.append('| ' + ' | '.join(hdr) + ' |')
-L.append('|' + '---|' * 3 + '---:|' * len(COLS) + '---:|:--|---:|---:|:--|')
+L.append('|' + '---|' * 3 + '---:|' * len(COLS) + '---:|:--|---:|---:|---:|:--|')
 for r in rows:
     gap = r['best'] and r['cur'] and r['best'] < r['cur']
+    d   = r['dbase']
     cells = [r['shape'], f"{r['ideal']:,}", fmt(r['base'])] + \
             [fmt(r['vals'][tag]) for tag, _, _ in COLS] + \
             [f"**{r['cur']:,}**" if r['cur'] else '—',
              LAB.get(r['curtag'], '—'),
              f"**{r['eff']:.1f}%**" if r['eff'] else '—',
+             ('—' if d is None else f"**{d:+.1f}%**"),
              (f"{r['best']:,}" if gap else '=') if r['best'] else '—',
              LAB.get(r['besttag'], '—') if gap else '']
     L.append('| ' + ' | '.join(cells) + ' |')
 L.append('')
-L.append('`=` in the `best` column means current *is* the best ever measured for that shape.\n')
+L.append("""`Δ vs base` is `current` against the 2026-08-03 pre-campaign baseline in `gemm_results.md`.
+**Negative is faster.** It bundles every change since that date, so it is a "where did we end up"
+number, not an attribution — for what any single phase cost or bought, use that phase's own file.
+
+`=` in the `best` column means current *is* the best ever measured for that shape.
+""")
 
 # ---- summary. MEDIAN and a split, never a bare mean: one +252% arm drags the CSR mean to +14%
 # while 18 of 21 sit under +5%, and a bare mean has already misled this campaign three times.
@@ -184,9 +192,17 @@ if comp:
     for r in comp: at[r['curtag']] = at.get(r['curtag'], 0) + 1
     L.append('- Current result comes from: ' +
              ', '.join(f'`{LAB[k]}` ×{v}' for k, v in sorted(at.items(), key=lambda kv: -kv[1])) + '.')
-    imp = [r for r in comp if r['base'] and r['cur'] < r['base']]
-    L.append(f'- **{len(imp)} of {len(comp)}** are faster than the 2026-08-03 baseline; '
-             f'{len(comp)-len(imp)} are not.')
+    ds  = [r['dbase'] for r in comp if r['dbase'] is not None]
+    imp = [r for r in comp if r['dbase'] is not None and r['dbase'] < 0]
+    if ds:
+        L.append(f'- **vs the 2026-08-03 baseline: median {med(ds):+.1f}%** '
+                 f'(negative is faster), range {min(ds):+.1f}% to {max(ds):+.1f}%. '
+                 f'**{len(imp)} of {len(ds)}** shapes are faster, {len(ds)-len(imp)} slower.')
+        wins = sorted((r for r in comp if r['dbase'] is not None), key=lambda r: r['dbase'])
+        L.append('  - biggest gains: ' +
+                 ', '.join(f"`{r['shape']}` {r['dbase']:+.1f}%" for r in wins[:3]) + '.')
+        L.append('  - biggest regressions: ' +
+                 ', '.join(f"`{r['shape']}` {r['dbase']:+.1f}%" for r in reversed(wins[-3:])) + '.')
     csrd = [(r, 100*(r['vals']['sweepCSR']-r['cur'])/r['cur'])
             for r in comp if isinstance(r['vals'].get('sweepCSR'), int)]
     if csrd:
