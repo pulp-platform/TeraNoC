@@ -145,7 +145,42 @@ If the runtime-CSR cost on those shapes is *paid on burst entries that were neve
 then bypassing bursts should remove it. That is a hypothesis, not a result, and it cannot be the
 whole story: the largest outlier, `512x256x512`, is **B-share=4** and needs a different explanation.
 
-The test is a `cfg_runtime=1` × `hold_subs_burst=1` arm on `128x256x512` — running now as
-`csrbypass_128x256x512`, on the *same* `build_sweepCSR_128x256x512` binary. Under `cfg_runtime=1`
-the value software writes over the CSR wins (`mempool_group_mshr.sv:494`), so the RTL is
-bit-identical and the CSR write is the only variable.
+## CONFIRMED — bypass removes the runtime-CSR penalty entirely
+
+`csrbypass_128x256x512` ran `cfg_runtime=1` **with** `hold_subs_burst=1`, on the *same*
+`build_sweepCSR_128x256x512` binary. Under `cfg_runtime=1` the value software writes over the CSR
+wins (`mempool_group_mshr.sv:494`), so the RTL was bit-identical and the CSR write was the only
+variable in the experiment.
+
+**Result: 17,658 cycles.**
+
+| arm | cfg_runtime | hold_subs_burst | cycles | efficiency |
+|---|:--:|:--:|---:|---:|
+| `phaseE1` (shipping default) | 0 | 2 | 21,614 | 75.8% |
+| `sweepCSR` | **1** | 2 | 27,579 | 59.4% |
+| `bypass` | 0 | **1** | 17,627 | 92.9% |
+| **`csrbypass`** | **1** | **1** | **17,658** | **92.8%** |
+
+Read the first column against the third: **the runtime-CSR penalty on this shape was +27.60%, and
+with burst bypass on it is +0.18%** — from 27,579 vs 21,614, to 17,658 vs 17,627. That +0.18% is
+indistinguishable from the +0.31% median cold-start cost the CSR shows on the 18 healthy shapes, so
+the shape-specific penalty is not reduced, it is *gone*.
+
+The counters say the two bypass arms are doing the same thing regardless of how the 1 got there:
+
+| | `sweepCSR` | `bypass` | `csrbypass` |
+|---|---:|---:|---:|
+| `alloc_single` | 30,715 | 30,720 | 30,720 |
+| `merged_single` | 460,655 | 460,800 | 460,800 |
+| `alloc_burst` | **122,723** | 0 | **0** |
+| `merged_burst` | 0 | 0 | 0 |
+| FPU busy lane-cycles | 16,916,292 | 16,857,588 | 16,827,516 |
+
+`csrbypass` and `bypass` are byte-identical on both single counters. So the runtime-CSR cost on this
+family was **entirely** the 122,723 burst entries that could never merge — enabling the MSHR at
+runtime made those allocations more expensive, and removing them removes the whole difference.
+
+**What this does and does not settle.** It accounts for the three `share_b = 1` outliers
+(+67.9%, +27.6%, +9.6%) — arms for the other two are running. It does **not** account for
+`512x256x512` at +252.7%, which is `share_b = 4`, allocates burst entries that *do* merge, and
+still needs its own explanation. That is what the `build_4` waveform run is for.
