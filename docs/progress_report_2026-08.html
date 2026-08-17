@@ -181,6 +181,8 @@ footer{
       reached, up from 50.1% on the same shape</div></div>
     <div class="stat"><span class="v">+0.18%</span><div class="n">Cost of the runtime MSHR CSR
       once the defect is fixed — was up to +1119%</div></div>
+    <div class="stat pos"><span class="v">0</span><div class="n">Runtime-CSR regressions left
+      unexplained, after 512×256×512 was traced to a non-shipping knob</div></div>
     <div class="stat"><span class="v">23 / 23</span><div class="n">Shapes measured on the runtime-CSR
       sweep; 18/23 on the shipping-default sweep</div></div>
     <div class="stat"><span class="v">77.5%</span><div class="n">Best roofline efficiency at 1024
@@ -499,6 +501,33 @@ with coalescing   :   4 A +  4 B =  8 requests cross the mesh</code></pre>
     and the 12× blow-up on <code>128×128×512</code>.</p>
   </div>
 
+  <div class="measure">
+    <h4>The fifth outlier, and the last one open</h4>
+    <p>One shape resisted that explanation: <code>512×256×512</code> at <b>+252.7%</b>, with a
+    B-sharing degree of 4 — its burst entries do merge, so bypass does not apply.</p>
+    <p>It turns out not to be a property of the runtime CSR at all. Re-running the identical
+    configuration and ELF with only <code>hold_prescale_w</code> changed from the campaign's pinned
+    0 to the shipping default of 4:</p>
+  </div>
+  <div class="tw"><table>
+    <caption>512×256×512 — the collapse exists only at the non-shipping prescaler</caption>
+    <thead><tr><th>Arm</th><th>cfg_runtime</th><th>prescale_w</th><th>Cycles</th><th>Efficiency</th><th>Dead periods</th></tr></thead>
+    <tbody>
+      <tr><td>phaseE1</td><td>0</td><td>0</td><td>79,653</td><td>82.3%</td><td>0</td></tr>
+      <tr><td>sweepCSR</td><td>1</td><td>0</td><td class="neg">280,917</td><td>23.3%</td><td class="neg">169 / 281</td></tr>
+      <tr><td>presc4</td><td>1</td><td><b>4</b></td><td class="pos">80,064</td><td>81.9%</td><td class="pos">1 / 80</td></tr>
+    </tbody>
+  </table></div>
+  <div class="measure">
+    <p><b>3.51× faster than the collapsing arm, and +0.52% against the healthy reference.</b> Three
+    independent arms agree — <code>presc4</code>, the interactive <code>build_4</code> run
+    (~79,127 cycles), and <code>latest_512x256x512</code>.</p>
+    <p>The leading indicator was per-group minimum utilisation, not the aggregate. At the same point
+    in the run the collapsing arm still reported 90–92% aggregate while its slowest group oscillated
+    between 1.5% and 13% for thousands of cycles; the healthy arm held 90–96% throughout. A mean over
+    16 groups hides this entirely — which is why the per-group view is instrumented separately.</p>
+  </div>
+
   <h3>4.3 Shipping-configuration sweep <span class="chip run">18 / 23 in flight</span></h3>
   <div class="measure">
     <p>A methodological gap surfaced late: every one of the ~190 arms run to date pinned
@@ -588,15 +617,20 @@ with coalescing   :   4 A +  4 B =  8 requests cross the mesh</code></pre>
 <section>
   <h2><span class="num">6</span> Open items</h2>
   <div class="measure">
-    <h4><span class="chip open">open</span> &nbsp;512×256×512 under runtime configuration</h4>
-    <p>This shape showed +252.7% under the runtime CSR at <code>hold_prescale_w = 0</code>. It has
-    a B-sharing degree of 4 — its burst entries genuinely merge — so the bypass fix does not apply
-    and it is the one regression still unexplained.</p>
-    <p>An interactive full-waveform run of the same shape at the <em>shipping</em> prescale
-    completed cleanly at ~79,127 cycles, matching the healthy reference within 0.7%, which suggests
-    the regression may be specific to a configuration that does not ship. Two batch arms are in
-    flight to confirm this on a matched binary; neither has yet reached the point where the original
-    arm diverged.</p>
+    <h4><span class="chip ok">resolved</span> &nbsp;512×256×512 under runtime configuration</h4>
+    <p>This shape carried the campaign's last unexplained regression — <b>+252.7%</b> under the
+    runtime CSR. It has a B-sharing degree of 4, so its burst entries genuinely merge and the §4.1
+    bypass fix does not apply.</p>
+    <p>It is now accounted for: the collapse is specific to <code>hold_prescale_w = 0</code>, a
+    value pinned throughout the campaign for cycle-accurate one-knob comparisons and which
+    <b>nothing ships</b>. Re-running the identical configuration and ELF at the shipping
+    <code>prescale_w = 4</code> gives <b>80,064 cycles — 3.51× faster than the collapsing arm and
+    +0.52% against the healthy reference</b>, with 1 dead period instead of 169. Three independent
+    arms agree. Details in §4.2.</p>
+    <p><b>Characterised, not root-caused.</b> This establishes the shipping configuration is
+    unaffected; it does not explain what <code>prescale_w = 0</code> and <code>cfg_runtime = 1</code>
+    do to each other on this shape. Roughly 190 earlier campaign arms ran at
+    <code>prescale_w = 0</code> and carry that latent behaviour, so the mechanism stays on the list.</p>
 
     <h4><span class="chip open">open</span> &nbsp;Synthesis guard coverage</h4>
     <p>44 <code>ifndef TARGET_SYNTHESIS</code> guards across six RTL files exclude verification-only

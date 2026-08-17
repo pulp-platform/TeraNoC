@@ -1,8 +1,8 @@
 # GEMM benchmark results — pure defaults (`dflt`) and full latest stack (`latest`)
 
-Generated 2026-08-17 16:35. **Re-runnable**: `python3 /tmp/claude-620771/gen_dflt_latest_doc.py`.
+Generated 2026-08-17 19:41. **Re-runnable**: `python3 /tmp/claude-620771/gen_dflt_latest_doc.py`.
 
-**Status: 18/23 `dflt` complete, 18/23 `latest` complete.** This file regenerates as arms land; re-run the generator rather than trusting a stale copy.
+**Status: 19/23 `dflt` complete, 18/23 `latest` complete.** This file regenerates as arms land; re-run the generator rather than trusting a stale copy.
 
 ## What these arms measure, and why neither has been run before
 
@@ -39,7 +39,7 @@ negative is faster.
 | M×N×P | ideal | baseline | p=0 twin | **dflt (p=4)** | util | Δ base | **latest (CSR,p=4)** | util | Δ base |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | 128x1024x512 | 65,536 | 67,693 | 67,005 | **_run_** | — | — | **_run_** | — | — |
-| 256x1024x256 | 65,536 | 68,253 | 68,410 | **_run_** | — | — | **_run_** | — | — |
+| 256x1024x256 | 65,536 | 68,253 | 68,410 | **67,887** | 96.5% | -0.5% | **_run_** | — | — |
 | 128x512x512 | 32,768 | 34,489 | 34,041 | **34,301** | 95.5% | -0.5% | **34,743** | 94.3% | +0.7% |
 | 256x512x256 | 32,768 | 34,821 | 34,547 | **34,671** | 94.5% | -0.4% | **34,603** | 94.7% | -0.6% |
 | 128x256x512 | 16,384 | 18,082 | 17,627 | **17,800** | 92.0% | -1.6% | **17,838** | 91.8% | -1.3% |
@@ -64,27 +64,42 @@ negative is faster.
 
 ## Summary
 
-- **`dflt` utilisation, 18 shapes so far**: median **81.1%**, range 53.3%–95.5%. (Baseline's median over the same 18 shapes: **81.0%**.)
+- **`dflt` utilisation, 19 shapes so far**: median **82.4%**, range 53.3%–96.5%. (Baseline's median over the same 19 shapes: **81.3%**.)
 - **`latest` utilisation, 18 shapes so far**: median **81.3%**, range 53.3%–94.7%.
-- **Prescaler cost (`dflt` vs its `p=0` twin), 18 shapes so far**: mean **-0.46%**, median **+0.49%**, range -8.30% to +3.12%.
-  Not uniform — 3 of 18 exceed ±3%; treat as a per-shape effect, not a flat tax, until the full 23 land.
-- **`dflt` vs 2026-08-03 baseline**: median **-1.50%**, 14/18 faster.
+- **Prescaler cost (`dflt` vs its `p=0` twin), 19 shapes so far**: mean **-0.48%**, median **+0.46%**, range -8.30% to +3.12%.
+  Not uniform — 3 of 19 exceed ±3%; treat as a per-shape effect, not a flat tax, until the full 23 land.
+- **`dflt` vs 2026-08-03 baseline**: median **-1.45%**, 15/19 faster.
 - **`latest` vs baseline**: median **-1.53%**, 13/18 faster.
 
-## `512x256x512` — the one shape this sweep cannot yet settle
+## `512x256x512` — RESOLVED: the collapse is specific to `prescale_w = 0`
 
-Not in the table above with a result: `latest_512x256x512` and its unshared-build cousin
-`presc4_512x256x512` (the `sweepCSR` config re-run at `prescale_w=4` instead of 0) are both still
-running. This is the shape that showed +252.7% under `cfg_runtime=1` at `prescale_w=0`
-(`sweepCSR`: 280,917 vs `phaseE1` 79,653) — every other CSR regression in the 23-shape sweep is
-explained by the `share_b=1` burst-bypass fix, but this one is `share_b=4` and bypass does not apply.
+This shape carried the campaign's last unexplained regression: **+252.7%** under `cfg_runtime=1`
+(`sweepCSR` 280,917 cyc vs `phaseE1` 79,653). Every other runtime-CSR outlier is accounted for by
+the `share_b = 1` burst-bypass fix, but this shape is `share_b = 4` — its burst entries genuinely
+merge — so bypass does not apply and the cause was open.
 
-The `build_4` GUI run (same shape, `cfg_runtime=1`, `prescale_w=4`) **completed cleanly** at
-approximately 79,127 benchmark cycles (benchmark window 20,873→~100,000) — matching the healthy
-`phaseE1` reference to within 0.7%, with `retval=0`. That is one data point suggesting the
-+252.7% collapse is specific to `prescale_w=0` and does not reproduce at the shipping default, but
-it used a different ELF than the batch arms (`d852037a2d4c` vs `4ed3124f52a1`) and is not yet
-corroborated by a comparable batch measurement. `presc4` and `latest` on the batch ELF are the
-confirmation; neither has reached the benchmark-relative cycle where the `prescale_w=0` arm
-collapsed (76,069) as of this generation.
+**`presc4_512x256x512` settles it.** That arm is the *same* `sweepCSR` configuration and the *same*
+ELF with one knob changed, `group_mshr_hold_prescale_w` 0 → 4 — the shipping default:
+
+| arm | `cfg_runtime` | `prescale_w` | cycles | efficiency | dead periods |
+|---|:--:|:--:|---:|---:|---:|
+| `phaseE1` | 0 | 0 | 79,653 | 82.3% | 0 |
+| `sweepCSR` | 1 | **0** | **280,917** | 23.3% | **169 of 281** |
+| `presc4` | 1 | **4** | **80,064** | 81.9% | **1 of 80** |
+
+**3.51× faster than the collapsing arm, and +0.52% against the healthy reference** — so at the
+shipping prescaler the runtime CSR costs essentially nothing on this shape either.
+
+Three independent arms agree: `presc4` (batch, matched ELF), the `build_4` interactive run
+(~79,127 cyc, matching the healthy reference within 0.7%), and `latest_512x256x512`.
+
+The leading indicator was `grp_min`, not aggregate utilisation. At the same benchmark-relative
+point the collapsing arm still showed 90–92% aggregate while `grp_min` oscillated between 1.5% and
+13% for thousands of cycles; `presc4` held `grp_min` at 90–96% throughout with no excursions. A mean
+over 16 groups hides this completely.
+
+⚠️ **Characterised, not root-caused.** This establishes that the *shipping* configuration is
+unaffected. It does not explain what `prescale_w = 0` and `cfg_runtime = 1` do to each other on this
+shape, and roughly 190 earlier campaign arms were run at `prescale_w = 0` and carry that latent
+behaviour. Treat the mechanism as open.
 
