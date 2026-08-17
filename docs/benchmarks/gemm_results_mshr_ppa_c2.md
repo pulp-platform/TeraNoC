@@ -1,6 +1,6 @@
 # GEMM benchmark results — MSHR PPA re-baseline, opt2 + opt3 + C2 (req-in spill bypassed)
 
-Generated 2026-08-15 16:39. **Re-runnable**: `python3 scripts/gen_sweep_doc_c2.py` refreshes this file as arms complete.
+Generated 2026-08-15 20:14. **Re-runnable**: `python3 scripts/gen_sweep_doc_c2.py` refreshes this file as arms complete.
 
 Third of three PPA sweeps over the same 23 shapes. See
 [`README.md`](README.md) for how the files relate; in short:

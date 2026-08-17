@@ -1,6 +1,6 @@
 # GEMM benchmark results — MSHR PPA re-baseline, opt3 ON
 
-Generated 2026-08-15 16:39. **Re-runnable**: `python3 scripts/gen_sweep_doc_opt3.py` refreshes this file as arms complete.
+Generated 2026-08-15 20:14. **Re-runnable**: `python3 scripts/gen_sweep_doc_opt3.py` refreshes this file as arms complete.
 
 Companion to `gemm_results.md`, which this re-measures. Same kernel, same shapes, same
 `ideal = M·N·P / 1024` definition — so the two tables are directly comparable.

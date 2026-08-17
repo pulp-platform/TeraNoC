@@ -411,7 +411,8 @@ if {$NumGroups > 0 && $NumTilesPerGroup > 0 && $NumCoresPerTile > 0} {
 # Add selected cores by global core ID for targeted debug.
 # sp-fmatmul-opt-burst-merge stuck cores (build_2), wedge order; first 6 = Group 12
 # hard-frozen deadlock cluster (tiles 9-14). See bottleneck_analysis/2026-06-11_sp_fmatmul_stuck_cores.md
-foreach global_core {0 8 1 9 2 10 3 11 4 12 5 13 6 14 7 15} {
+foreach global_core {0 8 1 9 2 10 3 11 4 12 5 13 6 14 7 15 \
+                      64 65 66 67 68 69 70 71 72 73 74 75 76 77 78 79} {
     add_core_wave_by_global_id $global_core $NumGroups $NumTilesPerGroup $NumCoresPerTile $NumY $HasSpatz
 }
 
