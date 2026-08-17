@@ -190,3 +190,60 @@ raises the batch requirement" rather than asserting it.
 - `docs/benchmarks/gemm_results_8x8_1024core.md` — the scaling data and its caveats
 - `scripts/gemm_autotune.py` — derives the sharing degrees; `derive(M,N,P)` also reports why a
   shape is rejected, which is how the ladders above were found
+
+---
+
+## 7. FINDING (2026-08-18): both hold classes active at once collapses the machine
+
+The batch ladder immediately found a regime the 23-shape sweep never visits. **No shipping shape
+lands at `share_a = 2`** — all 23 sit at 4, 8 or 16 — and that is exactly where it breaks.
+
+| rung | share_a | share_b | cum util | MSHR timeouts |
+|---|---:|---:|---:|---:|
+| `256x256x512` | 8 | 2 | 94.9% | 0 |
+| `1024x128x256` | **2** | **8** | **5.8%** | **5,490** |
+| `1024x256x512` | **2** | **8** | **6.9%** | 672+ |
+| `2048x128x256` | 1 | 16 | 62.6% | 0 |
+
+Non-monotonic in `share_b` (95% → 6% → 63%), so it is **not** "deeper merge target is worse" —
+`share_b=16` has the deepest target and zero timeouts.
+
+### What it is
+
+Two diagnostics on `1024x128x256`, same ELF, one knob each:
+
+| arm | `subs_single` | `subs_burst` | bench opens | cum util | timeouts |
+|---|---:|---:|---:|---:|---:|
+| base | 2 | 8 | 54,000 | 5.8% | 5,490 |
+| `diagS1` | **1** | 8 | **23,000** | 80.5% | **0** |
+| `diagB1` | 2 | **1** | 50,000 | 42.3% | **0** |
+
+**Either bypass removes the timeouts**, so the pathology requires *both* classes to be holding for
+subscribers simultaneously — entries occupy ways while blocked and only `serve_timeout` (effective
+2,032 cycles at `prescale_w=4`) releases them. The base arm's utilisation oscillates on exactly that
+period.
+
+**The two fixes are not equivalent.** Scalar bypass keeps the 8-way burst coalescing and reaches
+80.5%; burst bypass keeps a near-worthless 2-way scalar merge and reaches 42.3%. **Disable the
+scalar hold, not the burst hold.**
+
+**The scalar hold also wrecks warm-up**: the benchmark window opens at 23,000 cycles with it off
+versus 50,000–54,000 with it on — ~30,000 cycles recovered before the timed region starts. That cost
+is invisible in the cycle count and was found only because the probe prints the window open.
+
+### Design implication
+
+`gemm_autotune.py` disables the scalar delivery gate (`resp_wait_subs_single`) only when
+`share_a < 2`. At `share_a = 2` the hold costs far more than a 2-way merge returns, so the threshold
+is wrong. The deeper rule the data suggests — **do not let both classes hold at once** — is not
+expressed anywhere in the derivation today.
+
+⚠️ Utilisation figures above are from arms 18–27% complete; the timeout counts and the warm-up gap
+are decisive, the exact percentages are not final.
+
+### Why this matters for the paper
+
+The decode story pushes toward large batch, which raises `share_b` and *lowers* `share_a` — straight
+into this regime. A batch large enough to give 8-way weight sharing puts `share_a` at 2. So this is
+not an exotic corner: **it is on the path the LLM framing recommends**, and it has to be fixed
+before the decode claim can be made.
