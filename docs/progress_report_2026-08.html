@@ -1,0 +1,430 @@
+<title>Group MSHR Coalescing at 256 Cores</title>
+<style>
+:root{
+  --ground:#f5f7f7; --panel:#ffffff; --sunk:#eef2f3;
+  --ink:#0f191c; --muted:#5c7077; --faint:#8298a0;
+  --rule:#cbd9db; --rule-soft:#dfe8e9;
+  --accent:#0b6e78; --accent-soft:#e2f0f1;
+  --good:#1b7a56; --warn:#9a5b08; --crit:#a32a32;
+  --serif:Charter,"Bitstream Charter","Iowan Old Style",Georgia,"Times New Roman",serif;
+  --sans:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  --s1:.70rem; --s2:.78rem; --s3:.875rem; --s4:1rem; --s5:1.35rem; --s6:1.75rem; --s7:2.4rem;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --ground:#0c1417; --panel:#131e22; --sunk:#0f191d;
+    --ink:#dce8ea; --muted:#8aa3aa; --faint:#6a838b;
+    --rule:#22343a; --rule-soft:#1a2a2f;
+    --accent:#3fbecb; --accent-soft:#122b30;
+    --good:#3fbc8b; --warn:#d69a3c; --crit:#e0727a;
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#0c1417; --panel:#131e22; --sunk:#0f191d;
+  --ink:#dce8ea; --muted:#8aa3aa; --faint:#6a838b;
+  --rule:#22343a; --rule-soft:#1a2a2f;
+  --accent:#3fbecb; --accent-soft:#122b30;
+  --good:#3fbc8b; --warn:#d69a3c; --crit:#e0727a;
+}
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--ground); color:var(--ink);
+  font-family:var(--sans); font-size:var(--s4); line-height:1.62;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:920px; margin:0 auto; padding:0 clamp(18px,4vw,36px) 96px}
+.measure{max-width:68ch}
+
+header{padding:clamp(38px,7vw,72px) 0 0}
+.eyebrow{
+  font-family:var(--mono); font-size:var(--s1); letter-spacing:.13em;
+  text-transform:uppercase; color:var(--accent);
+}
+h1{
+  font-family:var(--serif); font-size:var(--s7); font-weight:600;
+  letter-spacing:-.015em; line-height:1.12; margin:.5rem 0 0; text-wrap:balance;
+}
+.standfirst{
+  font-size:var(--s5); line-height:1.5; color:var(--muted);
+  margin:1rem 0 0; max-width:60ch; text-wrap:balance;
+}
+.byline{
+  display:flex; flex-wrap:wrap; gap:8px 22px; margin-top:1.6rem;
+  padding-top:1.1rem; border-top:1px solid var(--rule);
+  font-family:var(--mono); font-size:var(--s2); color:var(--muted);
+}
+.byline b{color:var(--ink); font-weight:600}
+
+.glance{
+  display:grid; grid-template-columns:repeat(auto-fit,minmax(158px,1fr));
+  gap:1px; background:var(--rule-soft); border:1px solid var(--rule-soft);
+  margin-top:clamp(26px,4vw,38px);
+}
+.stat{background:var(--panel); padding:15px 17px 17px}
+.stat .v{
+  font-family:var(--mono); font-size:var(--s6); font-weight:600;
+  line-height:1.1; letter-spacing:-.02em; font-variant-numeric:tabular-nums;
+  display:block;
+}
+.stat .n{font-size:var(--s1); color:var(--muted); margin-top:5px; line-height:1.4}
+.stat.pos .v{color:var(--good)} .stat.neg .v{color:var(--crit)}
+
+section{margin-top:clamp(40px,6vw,64px)}
+h2{
+  font-family:var(--serif); font-size:var(--s6); font-weight:600;
+  letter-spacing:-.01em; margin:0 0 .2rem; text-wrap:balance;
+  display:flex; align-items:baseline; gap:.6rem;
+}
+h2 .num{
+  font-family:var(--mono); font-size:var(--s3); color:var(--accent);
+  font-weight:500; letter-spacing:0;
+}
+h3{
+  font-family:var(--serif); font-size:var(--s5); font-weight:600;
+  margin:2.1rem 0 .3rem; text-wrap:balance;
+}
+h4{
+  font-family:var(--mono); font-size:var(--s2); font-weight:600;
+  letter-spacing:.08em; text-transform:uppercase; color:var(--muted);
+  margin:1.7rem 0 .4rem;
+}
+p{margin:.75rem 0 0}
+ul,ol{margin:.75rem 0 0; padding-left:1.3rem}
+li{margin:.35rem 0}
+li::marker{color:var(--faint)}
+code{
+  font-family:var(--mono); font-size:.9em; color:var(--accent);
+  background:var(--accent-soft); padding:.08em .34em; border-radius:2px;
+}
+b,strong{font-weight:650; color:var(--ink)}
+
+.lede{border-left:2px solid var(--accent); padding-left:1.1rem; margin-top:1rem}
+.lede p:first-child{margin-top:0}
+
+.tw{overflow-x:auto; margin-top:1.2rem; border:1px solid var(--rule-soft); background:var(--panel)}
+table{border-collapse:collapse; width:100%; min-width:520px; font-size:var(--s2)}
+caption{
+  caption-side:top; text-align:left; font-family:var(--mono); font-size:var(--s1);
+  letter-spacing:.07em; text-transform:uppercase; color:var(--muted);
+  padding:11px 14px 0;
+}
+th,td{
+  padding:8px 14px; text-align:right; white-space:nowrap;
+  border-bottom:1px solid var(--rule-soft); font-variant-numeric:tabular-nums;
+}
+th{
+  font-family:var(--mono); font-size:var(--s1); font-weight:600;
+  letter-spacing:.06em; text-transform:uppercase; color:var(--muted);
+}
+th:first-child,td:first-child{text-align:left; font-family:var(--mono)}
+tbody tr:last-child td{border-bottom:0}
+tbody tr:hover{background:var(--sunk)}
+td.pos{color:var(--good); font-weight:600}
+td.neg{color:var(--crit); font-weight:600}
+tfoot td{font-weight:650; border-top:1px solid var(--rule)}
+
+.chip{
+  display:inline-block; font-family:var(--mono); font-size:var(--s1);
+  letter-spacing:.05em; text-transform:uppercase; padding:1px 7px;
+  border:1px solid var(--rule); color:var(--muted); border-radius:2px;
+  vertical-align:.14em; white-space:nowrap;
+}
+.chip.ok{border-color:var(--good); color:var(--good)}
+.chip.run{border-color:var(--warn); color:var(--warn)}
+.chip.open{border-color:var(--crit); color:var(--crit)}
+
+.note{
+  background:var(--sunk); border:1px solid var(--rule-soft);
+  padding:14px 17px; margin-top:1.2rem; font-size:var(--s3);
+}
+.note p:first-child{margin-top:0}
+.note .lbl{
+  font-family:var(--mono); font-size:var(--s1); letter-spacing:.08em;
+  text-transform:uppercase; color:var(--accent); display:block; margin-bottom:.3rem;
+}
+
+pre{
+  font-family:var(--mono); font-size:var(--s2); line-height:1.55;
+  background:var(--sunk); border:1px solid var(--rule-soft);
+  padding:13px 16px; overflow-x:auto; margin:1rem 0 0;
+}
+pre code{background:none; padding:0; color:var(--ink)}
+
+footer{
+  margin-top:clamp(48px,7vw,80px); padding-top:1.2rem;
+  border-top:1px solid var(--rule); color:var(--muted);
+  font-family:var(--mono); font-size:var(--s1); line-height:1.7;
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+
+<div class="wrap">
+<header>
+  <div class="eyebrow">TeraNoC · Progress report</div>
+  <h1>Making remote-load coalescing pay off at 256 cores</h1>
+  <p class="standfirst">A configuration defect was suppressing the group MSHR's benefit on a
+  quarter of the benchmark set. Finding it, fixing it at source, and making the MSHR
+  runtime-configurable took four shapes from 48–78% of the FPU roofline to 87–98%.</p>
+  <div class="byline">
+    <span><b>Platform</b> terapool_spatz4_fpu · 4×4 mesh · 256 cores · 16 groups</span>
+    <span><b>Workload</b> sp-fmatmul-opt-burst-merge, 23 GEMM shapes</span>
+    <span><b>Period</b> to 2026-08-17</span>
+  </div>
+
+  <div class="glance">
+    <div class="stat pos"><span class="v">−48.8%</span><div class="n">Best single-shape cycle
+      reduction from the autotuner fix (128×1024×512)</div></div>
+    <div class="stat pos"><span class="v">97.8%</span><div class="n">Peak FPU roofline efficiency
+      reached, up from 50.1% on the same shape</div></div>
+    <div class="stat"><span class="v">+0.18%</span><div class="n">Cost of the runtime MSHR CSR
+      once the defect is fixed — was up to +1119%</div></div>
+    <div class="stat"><span class="v">23 / 23</span><div class="n">Shapes measured on the runtime-CSR
+      sweep; 18/23 on the shipping-default sweep</div></div>
+  </div>
+</header>
+
+<section>
+  <h2><span class="num">1</span> Motivation</h2>
+  <div class="measure">
+    <div class="lede">
+      <p>TeraNoC scales MemPool's shared-L1 programming model past the point where a flat
+      logarithmic crossbar is physically realizable. Cores keep an all-to-all view of TCDM, but
+      beyond a few hundred cores the interconnect must become a network — and remote load traffic
+      becomes the scaling bottleneck.</p>
+    </div>
+    <p>Two mechanisms address that bottleneck, and both are the subject of this work:</p>
+    <ul>
+      <li><b>Group MSHR coalescing.</b> Under matmul traffic, many cores in a group load the
+      <em>same</em> lines (the shared B operand). A per-group MSHR merges those outstanding remote
+      loads into one NoC request and multicasts the single returned line back to every requester —
+      cutting request pressure and redundant response bandwidth.</li>
+      <li><b>Spatz VLSU burst support.</b> The vector LSU splits aligned unit-stride loads into
+      16-word bursts, converting many single-word remote requests into a few burst requests that
+      the MSHR can coalesce efficiently.</li>
+    </ul>
+    <p>The MSHR's behaviour is governed by roughly a dozen parameters — how many subscribers an
+    entry waits for, how long it holds, how addresses map to banks. These are derived per GEMM
+    shape by <code>gemm_autotune.py</code> from the kernel's sharing structure. That derivation is
+    where the defect described in §4.1 lived.</p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">2</span> Architecture</h2>
+  <div class="measure">
+    <h3>2.1 Interconnect</h3>
+    <p>Intra-group traffic uses a combinational logarithmic crossbar for low-latency local sharing.
+    Inter-group traffic uses a 2D mesh of narrow 32-bit FlooNoC routers. The hybrid keeps local
+    access cheap while making global traffic physically scalable.</p>
+
+    <h3>2.2 Group MSHR</h3>
+    <p>Each group has 64 MSHR entries in banks of 4 ways. A <code>(target_group, address)</code>
+    key selects a bank by XOR-folding address bits above the burst-align boundary, which keeps all
+    beats of one burst in a single bank. Each entry holds the merge key, the burst length, and a
+    per-requester record array indexed by merge slot.</p>
+    <p>Two parameters govern coalescing and are central to the results below:</p>
+    <ul>
+      <li><code>hold_subs_burst</code> / <code>hold_subs_single</code> — how many subscribers an
+      entry waits for before issuing. Set from the kernel's sharing degree.</li>
+      <li><code>hold_window_*</code> — how long it waits for them, backstopped by
+      <code>serve_timeout</code>.</li>
+    </ul>
+    <p>A shared prescaler divides the hold-counter tick rate by 16, so counters store windows in
+    ticks rather than cycles. It is phased per entry (entry <em>e</em> ticks when the prescaler
+    equals <em>e</em>'s low bits) rather than pulsed globally — a global pulse would release up to
+    64 held fetches into the NoC in the same cycle, and this design is measurably sensitive to that
+    bunching.</p>
+
+    <h3>2.3 Runtime MSHR configuration <span class="chip ok">new</span></h3>
+    <p>Every knob comparison previously cost an RTL rebuild plus a full sweep. A CSR file per group
+    now makes nine MSHR parameters software-writable at runtime, reached through the existing group
+    barrier address window rather than a new address space. The MSHR ships disabled and software
+    programs and enables it before the timed region.</p>
+    <p>Beyond experiment turnaround, this has a structural consequence used throughout this work:
+    under runtime configuration the software-written value <em>wins</em> over the elaborated one for
+    every per-shape parameter except <code>merge_reqs</code>, which sizes the record array. Shapes
+    sharing a <code>merge_reqs</code> can therefore run on a bit-identical simulator — 23 builds
+    collapse to 3.</p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">3</span> Method</h2>
+  <div class="measure">
+    <p>All results are cycle counts from VCS 2024.09 simulation of the full 256-core cluster, over
+    23 GEMM shapes spanning 2,048 to 131,072 ideal cycles.</p>
+
+    <h4>Efficiency metric</h4>
+    <p>Efficiency is <code>ideal / actual</code>, where <code>ideal = M·N·P / 1024</code> — the
+    roofline for 1024 FPU lanes. The testbench also emits a raw utilisation counter, but it measures
+    lane <em>occupancy</em> and is not conserved across runs of identical work; it has previously
+    inverted a real ranking in this campaign, so it is not used for comparisons.</p>
+
+    <h4>Comparison discipline</h4>
+    <p>Each sweep differs from its reference by exactly one knob, and every arm gates on a full
+    define-set diff against that reference before it runs — any difference beyond the knob under
+    test aborts the arm. This was added after configuration drift produced invalid results twice.</p>
+
+    <div class="note">
+      <span class="lbl">Why a cycle win alone is not accepted</span>
+      <p>A configuration bug earlier in this campaign produced a spurious 43% "improvement" by
+      silently discarding work. Every result below is therefore checked against FPU busy
+      lane-cycles and the MSHR's own request counters: a genuine speedup retires the same work in
+      fewer cycles, and that is verified per arm rather than assumed.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">4</span> Results</h2>
+
+  <h3>4.1 The autotuner clamp <span class="chip ok">fixed &amp; verified</span></h3>
+  <div class="measure">
+    <p>For the four <code>128×N×512</code> shapes the autotuner derives a B-sharing degree of
+    <b>1</b> — B is private to each core, so a second requester for a burst line can never arrive.
+    The correct MSHR setting is therefore "do not hold burst entries at all". But an elaboration
+    check required <code>hold_subs ≥ 2</code>, so the autotuner clamped the derived 1 up to 2.</p>
+    <p>The consequence, visible in the MSHR counters: those shapes allocated
+    <b>61,344 / 122,721 / 245,540 / 491,216</b> burst entries respectively — doubling with N — and
+    <b>merged exactly zero</b> of them. Every allocation was pure added latency on a load that was
+    going to miss anyway.</p>
+    <p>The guard was relaxed to admit 1, which the RTL already defines as "bypass this class
+    entirely", and the clamp removed from the autotuner so the derived value is emitted directly.</p>
+  </div>
+  <div class="tw"><table>
+    <caption>Burst bypass — cycles and roofline efficiency, four affected shapes</caption>
+    <thead><tr><th>Shape</th><th>Ideal</th><th>Before</th><th>Eff.</th><th>After</th><th>Eff.</th><th>Δ</th><th>vs baseline</th></tr></thead>
+    <tbody>
+      <tr><td>128×128×512</td><td>8,192</td><td>16,995</td><td>48.2%</td><td>9,401</td><td>87.1%</td><td class="pos">−44.7%</td><td class="pos">−4.0%</td></tr>
+      <tr><td>128×256×512</td><td>16,384</td><td>21,614</td><td>75.8%</td><td>17,627</td><td>92.9%</td><td class="pos">−18.4%</td><td class="pos">−2.5%</td></tr>
+      <tr><td>128×512×512</td><td>32,768</td><td>41,943</td><td>78.1%</td><td>34,041</td><td>96.3%</td><td class="pos">−18.8%</td><td class="pos">−1.3%</td></tr>
+      <tr><td>128×1024×512</td><td>65,536</td><td>130,792</td><td>50.1%</td><td>67,005</td><td>97.8%</td><td class="pos">−48.8%</td><td class="pos">−1.0%</td></tr>
+    </tbody>
+  </table></div>
+  <div class="measure">
+    <p>Each arm was verified against the lost-work failure mode: FPU busy lane-cycles match to
+    within 0.5% and the single-request path to within 0.1%, so the same work retires in fewer
+    cycles. Before the fix these four shapes were the campaign's entire net regression against the
+    pre-campaign baseline; after it, all four sit at or below baseline.</p>
+    <p>The benefit does not decay with N, which the first two arms had suggested it would. Because
+    the wasted allocation count scales with the work, so does the saving.</p>
+  </div>
+
+  <h3>4.2 Runtime MSHR configuration <span class="chip ok">feasibility established</span></h3>
+  <div class="measure">
+    <p>Across all 23 shapes the runtime CSR costs a median <b>+0.77%</b>, with 18 of 23 under +5%.
+    Five shapes were outliers — and four of those five were the same B-share=1 family, where the
+    clamp was inflating an already-wasted allocation.</p>
+    <p>Re-running those four with the corrected parameter, on the <em>same simulator binary</em> so
+    that the software-written CSR value was the only variable, removes the penalty entirely:</p>
+  </div>
+  <div class="tw"><table>
+    <caption>Runtime-CSR cost, before and after the autotuner fix</caption>
+    <thead><tr><th>Shape</th><th>CSR cost with clamp</th><th>CSR cost with fix</th></tr></thead>
+    <tbody>
+      <tr><td>128×128×512</td><td class="neg">+1119.3%</td><td class="pos">+0.82%</td></tr>
+      <tr><td>128×256×512</td><td class="neg">+27.6%</td><td class="pos">+0.18%</td></tr>
+      <tr><td>128×512×512</td><td class="neg">+9.6%</td><td class="pos">+0.23%</td></tr>
+      <tr><td>128×1024×512</td><td class="neg">+67.9%</td><td class="pos">+0.21%</td></tr>
+    </tbody>
+  </table></div>
+  <div class="measure">
+    <p>All four land inside the +0.31% median cold-start cost the CSR shows on unaffected shapes —
+    the penalty is removed, not reduced. This holds for both failure modes: the mild degradations
+    and the 12× blow-up on <code>128×128×512</code>.</p>
+  </div>
+
+  <h3>4.3 Shipping-configuration sweep <span class="chip run">18 / 23 in flight</span></h3>
+  <div class="measure">
+    <p>A methodological gap surfaced late: every one of the ~190 arms run to date pinned
+    <code>hold_prescale_w = 0</code> for cycle-accurate one-knob deltas, but the shipping default is
+    4. No arm had ever measured the configuration that actually ships. Two sweeps now do —
+    <code>dflt</code> at pure flavour defaults, and <code>latest</code> adding the runtime CSR.</p>
+  </div>
+  <div class="tw"><table>
+    <caption>Shipping-configuration sweeps, 18 of 23 shapes complete</caption>
+    <thead><tr><th>Sweep</th><th>Runtime CSR</th><th>Median efficiency</th><th>vs baseline</th><th>Faster</th></tr></thead>
+    <tbody>
+      <tr><td>baseline</td><td>—</td><td>81.0%</td><td>—</td><td>—</td></tr>
+      <tr><td>dflt</td><td>off</td><td>81.1%</td><td class="pos">−1.50%</td><td>14 / 18</td></tr>
+      <tr><td>latest</td><td>on</td><td>81.3%</td><td class="pos">−1.53%</td><td>13 / 18</td></tr>
+    </tbody>
+  </table></div>
+  <div class="measure">
+    <p>Both track baseline utilisation closely, and enabling the runtime CSR costs essentially
+    nothing at the shipping prescale. The five outstanding shapes are the largest in the set and
+    will move these medians; the figures are interim.</p>
+  </div>
+
+  <h3>4.4 The hold prescaler</h3>
+  <div class="measure">
+    <p>The prescaler is a backend PPA lever, not a performance feature. It narrows the per-entry
+    hold counter from 11 bits to 7 — removing <b>4,096 flops at 4×4 and 16,384 at 8×8</b> — cuts
+    that field's switching activity 16×, and shortens the comparator feeding the per-entry issue
+    decision.</p>
+    <p>Its frontend cost, measured for the first time here across 16 shapes: mean <b>−0.44%</b>,
+    median <b>+0.49%</b>, range <b>−8.30%</b> to <b>+3.12%</b>. The mean sits near zero but the
+    spread does not — one shape gains 8.3%. Coarsening <em>when</em> an entry releases interacts
+    with traffic patterns and can land either way, so this should be read as roughly-zero-mean
+    per-shape noise rather than a flat tax.</p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">5</span> Verification</h2>
+  <div class="measure">
+    <p><b>Static analysis.</b> A Spyglass lint of the current shipping configuration reports 9
+    errors, identical in count and location to the previous clean run, all in vendored Spatz/Snitch
+    IP and all of the known-false <code>read but never set</code> class. Zero findings in
+    project RTL. The lint was gated to confirm the newly-legal bypass parameter and both new Spatz
+    defaults were actually present in the compile line — the flow otherwise exits successfully even
+    when it has checked nothing.</p>
+    <p><b>Functional.</b> Each result is corroborated by MSHR request-class counters and FPU busy
+    lane-cycles, as described in §3. The runtime-CSR arms additionally reject any run where the
+    MSHR was not confirmed enabled in all 16 groups, since an unconfigured MSHR does not fail — it
+    silently measures a bypassed one.</p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">6</span> Open items</h2>
+  <div class="measure">
+    <h4><span class="chip open">open</span> &nbsp;512×256×512 under runtime configuration</h4>
+    <p>This shape showed +252.7% under the runtime CSR at <code>hold_prescale_w = 0</code>. It has
+    a B-sharing degree of 4 — its burst entries genuinely merge — so the bypass fix does not apply
+    and it is the one regression still unexplained.</p>
+    <p>An interactive full-waveform run of the same shape at the <em>shipping</em> prescale
+    completed cleanly at ~79,127 cycles, matching the healthy reference within 0.7%, which suggests
+    the regression may be specific to a configuration that does not ship. Two batch arms are in
+    flight to confirm this on a matched binary; neither has yet reached the point where the original
+    arm diverged.</p>
+
+    <h4><span class="chip open">open</span> &nbsp;Synthesis guard coverage</h4>
+    <p>44 <code>ifndef TARGET_SYNTHESIS</code> guards across six RTL files exclude verification-only
+    state from synthesis — 64 bits per MSHR entry, or 65,536 flops at 4×4 and 262,144 at 8×8. That
+    macro is defined by nothing in this repository; it relies on the backend flow invoking Bender
+    with the synthesis target. This is very likely correct by convention, but it is unverified here
+    and worth one confirmation, since the cost of it being wrong is a quarter of a million flops.</p>
+
+    <h4><span class="chip run">in flight</span> &nbsp;Remaining sweep arms</h4>
+    <p>Five shapes outstanding on each of the two shipping-configuration sweeps, all among the
+    largest in the set.</p>
+
+    <h4>Next steps</h4>
+    <ol>
+      <li>Complete both sweeps and re-issue §4.3 with the full 23 shapes.</li>
+      <li>Resolve 512×256×512 — either confirmed as a non-shipping-configuration artifact, or
+      root-caused from the captured waveform.</li>
+      <li>Confirm the synthesis-target flag with the backend flow.</li>
+      <li>Consider defaulting the runtime CSR on, once §4.3 and the item above are closed.</li>
+    </ol>
+  </div>
+</section>
+
+<footer>
+  Cycle counts from VCS 2024.09-zr, full 256-core cluster simulation · efficiency = ideal/actual,
+  ideal = M·N·P/1024 · baseline is the pre-campaign reference of 2026-08-03 · figures marked in
+  flight are interim and will move as arms complete.
+</footer>
+</div>
