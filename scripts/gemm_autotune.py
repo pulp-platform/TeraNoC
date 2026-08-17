@@ -116,15 +116,30 @@ def derive(M, N, P, *, num_groups=16, num_cores=256, kernel_size=8,
     share_b = split_m_count or 1
     merge   = max(share_a, share_b)
 
-    # mempool_group_mshr.sv requires hold_subs in [2, merge_reqs] (elaboration
-    # $error). A share degree of 1 means no second requester for that class can
-    # EVER arrive, so the legal minimum of 2 has to be paired with a zero hold
-    # window -- otherwise every entry of that class waits out the full window for a
-    # partner that cannot come. Emitting a bare 1 (as this script used to) builds
-    # under Verilator, which does not enforce the elaboration $error, but Questa
-    # refuses to elaborate it.
-    subs_a = min(max(share_a, 2), merge)
-    subs_b = min(max(share_b, 2), merge)
+    # hold_subs = share degree, directly. A share degree of 1 means no second
+    # requester for that class can EVER arrive, and hold_subs=1 is the RTL's
+    # encoding for "bypass this class entirely" (cfg_bypass_single /
+    # cfg_bypass_burst, mempool_group_mshr.sv:509-510) -- no entry allocated,
+    # nothing held, nothing to wait for.
+    #
+    # This used to read min(max(share, 2), merge). The floor of 2 existed ONLY to
+    # satisfy an elaboration $error that required hold_subs in [2, merge_reqs];
+    # that guard was relaxed to [1, merge_reqs] on 2026-08-16
+    # (mempool_group_mshr.sv:341), so the floor is now vestigial -- and expensive.
+    #
+    # MEASURED COST OF THE OLD FLOOR, on the four share_b=1 shapes (the only ones
+    # it affected; share_a is >= 4 on every shape in the sweep):
+    #     128x128x512    16,995 -> 9,401   -44.7%   48.2% -> 87.1% of roofline
+    #     128x256x512    21,614 -> 17,627  -18.5%   75.8% -> 92.9%
+    #     128x512x512    41,943 -> 34,041  -18.8%   78.1% -> 96.3%
+    #     128x1024x512  130,792 -> 67,005  -48.8%   50.1% -> 97.8%
+    # Verified against the lost-work failure mode: FPU busy lane-cycles match to
+    # 0.5%, the single path to 0.1%. The mechanism is that alloc_burst scaled
+    # 61,344 / 122,721 / 245,540 / 491,216 -- doubling with N -- while merged_burst
+    # was ZERO in every one. Every allocation was latency in the path of a load
+    # that was going to miss anyway. See docs/benchmarks/gemm_results_burst_bypass.md.
+    subs_a = min(share_a, merge)
+    subs_b = min(share_b, merge)
 
     knobs = {
         "group_mshr_bank_shift_single": clog2(N) if N > 0 else 0,
@@ -145,6 +160,10 @@ def derive(M, N, P, *, num_groups=16, num_cores=256, kernel_size=8,
         # cycles). Disable the delivery gate rather than let it time out.
         knobs["group_mshr_resp_wait_subs_single"] = 0
     if share_b < 2:
+        # Kept at 0 even though subs_b=1 now bypasses bursts outright, so the window
+        # governs nothing: it costs nothing, it keeps the emitted config identical to
+        # the one the -44.7%/-18.5%/-18.8%/-48.8% arms actually measured, and it stays
+        # correct if anyone overrides hold_subs_burst back to 2 by hand.
         knobs["group_mshr_hold_window_burst"] = 0
 
     info.update(vl_words=vl_words, p_start_gap_words=gap,
