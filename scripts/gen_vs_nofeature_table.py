@@ -115,13 +115,14 @@ def tsv_num(v):  return str(v) if isinstance(v, int) else ('running' if v == 'ru
 def tsv_pct(fl, v): return f'{100*fl/v:.1f}%' if isinstance(v, int) else ''
 def tsv_spd(b, v):  return f'{b/v:.2f}' if isinstance(v, int) else ''
 
-TH = ['Shape', 'Ideal cycles', 'Baseline (no MSHR/burst)', 'Baseline eff.',
+TH = ['M', 'N', 'P', 'Ideal cycles', 'Baseline (no MSHR/burst)', 'Baseline eff.',
       'Default', 'Default eff.', 'Default speedup',
       'Runtime CSR', 'Runtime CSR eff.', 'Runtime CSR speedup', 'Limited by']
 TL = ['\t'.join(TH)]
 for r in rows:
+    M, N, P = r['shape'].split('x')          # split so each dimension sorts numerically in a table
     TL.append('\t'.join([
-        r['shape'], str(r['floor']), str(r['base']), f"{100*r['floor']/r['base']:.1f}%",
+        M, N, P, str(r['floor']), str(r['base']), f"{100*r['floor']/r['base']:.1f}%",
         tsv_num(r['dflt']),   tsv_pct(r['floor'], r['dflt']),   tsv_spd(r['base'], r['dflt']),
         tsv_num(r['latest']), tsv_pct(r['floor'], r['latest']), tsv_spd(r['base'], r['latest']),
         r['lim'] if r['lim'] in ('A', 'B') else '—']))
