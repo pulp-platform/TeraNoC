@@ -144,7 +144,7 @@ claim. Best ladders (feasible under both the work-split guard and L1 capacity):
 | 512 | 4 | 4 | 65,536 | measured |
 | 1024 | 2 | 8 | 131,072 | **new** |
 
-**6 new arms total.** Both ladders reuse already-measured rungs as anchors, so a discrepancy on
+**4 new arms total.** Both ladders reuse already-measured rungs as anchors, so a discrepancy on
 those is an immediate red flag rather than a silent inconsistency.
 
 What to record per rung, beyond cycles: `alloc_single` / `merged_single` / `alloc_burst` /
