@@ -212,6 +212,76 @@ footer{
     shape by <code>gemm_autotune.py</code> from the kernel's sharing structure. That derivation is
     where the defect described in §4.1 lived.</p>
   </div>
+
+  <h3>1.1 Why the sharing exists, and why it is a <em>group</em>-level property</h3>
+  <div class="measure">
+    <p>The opportunity is not incidental to matmul — it falls directly out of how the kernel splits
+    work. Each group receives a slab of the output matrix and divides its 16 cores into a
+    two-dimensional grid. For a 512×512×512 GEMM on the 4×4 mesh:</p>
+  </div>
+  <pre><code>dim_group = M / num_groups          = 512/16 = 32   rows of C per group
+split_m   = dim_group / KERNEL_SIZE = 32/8   =  4   m-blocks
+split_p   = cores_per_group / split_m = 16/4 =  4   p-slices
+                                              -> a 4 x 4 grid of cores</code></pre>
+  <div class="measure">
+    <p>Now consider what a core loads to compute
+    <code>C[m][p] = Σ<sub>n</sub> A[m][n]·B[n][p]</code>:</p>
+    <ul>
+      <li><b><code>A[m][n]</code> depends on m, not p.</b> The four cores across one m-block row
+      differ only in their p-slice, so they all need the <em>same</em> A element.</li>
+      <li><b><code>B[n][p..p+VL]</code> depends on p, not m.</b> The four cores down one p-slice
+      column differ only in their m-block, so they all need the <em>same</em> B line.</li>
+    </ul>
+    <p>So at any step the group's 16 cores need only <b>4 distinct A elements and 4 distinct B
+    lines</b> between them:</p>
+  </div>
+  <pre><code>without coalescing:  16 A + 16 B = 32 requests cross the mesh
+with coalescing   :   4 A +  4 B =  8 requests cross the mesh</code></pre>
+  <div class="measure">
+    <p><b>The sharing is confined to a group because the work split is confined to a group.</b>
+    Cores in different groups work on different slabs of C and share almost nothing. That is the
+    argument for placing the coalescer at group level: a per-tile MSHR would see only a fraction of
+    each sharing set, and a global one would pay cross-mesh latency to capture sharing that does not
+    exist there.</p>
+
+    <h4>Measured saving</h4>
+    <p>Summed over all 16 groups for the full 256-core run of that shape:</p>
+  </div>
+  <div class="tw"><table>
+    <caption>512×512×512 — remote load requests, whole run, all groups</caption>
+    <thead><tr><th>Operand</th><th>Core requests</th><th>NoC requests</th><th>Reduction</th></tr></thead>
+    <tbody>
+      <tr><td>A (scalar)</td><td>3,932,155</td><td>983,040</td><td class="pos">4.0×</td></tr>
+      <tr><td>B (burst)</td><td>983,040</td><td>245,760</td><td class="pos">4.0×</td></tr>
+    </tbody>
+    <tfoot><tr><td>Total</td><td>4,915,195</td><td>1,228,800</td><td class="pos">75% removed</td></tr></tfoot>
+  </table></div>
+  <div class="measure">
+    <p><b>3.7 million remote-load requests never leave their group</b>, and because the returned
+    line is multicast to every merged requester, response traffic falls by the same factor.</p>
+
+    <h4>The model is predictive, not descriptive</h4>
+    <p>Both sharing degrees follow from <code>(M, N, P)</code> before anything runs. The hardware
+    hits them exactly — the measured merge ratio equals the predicted degree on every shape
+    checked:</p>
+  </div>
+  <div class="tw"><table>
+    <caption>Predicted sharing degree vs. measured merge ratio</caption>
+    <thead><tr><th>Shape</th><th>A predicted</th><th>A measured</th><th>B predicted</th><th>B measured</th></tr></thead>
+    <tbody>
+      <tr><td>128×1024×512</td><td>16</td><td>16.0</td><td>1</td><td>1.0</td></tr>
+      <tr><td>256×512×256</td><td>8</td><td>8.0</td><td>2</td><td>2.0</td></tr>
+      <tr><td>512×512×512</td><td>4</td><td>4.0</td><td>4</td><td>4.0</td></tr>
+      <tr><td>512×256×512</td><td>4</td><td>4.0</td><td>4</td><td>4.0</td></tr>
+    </tbody>
+  </table></div>
+  <div class="measure">
+    <p>Note that the two degrees <b>invert with M</b>: at M=128 the A operand is shared 16 ways
+    while B is private to each core; at M=512 both are 4. That inversion is exactly what §4.1 is
+    about — the parameter derivation clamped B's true degree of 1 up to 2, so the hardware waited
+    for a second requester that provably could not exist. The <code>B measured = 1.0</code> on
+    128×1024×512 is that defect visible as a single number.</p>
+  </div>
 </section>
 
 <section>
