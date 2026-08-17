@@ -1,6 +1,6 @@
 # GEMM shape status — every shape, every phase, side by side
 
-Generated 2026-08-17 02:22. **Re-runnable**: `python3 scripts/gen_shape_status.py`.
+Generated 2026-08-17 04:22. **Re-runnable**: `python3 scripts/gen_shape_status.py`.
 
 
 The other `gemm_results_*.md` files are a **chain**: each measures one phase against the phase
@@ -73,8 +73,8 @@ Sorted by current efficiency, best first.
 | 256x32x512 | 4,096 | 6,752 | 6,563 | 6,584 | 6,598 | 6,598 | 6,826 | — | — | **6,598** | E1 | **62.1%** | **-2.3%** | 50m | 15.5* | 6,563 | opt2 |
 | 256x32x256 | 2,048 | 4,081 | _inc_ | 3,859 | 3,771 | 3,771 | 3,667 | — | — | **3,771** | E1 | **54.3%** | **-7.6%** | 25m | 21.6* | 3,667 | CSR |
 | 512x32x512 | 8,192 | 16,238 | 15,037 | 15,213 | 15,088 | 15,088 | 15,471 | — | — | **15,088** | E1 | **54.3%** | **-7.1%** | 92m | 13.7* | 15,037 | opt2 |
-| 128x1024x512 | 65,536 | 67,693 | 75,614 | 139,129 | 130,792 | 130,792 | 219,562 | 67,005 | — | **130,792** | E1 | **50.1%** | **+93.2%** | 806m | 3.4* | 67,005 | BYP |
-| 128x128x512 | 8,192 | 9,792 | 13,138 | 165,585 | 16,995 | 16,995 | _run_ | 9,401 | — | **16,995** | E1 | **48.2%** | **+73.6%** | 118m | 6.5* | 9,401 | BYP |
+| 128x1024x512 | 65,536 | 67,693 | 75,614 | 139,129 | 130,792 | 130,792 | 219,562 | 67,005 | _run_ | **130,792** | E1 | **50.1%** | **+93.2%** | 806m | 3.4* | 67,005 | BYP |
+| 128x128x512 | 8,192 | 9,792 | 13,138 | 165,585 | 16,995 | 16,995 | 207,223 | 9,401 | _run_ | **16,995** | E1 | **48.2%** | **+73.6%** | 118m | 6.5* | 9,401 | BYP |
 
 `Δ vs base` is `current` against the 2026-08-03 pre-campaign baseline in `gemm_results.md`.
 **Negative is faster.** It bundles every change since that date, so it is a "where did we end up"
@@ -96,7 +96,7 @@ A `*` marks a value estimated from file mtimes rather than measured; those overs
 - **vs the 2026-08-03 baseline: median -0.0%** (negative is faster), range -7.6% to +93.2%. **12 of 23** shapes are faster, 11 slower.
   - biggest gains: `256x32x256` -7.6%, `512x32x512` -7.1%, `512x256x128` -3.3%.
   - biggest regressions: `128x1024x512` +93.2%, `128x128x512` +73.6%, `128x512x512` +21.6%.
-- Enabling the runtime CSR (`CSR`) costs a median **+0.75%** over 22 shapes, but the spread is what matters: `512x256x512` +252.7%, `128x1024x512` +67.9%, `128x256x512` +27.6%.
+- Enabling the runtime CSR (`CSR`) costs a median **+0.77%** over 23 shapes, but the spread is what matters: `128x128x512` +1119.3%, `512x256x512` +252.7%, `128x1024x512` +67.9%.
 - **17 shapes are slower now than their best-ever arm.** Largest gaps: `128x1024x512` 1.95× (E1 130,792 vs BYP 67,005), `128x128x512` 1.81× (E1 16,995 vs BYP 9,401), `128x512x512` 1.23× (E1 41,943 vs BYP 34,041), `128x256x512` 1.23× (E1 21,614 vs BYP 17,627).
 - Burst bypass (`BYP`), on the `share_b = 1` family: `128x512x512` -18.8% vs current, `128x256x512` -18.4% vs current, `128x1024x512` -48.8% vs current, `128x128x512` -44.7% vs current.
 

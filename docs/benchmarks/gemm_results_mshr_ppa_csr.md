@@ -1,6 +1,6 @@
 # GEMM benchmark results — Phase CSR — runtime-configurable group MSHR, software-enabled
 
-Generated 2026-08-16 23:25 from `36e9ea76`. **Re-runnable**: `python3 scripts/gen_sweep_doc_phase.py sweepCSR phaseE1 gemm_results_mshr_ppa_csr.md "Phase CSR — runtime-configurable group MSHR, software-enabled" "group_mshr_cfg_runtime=1: the MSHR ships DISABLED and software programs+enables it before the timed region"`.
+Generated 2026-08-17 04:22 from `36e9ea76`. **Re-runnable**: `python3 scripts/gen_sweep_doc_phase.py sweepCSR phaseE1 gemm_results_mshr_ppa_csr.md "Phase CSR — runtime-configurable group MSHR, software-enabled" "group_mshr_cfg_runtime=1: the MSHR ships DISABLED and software programs+enables it before the timed region"`.
 
 **What changed in this phase:** group_mshr_cfg_runtime=1: the MSHR ships DISABLED and software programs+enables it before the timed region
 
@@ -33,7 +33,7 @@ Column guide — the three cycle columns are three DIFFERENT measurements, which
 | 512x512x128 | 32,768 | 4 | 4 | 4 | `aec98132` | 38,325 | 85.5% | 38,885 | 39,612 | 82.7% | +3.4% | **+1.87%** |
 | 512x512x512 | 131,072 | 4 | 4 | 4 | `97c85346` | 153,707 | 85.3% | 154,734 | 155,036 | 84.5% | +0.9% | **+0.20%** |
 | 512x256x512 | 65,536 | 4 | 4 | 4 | `2903acbf` | 78,314 | 83.7% | 79,653 | 280,917 | 23.3% | +258.7% | **+252.68%** |
-| 128x128x512 | 8,192 | 16 | 1 | 16 | `f4e7253a` | 9,792 | 83.7% | 16,995 | _running (0 periods)_ | — | — | **—** |
+| 128x128x512 | 8,192 | 16 | 1 | 16 | `f4e7253a` | 9,792 | 83.7% | 16,995 | 207,223 | 4.0% | +2016.2% | **+1119.32%** |
 | 256x128x256 | 8,192 | 8 | 2 | 8 | `55b75bcd` | 10,014 | 81.8% | 9,944 | 9,906 | 82.7% | -1.1% | **-0.38%** |
 | 512x256x128 | 16,384 | 4 | 4 | 4 | `30c8a832` | 20,155 | 81.3% | 19,493 | 19,919 | 82.3% | -1.2% | **+2.19%** |
 | 512x128x256 | 16,384 | 4 | 4 | 4 | `15e8ddef` | 20,307 | 80.7% | 20,538 | 21,065 | 77.8% | +3.7% | **+2.57%** |
@@ -46,11 +46,11 @@ Column guide — the three cycle columns are three DIFFERENT measurements, which
 | 512x32x512 | 8,192 | 4 | 4 | 4 | `9209f128` | 16,238 | 50.4% | 15,088 | 15,471 | 53.0% | -4.7% | **+2.54%** |
 | 256x32x256 | 2,048 | 8 | 2 | 8 | `697a398d` | 4,081 | 50.2% | 3,771 | 3,667 | 55.8% | -10.1% | **-2.76%** |
 
-**22 of 23 complete**, 22 paired against `phaseE1`.
+**23 of 23 complete**, 23 paired against `phaseE1`.
 
 - **this phase, the 19 arms within ±10%: mean +0.83%, median +0.31%** · range -2.76% .. +9.60%
-- **3 arm(s) outside ±10%, reported as defects and EXCLUDED from the mean above:** +252.7%, +67.9%, +27.6%. Including them the mean would read +16.54%, which one arm dominates.
-- whole tree vs `gemm_results.md`: mean +25.1%
+- **4 arm(s) outside ±10%, reported as defects and EXCLUDED from the mean above:** +1119.3%, +252.7%, +67.9%, +27.6%. Including them the mean would read +64.49%, which one arm dominates.
+- whole tree vs `gemm_results.md`: mean +111.7%
 
 `ideal = M·N·P / 1024` (MACs ÷ 1024 FMA lanes = 256 cores × 4 FPU). Efficiency is `ideal / actual`;
 the denominator comes from the data size, never from simulation. **Do not rank on the TB's
