@@ -60,6 +60,27 @@ def final(tag, shape):
     fresh = (datetime.datetime.now().timestamp() - os.path.getmtime(p)) < STALE
     return 'run' if fresh else 'inc'
 
+
+def wall(tag, shape):
+    """Wall-clock + simulation speed for one arm, from the sidecar written by wallclock.sh.
+
+    Speed is NOT a property of the shape -- it is dominated by how many sims shared the machine.
+    The same four-arm bypass batch measured 8.9 / 5.8 / 4.1 cyc/s purely from contention. So a
+    cyc/s figure is only meaningful next to its wall time, and estimated ones are marked.
+    """
+    f = f'{T}/_wall_{tag}_{shape}.txt' if shape else f'{T}/_wall_{tag}.txt'
+    if not os.path.exists(f):
+        f2 = f'{T}/_wall_{tag}.txt'
+        if not os.path.exists(f2): return None
+        f = f2
+    d = {}
+    for ln in open(f):
+        if ln.startswith('#') or '=' not in ln: continue
+        k, v = ln.strip().split('=', 1); d[k] = v
+    if 'cyc_per_s' not in d: return None
+    return dict(cps=float(d['cyc_per_s']), wall=int(d.get('wall_s', 0)),
+                est=d.get('estimated') == '1')
+
 def doccol(path, idx):
     """One numeric column, keyed by shape, out of a generated results table."""
     out = {}
@@ -90,7 +111,8 @@ for s in shapes:
     for tag, _, _ in CHAIN:
         if isinstance(vals.get(tag), int): cur, curtag = vals[tag], tag
     bt = min(done, key=done.get) if done else None
-    rows.append(dict(shape=s, ideal=ideal, base=base.get(s), vals=vals,
+    w = wall(curtag, s) if curtag else None
+    rows.append(dict(shape=s, ideal=ideal, base=base.get(s), vals=vals, wall=w,
                      cur=cur, curtag=curtag, best=done.get(bt), besttag=bt,
                      dbase=(100.0 * (cur - base[s]) / base[s]) if (cur and base.get(s)) else None,
                      eff=(100.0 * ideal / cur) if cur else None,
@@ -150,9 +172,9 @@ something — treat a large gap as a regression to explain, not as headroom.
 Sorted by current efficiency, best first.
 """)
 hdr = ['M×N×P', 'ideal', 'baseline'] + [lab for _, lab, _ in COLS] + \
-      ['**current**', 'from', '**eff**', '**Δ vs base**', 'best', 'from']
+      ['**current**', 'from', '**eff**', '**Δ vs base**', 'wall', 'cyc/s', 'best', 'from']
 L.append('| ' + ' | '.join(hdr) + ' |')
-L.append('|' + '---|' * 3 + '---:|' * len(COLS) + '---:|:--|---:|---:|---:|:--|')
+L.append('|' + '---|' * 3 + '---:|' * len(COLS) + '---:|:--|---:|---:|---:|---:|---:|:--|')
 for r in rows:
     gap = r['best'] and r['cur'] and r['best'] < r['cur']
     d   = r['dbase']
@@ -162,6 +184,8 @@ for r in rows:
              LAB.get(r['curtag'], '—'),
              f"**{r['eff']:.1f}%**" if r['eff'] else '—',
              ('—' if d is None else f"**{d:+.1f}%**"),
+             ('—' if not r['wall'] else f"{r['wall']['wall']//60}m"),
+             ('—' if not r['wall'] else f"{r['wall']['cps']:.1f}{'*' if r['wall']['est'] else ''}"),
              (f"{r['best']:,}" if gap else '=') if r['best'] else '—',
              LAB.get(r['besttag'], '—') if gap else '']
     L.append('| ' + ' | '.join(cells) + ' |')
@@ -169,6 +193,12 @@ L.append('')
 L.append("""`Δ vs base` is `current` against the 2026-08-03 pre-campaign baseline in `gemm_results.md`.
 **Negative is faster.** It bundles every change since that date, so it is a "where did we end up"
 number, not an attribution — for what any single phase cost or bought, use that phase's own file.
+
+`wall` and `cyc/s` are the wall-clock runtime and simulation speed of the `current` arm.
+**Speed is not a property of the shape** — it is dominated by how many simulations shared the
+machine, and the same four-arm batch has measured 8.9 / 5.8 / 4.1 cyc/s from contention alone.
+A `*` marks a value estimated from file mtimes rather than measured; those overstate wall time
+(the build log is touched at compile end, not at sim start) and so understate cyc/s.
 
 `=` in the `best` column means current *is* the best ever measured for that shape.
 """)
