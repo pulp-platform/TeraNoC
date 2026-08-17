@@ -1,8 +1,8 @@
 # GEMM benchmark results — pure defaults (`dflt`) and full latest stack (`latest`)
 
-Generated 2026-08-17 19:54. **Re-runnable**: `python3 /tmp/claude-620771/gen_dflt_latest_doc.py`.
+Generated 2026-08-17 20:24. **Re-runnable**: `python3 /tmp/claude-620771/gen_dflt_latest_doc.py`.
 
-**Status: 21/23 `dflt` complete, 19/23 `latest` complete.** This file regenerates as arms land; re-run the generator rather than trusting a stale copy.
+**Status: 22/23 `dflt` complete, 21/23 `latest` complete.** This file regenerates as arms land; re-run the generator rather than trusting a stale copy.
 
 ## What these arms measure, and why neither has been run before
 
@@ -43,14 +43,14 @@ negative is faster.
 | 128x512x512 | 32,768 | 34,489 | 34,041 | **34,301** | 95.5% | -0.5% | **34,743** | 94.3% | +0.7% |
 | 256x512x256 | 32,768 | 34,821 | 34,547 | **34,671** | 94.5% | -0.4% | **34,603** | 94.7% | -0.6% |
 | 128x256x512 | 16,384 | 18,082 | 17,627 | **17,800** | 92.0% | -1.6% | **17,838** | 91.8% | -1.3% |
-| 256x512x512 | 65,536 | 71,218 | 71,116 | **_run_** | — | — | **_run_** | — | — |
 | 256x256x256 | 16,384 | 18,177 | 17,984 | **18,067** | 90.7% | -0.6% | **18,246** | 89.8% | +0.4% |
+| 256x512x512 | 65,536 | 71,218 | 71,116 | **74,720** | 87.7% | +4.9% | **74,918** | 87.5% | +5.2% |
 | 512x512x128 | 32,768 | 38,325 | 38,885 | **37,732** | 86.8% | -1.5% | **37,848** | 86.6% | -1.2% |
 | 128x128x512 | 8,192 | 9,792 | 9,401 | **9,514** | 86.1% | -2.8% | **9,512** | 86.1% | -2.9% |
 | 512x512x512 | 131,072 | 153,707 | 154,734 | **_run_** | — | — | **_run_** | — | — |
 | 512x256x256 | 32,768 | 37,632 | 38,260 | **38,652** | 84.8% | +2.7% | **37,412** | 87.6% | -0.6% |
 | 256x128x256 | 8,192 | 10,014 | 9,944 | **9,794** | 83.6% | -2.2% | **9,842** | 83.2% | -1.7% |
-| 512x256x512 | 65,536 | 78,314 | 79,653 | **78,424** | 83.6% | +0.1% | **_run_** | — | — |
+| 512x256x512 | 65,536 | 78,314 | 79,653 | **78,424** | 83.6% | +0.1% | **78,993** | 83.0% | +0.9% |
 | 512x256x128 | 16,384 | 20,155 | 19,493 | **19,886** | 82.4% | -1.3% | **19,495** | 84.0% | -3.3% |
 | 512x128x256 | 16,384 | 20,307 | 20,538 | **20,548** | 79.7% | +1.2% | **20,830** | 78.7% | +2.6% |
 | 512x128x512 | 32,768 | 42,767 | 42,743 | **41,782** | 78.4% | -2.3% | **41,316** | 79.3% | -3.4% |
@@ -64,12 +64,12 @@ negative is faster.
 
 ## Summary
 
-- **`dflt` utilisation, 21 shapes so far**: median **83.6%**, range 53.3%–96.6%. (Baseline's median over the same 21 shapes: **81.8%**.)
-- **`latest` utilisation, 19 shapes so far**: median **83.2%**, range 53.3%–96.3%.
-- **Prescaler cost (`dflt` vs its `p=0` twin), 21 shapes so far**: mean **-0.44%**, median **+0.46%**, range -8.30% to +3.12%.
-  Not uniform — 3 of 21 exceed ±3%; treat as a per-shape effect, not a flat tax, until the full 23 land.
-- **`dflt` vs 2026-08-03 baseline**: median **-1.33%**, 15/21 faster.
-- **`latest` vs baseline**: median **-1.35%**, 14/19 faster.
+- **`dflt` utilisation, 22 shapes so far**: median **83.6%**, range 53.3%–96.6%. (Baseline's median over the same 22 shapes: **82.7%**.)
+- **`latest` utilisation, 21 shapes so far**: median **83.2%**, range 53.3%–96.3%.
+- **Prescaler cost (`dflt` vs its `p=0` twin), 22 shapes so far**: mean **-0.19%**, median **+0.49%**, range -8.30% to +5.07%.
+  Not uniform — 4 of 22 exceed ±3%; treat as a per-shape effect, not a flat tax, until the full 23 land.
+- **`dflt` vs 2026-08-03 baseline**: median **-0.97%**, 15/22 faster.
+- **`latest` vs baseline**: median **-1.24%**, 14/21 faster.
 
 ## `512x256x512` — RESOLVED: the collapse is specific to `prescale_w = 0`
 

@@ -1,5 +1,5 @@
 Latest sweeps vs. the NO-FEATURE baseline (no Spatz burst, no group MSHR)
-Generated 2026-08-17 20:16 · python3 scripts/gen_vs_nofeature_table.py
+Generated 2026-08-17 20:24 · python3 scripts/gen_vs_nofeature_table.py
 
 baseline = the build with neither Spatz burst support nor the group MSHR.
            (NOT the "ours" column of gemm_results_table.txt, which already has both.)
@@ -17,6 +17,7 @@ shape              floor  baseline  base%      dflt  dflt%  spdup    latest   la
 256x512x256       32,768    44,618   73.4    34,671   94.5   1.29    34,603   94.7   1.29  A
 128x256x512       16,384    20,446   80.1    17,800   92.0   1.15    17,838   91.8   1.15  A
 256x256x256       16,384    20,785   78.8    18,067   90.7   1.15    18,246   89.8   1.14  A
+256x512x512       65,536    94,078   69.7    74,720   87.7   1.26    74,918   87.5   1.26  A
 512x512x128       32,768    45,309   72.3    37,732   86.8   1.20    37,848   86.6   1.20  -
 128x128x512        8,192    10,850   75.5     9,514   86.1   1.14     9,512   86.1   1.14  A
 512x256x256       32,768    48,505   67.6    38,652   84.8   1.25    37,412   87.6   1.30  -
@@ -32,10 +33,9 @@ shape              floor  baseline  base%      dflt  dflt%  spdup    latest   la
 256x32x512         4,096     7,901   51.8     6,804   60.2   1.16     6,564   62.4   1.20  A
 512x32x512         8,192    16,884   48.5    13,836   59.2   1.22    15,365   53.3   1.10  -
 256x32x256         2,048     3,919   52.3     3,846   53.3   1.02     3,667   55.8   1.07  A
-256x512x512       65,536    94,078   69.7       run      -      -       run      -      -  A
 512x512x512      131,072   208,630   62.8       run      -      -       run      -      -  -
 ----------------------------------------------------------------------------------------------
-dflt     21/23 shapes | speedup vs baseline: median 1.25x, range 1.02-1.35x | efficiency 67.3% -> 83.6% (median)
-latest   20/23 shapes | speedup vs baseline: median 1.23x, range 1.04-1.35x | efficiency 66.3% -> 83.1% (median)
+dflt     22/23 shapes | speedup vs baseline: median 1.25x, range 1.02-1.35x | efficiency 67.4% -> 83.6% (median)
+latest   21/23 shapes | speedup vs baseline: median 1.24x, range 1.04-1.35x | efficiency 67.3% -> 83.2% (median)
 
 NOTE: shapes still running show "run". Re-run the generator as arms land.
