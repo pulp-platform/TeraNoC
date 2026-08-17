@@ -1,5 +1,5 @@
 Latest sweeps vs. the NO-FEATURE baseline (no Spatz burst, no group MSHR)
-Generated 2026-08-17 20:11 · python3 scripts/gen_vs_nofeature_table.py
+Generated 2026-08-17 20:16 · python3 scripts/gen_vs_nofeature_table.py
 
 baseline = the build with neither Spatz burst support nor the group MSHR.
            (NOT the "ours" column of gemm_results_table.txt, which already has both.)

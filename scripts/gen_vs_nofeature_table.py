@@ -23,6 +23,7 @@ T    = '/tmp/claude-620771'
 MAIN = '/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC'
 SRC  = f'{MAIN}/docs/benchmarks/gemm_results_table.txt'
 OUT  = f'{MAIN}/docs/benchmarks/gemm_results_vs_nofeature.txt'
+TSV  = f'{MAIN}/docs/benchmarks/gemm_results_vs_nofeature.tsv'
 SB1  = {'128x128x512', '128x256x512', '128x512x512', '128x1024x512'}
 
 def fin(p):
@@ -102,5 +103,30 @@ for nm, key in (('dflt', 'dflt'), ('latest', 'latest')):
 L.append('')
 L.append('NOTE: shapes still running show "run". Re-run the generator as arms land.')
 open(OUT, 'w').write('\n'.join(L) + '\n')
+
+# ---- TSV for pasting straight into a Google Doc / Sheets table -------------------------------
+# Tab-separated, header row, nothing else -- no legend, no rule lines, no ASCII art, because any
+# of those become stray rows when the paste is converted to a table.
+# Numbers carry NO thousands separators: "67,860" pastes as text and silently breaks any later
+# arithmetic, whereas 67860 is parsed as a number. Percentages keep their % for readability.
+# In Docs: paste, select the pasted block, Format > Convert > Convert text to table (or paste
+# into Sheets first, then copy that range into the Doc).
+def tsv_num(v):  return str(v) if isinstance(v, int) else ('running' if v == 'run' else '')
+def tsv_pct(fl, v): return f'{100*fl/v:.1f}%' if isinstance(v, int) else ''
+def tsv_spd(b, v):  return f'{b/v:.2f}' if isinstance(v, int) else ''
+
+TH = ['Shape', 'Ideal cycles', 'Baseline (no MSHR/burst)', 'Baseline eff.',
+      'Default', 'Default eff.', 'Default speedup',
+      'Runtime CSR', 'Runtime CSR eff.', 'Runtime CSR speedup', 'Limited by']
+TL = ['\t'.join(TH)]
+for r in rows:
+    TL.append('\t'.join([
+        r['shape'], str(r['floor']), str(r['base']), f"{100*r['floor']/r['base']:.1f}%",
+        tsv_num(r['dflt']),   tsv_pct(r['floor'], r['dflt']),   tsv_spd(r['base'], r['dflt']),
+        tsv_num(r['latest']), tsv_pct(r['floor'], r['latest']), tsv_spd(r['base'], r['latest']),
+        r['lim'] if r['lim'] in ('A', 'B') else '—']))
+open(TSV, 'w').write('\n'.join(TL) + '\n')
+
+print(f'wrote {TSV}')
 print(f'wrote {OUT}  ({sum(1 for r in rows if isinstance(r["dflt"], int))}/{len(rows)} dflt, '
       f'{sum(1 for r in rows if isinstance(r["latest"], int))}/{len(rows)} latest)')
