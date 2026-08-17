@@ -141,6 +141,19 @@ tile_id_remap ?= 0
 # the fold and the field-select hash -- terapool has 16 tiles x 2 remote req ports = 32 concurrent
 # request slots, so 32 entries has ~zero headroom. 64 (16 banks x 4 ways) was the measured-safe
 # value; revert to 64 if the collapse reproduces.
+# Runtime-configurable group MSHR (docs/mshr_runtime_csr_design.md).
+#   0 = fixed-function. Every CSR const-folds to its elaborated default and the register file has no
+#       storage, so the build is BIT-IDENTICAL to the pre-CSR design -- verified twice at exactly
+#       34,596 cycles (V1, and V1-redo after the guard/width fixes).
+#   1 = software-writable. The MSHR then ships DISABLED out of reset and software must program and
+#       enable it before the timed region; a binary that does not costs +55.6% (measured), which the
+#       [MSHRCFG] testbench line reports at benchmark start.
+#
+# DEFAULT 0 ON PURPOSE. This file is included by 25 flavours including terapool_spatz4_fpu_backend_4x4,
+# so flipping it here changes what the backend tapes out. The runtime path is NOT ready for that: it
+# has an unexplained 3-12x slowdown on 512x256x512 and 128x128x512 (docs/mshr_runtime_csr_verification.md).
+# Set it per flavour, or on the make command line, until that is root-caused.
+group_mshr_cfg_runtime   ?= 0
 group_mshr_num           ?= 64
 # Ways (entries) per bank; banks = group_mshr_num / group_mshr_ways_per_bank. 16 entries / 2 ways
 # = 8 banks x 2 ways (user experiment). WARNING: 16 entries is HALF of the 32 concurrent request
@@ -563,12 +576,12 @@ zfinx ?= 0
 # ROB (x4 ROBs/core), and ~6 fewer logic levels on the id_valid_o -> mem_req_lvalid path.
 # AREA-reduction / timing cleanup, NOT a performance change (measured cycle-identical
 # at ROB32 and ROB64). Deliberate netlist change when on; not bit-identical.
-spatz_rob_cnt_idvalid ?= 0
+spatz_rob_cnt_idvalid ?= 1
 # R2: VLSU commit-metadata FIFO DEPTH NrOutstandingLoads(32) -> NrParallelInstructions(4),
 # the most entries that can ever be resident (the push is gated on the per-id
 # mem_insn_pending_q bit). 0 = legacy depth. 1 = -28 x 37 flops + a 37b 32:1 read mux.
 # AREA-reduction only, NOT a performance change (measured cycle-identical).
-spatz_vlsu_commit_qmin ?= 0
+spatz_vlsu_commit_qmin ?= 1
 
 # --- Block ROB-id reservation (docs/spatz_mlp_design_plan.md §5.1, the main MLP lever) ---
 # 0 = OFF: the port-0 burst allocator walks its ROB ids one per cycle, so every 16-beat burst

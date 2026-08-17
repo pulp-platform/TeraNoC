@@ -478,12 +478,12 @@ zfinx ?= 0
 # ROB (x4 ROBs/core), and ~6 fewer logic levels on the id_valid_o -> mem_req_lvalid path.
 # AREA-reduction / timing cleanup, NOT a performance change (measured cycle-identical
 # at ROB32 and ROB64). Deliberate netlist change when on; not bit-identical.
-spatz_rob_cnt_idvalid ?= 0
+spatz_rob_cnt_idvalid ?= 1
 # R2: VLSU commit-metadata FIFO DEPTH NrOutstandingLoads(32) -> NrParallelInstructions(4),
 # the most entries that can ever be resident (the push is gated on the per-id
 # mem_insn_pending_q bit). 0 = legacy depth. 1 = -28 x 37 flops + a 37b 32:1 read mux.
 # AREA-reduction only, NOT a performance change (measured cycle-identical).
-spatz_vlsu_commit_qmin ?= 0
+spatz_vlsu_commit_qmin ?= 1
 
 # --- Block ROB-id reservation (docs/spatz_mlp_design_plan.md §5.1, the main MLP lever) ---
 # 0 = OFF: the port-0 burst allocator walks its ROB ids one per cycle, so every 16-beat burst
