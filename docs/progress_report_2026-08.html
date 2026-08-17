@@ -1,4 +1,4 @@
-<title>Group MSHR Coalescing at 256 Cores</title>
+<title>Group MSHR Coalescing</title>
 <style>
 :root{
   --ground:#f5f7f7; --panel:#ffffff; --sunk:#eef2f3;
@@ -162,13 +162,15 @@ footer{
 <div class="wrap">
 <header>
   <div class="eyebrow">TeraNoC · Progress report</div>
-  <h1>Making remote-load coalescing pay off at 256 cores</h1>
+  <h1>Making remote-load coalescing pay off</h1>
   <p class="standfirst">A configuration defect was suppressing the group MSHR's benefit on a
   quarter of the benchmark set. Finding it, fixing it at source, and making the MSHR
-  runtime-configurable took four shapes from 48–78% of the FPU roofline to 87–98%.</p>
+  runtime-configurable took four shapes from 48–78% of the FPU roofline to 87–98% — and the
+  mechanism carries to 1024 cores.</p>
   <div class="byline">
-    <span><b>Platform</b> terapool_spatz4_fpu · 4×4 mesh · 256 cores · 16 groups</span>
-    <span><b>Workload</b> sp-fmatmul-opt-burst-merge, 23 GEMM shapes</span>
+    <span><b>Primary</b> 4×4 mesh · 256 cores · 16 groups · 23 GEMM shapes</span>
+    <span><b>Scaling</b> 8×8 mesh · 1024 cores · 64 groups (§4.5)</span>
+    <span><b>Workload</b> sp-fmatmul-opt-burst-merge</span>
     <span><b>Period</b> to 2026-08-17</span>
   </div>
 
@@ -181,6 +183,8 @@ footer{
       once the defect is fixed — was up to +1119%</div></div>
     <div class="stat"><span class="v">23 / 23</span><div class="n">Shapes measured on the runtime-CSR
       sweep; 18/23 on the shipping-default sweep</div></div>
+    <div class="stat"><span class="v">77.5%</span><div class="n">Best roofline efficiency at 1024
+      cores — separate 26-arm campaign, not comparable to the 4×4 figures</div></div>
   </div>
 </header>
 
@@ -368,6 +372,40 @@ footer{
     spread does not — one shape gains 8.3%. Coarsening <em>when</em> an entry releases interacts
     with traffic patterns and can land either way, so this should be read as roughly-zero-mean
     per-shape noise rather than a flat tax.</p>
+  </div>
+  <h3>4.5 Scaling to 1024 cores <span class="chip ok">measured</span></h3>
+  <div class="measure">
+    <p>The design also runs at <b>8×8 / 64 groups / 1024 cores</b>. The MSHR is instantiated per
+    group, so scaling replicates it 64× rather than widening it — <code>group_mshr_num</code> stays
+    at 64 entries per group at both mesh sizes, and the structure carries over unchanged.</p>
+    <p>A 26-arm sweep on shape <code>2048×512×512</code> (ideal = M·N·P / 4096 = 131,072 cycles at
+    4096 FPU lanes) reached a best of <b>169,073 cycles — 77.5% of roofline</b>, across a 4.4×
+    spread between best and worst configuration.</p>
+  </div>
+  <div class="note">
+    <span class="lbl">These numbers do not compare with the 4×4 results above</span>
+    <p>Different mesh, core count, lane count and GEMM shape. The 8×8 work is a separate campaign;
+    it establishes that the mechanism scales and what limits it there, not a like-for-like
+    efficiency comparison. Its build directories have since been reclaimed, so the record is
+    recovered from the campaign's live artifact rather than re-derivable from logs.</p>
+  </div>
+  <div class="measure">
+    <p>Two findings from that campaign shape how the 8×8 result should be read:</p>
+    <ul>
+      <li><b>The scaling loss is group alignment, not the MSHR.</b> 21 of 64 groups are
+      persistently slow — the same set early and late (r = 0.92), bimodal at ~82% and ~22%, and
+      <em>not</em> contiguous on the mesh. At 4×4 the inter-group spread stays within a few
+      percentage points under any configuration; at 8×8 it fans out far wider. That spread is the
+      loss.</li>
+      <li><b>An inherited default cost 22–108%.</b> The 8×8 base configuration shipped
+      <code>hold = 1023</code> to every arm, where the 4×4 production default was already 255.
+      Several arms were slow because of that inheritance rather than the variable under test — the
+      same class of defect as §4.1, found the same way.</li>
+    </ul>
+    <p>A software defect also had to be fixed before any 8×8 measurement was meaningful: the group
+    barrier hardcoded a word stride valid only at 16 groups, so at 64 groups every barrier operation
+    addressed a word outside the barrier window and the synchronisation silently did nothing — no
+    hang, no error. Repairing it was worth 14.1%.</p>
   </div>
 </section>
 
