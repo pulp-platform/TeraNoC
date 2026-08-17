@@ -213,55 +213,81 @@ footer{
     where the defect described in §4.1 lived.</p>
   </div>
 
-  <h3>1.1 Why the reuse is intrinsic to GEMM, not to our kernel</h3>
+  <h3>1.1 Why matmul creates sharing — the general reason</h3>
   <div class="measure">
-    <p>The coalescing opportunity does not come from how we happened to write the matmul. It is a
-    property of the operation. A GEMM performs <code>2·M·N·P</code> flops on only
-    <code>M·N + N·P + M·P</code> elements, so every element is reused Θ(problem dimension) times;
-    the only question is <em>where</em> that reuse is exposed.</p>
-    <p>Assign a two-dimensional block of the output to a set of <code>p</code> processors arranged
-    as a <code>p₁ × p₂</code> grid. Because <code>A</code> is indexed by the row coordinate and
-    <code>B</code> by the column coordinate, and neither is indexed by both:</p>
-    <ul>
-      <li>each <b>A</b> element is required by the <code>p₂</code> processors sharing its grid row,</li>
-      <li>each <b>B</b> element by the <code>p₁</code> processors sharing its grid column.</li>
-    </ul>
-    <p>This is the structure that classical distributed matmul algorithms are built on — Cannon
-    (1969) and SUMMA (van de Geijn &amp; Watts, 1997) both organise processors as a 2-D grid and
-    make the sharing explicit as a broadcast along grid rows and columns. It is also why the
-    communication lower bounds for matmul take the form they do: Hong &amp; Kung (1981) established
-    Ω(n³/√M) slow-memory traffic for fast memory of size M, and Irony, Toledo &amp; Tiskin (2004)
-    extended this to Ω(n³/(p·√M)) per processor in the distributed case. Any implementation that
-    fails to exploit the 2-D sharing pays more traffic than the bound requires.</p>
-
-    <h4>What is different here</h4>
-    <p>In SUMMA the broadcast is <em>orchestrated by the algorithm</em>: the code explicitly
-    broadcasts a panel of A along processor rows before each rank-k update. In a shared-L1 machine
-    there is no broadcast to orchestrate — every core simply issues its own load, and the sharing is
-    latent in the address stream rather than expressed in the program.</p>
-    <p><b>The group MSHR recovers that broadcast in hardware.</b> Independent loads that happen to
-    target the same line are merged into one NoC request and the reply is multicast back to every
-    requester. The machine therefore obtains SUMMA's communication pattern without the software
-    having to express it, and — unlike an algorithmic broadcast — it degrades gracefully to
-    ordinary loads when the sharing is not present.</p>
-
-    <h4>The optimal work split is traffic-weighted, not square</h4>
-    <p>The textbook choice is the balanced grid <code>p₁ = p₂ = √p</code>, which minimises total
-    traffic when both operands cost the same to fetch. They do not here: <code>A</code> is loaded by
-    scalar accesses and <code>B</code> by 16-word vector bursts, and the measured request counts run
-    <b>4 : 1</b> in A's favour. Minimising <code>w<sub>A</sub>/s<sub>A</sub> +
-    w<sub>B</sub>/s<sub>B</sub></code> subject to <code>s<sub>A</sub>·s<sub>B</sub> = p</code>
-    gives</p>
+    <p>Start from one fact about the operation itself, with no reference to how we wrote it:</p>
+    <div class="lede">
+      <p>To compute one output element <code>C[m][p]</code> a core must read <b>an entire row of
+      A</b> (row <code>m</code>) and <b>an entire column of B</b> (column <code>p</code>).</p>
+    </div>
+    <p>So two cores computing different outputs <em>in the same row of C</em> read exactly the same
+    row of A. Two cores in the same column of C read exactly the same column of B. The sharing is
+    not a coincidence of our tiling — it is forced by which index each operand depends on.</p>
+    <p>Lay four cores out as a 2 × 2 block of the output and it is immediate:</p>
   </div>
-  <pre><code>s_A / s_B  =  w_A / w_B        (sharing degrees in the ratio of the traffic they serve)</code></pre>
+  <pre><code>                    B col p0        B col p1
+                  +-----------+   +-----------+
+   A row m0  ---> |  core 0   |   |  core 1   |   both read A row m0
+                  +-----------+   +-----------+
+   A row m1  ---> |  core 2   |   |  core 3   |   both read A row m1
+                  +-----------+   +-----------+
+                        |               |
+                  core 0 &amp; 2       core 1 &amp; 3
+                  read B col p0    read B col p1
+
+   4 cores, but only 2 distinct A rows + 2 distinct B columns are needed.
+   8 loads collapse to 4.</code></pre>
   <div class="measure">
-    <p>With <code>p = 16</code> and 4:1 traffic that is <code>s_A = 8, s_B = 2</code> — a
-    <b>2 × 8</b> grid, not the square 4 × 4. The aggregate reduction is then the traffic-weighted
-    harmonic mean of the two degrees, and it reproduces every measured shape:</p>
+    <p>The general statement follows directly. Arrange <code>p</code> cores as a
+    <code>p₁ × p₂</code> grid over a block of the output:</p>
+    <ul>
+      <li>each <b>A</b> row is read by the <code>p₂</code> cores across its grid row,</li>
+      <li>each <b>B</b> column is read by the <code>p₁</code> cores down its grid column.</li>
+    </ul>
+    <p>The sharing degree is simply <em>the width of the grid in the other direction</em>. Scale the
+    grid up and the sharing scales with it — which is exactly why the opportunity grows as the
+    machine gets bigger, rather than washing out.</p>
+
+    <div class="note">
+      <span class="lbl">This is well-trodden ground, which is the point</span>
+      <p>Classical distributed matmul algorithms — Cannon (1969), SUMMA (van de Geijn &amp; Watts,
+      1997) — are built on exactly this 2-D grid structure, and they turn it into an explicit
+      broadcast along grid rows and columns. The matmul communication lower bounds (Hong &amp; Kung,
+      1981; Irony, Toledo &amp; Tiskin, 2004) have their shape for the same reason. An implementation
+      that does not exploit the 2-D sharing simply moves more data than it has to.</p>
+    </div>
+
+    <h4>What is different in a shared-L1 machine</h4>
+    <p>In SUMMA the broadcast is written into the algorithm: the program explicitly sends a panel of
+    A to every processor in a grid row before each update step. Here there is no broadcast to write
+    — every core just issues an ordinary load for the address it needs. The sharing still exists, but
+    it is <em>hidden in the address stream</em> rather than expressed in the program.</p>
+    <p><b>The group MSHR's job is to notice it.</b> Loads that happen to target the same line get
+    merged into one request, and the single reply is multicast back to everyone who asked. The
+    machine ends up with SUMMA's communication pattern without the programmer arranging it — and
+    when the sharing is not there, the same hardware quietly behaves like ordinary loads.</p>
+
+    <h4>How to split the cores: not the obvious way</h4>
+    <p>If both operands cost the same to fetch, the best grid is square — split the cores evenly and
+    both sharing degrees are <code>√p</code>. That is the textbook answer, and here it is wrong.</p>
+    <p><b>A and B do not cost the same.</b> A is read by scalar loads, one word at a time; B is read
+    by the vector unit in 16-word bursts. Measured over a run, <b>A generates about four times as
+    many requests as B</b>. Since coalescing saves a request every time one is shared, the operand
+    that issues more requests deserves the larger sharing degree.</p>
+    <p>Making that precise — minimise total requests <code>w<sub>A</sub>/s<sub>A</sub> +
+    w<sub>B</sub>/s<sub>B</sub></code> subject to <code>s<sub>A</sub>·s<sub>B</sub> = p</code> —
+    gives a simple rule:</p>
+  </div>
+  <pre><code>s_A : s_B   =   w_A : w_B
+
+   "share each operand as many ways as it generates traffic"</code></pre>
+  <div class="measure">
+    <p>With 16 cores and 4:1 traffic that means <code>s_A = 8, s_B = 2</code> — a <b>2 × 8</b> grid,
+    not the square 4 × 4. The prediction holds against every shape measured:</p>
   </div>
   <div class="tw"><table>
     <caption>Predicted vs. measured request reduction, 16 cores per group</caption>
-    <thead><tr><th>Shape</th><th>Grid (s<sub>B</sub>×s<sub>A</sub>)</th><th>Model</th><th>Measured</th></tr></thead>
+    <thead><tr><th>Shape</th><th>Grid (B×A sharing)</th><th>Predicted</th><th>Measured</th></tr></thead>
     <tbody>
       <tr><td>256×512×256</td><td>2 × 8</td><td>5.00×</td><td>5.00×</td></tr>
       <tr><td>256×1024×256</td><td>2 × 8</td><td>5.00×</td><td>5.00×</td></tr>
@@ -272,10 +298,9 @@ footer{
     </tbody>
   </table></div>
   <div class="measure">
-    <p>The <code>2 × 8</code> shapes achieve <b>5.0×</b> against the square grid's 4.0× — the
-    asymmetry is worth 25% of the remaining traffic. This is a prediction the conventional
-    balanced-grid intuition gets wrong, and it follows from the vector machine's operand asymmetry
-    rather than from anything specific to this code.</p>
+    <p>The <code>2 × 8</code> shapes reach <b>5.0×</b> where the square grid reaches 4.0× — the
+    asymmetry is worth a further 25% of the traffic that survives coalescing. Nothing in this
+    depends on our code; it follows from one operand being scalar and the other vector.</p>
   </div>
 
   <h3>1.2 The same structure in this kernel</h3>
