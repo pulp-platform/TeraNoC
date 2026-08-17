@@ -15,6 +15,7 @@ the infrastructure that produces them**.
 | **[`gemm_shape_status.md`](gemm_shape_status.md)** | **Where everything stands right now.** All 23 shapes × every phase in one table, with `current` (the default build) separated from `best` (which for most shapes sits on a superseded phase). Generated — `python3 scripts/gen_shape_status.py`. |
 | **[`gemm_results.md`](gemm_results.md)** | The single source of truth for GEMM performance: all 29 shapes vs. the baseline, the tuning rules, and every finding. Predates the PPA campaign — for today's numbers read `gemm_shape_status.md` first. |
 | [`gemm_results_burst_bypass.md`](gemm_results_burst_bypass.md) | `hold_subs_burst = 1` on the `share_b = 1` family. The largest win in the campaign (up to −44.7%, 96.3% of roofline) and the explanation for three of the four runtime-CSR outliers. |
+| [`gemm_results_default_latest.md`](gemm_results_default_latest.md) | **First-ever measurement of the shipping default** (`group_mshr_hold_prescale_w=4` — every prior arm pinned 0). `dflt` = defaults with the runtime CSR off; `latest` = with it on. Generated — `python3 /tmp/claude-620771/gen_dflt_latest_doc.py`. |
 | [`gemm_results_table.txt`](gemm_results_table.txt) | The same table as plain text, for diffing and quoting. |
 | [`verilator_simulation.md`](verilator_simulation.md) | How to build and run these benchmarks fast. |
 | [`matmul_bottleneck_report.md`](matmul_bottleneck_report.md) | Microarchitectural analysis of where matmul cycles go — the motivation for the design work in `docs/`. |
