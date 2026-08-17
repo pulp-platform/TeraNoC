@@ -42,30 +42,32 @@ Efficiency is `ideal / actual` with `ideal = M·N·P / 1024` (4×4, 1024 FPU lan
 | 128x128x512 | 8,192 | 16,995 | **9,401** | **−44.68%** | 48.2% | **87.1%** |
 | 128x256x512 | 16,384 | 21,614 | **17,627** | **−18.45%** | 75.8% | **92.9%** |
 | 128x512x512 | 32,768 | 41,943 | **34,041** | **−18.84%** | 78.1% | **96.3%** |
-| 128x1024x512 | 65,536 | 130,792 | _running_ | — | 50.1% | — |
+| 128x1024x512 | 65,536 | 130,792 | **67,005** | **−48.77%** | 50.1% | **97.8%** |
 
-`_running_` means no FINAL yet; it is not a result.
+**All four arms complete.**
 
-**The win does NOT keep shrinking.** After −44.7% at N=128 and −18.5% at N=256 the obvious reading
+**The win does NOT shrink with N.** After −44.7% at N=128 and −18.5% at N=256 the obvious reading
 was that a larger N amortises the wasted allocation and the benefit decays to nothing; N=512 came in
-at **−18.8%**, slightly *larger* than N=256. So the cost is not a fixed overhead being amortised —
-it scales with the work, which is what a per-burst-miss penalty should do. The three arms land at
-**87.1% / 92.9% / 96.3%** of roofline against 48.2% / 75.8% / 78.1%.
+at −18.8% and N=1024 at **−48.8%**, the largest of the four. So the cost is not a fixed overhead
+being amortised — it scales with the work, which is what a per-burst-miss penalty should do. The
+four arms land at **87.1% / 92.9% / 96.3% / 97.8%** of roofline against 48.2% / 75.8% / 78.1% / 50.1%.
 
-**96.3% is the highest efficiency measured anywhere in this campaign**, against a previous best of
-95.8% (`256x1024x256`) — and it comes from a shape that sits at 78.1% on the shipping default.
+**97.8% is the highest efficiency measured anywhere in this campaign**, against a previous best of
+95.8% (`256x1024x256`) — and it comes from the shape with the *worst* standing regression, which
+sits at 50.1% on the shipping default.
 
-## Verification — both completed arms, not just faster
+`alloc_burst` under the clamped setting scales **61,344 → 122,721 → 245,540 → 491,216** across the
+four shapes: an exact doubling with N, merging zero every time. That is the whole finding in one
+row — the waste is proportional to the work, so no amount of scaling escapes it.
 
-A 1.81× speedup is exactly the shape of result that a **lost-work** bug produces, and this campaign
+## Verification — all four arms, not just faster
+
+A 1.8× speedup is exactly the shape of result that a **lost-work** bug produces, and this campaign
 has already been bitten once by that (the `MshrCfgSubsW=4` truncation manufactured a fake 43% "win"
-on this same family). So the cycle counts alone were not accepted.
+on this same family). So no cycle count here was accepted on its own; each arm had to show that the
+FPU retired the same work and that the single path was untouched.
 
 ### 128x128x512
-
-A 1.81× speedup is exactly the shape of result that a **lost-work** bug produces, and this campaign
-has already been bitten once by that (the `MshrCfgSubsW=4` truncation manufactured a fake 43% "win"
-on this same family). So the cycle count alone was not accepted. The work counters:
 
 | | phaseE1 | bypass | |
 |---|---:|---:|:--|
@@ -117,8 +119,24 @@ The same signature, independently:
 
 Three independent shapes now show `merged_burst = 0` under the clamped setting, with `alloc_burst`
 scaling 61,344 → 122,721 → 245,540 — exactly doubling with N, and never merging once. That makes
-this a property of `share_b = 1` rather than a quirk of one geometry, and it is why the benefit does
-not decay with N: the waste grows at the same rate as the work.
+this a property of `share_b = 1` rather than a quirk of one geometry.
+
+### 128x1024x512
+
+| | phaseE1 | bypass | |
+|---|---:|---:|:--|
+| FPU busy lane-cycles | 67,392,360 | 67,225,984 | −0.25% — **same work retired** |
+| `alloc_single` | 122,874 | 122,880 | +0.005% |
+| `merged_single` | 1,842,910 | 1,843,200 | +0.016% |
+| `alloc_burst` | **491,216** | **0** | bursts now bypass |
+| `merged_burst` | **0** | **0** | fourth shape, still zero |
+
+**Against the 2026-08-03 baseline this shape goes from +93.2% to −1.0%** — the campaign's worst
+standing regression becomes a small improvement.
+
+Four shapes, `alloc_burst` **61,344 → 122,721 → 245,540 → 491,216** — an exact doubling with N — and
+`merged_burst = 0` in every single one. That is why the benefit does not decay with N: the waste
+grows at the same rate as the work.
 
 ## Consequence for the autotuner
 
