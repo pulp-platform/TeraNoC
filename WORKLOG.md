@@ -9710,3 +9710,69 @@ RMSNorm/SwiGLU/softmax all need software transcendentals written from scratch.
 existing fp32 GEMM (zero new code, M=128/256/512 at N=P=512 are measured rungs), then fp16 GEMM,
 then the glue kernels, then the DeltaNet step. First full-layer target should be a DeltaNet
 layer, brought up at 4x4 and measured at 8x8. No GVSOC model in this tree.
+
+## 2026-08-18 · fp16 on the burst path: RTL knob, fp16 matmul, 4-arm sweep
+
+**Purpose.** Two asks: (1) enable fp16 in hardware with the burst load length unchanged and no
+PPA overhead, (2) an fp16 sp-fmatmul that is otherwise identical to the fp32 one, then sweep.
+
+**Why it was needed at all.** `spatz_vlsu.sv` gated the port-0 burst path on `vsew == EW_32`
+(`:200` and `:1155`, both from the original burst commits 7887c96f / 9ffe73c7). A `vle16.v`
+therefore fell back to the 4-port word-interleaved path: identical bytes/cycle -- the strobe is a
+full 32-bit word regardless of `vsew` -- but it never reached the group MSHR's BURST class, so
+burst merging, ParityDrain, BlockAlloc and dual_load were all inactive. fp16 would have gained
+arithmetic and lost the entire contribution of this project.
+
+**Implementation.**
+- `spatz_vlsu_burst_ew16` (default 0, bit-identical) relaxes both predicates to `vsew != EW_8`.
+  **Burst length unchanged**: `MaxBurstWords` 32-bit words = 64 B in both modes, 16 fp32 or 32
+  fp16 elements. Everything downstream is byte/word granular, so no new state and no new
+  datapath. With `MAXEW == EW_32` the new test is `|vsew` against a 2-bit equality -- the gate
+  gets *smaller* when on, and const-folds to the exact legacy comparison when off.
+- `gen_burst_ew_vl_ceiling`: burst eligibility caps `vl` at `NrOutstandingLoads*4` = 256 B, and
+  `vl` is in BYTES, so `e16,m4` sits exactly on the ceiling and `e16,m8` would silently drop off
+  the burst path. Now warns instead of being invisible.
+- `sp-fmatmul-opt-burst-merge-fp16`: a verbatim copy of the fp32 app, three mechanical changes
+  only (`float`->`_Float16`, `e32`->`e16`, `vle32/vse32`->`vle16/vse16`). **LMUL held at m2** so a
+  vector load still moves 128 B as two 16-word bursts -- the memory side is held constant and a
+  cycle difference is attributable to precision alone. `_Float16` not `__fp16`: only the former
+  is a native arithmetic type here and can bind to the `"f"` asm operand `vfmacc.vf` needs.
+- `MATMUL_SPOTCHECK` + `scripts/check_fp16_spot.py`: an FP-free correctness probe. The device
+  verify wedges core 0, so every perf run ships `MATMUL_VERIFY=0` -- i.e. with no correctness
+  signal at all, which for a new kernel is unacceptable (garbage twice as fast still wins a
+  speed sweep). Reads C as raw 32-bit words via integer loads, one sample per group so a bad
+  group is identified rather than merely detected.
+
+**Bug found and fixed on the way.** `gemm_autotune.py` derived both MSHR bank shifts as
+`clog2(N)` / `clog2(gap)`, but those select bits of the 32-bit WORD address while N and gap count
+ELEMENTS. Identical at fp32, off by one at fp16 -- and it does not error, it just folds concurrent
+requests onto a few banks and runs quietly slow. Now takes `--elem-bytes`; fp32 output verified
+unchanged (512x512x512 still 9/7, 3.00 MB).
+
+**Finding: how the fp16 2x is actually built.** ADDMUL is `MERGED`, so
+`fpnew_opgroup_multifmt_slice` splits into `NUM_LANES = width / min_fp_width(cfg)` lanes, each its
+own `fpnew_fma_multi` with that lane's format mask. At Width=32 with {FP32, FP16}: lane 0 is a
+32-bit FMA (FP32 or FP16), lane 1 is a **separate 16-bit FP16-only FMA**. So the 2x is a second
+physical multiplier, not packing. Consequences: the fp16 silicon is already in the shipping
+netlist and already paid for; **enabling bf16 adds NO lanes** (FP16ALT is also 16 b, and its
+mantissa is narrower than fp16's, so the datapath is already wide enough); fp8 would add two whole
+8-bit FMAs per instance.
+
+**Decision recorded: fp16 is enough, bf16 not needed for the kernel work.** fp16 has MORE mantissa
+than bf16 (10 vs 7), so converting published bf16 weights to fp16 gains precision and only loses
+range; there is no throughput difference; the real fp16 hazard is sums (RMSNorm, pre-softmax
+logits) which must accumulate in fp32 regardless; and the DeltaNet state is fp32 in the reference
+either way. bf16's value is operational (no conversion, no per-tensor scaling) and matters only
+for end-to-end accuracy work. Since it adds no lanes, enable it in silicon during the backend run
+anyway -- nearly free, and a respin is not.
+
+**Result.** Four RTL builds compiled clean (533 modules, Errors: 0), knob verified present only in
+the intended build. Four arms in flight on 512x512x512: A fp32 baseline (gate off), B fp16 (gate
+off, isolates arithmetic), C fp16 (gate on, adds burst recovery), D fp32 with the gate ON -- D must
+be cycle-identical to A, which is the empirical proof the change is inert for e32 traffic.
+Efficiency is ideal/actual with a PRECISION-DEPENDENT denominator: 1024 MAC/cyc fp32 (ideal
+131,072) vs 2048 fp16 (ideal 65,536); scoring an fp16 arm against the fp32 denominator would
+report a correct kernel as 170% efficient.
+
+**Status.** Arms running (warmup phase). Results pending; nothing quoted until the spot check
+confirms the fp16 kernel is numerically right.
