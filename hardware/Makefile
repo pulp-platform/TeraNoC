@@ -183,7 +183,14 @@ vlog_defs += -DBOOT_ADDR=32\'d$(boot_addr)
 # --------------------------
 # FlooNoC Configuration
 # --------------------------
-vlog_defs += -DNUM_REMOTE_PORTS_PER_TILE=$(num_remote_ports_per_tile)
+# No config defines `num_remote_ports_per_tile`, so this expanded unconditionally to a bare
+# `-DNUM_REMOTE_PORTS_PER_TILE=` -- the malformed empty-value form this file already warns about
+# for the group_mshr knobs. QuestaSim tolerates it; a backend `analyze` need not, and the macro is
+# read by no RTL (only the orphaned selector.sv generator at the bottom uses the make variable).
+# Guard it like every other optional knob so the define appears only when something sets it.
+ifneq ($(strip $(num_remote_ports_per_tile)),)
+  vlog_defs += -DNUM_REMOTE_PORTS_PER_TILE=$(num_remote_ports_per_tile)
+endif
 vlog_defs += -DNUM_DIRECTIONS=$(num_directions)
 vlog_defs += -DNUM_X=$(num_x)
 vlog_defs += -DNOC_TOPOLOGY=$(noc_topology)

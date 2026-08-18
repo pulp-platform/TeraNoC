@@ -6,13 +6,17 @@
 #
 #   mesh          8x8, num_cores 1024, num_groups 64, 1 core/tile
 #   NoC channels  baseline: rd 0 + rdwr 2 request, 2 response
-#   MSHR hold     1023 (window_burst and serve_timeout)
+#   MSHR hold     2047 (window_burst and serve_timeout)
 #   router remap  2 (response remapping)
 #
-# ONE KNOB DIFFERS FROM THE BASE. terapool_spatz4_fpu_8x8.mk already ships hold_window_burst 1023,
-# serve_timeout 1023, and channel_config_mode baseline (rd 0 + rdwr 2, resp 2), so response
-# remapping is the entire delta. mshr_num 64, merge_reqs 4, hold_subs 4/4 and port_hash 7 all
-# come from the base unchanged.
+# TWO KNOBS DIFFER FROM THE BASE. terapool_spatz4_fpu_8x8.mk already ships hold_window_burst 2047,
+# serve_timeout 2047, and channel_config_mode baseline (rd 0 + rdwr 2, resp 2), so response
+# remapping and the stats guard are the entire delta. mshr_num 64, merge_reqs 4, hold_subs 4/4
+# and port_hash 7 all come from the base unchanged.
+#
+# NOTE the hold window moved 1023 -> 2047 under the standing decision of 2026-08-14 (one value at
+# every mesh). This header claimed 1023 until 2026-08-18; the measurements quoted below were taken
+# at 1023 and are annotated accordingly.
 #
 # This is byte-for-byte the configuration of the `fpugir2` arm and of build_g54diag -- verified
 # against build_fpugir2/compilevcs.sh define-by-define -- so every measurement below applies to
@@ -30,15 +34,24 @@
 #    (6.4 releases/period vs 4.5-5.3 for every other arm) -- i.e. its groups stay the most
 #    synchronised of any configuration measured.
 #
-# KNOWN COST, inherited from the base: hold=1023 is expensive. Matched pairs at 8x8 show 1023
+# KNOWN COST, inherited from the base: a long hold window is expensive. Matched pairs at 8x8 show 1023
 # costing +22% (D), +82% (F) and +108% (E) in completion cycles versus 511, and the shipped 4x4
-# default is 255. This config keeps 1023 as requested, but if the backend run is meant to
+# default is 255. The base now carries 2047, which is longer still. If the backend run is meant to
 # represent the *best* 8x8 design rather than the *measured* one, hold 255-511 is the better
-# operating point and would need only a one-line override here.
+# operating point and would need only a one-line override here. Note the window is a COUNTER
+# WIDTH knob as well as a policy one, so 2047 vs 1023 is one extra flop per entry -- it is not
+# PPA-neutral, only nearly so.
 #
 # DERIVED, not a fork: assigned before the include, and every definition in the base is `?=`.
 # If you need a non-default channel split, pass it as a MAKE ARGUMENT
 # (`channel_config_mode=enhanced`), never as a pre-assignment.
 noc_router_remapping := 2
+
+# Synthesis insurance, and PARITY WITH backend_4x4 -- which has set this since 2026-08-14. The
+# stats blocks are contained three ways (`pragma translate_off`, this parameter, `ifndef
+# VERILATOR`), but the 4x4 config's own history records a bare translate_off guard leaking into
+# synthesis once. Beyond the leak risk: if the two backend configs disagree on this knob, a
+# 4x4-vs-8x8 area comparison is measuring the counters as well as the mesh.
+group_mshr_enable_stats := 0
 
 include $(MEMPOOL_DIR)/config/terapool_spatz4_fpu_8x8.mk
