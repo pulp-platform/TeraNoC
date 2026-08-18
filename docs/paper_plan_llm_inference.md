@@ -184,6 +184,49 @@ the scalar hold.
 Caveat: the M=1024 ratios are from a run still in flight and may move; the three completed rungs are
 final. Ladder A (N=128, P=256) is still running at M=1024 and M=2048.
 
+#### 4.1b Ladder A — measured (2026-08-18), and what the two ladders say together
+
+| M | share_a | share_b | A merge | B merge | ideal | cycles | efficiency |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 256 | 8 | 2 | 8.00x | 2.00x | 8,192 | 9,794 | **83.6%** |
+| 512 | 4 | 4 | 4.00x | 4.00x | 16,384 | 20,548 | 79.7% |
+| 1024 | 2 | 8 | 1.46x | 1.95x | 32,768 | *running* | *collapsed* |
+| 2048 | 1 | 16 | — (A private) | **16.00x** | 65,536 | 124,257 | **52.7%** |
+
+**The M=2048 rung is the paper's cleanest single measurement.** It achieves the *maximum possible*
+B-sharing — a perfect 16.00x, every one of a group's 16 cores merging onto one burst — in a
+completely healthy run: zero timeouts, zero bankfull bypasses, no pathology of any kind. And it
+reaches only **52.7%**, against 83.6% for the M=256 rung that has just 2x B-sharing but 8x on A.
+
+So this is not a story about the coalescer failing at large M. The coalescer does exactly what it is
+asked to do, perfectly, and it still loses — because **B-sharing is the wrong thing to maximise.**
+
+#### The traffic-weighted model predicts the ranking of all four rungs
+
+Normalised remote traffic is `w_A/s_A + w_B/s_B`. A is fetched by scalar loads and B in 16-word
+bursts, so A carries roughly 4x the request count: take `w_A:w_B = 4:1`.
+
+| M | s_A | s_B | predicted traffic | measured efficiency |
+|---:|---:|---:|---:|---:|
+| 256 | 8 | 2 | **1.00** | 83.6% |
+| 512 | 4 | 4 | 1.25 | 79.7% |
+| 1024 | 2 | 8 | 2.13 | *collapsed* |
+| 2048 | 1 | 16 | **4.06** | 52.7% |
+
+The ordering is exact, and monotonic, across a 4x span of predicted traffic. Efficiency does not
+fall *linearly* with traffic — the kernel is not purely traffic-bound — but nothing about the
+ranking is ambiguous. Ladder B agrees independently: 92.0% (A 16x, B private) > 86.7% (8x/2x) >
+83.6% (4x/4x).
+
+**Consequence for the paper.** The square grid is not the design target; `s_A : s_B` should track
+the request-count ratio, which at 4:1 puts the optimum at a 2x8 grid, not 4x4. And decode — small M,
+therefore A-heavy — sits at the *good* end of both ladders rather than the awkward end. The
+experiment was designed to test whether traffic tracks B-sharing; the answer is that it tracks
+A-sharing about four times more strongly, and that is the more useful result.
+
+*(Both M=1024 rungs collapsed for an unrelated reason — the `share_a == 2` scalar-hold bug, fixed in
+`gemm_autotune.py` on 2026-08-18; see 4.1a and 7. They are the only two shapes the fix touches.)*
+
 ### 4.2 Decode tiling (requires a kernel change)
 
 Split **P** across groups instead of M, so a group owns all M rows for a P-slice and its 16 cores
