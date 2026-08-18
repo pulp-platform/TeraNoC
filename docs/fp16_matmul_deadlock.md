@@ -1,0 +1,87 @@
+# fp16 sp-fmatmul deadlocks at 512x512x512 — investigation state
+
+2026-08-18. **Open bug.** Root cause NOT found. This records what has been eliminated (with
+evidence) so the next person does not repeat it, and hands over the one correction that
+invalidated part of the first analysis.
+
+## Symptom
+
+`sp-fmatmul-opt-burst-merge-fp16` at M=N=P=512 deadlocks during the **icache warm-up pass**
+(before the timed region opens):
+
+- every core stops retiring at cycle **12,000-18,000**; the sim runs on to 98,000 with
+  `[STALLG] ins=0 raw=16000/16000` — a 100% RAW stall on every core
+- `[CMS] inflight=2` (vs **9,921** in the healthy fp32 arm at the same point): the machine is
+  *idle*, not thrashing
+- stuck requests with monotonically growing `age`; cores are parked on
+  `vfmacc.vf v0, ft7, v20`, waiting for a `vle16.v` that never lands
+- the fp32 arm on the identical kernel structure is healthy and reaches its benchmark at 53,000
+
+## What it is NOT (each with evidence)
+
+| hypothesis | verdict | evidence |
+|---|---|---|
+| the new `spatz_vlsu_burst_ew16` gate | **NO** | arm B ran with `SPATZ_VLSU_BURST_EW16=0` (verified in its build log) and hung identically |
+| `spatz_vlsu_dual_load` runahead | **NO** | dual_load 2 vs 1 on the same shape is **byte-identical at every period** (1447 / 4810 / 1044 / 433 …) |
+| group-barrier arrival mismatch | **NO** | `bar_rel=+16` (barriers firing) and `bar_max=40` (tiny spread) right up to the stall; the healthy fp32 arm reaches `bar_max=9664`. Barriers stopped because cores stopped *arriving* — downstream of the fault |
+| `vl` -> bytes conversion for e16 | **NO** | `spatz_vlsu.sv:190` `EW_16: vl << 1` is correct (64 elements -> 128 B) |
+| MSHR hold / subscriber config | **NO** | `[RH STUCK] subs=2/4` appears **more** often in the healthy fp32 arm (462 vs 128), and the MSHR defines are identical between the two builds |
+| address misalignment | **NO** | `mem_is_addr_unaligned` is `rs1[1:0] != 0`; the stuck address `0xa1740` is even 64-B aligned |
+
+## ⚠️ The correction that invalidated the first analysis
+
+**`bl=1` in `[CMS WARN] STUCK_REQ` does NOT mean "this load never became a burst."**
+`tb_core_mem_scoreboard.sv:281-308` *expands* a burst request of length N into **N separate
+entries, one per expected beat id, each with `burst_len = 1`**. So `bl=1` is exactly what a
+burst's individual beats look like in this probe.
+
+Several deductions were built on the opposite reading — that the load had fallen off the port-0
+burst path, hence that `use_port0_burst_req` must have failed its alignment test. All of that is
+void. Check what a TB probe *records* before inferring hardware behaviour from it.
+
+## Facts the root cause must explain
+
+1. **It is not vector-specific.** Stuck addresses land in **both** buffers: `0x20c8c` is inside
+   `a` (reached only by scalar `flh` via the FP-LSU) and `0xa1500` inside `b` (vector `vle16`).
+   The memory system stops responding to a core across *both* request paths.
+2. **The stuck pattern differs by gate, as the request paths do.** Gate OFF: 426 distinct stuck
+   addresses stepping individually (`0xa1500`, `0xa1510`, `0xa1520`, separate ids) — the
+   word-interleaved multi-port path. Gate ON: many ids collapsed on one address — burst beats.
+   Both deadlock.
+3. **It is shape-dependent.** `512x64x256` runs clean well past 10,000 cycles, while `512x512x512`
+   dies at 12,000-18,000. Whatever it is, it accumulates rather than failing on a single
+   iteration — which is why per-iteration static inspection of the kernel found nothing.
+4. **It fires in the warm-up pass**, where `ICACHE_WARMUP_N` clamps N to 6, so the A row stride is
+   degenerate (6 elements = 12 B). The fp32 build survives the same clamp.
+
+## Context worth knowing
+
+The entire aggressive VLSU feature stack — `block_alloc`, ROB64, `dual_load`, and the burst path
+itself — was designed and validated **at e32 only**. All three design docs
+(`spatz_mlp_design_plan.md`, `spatz_rob64_h1_design_plan.md`, `tcdm_burst_interleave_design.md`)
+mention `e16` **zero** times, and the ROB64 doc reasons explicitly in terms of "two e32,m2 loads =
+2*32 ids exactly fill ROB0". The two other e16 apps in the tree (`gemv`, `gemv-bk`) have no built
+binaries. The e16 VLSU path looks genuinely unexercised.
+
+Note the ROB is an in-order **ring** (`read_pointer` / `write_pointer` / `status_cnt`), not a free
+list, so an id "leak" is not possible — but a stall-forever is: if a burst reserves `BlockWords`
+ids and fewer beats return, the ring can never advance past them.
+
+## Next step: this needs waveforms, not logs
+
+Log-level analysis is exhausted. The concrete next move is to take one stuck request and follow
+it from issue to non-response:
+
+1. the hung transcripts are preserved at `/tmp/hang_build_fp16{b,nb}.transcript`; re-run to get a
+   WLF if they have been cleaned
+2. use the `waveform-analysis` skill (WAL over WLF->VCD->FST) on the stuck `{tile, core, port, id}`
+   from the `[CMS WARN]` line — e.g. `g=14 t=15 c=0 p=1 id=61 addr=0x000a1740`
+3. the question to answer: does the request reach the group MSHR, and if so does the MSHR issue a
+   NoC fetch for it? That splits the search between the VLSU/ROB and the MSHR/NoC.
+
+## Status of the surrounding work
+
+The RTL change this was meant to exercise is **independently proven safe**: the same fp32 ELF run
+with `spatz_vlsu_burst_ew16` 0 vs 1 is byte-identical over 280+ probe-periods across five counters
+(`scripts/check_arm_equivalence.py`), both arms opening the timed region at exactly cyc=53000. The
+deadlock does not implicate it and does not block landing it.
