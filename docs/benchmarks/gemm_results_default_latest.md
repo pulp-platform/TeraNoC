@@ -1,6 +1,6 @@
 # GEMM benchmark results — pure defaults (`dflt`) and full latest stack (`latest`)
 
-Generated 2026-08-18 06:25. **Re-runnable**: `python3 /tmp/claude-620771/gen_dflt_latest_doc.py`.
+Generated 2026-08-18 15:36. **Re-runnable**: `python3 /tmp/claude-620771/gen_dflt_latest_doc.py`.
 
 **Status: 23/23 `dflt` complete, 23/23 `latest` complete.** This file regenerates as arms land; re-run the generator rather than trusting a stale copy.
 

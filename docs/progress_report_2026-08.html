@@ -528,26 +528,31 @@ with coalescing   :   4 A +  4 B =  8 requests cross the mesh</code></pre>
     16 groups hides this entirely — which is why the per-group view is instrumented separately.</p>
   </div>
 
-  <h3>4.3 Shipping-configuration sweep <span class="chip run">18 / 23 in flight</span></h3>
+  <h3>4.3 Shipping-configuration sweep <span class="chip ok">23 / 23 complete</span></h3>
   <div class="measure">
     <p>A methodological gap surfaced late: every one of the ~190 arms run to date pinned
     <code>hold_prescale_w = 0</code> for cycle-accurate one-knob deltas, but the shipping default is
-    4. No arm had ever measured the configuration that actually ships. Two sweeps now do —
+    4. No arm had ever measured the configuration that actually ships. Two sweeps now have —
     <code>dflt</code> at pure flavour defaults, and <code>latest</code> adding the runtime CSR.</p>
   </div>
   <div class="tw"><table>
-    <caption>Shipping-configuration sweeps, 18 of 23 shapes complete</caption>
+    <caption>Shipping-configuration sweeps, all 23 shapes complete</caption>
     <thead><tr><th>Sweep</th><th>Runtime CSR</th><th>Median efficiency</th><th>vs baseline</th><th>Faster</th></tr></thead>
     <tbody>
-      <tr><td>baseline</td><td>—</td><td>81.0%</td><td>—</td><td>—</td></tr>
-      <tr><td>dflt</td><td>off</td><td>81.1%</td><td class="pos">−1.50%</td><td>14 / 18</td></tr>
-      <tr><td>latest</td><td>on</td><td>81.3%</td><td class="pos">−1.53%</td><td>13 / 18</td></tr>
+      <tr><td>baseline</td><td>&mdash;</td><td>83.7%</td><td>&mdash;</td><td>&mdash;</td></tr>
+      <tr><td>dflt</td><td>off</td><td>83.6%</td><td class="pos">&minus;0.61%</td><td>15 / 23</td></tr>
+      <tr><td>latest</td><td>on</td><td>84.0%</td><td class="pos">&minus;0.69%</td><td>15 / 23</td></tr>
     </tbody>
   </table></div>
   <div class="measure">
-    <p>Both track baseline utilisation closely, and enabling the runtime CSR costs essentially
-    nothing at the shipping prescale. The five outstanding shapes are the largest in the set and
-    will move these medians; the figures are interim.</p>
+    <p>The interim medians held: both sweeps track the tuned baseline to well under a percent, and
+    <b>enabling the runtime CSR costs nothing measurable</b> at the shipping prescale. Against the
+    no-feature baseline &mdash; no Spatz burst, no group MSHR &mdash; the same 23 shapes give a
+    <b>median 1.25&times; speedup</b>, lifting median efficiency from <b>67.3% to 84.0%</b>.</p>
+    <p>One caveat the medians hide. The <code>dflt</code> efficiency range runs 40.7%&ndash;96.6%
+    while <code>latest</code> runs 53.3%&ndash;96.3%, and the entire difference is a single arm:
+    <code>512&times;512&times;512</code>, which hit the trap described in &sect;4.6. Its two arms, at
+    verified identical parameters, landed at 322,144 and 152,639 cycles.</p>
   </div>
 
   <h3>4.4 The hold prescaler</h3>
@@ -595,6 +600,100 @@ with coalescing   :   4 A +  4 B =  8 requests cross the mesh</code></pre>
     barrier hardcoded a word stride valid only at 16 groups, so at 64 groups every barrier operation
     addressed a word outside the barrier window and the synchronisation silently did nothing — no
     hang, no error. Repairing it was worth 14.1%.</p>
+  </div>
+
+  <h3>4.6 A single-group desync trap <span class="chip open">characterised</span></h3>
+  <div class="measure">
+    <p>Coalescing is intra-group and source-side, so a group merges only among its own 16 cores. If
+    those cores drift apart they stop arriving at the MSHR inside the same hold window, every remote
+    load then <em>times out</em> instead of merging, and the group runs about 12&times; slower &mdash;
+    which drifts it further behind. The barrier then serialises all 16 groups behind the straggler.</p>
+    <p>It fired once, on <code>512&times;512&times;512</code>. One group fell <b>55,704 cycles</b>
+    behind; the other fifteen finished and waited. The two arms of that shape differ only in whether
+    it happened:</p>
+  </div>
+  <div class="tw"><table>
+    <caption>512&times;512&times;512, identical MSHR parameters (verified against the elaboration defines)</caption>
+    <thead><tr><th>Arm</th><th>Cycles</th><th>Efficiency</th><th>MSHR timeouts</th><th>Bankfull bypass</th></tr></thead>
+    <tbody>
+      <tr><td>latest</td><td>152,639</td><td class="pos">85.9%</td><td>4</td><td>8</td></tr>
+      <tr><td>dflt</td><td>322,144</td><td class="neg">40.7%</td><td>1,935</td><td>2,253</td></tr>
+    </tbody>
+  </table></div>
+  <div class="measure">
+    <p>So a large-shape cycle count is not a point estimate unless the trap is checked. The signal is
+    free &mdash; <code>mshr_timeout</code> is already on the profiling line and reads 0 in a healthy
+    run &mdash; and it is now reported per arm in the results tables, with any flagged arm named
+    explicitly. Across all 45 sweep arms <b>exactly one</b> flags, which is the evidence that the
+    rest of the table is clean.</p>
+    <p>This also narrows an earlier attribution: the comparable <code>512&times;256&times;512</code>
+    anomaly was blamed on a non-shipping prescaler setting. That was too narrow &mdash; the prescaler
+    sets how much each timeout costs, not whether the group desynchronises. Mitigation is intra-group
+    re-synchronisation, not a shorter window; shortening the window was already measured
+    net-negative.</p>
+  </div>
+
+  <h3>4.7 The batch ladder <span class="chip ok">measured</span></h3>
+  <div class="measure">
+    <p>The design question behind the LLM framing is which operand's sharing actually matters. The
+    two sharing degrees are constrained by <code>s_A &times; s_B = 16</code>, so holding (N, P) fixed
+    and sweeping M trades one against the other. Two ladders were run.</p>
+  </div>
+  <div class="tw"><table>
+    <caption>Ladder A &mdash; N=128, P=256. Merge ratios are measured, not predicted.</caption>
+    <thead><tr><th>M</th><th>s<sub>A</sub></th><th>s<sub>B</sub></th><th>A merge</th><th>B merge</th><th>Cycles</th><th>Efficiency</th></tr></thead>
+    <tbody>
+      <tr><td>256</td><td>8</td><td>2</td><td>8.00&times;</td><td>2.00&times;</td><td>9,794</td><td class="pos">83.6%</td></tr>
+      <tr><td>512</td><td>4</td><td>4</td><td>4.00&times;</td><td>4.00&times;</td><td>20,548</td><td>79.7%</td></tr>
+      <tr><td>1024</td><td>2</td><td>8</td><td>1.42&times;</td><td>1.83&times;</td><td>979,180</td><td class="neg">3.4%</td></tr>
+      <tr><td>2048</td><td>1</td><td>16</td><td>&mdash;</td><td><b>16.00&times;</b></td><td>124,257</td><td>52.7%</td></tr>
+    </tbody>
+  </table></div>
+  <div class="measure">
+    <p><b>The M=2048 rung is the cleanest result of the campaign.</b> It achieves the maximum
+    possible B-sharing &mdash; a perfect 16.00&times;, all sixteen cores of a group merging onto one
+    burst &mdash; in a completely healthy run: zero timeouts, zero bypasses. And it reaches only
+    52.7%, against 83.6% for M=256, which has just 2&times; on B but 8&times; on A. The large-M end
+    does not lose because the coalescer fails; it does exactly what it is asked, perfectly, and still
+    loses.</p>
+    <p>The reason is that A is fetched by scalar loads and B in 16-word bursts, so A carries roughly
+    4&times; the request count. Weighting traffic as <code>w_A/s_A + w_B/s_B</code> at 4:1 predicts
+    the ranking of every rung exactly and monotonically across a 4&times; span (1.00, 1.25, 2.13,
+    4.06 against 83.6%, 79.7%, collapsed, 52.7%). Ladder B agrees independently: 92.0% &rarr; 86.7%
+    &rarr; 83.6% as sharing shifts from A to B.</p>
+    <p><b>Two consequences.</b> The square grid is not the design target &mdash;
+    <code>s_A : s_B</code> should track the request-count ratio, putting the optimum at 2&times;8
+    rather than 4&times;4. And decode, being small-M and therefore A-heavy, sits at the <em>good</em>
+    end of both ladders. The experiment was built to test whether traffic tracks B-sharing; it tracks
+    A-sharing about four times more strongly, which is the more useful answer.</p>
+  </div>
+
+  <h3>4.8 A parameter bug the sweep could not have found <span class="chip ok">fixed</span></h3>
+  <div class="measure">
+    <p>Both M=1024 rungs collapsed, and the cause was not the ladder: at <code>s_A = 2</code> the
+    autotuner still asked the MSHR to hold each scalar single for a merge partner. A is the
+    high-volume class and there is exactly one core that can ever supply that partner, so held
+    entries retire slower than they arrive, saturate the ways, and evict the <em>burst</em> class
+    &mdash; which would have merged perfectly well. Measured B merging fell from a predicted
+    8.00&times; to 1.83&times;.</p>
+  </div>
+  <div class="tw"><table>
+    <caption>1024&times;128&times;256 &mdash; same ELF, one knob, all three arms run to completion</caption>
+    <thead><tr><th>Arm</th><th>hold_subs_single</th><th>Cycles</th><th>Efficiency</th><th>Timeouts</th><th>Bankfull bypass</th></tr></thead>
+    <tbody>
+      <tr><td>base</td><td>2</td><td>979,180</td><td class="neg">3.4%</td><td>30,474</td><td>814,022</td></tr>
+      <tr><td>burst hold off</td><td>2</td><td>842,722</td><td class="neg">3.9%</td><td>0</td><td>232,582</td></tr>
+      <tr><td>scalar hold off</td><td><b>1</b></td><td><b>48,630</b></td><td class="pos">67.4%</td><td>0</td><td>0</td></tr>
+    </tbody>
+  </table></div>
+  <div class="measure">
+    <p>Removing the burst hold eliminates every timeout and buys 1.16&times; &mdash; nothing.
+    Removing the scalar hold buys <b>20.1&times;</b> and drives both counters to zero. Performance
+    tracks bank saturation, not timeouts.</p>
+    <p>The failure is non-monotonic in <code>s_A</code> &mdash; 1 is fine, 2 is catastrophic,
+    &ge;4 is fine &mdash; which is exactly why a 23-shape sweep never saw it: <code>s_A &ge; 4</code>
+    on every shipping shape. The fix is one line in the parameter derivation, and its blast radius is
+    precisely the two collapsed rungs, so no sweep result changes and nothing needs re-running.</p>
   </div>
 </section>
 
@@ -645,11 +744,14 @@ with coalescing   :   4 A +  4 B =  8 requests cross the mesh</code></pre>
 
     <h4>Next steps</h4>
     <ol>
-      <li>Complete both sweeps and re-issue §4.3 with the full 23 shapes.</li>
-      <li>Resolve 512×256×512 — either confirmed as a non-shipping-configuration artifact, or
-      root-caused from the captured waveform.</li>
+      <li>Re-synchronise cores within a group during the hot loop, closing the §4.6 trap at its
+      cause rather than by shortening the hold window.</li>
+      <li>Root-cause the desync trap from a captured waveform; it is characterised and detected,
+      but not yet explained at cycle level.</li>
       <li>Confirm the synthesis-target flag with the backend flow.</li>
-      <li>Consider defaulting the runtime CSR on, once §4.3 and the item above are closed.</li>
+      <li>Default the runtime CSR on — §4.3 now shows it costs nothing across all 23 shapes.</li>
+      <li>Run the decode-tiling kernel variant, which splits P across groups so the A-heavy regime
+      of §4.7 becomes reachable at small M.</li>
     </ol>
   </div>
 </section>
