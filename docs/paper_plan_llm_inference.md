@@ -296,11 +296,18 @@ so the request skipped the MSHR entirely — is the counter that explains the wh
 | base | 2 | 8 | 54,000 | **3.4%** (979,180 cyc, final) | 30,474 | 814,022 |
 | `diagS1` | **1** | 8 | **23,000** | **67.4%** (48,630 cyc, final) | **0** | **0** |
 
-**Both arms are now complete: 979,180 vs 48,630 cycles — a 20.1x swing from a single knob**, and the fixed arm reaches zero on both counters.
-| `diagB1` | 2 | **1** | 50,000 | <14.2% *(running)* | **0** | **101,127** |
+**All three arms are now complete, and the ablation is unambiguous:**
+
+| knob removed | cycles | speedup |
+|---|---:|---:|
+| burst hold (`diagB1`) | 842,722 | **1.16x** — nothing |
+| scalar hold (`diagS1`) | **48,630** | **20.1x** |
+
+Removing the burst hold eliminates every timeout and buys 16%. Removing the scalar hold buys 20x and drives both counters to zero. Note `diagB1` also gives up B merging entirely (`subs_burst=1` bypasses the class, B 0.00x) while keeping the scalar hold, which is why it is the worst of the three on merge ratios and still barely moves: the scalar hold dominates whatever the burst class does.
+| `diagB1` | 2 | **1** | 50,000 | 3.9% (842,722 cyc, final) | **0** | **232,582** |
 
 **Performance tracks `bfb`, not timeouts.** `diagB1` removes the burst hold and its timeouts go to
-zero — and it is still slow, because the *scalar* hold keeps filling the banks (101,127 bypasses).
+zero — and it is still slow, because the *scalar* hold keeps filling the banks (232,582 bypasses).
 Only `diagS1`, which removes the scalar hold, drives bypasses to exactly zero, and it is the only
 arm that recovers.
 
