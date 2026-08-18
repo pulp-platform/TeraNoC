@@ -146,6 +146,36 @@ boot and DMA, before the workload generates remote traffic, so *no* MSHR knob ca
 The divergence appears at cyc=11000 the moment real traffic starts. **Never conclude equivalence
 from periods in which the mechanism under test is not yet exercised.**
 
+## ⚠️ THE IN-TREE NoC TRACER IS UNRELIABLE FOR THIS DESIGN (found 2026-08-19)
+
+`hardware/tb/tb_noc_req_resp_tracer.svh` + `hardware/scripts/analyze_noc_trace.py` stitch a
+transaction using a "stable identity" of `(owner_group, owner_tile, core_id, meta_id)` at every
+observation point. **That assumption is violated by ParityDrain.** With
+`group_mshr_drain_beats=2`, beat `b` of a burst is delivered on tile response port `1+(b&1)`
+with **`core_id+(b&1)`** — so odd beats arrive under a *different* core key and never attach to
+the transaction that owns them.
+
+Consequences, measured:
+
+* The analyzer reports **42% of burst-16 reads "incomplete" on the HEALTHY fp32 arm**, which is
+  running perfectly. Incompleteness in this tool is not evidence of a bug.
+* Its `FROZEN transactions bucketed by LAST stage` table — the one headed "== the deadlock" —
+  is likewise meaningless here: the healthy fp32 arm shows *more* frozen at `MSHR_REQ_IN`
+  (5,123) than the deadlocked fp16 arm (3,132).
+
+**Do not draw conclusions from this tool until it is retag-aware.** A naive fix (also try
+`core_id-1` for odd beats) was attempted and is NOT correct either — it yields exactly 8/16 beats
+for every transaction on both arms, so the retag is not a simple `+1` on the traced field. The
+tracer taps and the ParityDrain retag need to be reconciled by reading
+`mempool_group_mshr.sv`'s drain path before the analyzer can be trusted.
+
+This is a real defect in the debug infrastructure and it cost most of a debugging session: two
+candidate root causes ("incomplete bursts", "frozen at CORE_REQ") were derived from it and both
+were artifacts, caught only by running the healthy fp32 arm as a control.
+
+**Lesson: always run the known-good arm through the same analysis.** Every metric that looked
+damning for fp16 looked equally damning for a healthy fp32 run.
+
 ## Next step: waveforms, now well-targeted
 
 Log-level analysis is exhausted. The concrete next move is to take one stuck request and follow
