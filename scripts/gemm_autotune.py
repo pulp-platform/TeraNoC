@@ -70,6 +70,7 @@ def clog2(x):
 
 def derive(M, N, P, *, num_groups=16, num_cores=256, kernel_size=8,
            vlen=512, elen=32, lmul=2, max_burst_words=16, l1_bytes=None,
+           elem_bytes=4,
            seq_bytes=0x20000, gbar_word=240):
     """Return (knobs, errors, info). errors non-empty => the shape is ILLEGAL."""
     err, info = [], {}
@@ -107,7 +108,11 @@ def derive(M, N, P, *, num_groups=16, num_cores=256, kernel_size=8,
                 split_p_count=split_p_count, cores_per_group=cores_per_group)
 
     # ---- derived knobs --------------------------------------------------------
-    vl_words = (vlen * lmul) // elen            # e32,m2 with VLEN=512 -> 32 words
+    # Vector-load footprint in 32-bit MEMORY words. Note this is elen (the memory word width),
+    # NOT the element width, so it is the same 32 words for e32,m2 and e16,m2 at VLEN=512 -- both
+    # move 128 B and split into the same two 16-word bursts. That invariance is deliberate: an
+    # fp16 kernel that keeps LMUL fixed presents an IDENTICAL burst stream to the group MSHR.
+    vl_words = (vlen * lmul) // elen            # VLEN=512, m2 -> 32 words = 128 B
     gap = (P // split_p_count) if split_p_count else 0
 
     # A is shared by split_p_count cores, B by split_m_count; one entry pool serves
@@ -161,9 +166,20 @@ def derive(M, N, P, *, num_groups=16, num_cores=256, kernel_size=8,
     subs_a = 1 if share_a <= 2 else min(share_a, merge)
     subs_b = min(share_b, merge)
 
+    # ELEMENT SIZE. Both bank shifts select bits of the 32-bit WORD address (mshr_bank_of works
+    # on word_addr = byte_addr >> 2), but N and gap are counts of ELEMENTS. At fp32 the two
+    # coincide -- 1 element = 1 word -- which is why this file could ignore the distinction for
+    # 23 shapes. At fp16 an element is 2 bytes, so a stride of N elements is only N/2 words and
+    # BOTH shifts drop by exactly one. Getting this wrong does not error: the hash simply selects
+    # the wrong address bits, every concurrent request folds onto a few banks, and the run is
+    # quietly slow -- the same failure mode documented in docs/mshr_bank_hash_design.md 7.
+    stride_words = lambda n_elems: (n_elems * elem_bytes) // 4
+    n_words   = stride_words(N)
+    gap_words = stride_words(gap)
+
     knobs = {
-        "group_mshr_bank_shift_single": clog2(N) if N > 0 else 0,
-        "group_mshr_bank_shift_burst": clog2(gap) if gap > 0 else 0,
+        "group_mshr_bank_shift_single": clog2(n_words) if n_words > 0 else 0,
+        "group_mshr_bank_shift_burst": clog2(gap_words) if gap_words > 0 else 0,
         "group_mshr_bank_burst_bits": clog2(vl_words // max_burst_words)
                                       if vl_words > max_burst_words else 0,
         "group_mshr_hold_subs_single": subs_a,
@@ -186,7 +202,8 @@ def derive(M, N, P, *, num_groups=16, num_cores=256, kernel_size=8,
         # correct if anyone overrides hold_subs_burst back to 2 by hand.
         knobs["group_mshr_hold_window_burst"] = 0
 
-    info.update(vl_words=vl_words, p_start_gap_words=gap,
+    info.update(vl_words=vl_words, p_start_gap_elems=gap,
+                p_start_gap_words=gap_words, elem_bytes=elem_bytes,
                 share_a=share_a, share_b=share_b)
 
     # RTL elaboration rule: the burst field must sit above the burst-align bits.
@@ -207,7 +224,7 @@ def derive(M, N, P, *, num_groups=16, num_cores=256, kernel_size=8,
         word_stride     = 4 * banks_per_tile * tiles_per_group * num_groups
         l1_bytes = gbar_word * word_stride
     usable = l1_bytes - seq_bytes - 16 * 1024  # minus sequential region and small syms
-    need = 4 * (M * N + N * P + M * P)
+    need = elem_bytes * (M * N + N * P + M * P)
     info.update(l1_need=need, l1_usable=usable)
     if need > usable:
         err.append(f"a+b+c = {need/2**20:.2f} MB exceeds usable L1 {usable/2**20:.2f} MB")
@@ -231,6 +248,10 @@ def main():
     ap.add_argument("--kernel-size", type=int, default=8)
     ap.add_argument("--lmul", type=int, default=2)
     ap.add_argument("--vlen", type=int, default=512)
+    ap.add_argument("--elem-bytes", type=int, default=4, choices=[2, 4],
+                    help="matrix element size: 4 = fp32 (default), 2 = fp16. "
+                         "Both bank shifts are WORD-address fields, so fp16 lowers "
+                         "each by one; L1 capacity halves too.")
     args = ap.parse_args()
 
     if args.json:
@@ -244,7 +265,8 @@ def main():
 
     knobs, err, info = derive(M, N, P, num_groups=args.num_groups,
                               num_cores=args.num_cores, kernel_size=args.kernel_size,
-                              vlen=args.vlen, lmul=args.lmul)
+                              vlen=args.vlen, lmul=args.lmul,
+                              elem_bytes=args.elem_bytes)
 
     if args.make:
         if err:
@@ -256,7 +278,8 @@ def main():
         return 0
 
     print(f"GEMM {M}x{N}x{P}  ({args.num_cores} cores, {args.num_groups} groups, "
-          f"KERNEL_SIZE={args.kernel_size}, e{32},m{args.lmul})")
+          f"KERNEL_SIZE={args.kernel_size}, e{args.elem_bytes*8},m{args.lmul}, "
+          f"{args.elem_bytes}B elements)")
     print(f"  dim_group={info['dim_group']}  split_m_count={info['split_m_count']}  "
           f"split_p_count={info['split_p_count']}  p_start gap={info['p_start_gap_words']} words")
     print(f"  L1 a+b+c = {info['l1_need']/2**20:.2f} MB of {info['l1_usable']/2**20:.2f} MB usable")

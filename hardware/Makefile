@@ -465,6 +465,15 @@ endif
 ifneq ($(strip $(spatz_vlsu_dual_load)),)
   vlog_defs += -DSPATZ_VLSU_DUAL_LOAD=$(spatz_vlsu_dual_load)
 endif
+# Sub-word burst eligibility. Unset/0 = LEGACY: only vsew == EW_32 may take the port-0 burst
+# path, so a vle16.v never reaches the group MSHR's burst class (no burst merge, no ParityDrain,
+# no BlockAlloc) -- bit-identical netlist. 1 = admit every element width except EW_8.
+# The BURST LENGTH IS UNCHANGED: MaxBurstWords 32-bit words (64 B) in both modes, so the MSHR,
+# the burst expander and the NoC see an identical burst stream. Only the eligibility test widens,
+# and it widens to something CHEAPER (|vsew instead of a 2-bit equality against EW_32).
+ifneq ($(strip $(spatz_vlsu_burst_ew16)),)
+  vlog_defs += -DSPATZ_VLSU_BURST_EW16=$(spatz_vlsu_burst_ew16)
+endif
 # --------------------------
 # AXI & DMA Configuration
 # --------------------------
