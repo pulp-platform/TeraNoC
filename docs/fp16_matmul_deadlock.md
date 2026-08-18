@@ -81,17 +81,59 @@ Note the ROB is an in-order **ring** (`read_pointer` / `write_pointer` / `status
 list, so an id "leak" is not possible — but a stall-forever is: if a burst reserves `BlockWords`
 ids and fewer beats return, the ring can never advance past them.
 
-## Next step: this needs waveforms, not logs
+## ⭐ THE KEY FINDING: it is the VLSU COMMIT path, not the memory system
+
+Arm H1 (`group_mshr_enable_single=0` + `resp_wait_subs_single=0` — scalar requests never enter
+the MSHR at all) still deadlocks, one period later at cyc=14000. **But its signature is completely
+different from the baseline:**
+
+| | baseline | H1 (singles out of MSHR) |
+|---|---:|---:|
+| stuck requests | 2,385 | **0** |
+| `[RH STUCK]` held entries | 174 | **0** |
+| bank census | `hold=4 inv=0` (full) | — (none held) |
+| **CMS `inflight` at the hang** | 2 | **0** |
+
+**`inflight = 0`.** At the moment of the deadlock there is not a single outstanding memory
+request — and yet every core is RAW-stalled (`raw=14962/16000`) at
+`0x800002d4 = vfmacc.vf v0, ft7, v20`, waiting for `v20`.
+
+If no memory operation is pending, the load's data has already come back. The VLSU is **not
+committing it to the vector register file**, so the scoreboard keeps `v20` busy and the dependent
+`vfmacc` never issues. That is a Spatz-internal stall in the load *commit* path, not a memory
+system problem.
+
+**This reinterprets everything earlier in this file.** The MSHR bank saturation (`hold=4, inv=0`)
+and the 2,385 stuck requests in the baseline are a **downstream symptom**: cores stall -> their
+loads never retire -> requests pile up -> banks fill. Remove singles from the MSHR and the symptom
+disappears entirely while the deadlock survives. Do not chase the MSHR.
+
+**Corollary — why every MSHR knob was inert.** `dual_load`, `resp_wait_subs_single` and
+`enable_single` were all tested and none prevents the hang, which is exactly what you expect if
+the fault is downstream of the memory system. `enable_single` is the only one that changes
+anything at all (it removes the symptom and delays the hang by one period).
+
+**⚠️ A methodology error worth not repeating.** H1 was byte-identical to the baseline for its
+first ten periods, and that was read as "the knob is inert". It is not: the early periods are
+boot and DMA, before the workload generates remote traffic, so *no* MSHR knob can differ there.
+The divergence appears at cyc=11000 the moment real traffic starts. **Never conclude equivalence
+from periods in which the mechanism under test is not yet exercised.**
+
+## Next step: waveforms, now well-targeted
 
 Log-level analysis is exhausted. The concrete next move is to take one stuck request and follow
 it from issue to non-response:
 
-1. the hung transcripts are preserved at `/tmp/hang_build_fp16{b,nb}.transcript`; re-run to get a
-   WLF if they have been cleaned
-2. use the `waveform-analysis` skill (WAL over WLF->VCD->FST) on the stuck `{tile, core, port, id}`
-   from the `[CMS WARN]` line — e.g. `g=14 t=15 c=0 p=1 id=61 addr=0x000a1740`
-3. the question to answer: does the request reach the group MSHR, and if so does the MSHR issue a
-   NoC fetch for it? That splits the search between the VLSU/ROB and the MSHR/NoC.
+The search is now narrow: **one core's VLSU, at the moment its load data returns.**
+
+1. Fast repro: `512x64x256` fp16, `hardware/matmul_fp16_512x64x256.elf`, deadlock at cyc 13000-14000.
+2. Re-run with logging scoped to ONE core's Spatz VLSU (the whole design is not needed).
+3. Watch, for the load that fills `v20`: the ROB pop, `commit_counter_*`, the VRF write-enable, and
+   the instruction-retire/scoreboard-release signal. The data returns (`inflight=0`); the question
+   is which of those never fires at `vsew = EW_16`.
+4. Prime suspects are the commit-side element accounting paths that are byte-granular for the
+   full-word case but switch on `commit_insn_q.vsew` for the sub-word case
+   (`spatz_vlsu.sv:1006-1008`, `:1596-1598`, `:1628`).
 
 ## Status of the surrounding work
 
