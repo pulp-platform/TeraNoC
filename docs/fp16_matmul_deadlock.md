@@ -6,7 +6,8 @@ invalidated part of the first analysis.
 
 ## Symptom
 
-`sp-fmatmul-opt-burst-merge-fp16` at M=N=P=512 deadlocks during the **icache warm-up pass**
+`sp-fmatmul-opt-burst-merge-fp16` deadlocks during the **icache warm-up pass** at every shape
+tried so far (512x512x512 and 512x64x256 alike)
 (before the timed region opens):
 
 - every core stops retiring at cycle **12,000-18,000**; the sim runs on to 98,000 with
@@ -41,16 +42,29 @@ void. Check what a TB probe *records* before inferring hardware behaviour from i
 
 ## Facts the root cause must explain
 
-1. **It is not vector-specific.** Stuck addresses land in **both** buffers: `0x20c8c` is inside
-   `a` (reached only by scalar `flh` via the FP-LSU) and `0xa1500` inside `b` (vector `vle16`).
-   The memory system stops responding to a core across *both* request paths.
+1. **It is the SCALAR path.** At the moment of the wedge the stuck requests are on **port 0 —
+   the scalar port** — at addresses `0x000217e8` and `0x000217f4`, i.e. inside `a` and exactly
+   **12 bytes apart = 6 fp16 elements = the warm-up's clamped N**. That is the `flh` walk down a
+   column of A, `a__ += N`. Cores stall on `vfmacc.vf` because its *scalar* operand never returns,
+   not because the vector load failed. (Vector-buffer addresses appear stuck too, but downstream.)
+
+   **Leading hypothesis.** At fp32 every scalar FP load is a full 32-bit word. At fp16 `flh` is a
+   **sub-word** load and two adjacent A elements share one word. The group MSHR admits singles
+   into its merge pool (`group_mshr_enable_single=1`) and *holds* the response until
+   `group_mshr_hold_subs_single=4` subscribers arrive (`group_mshr_resp_wait_subs_single=1`).
+   Sub-word scalar requests are a case that path has never seen. Tests in flight:
+   `group_mshr_enable_single=0` (singles bypass the MSHR entirely) and
+   `group_mshr_resp_wait_subs_single=0` (deliver immediately, do not hold for subscribers).
 2. **The stuck pattern differs by gate, as the request paths do.** Gate OFF: 426 distinct stuck
    addresses stepping individually (`0xa1500`, `0xa1510`, `0xa1520`, separate ids) — the
    word-interleaved multi-port path. Gate ON: many ids collapsed on one address — burst beats.
    Both deadlock.
-3. **It is shape-dependent.** `512x64x256` runs clean well past 10,000 cycles, while `512x512x512`
-   dies at 12,000-18,000. Whatever it is, it accumulates rather than failing on a single
-   iteration — which is why per-iteration static inspection of the kernel found nothing.
+3. **It is NOT shape-dependent — corrected 2026-08-18.** An earlier revision of this file claimed
+   `512x64x256` ran clean; it does not, it deadlocks at ~12,000 cycles exactly like `512x512x512`.
+   It was merely slower to arrive. **This is the useful correction**: a shape with an ideal of
+   4,096 cycles reproduces the bug, so the repro is cheap and does not need the 2-hour full shape.
+   Both shapes fail at ~12k, and both run the same warm-up (N clamped to 6, m range 0-8), so the
+   trigger is in the warm-up rather than in the matmul dimensions.
 4. **It fires in the warm-up pass**, where `ICACHE_WARMUP_N` clamps N to 6, so the A row stride is
    degenerate (6 elements = 12 B). The fp32 build survives the same clamp.
 
