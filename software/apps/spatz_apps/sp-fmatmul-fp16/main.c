@@ -57,6 +57,10 @@
 // loop run by core 0 alone, each iteration paying an L2 round trip (~32 cyc). At M=2048
 // that is ~65k cycles of a ~102k-cycle run -- most of the simulation -- producing data
 // nothing reads when the verify is off.
+#ifndef MATMUL_SPOTCHECK
+// FP-FREE correctness probe (default off). See the note at the call site.
+#define MATMUL_SPOTCHECK 0
+#endif
 #ifndef MATMUL_VERIFY
 #define MATMUL_VERIFY 0
 #endif
@@ -571,6 +575,35 @@ int main() {
     printf("The performance is %u OP/1000cycle (%u%%o utilization).\n",
            performance, utilization);
   }
+
+#if MATMUL_SPOTCHECK
+  //========================================================--
+  // STEP 5b: FP-FREE SPOT CHECK
+  //========================================================--
+  // The device verify above is disabled because summing C in scalar FP wedges core 0 in the
+  // epilogue (see the MATMUL_VERIFY note). That leaves a perf run with NO correctness signal
+  // at all, which for a brand-new fp16 kernel is not acceptable -- a kernel that computes
+  // garbage twice as fast still "wins" the sweep.
+  //
+  // This probe reads C as raw 32-bit words with an ORDINARY INTEGER LOAD. One word holds two
+  // packed fp16 elements; nothing here touches an FP register, the FP-LSU, or the accumulator
+  // writeback, so it cannot reproduce the wedge. The host compares the printed words against
+  // the torch golden bit-for-bit-ish (see scripts/check_fp16_spot.py).
+  //
+  // One sample per GROUP, taken at the first row that group owns, so a single bad group is
+  // identified rather than merely detected -- the failure mode that actually happens here
+  // (a group desynchronising, or a bank-hash mistake concentrating one group's traffic).
+  if (cid == 0) {
+    const uint32_t rows_per_group = gemm_l.M / active_groups;
+    for (uint32_t g = 0; g < active_groups; ++g) {
+      const uint32_t row = g * rows_per_group;
+      const volatile uint32_t *w = (const volatile uint32_t *)(c + row * gemm_l.P);
+      printf("[SPOT] g=%2u row=%4u w0=%08x w1=%08x w2=%08x w3=%08x\n",
+             g, row, w[0], w[1], w[2], w[3]);
+    }
+  }
+  mempool_barrier(active_cores);
+#endif
 
   //========================================================--
   // STEP 6: VERIFICATION  (same self-test as sp-fmatmul-opt)
