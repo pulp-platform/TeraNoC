@@ -851,6 +851,14 @@ bit-for-bit), but the staircase is not what costs the 18 pp.
 Probes (see WORKLOG 2026-08-07 19:xx):
 - **1** `mempool_group_barrier.sv`: barrier ARRIVAL SPREAD -- cycles between a struct's first
   and last arrival. Reported as `bar_rel=+N bar_spread=X bar_max=Y`.
+  ⚠️ **`bar_max` SATURATES at 65535 and must be read as a floor, not a value.** `age_q` is
+  `logic [15:0]` and line 248 clamps it (`(age_q[s] != 16'hFFFF) ? age_q[s]+1 : age_q[s]`)
+  rather than letting it wrap -- the clamp is correct, since a wrap would alias a huge spread
+  into a small one, but it means `bar_max=65535` says only "at least 65,535 cycles". Two arms
+  both reading 65535 are NOT comparable, and a badly desynchronised run pins there, which is
+  exactly when the number is wanted. Observed live on `lad_1024x256x512` 2026-08-18. Values
+  strictly below 65535 are genuine -- e.g. the 55,704 quoted for the trapped `512x512x512`
+  `dflt` arm in `docs/benchmarks/gemm_results_default_latest.md` stands.
 - **2** `tb_fpu_util.svh`: intra-group CORE SPREAD from per-core busy FPU-lane-cycles,
   ungated. Reported as `core_spread=avg/worst(gN)`.
 - **3** (in source, not in these builds) per-core RETIRED-INSTRUCTION drift, benchmark-gated.
