@@ -269,65 +269,74 @@ raises the batch requirement" rather than asserting it.
 
 ---
 
-## 7. FINDING (2026-08-18): both hold classes active at once collapses the machine
+## 7. FINDING (2026-08-18): the scalar hold at `share_a = 2` saturates the MSHR banks
 
 The batch ladder immediately found a regime the 23-shape sweep never visits. **No shipping shape
 lands at `share_a = 2`** — all 23 sit at 4, 8 or 16 — and that is exactly where it breaks.
 
-| rung | share_a | share_b | cum util | MSHR timeouts |
-|---|---:|---:|---:|---:|
-| `256x256x512` | 8 | 2 | 94.9% | 0 |
-| `1024x128x256` | **2** | **8** | **5.8%** | **5,490** |
-| `1024x256x512` | **2** | **8** | **6.9%** | 672+ |
-| `2048x128x256` | 1 | 16 | 62.6% | 0 |
+Efficiency below is `ideal/actual`, never the testbench's lane-occupancy counter.
 
-Non-monotonic in `share_b` (95% → 6% → 63%), so it is **not** "deeper merge target is worse" —
-`share_b=16` has the deepest target and zero timeouts.
-
-### What it is
-
-Two diagnostics on `1024x128x256`, same ELF, one knob each:
-
-| arm | `subs_single` | `subs_burst` | bench opens | cum util | timeouts |
+| rung | share_a | share_b | efficiency | timeouts | bankfull bypass |
 |---|---:|---:|---:|---:|---:|
-| base | 2 | 8 | 54,000 | 4.7% | 5,490 |
-| `diagS1` | **1** | 8 | **23,000** | **74–90%** | **0** |
-| `diagB1` | 2 | **1** | 50,000 | **7–9%** | **0** |
+| `256x256x512` | 8 | 2 | 86.7% | 0 | 0 |
+| `1024x128x256` | **2** | **8** | **<7.0%** *(running)* | 15,306 | **418,920** |
+| `1024x256x512` | **2** | **8** | **collapsed** *(running)* | 15,928 | **475,428** |
+| `2048x128x256` | 1 | 16 | 52.7% | 0 | 0 |
 
-Two separate effects, and it took the `diagB1` control to tell them apart:
+Non-monotonic in `share_b`, so it is **not** "deeper merge target is worse" — `share_b=16` has the
+deepest target, zero timeouts and zero bypasses.
 
-**Timeouts need both classes holding.** Only the base arm accumulates them; `diagS1` keeps
-`subs_burst=8` and `diagB1` keeps `subs_single=2`, and neither times out alone. Entries occupy
-ways while blocked and only `serve_timeout` (effective 2,032 cycles at `prescale_w=4`) releases
-them, which is the period the base arm's utilisation oscillates on.
+### What it is: capacity, not latency
 
-**But the timeouts are not the performance problem.** `diagB1` has **zero** timeouts and still runs
-at 7–9% — barely better than the 4.7% base. Removing the burst hold removes the timeouts and leaves
-the machine just as slow.
+Three arms on `1024x128x256`, same ELF, one knob each. `bankfull_bypass` — the bank had no free way,
+so the request skipped the MSHR entirely — is the counter that explains the whole result.
 
-**The scalar hold at `share_a = 2` is the whole story.** It is the only knob whose removal restores
-performance (`diagS1`, 74–90%), and it is also what wrecks warm-up: the benchmark window opens at
-23,000 cycles with it off versus 50,000–54,000 with it on — about 30,000 cycles recovered before the
-timed region even starts. That cost is invisible in the cycle count and was found only because the
-probe prints the window open.
+| arm | `subs_single` | `subs_burst` | bench opens | efficiency | timeouts | **bfb** |
+|---|---:|---:|---:|---:|---:|---:|
+| base | 2 | 8 | 54,000 | <7.0% | 15,306 | 418,920 |
+| `diagS1` | **1** | 8 | **23,000** | **67.4%** (48,630 cyc, final) | **0** | **0** |
+| `diagB1` | 2 | **1** | 50,000 | <14.2% *(running)* | **0** | **101,127** |
 
-⚠️ An earlier revision of this section reported `diagB1` at 42.3% and called it a weaker fix. That
-was an early-run transient: it has since decayed to 7–9% and is still falling. **Burst bypass is not
-a fix here at all.**
+**Performance tracks `bfb`, not timeouts.** `diagB1` removes the burst hold and its timeouts go to
+zero — and it is still slow, because the *scalar* hold keeps filling the banks (101,127 bypasses).
+Only `diagS1`, which removes the scalar hold, drives bypasses to exactly zero, and it is the only
+arm that recovers.
 
-### Design implication
+**Mechanism.** A is the high-volume class (scalar loads, ~4x the burst class's request count). At
+`share_a = 2` there is exactly one other core that can supply a merge partner, so held singles
+retire far slower than they arrive, occupy ways, and saturate the banks. The victim is the **burst**
+class, which would have merged perfectly well: measured B merging falls from its predicted 8.00x to
+**2.01x**. Giving up A coalescing entirely is far cheaper than losing B's.
 
-`gemm_autotune.py` disables the scalar delivery gate (`resp_wait_subs_single`) only when
-`share_a < 2`. At `share_a = 2` the hold costs far more than a 2-way merge returns, so the threshold
-is wrong. The deeper rule the data suggests — **do not let both classes hold at once** — is not
-expressed anywhere in the derivation today.
+Timeouts are a secondary symptom that needs *both* classes holding — neither single-knob arm
+produces any. They are not the performance problem.
 
-⚠️ Utilisation figures above are from arms 18–27% complete; the timeout counts and the warm-up gap
-are decisive, the exact percentages are not final.
+The scalar hold also wrecks warm-up: the benchmark window opens at 23,000 cycles with it off versus
+50,000–54,000 with it on, about 30,000 cycles recovered before the timed region even starts. That
+cost is invisible in the cycle count and was found only because the probe prints the window open.
+
+⚠️ An earlier revision reported `diagB1` at 42.3% and called it a weaker fix. That was an early-run
+transient; it decayed to 7–9%. **Burst bypass is not a fix here at all.**
+
+### Design implication — FIXED 2026-08-18
+
+`gemm_autotune.py` derived `hold_subs_single = min(share_a, merge)`, and bypassed the class only at
+`share_a < 2`. The threshold was off by one. Now:
+
+```python
+subs_a = 1 if share_a <= 2 else min(share_a, merge)
+```
+
+Blast radius is exactly the two collapsed rungs — **no shipping shape changes**, because `share_a`
+is >= 4 on all 23, so the completed sweep stands and needs no re-runs. `2048x128x256` already
+received the bypass via `share_a = 1`, which is why it runs clean.
+
+The failure is **non-monotonic in `share_a`** (1 fine, 2 catastrophic, >=4 fine), which is precisely
+how it survived a 23-shape sweep. Do not simplify the expression back.
 
 ### Why this matters for the paper
 
 The decode story pushes toward large batch, which raises `share_b` and *lowers* `share_a` — straight
-into this regime. A batch large enough to give 8-way weight sharing puts `share_a` at 2. So this is
-not an exotic corner: **it is on the path the LLM framing recommends**, and it has to be fixed
-before the decode claim can be made.
+into this regime. A batch large enough to give 8-way weight sharing puts `share_a` at 2. So this was
+never an exotic corner: **it sits on the path the LLM framing recommends.** It is now fixed, and the
+recovered rung is a data point rather than a blocker.
