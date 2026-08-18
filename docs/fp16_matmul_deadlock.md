@@ -23,7 +23,7 @@ tried so far (512x512x512 and 512x64x256 alike)
 | hypothesis | verdict | evidence |
 |---|---|---|
 | the new `spatz_vlsu_burst_ew16` gate | **NO** | arm B ran with `SPATZ_VLSU_BURST_EW16=0` (verified in its build log) and hung identically |
-| `spatz_vlsu_dual_load` runahead | **NO** | dual_load 2 vs 1 on the same shape is **byte-identical at every period** (1447 / 4810 / 1044 / 433 …) |
+| `spatz_vlsu_dual_load` runahead | **NO** | dual_load 2 vs 1 on the same shape are **byte-identical at every period** (1447 / 4810 / 1044 / 433 …) and both deadlock at **exactly cyc=13000**. Not a timing coincidence to be explained away: the feature makes no difference whatsoever to this workload |
 | group-barrier arrival mismatch | **NO** | `bar_rel=+16` (barriers firing) and `bar_max=40` (tiny spread) right up to the stall; the healthy fp32 arm reaches `bar_max=9664`. Barriers stopped because cores stopped *arriving* — downstream of the fault |
 | `vl` -> bytes conversion for e16 | **NO** | `spatz_vlsu.sv:190` `EW_16: vl << 1` is correct (64 elements -> 128 B) |
 | MSHR hold / subscriber config | **NO** | `[RH STUCK] subs=2/4` appears **more** often in the healthy fp32 arm (462 vs 128), and the MSHR defines are identical between the two builds |
