@@ -534,8 +534,29 @@ works, and it is the only tractable way to run 64 layers.
 
 ## 7. Open questions
 
-1. **bf16 or fp16?** Convert offline and accept the range risk, or spend area to enable
-   `FP16ALT`? A backend flow is imminent at both meshes, so the area number is cheap now.
+1. **bf16 or fp16? -- ANSWERED (2026-08-18): fp16 is enough.** Three reasons, and the first is
+   the one that is usually got backwards: **fp16 is MORE precise than bf16**, 10 mantissa bits
+   against 7, so converting the published bf16 weights to fp16 *gains* 3 bits and only loses
+   range -- and LLM weights sit far inside fp16's +-65504. There is also **no throughput
+   difference** (both are 16-bit, both give `NUM_LANES = 2`, both 2048 MAC/cyc at 4x4). And the
+   genuine fp16 range hazard is not the weights but *sums* -- RMSNorm's sum-of-squares and
+   pre-softmax attention logits -- which must be accumulated in fp32 regardless, because fp16
+   accumulation over thousands of terms is already unusable (3.3). The one structure with truly
+   wide dynamic range, the DeltaNet state, is fp32 in the reference either way
+   (`mamba_ssm_dtype: float32`), so the format choice does not reach it.
+
+   What bf16 buys is **operational, not numerical**: published weights load with no conversion
+   pass and no per-tensor scale calibration, which removes a class of "is the error from your
+   hardware or your conversion?" objections to an end-to-end accuracy claim. That matters at
+   stage E/F, not for the kernel and NoC work.
+
+   The full bf16 path is already wired -- `CSR_FMODE` (0x800) `fmode.src`/`fmode.dst` route
+   through `snitch.sv:314` -> `spatz_decoder` -> `spatz_req.fm` -> `spatz_vfu.sv:843-844` -- so
+   only the mask bit is missing, and per 3.3b it adds no lanes.
+
+   **Decision rule: fp16 in software until end-to-end accuracy against published weights is
+   the deliverable; enable bf16 in silicon anyway during the backend run, because it is nearly
+   free and a respin is not.** Measure the area delta once and take it unless it surprises.
 2. **What precision is the DeltaNet state?** The config says fp32. fp16 halves a 3 MiB/seq/layer
    footprint — at 8x8 that is the difference between B=4 and B=8 fitting, i.e. between
    bandwidth-bound and compute-bound. Needs an accuracy check.

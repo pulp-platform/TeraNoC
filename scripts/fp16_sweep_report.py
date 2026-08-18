@@ -26,7 +26,8 @@ def norm(b):
 
 def scan(path):
     d = dict(cycles=None, done=False, fatal=None, dropped=0,
-             timeout=0, bfb=0, amerge=None, bmerge=None, last_cyc=None)
+             timeout=0, bfb=0, amerge=None, bmerge=None, last_cyc=None,
+             pre_cyc=None, in_bench=False)
     if not os.path.exists(path):
         return d
     with open(path, 'rb') as fh:
@@ -39,9 +40,16 @@ def scan(path):
                 d['dropped'] += 1
             if re.search(r'\bFatal\b|Error:', ln) and 'Errors: 0' not in ln:
                 d['fatal'] = ln.strip()[:100]
+            # Progress: [FPU] bench only appears once the TIMED region opens, which is tens of
+            # thousands of cycles in. Before that the run is in icache warmup and looks
+            # identical to 'still elaborating' unless we also read the pre-bench probes.
             m = re.search(r'cyc=(\d+)', ln)
-            if m and '[FPU] bench' in ln:
-                d['last_cyc'] = int(m.group(1))
+            if m:
+                c = int(m.group(1))
+                if '[FPU] bench' in ln:
+                    d['last_cyc'] = c; d['in_bench'] = True
+                elif not d.get('in_bench'):
+                    d['pre_cyc'] = c
             for k, pat in (('timeout', r'mshr_timeout=\+?(\d+)'),
                            ('bfb',     r'bankfull_bypass=\+?(\d+)')):
                 mm = re.search(pat, ln)
@@ -77,7 +85,9 @@ def main():
         elif r['done']:
             st = 'done'
         elif r['last_cyc']:
-            st = f"running (bench cyc={r['last_cyc']})"
+            st = f"in timed region (cyc={r['last_cyc']:,})"
+        elif r['pre_cyc']:
+            st = f"pre-benchmark warmup (cyc={r['pre_cyc']:,})"
         else:
             st = 'elaborating'
         if r['dropped']:
@@ -102,6 +112,8 @@ def main():
                   f'NOT INERT -- differs by {d_c - a_c:+,} cycles'
         print(f"  knob inertness on fp32 (A vs D): {verdict}")
     for tag, _, _, r, _, _ in rows:
+        if not r['in_bench']:
+            continue          # pre-bench counters are icache-warmup noise, not a result
         if r['timeout'] or r['bfb']:
             print(f"  {tag}: mshr_timeout={r['timeout']:,}  bankfull_bypass={r['bfb']:,}"
                   + ("   <- bfb >> timeouts = capacity saturation, check the knobs"
