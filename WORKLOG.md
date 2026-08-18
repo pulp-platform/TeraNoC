@@ -9598,3 +9598,69 @@ merge_reqs`. An accident, not an invariant.
 phase. Every arm is gated on a full define diff vs phaseE1 (only CFG_RUNTIME may differ) AND on
 `[MSHRCFG] all 16 groups ENABLED` -- without the latter an unconfigured arm would silently measure a
 bypassed MSHR and read as a catastrophic regression. Expect ~+0.8% (cold start), not 0.
+
+## 2026-08-18 · Campaign closed, backend configs prepared
+
+**Purpose.** Close out the MSHR PPA campaign (23 GEMM shapes, 4x4) and make the two backend
+flavours safe to hand to a synthesis flow.
+
+**Campaign result.** 23/23 complete. Against the no-feature baseline the median is **1.25x**
+(67.3% -> 84.0% efficiency, `ideal/actual` with `ideal = M*N*P/1024`). `dflt` 83.6% and `latest`
+84.0% are equal within the replication spread, so runtime-configurable CSRs cost nothing measurable.
+Best single point is `512x512x512` at 85.9% / 1.37x.
+
+**Caveat that limits the claim.** `dflt` vs `latest` is the campaign's ONLY replication, and it
+shows median 1.15% / max 11.1% spread between arms that should be identical. The median 1.25x is
+robust; individual cells are not. Do not quote a single shape as a point estimate.
+
+**Two failure modes separated, both by `bankfull_bypass` (bfb) vs `mshr_timeout`.**
+- ~1:1 -> spontaneous desync trap (timing lottery, config is correct). Caught exactly 1 arm of 45.
+- ~30-45:1 -> capacity saturation from a bad knob. This was `share_a == 2`: held scalar singles
+  saturate the ways and evict the burst class (B merge falls 8.00x -> 1.83x). Ablated on
+  `1024x128x256`, same ELF, one knob: 979,180 -> 48,630 cycles = **20.1x**. Fixed in
+  `gemm_autotune.py` (`63e6849f`): bypass the scalar-single class at `share_a <= 2`, was `< 2`.
+  Blast radius is exactly 2 batch-ladder rungs; no sweep shape has `share_a < 4`.
+
+**What the ladders showed.** M=2048 reaches a **perfect 16.00x B-merge in a completely healthy run**
+(0 timeouts, 0 bfb) and still only 52.7% efficiency. The coalescer works perfectly and still loses,
+so the remaining gap is not a coalescing problem. A traffic model weighting A:B at 4:1 predicts the
+ranking of all four rungs exactly.
+
+**Backend prep** (`b15efbdf`). Three things a synthesis flow would have tripped over:
+1. `hardware/Makefile` emitted a bare `-DNUM_REMOTE_PORTS_PER_TILE=` on every config -- no flavour
+   sets the variable, no RTL reads the macro. Questa tolerates the empty-value form; `analyze` need
+   not. Guarded; define-diffed to confirm that one line is all that moves.
+2. `backend_8x8`'s header claimed hold 1023 -- the base moved to 2047 in `8ca4f060`. Also corrected
+   "hold is free": `HoldCntW = clog2((max(window,timeout) >> prescale_w) + 1)`, so 1023 -> 2047 is
+   6 -> 7 bits, one extra flop on each of 64 entries per group.
+3. `backend_8x8` left `group_mshr_enable_stats` at 1 while `backend_4x4` pins 0, so a 4x4-vs-8x8
+   area comparison would have measured the stats counters as well as the mesh. Now 0 in both.
+
+**Backend config answer.** `terapool_spatz4_fpu_backend_4x4` is still correct: its resolved variable
+set is identical to `gemm512x512x512` except the deliberate `enable_stats=0`, i.e. the netlist IS
+the 85.9% operating point. It has since inherited `noc_router_remapping` 0->2 (`c05d54c1`) and
+`spatz_rob_cnt_idvalid` / `spatz_vlsu_commit_qmin` 0->1 (`8d199128`, both pure area, cycle-identical
+on all 23 shapes) -- so **any netlist built before 2026-08-17 is stale**.
+
+**Two prerequisites that matter more than the config choice.**
+- **`TARGET_SYNTHESIS` must be defined.** 30+ guards depend on it; `mempool_group_mshr.sv:690`
+  records synthesis carrying 16 flops per entry (1024/group) without it. There is no bender
+  `synthesis` target, so the flow must pass it explicitly.
+- **`Bender.local` is untracked and load-bearing.** It redirects spatz to `working_dir/spatz`
+  (f427541, pushed as `origin/zexin/teranoc_burst`); `Bender.yml` still pins upstream `b6a1875`.
+  Verified `build_1/compile.tcl` takes 32 files from `working_dir/spatz` and 0 from `deps/spatz`.
+  A fresh checkout without it gets a Spatz with none of the four `SPATZ_*` knobs.
+
+**Telemetry defect found and documented** (`17a89d38`). `bar_max` saturates at 65535 -- `age_q` is
+`logic [15:0]` and `mempool_group_barrier.sv:248` clamps rather than wraps. The clamp is right (a
+wrap would alias a huge spread into a small one) but the value is a FLOOR: two arms both reading
+65535 are not comparable, and a desynchronised run pins there, which is when it is consulted. Values
+below 65535 are genuine, so the 55,704 quoted for the trapped `512x512x512` `dflt` arm stands.
+
+**Status.** Campaign CLOSED. Docs, the three generated sweep tables, and the published progress
+artifact are all at 23/23. One arm, `lad_1024x256x512`, is still running and is confirmatory only:
+it reproduces the `share_a == 2` collapse that `63e6849f` already fixes (bfb:timeout ~45:1,
+`core_spread` 1000-1379 of 2440-4000, cum ~4.6%). Open items carried forward: confirm
+`TARGET_SYNTHESIS` with the backend flow, decide whether `cfg_runtime=1` warrants a second netlist,
+and the 8x8 batch ladder (needs the 4x4 arms cleared -- a mesh switch rewrites the shared
+`hardware/generated/`).
