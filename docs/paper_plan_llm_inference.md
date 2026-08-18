@@ -151,6 +151,39 @@ What to record per rung, beyond cycles: `alloc_single` / `merged_single` / `allo
 `merged_burst`, so the achieved merge ratio can be checked against the predicted degree — that
 prediction has matched exactly on every shape so far and is the paper's quantitative backbone.
 
+#### 4.1a Ladder B — measured (2026-08-18)
+
+Three of four rungs are in. The measured merge ratios are the point of the experiment, so they are
+reported next to efficiency rather than in an appendix.
+
+| M | A share | B share | product | ideal | cycles | efficiency |
+|---:|---:|---:|---:|---:|---:|---:|
+| 128 | 16.00× | — (B private) | — | 16,384 | 17,800 | **92.0%** |
+| 256 | 8.00× | 2.00× | 16 | 32,768 | 37,804 | 86.7% |
+| 512 | 4.00× | 4.00× | 16 | 65,536 | 78,424 | 83.6% |
+| 1024 | 1.43× | 1.67× | **2.4** | 131,072 | *running* | *collapsed, ~6.6% cum* |
+
+**Two results, and the second one is the more important.**
+
+**Efficiency falls monotonically as sharing shifts from A to B** — 92.0 → 86.7 → 83.6, about 3–5
+points per rung. This is the direction the traffic-weighted model predicts: A is fetched by scalar
+loads and B in 16-word bursts, so A generates roughly 4× the requests, and every step down the
+ladder trades away the sharing that matters most. The A-heavy end is the good end.
+
+That is a favourable result for the decode framing, because decode has **small M** — the A-heavy end
+of the ladder. It also says the square grid is not the target: `s_A : s_B` should track the
+request-count ratio, not be balanced.
+
+**At M=1024 the invariant `s_A × s_B = 16` breaks.** Predicted 2 × 8; measured **1.43 × 1.67 = 2.4**.
+Both degrees fall far below prediction, so this is not a re-allocation of a conserved budget — the
+merge machinery is *failing*, and the aggregate coalescing collapses to near nothing. This is the
+same `share_a = 2` collapse recorded in §7, now quantified: the mechanism is a merge failure, not a
+scheduling or capacity effect, and `diagS1` (`subs_single=1` → 74–90%, zero timeouts) locates it in
+the scalar hold.
+
+Caveat: the M=1024 ratios are from a run still in flight and may move; the three completed rungs are
+final. Ladder A (N=128, P=256) is still running at M=1024 and M=2048.
+
 ### 4.2 Decode tiling (requires a kernel change)
 
 Split **P** across groups instead of M, so a group owns all M rows for a P-slice and its 16 cores
