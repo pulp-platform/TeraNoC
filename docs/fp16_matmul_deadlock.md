@@ -81,7 +81,34 @@ Note the ROB is an in-order **ring** (`read_pointer` / `write_pointer` / `status
 list, so an id "leak" is not possible — but a stall-forever is: if a burst reserves `BlockWords`
 ids and fewer beats return, the ring can never advance past them.
 
-## ⭐ THE KEY FINDING: it is the VLSU COMMIT path, not the memory system
+## ⚠️ 2026-08-19 UPDATE — the "VLSU commit path" conclusion below is OVER-STATED
+
+Two results after it was written:
+
+**1. The exact-equality suspect is REFUTED.** A sim-only `[VLSU OVERSHOOT]` detector was added at
+`spatz_vlsu.sv:632` and the repro re-run: the counter **never** passes `commit_counter_max`
+(0 occurrences, arm OVS, hung at cyc=13000 as usual). `commit_finished` is not the blocker. The
+counter simply never *reaches* max — commits stop partway — so the question is why they stop, not
+how completion is tested.
+
+**2. `inflight=0` was arm-specific and is probably a scoreboard artifact.** It held for H1
+(`enable_single=0`) but NOT for the default config: arm OVS hangs with `inflight=5785` and 3,201
+stuck requests. Worse, H1's own numbers are internally inconsistent (`req=74781 resp=63934` — a
+10,847 gap — alongside `inflight=0`), so the CMS table is likely dropping or reusing entries
+rather than reporting a genuinely idle memory system. **Do not treat `inflight` as authoritative.**
+
+What survives from the section below: the MSHR knobs are all inert, and the stalled cores are
+waiting on `vfmacc.vf v0, ft7, v20`. What does NOT survive: the confident claim that no memory
+request is outstanding, and therefore the inference that the fault must be in the commit path.
+
+**Solid facts, arm-independent:** cores RAW-stall at `vfmacc.vf` waiting for `v20`; stuck requests
+are on **port 0 (scalar)** at addresses inside `a` stepping by the A row stride; two different
+harts stall on the **same address with the same id and `beats=0`**; and eight independent
+MSHR/VLSU knobs change nothing.
+
+---
+
+## (superseded) THE KEY FINDING: it is the VLSU COMMIT path, not the memory system
 
 Arm H1 (`group_mshr_enable_single=0` + `resp_wait_subs_single=0` — scalar requests never enter
 the MSHR at all) still deadlocks, one period later at cyc=14000. **But its signature is completely
