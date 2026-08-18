@@ -9776,3 +9776,43 @@ report a correct kernel as 170% efficient.
 
 **Status.** Arms running (warmup phase). Results pending; nothing quoted until the spot check
 confirms the fp16 kernel is numerically right.
+
+### 2026-08-19 · fp16 deadlock: located to the VLSU commit path (correction to the above)
+
+**Result of the root-cause hunt.** The fp16 matmul deadlock is **not** in the memory system. Arm
+H1 (`group_mshr_enable_single=0`, scalar requests never enter the MSHR) still deadlocks, but with
+`stuck_req=0`, `RH STUCK=0` and — decisively — **CMS `inflight=0`**: not one memory request
+outstanding, while every core is RAW-stalled on `vfmacc.vf v0, ft7, v20` waiting for `v20`. The
+data has returned; the VLSU is not committing it to the VRF, so the scoreboard never releases the
+register.
+
+**Everything MSHR-shaped was a symptom.** The bank saturation (`hold=4, inv=0`) and the 2,385
+stuck requests in the baseline are downstream of cores stalling. Eight knobs were tested and ALL
+are inert: the new burst gate, `dual_load` (2 and 1 hang at the identical cycle),
+`resp_wait_subs_single`, `enable_single`, `hold_window_burst`, plus `ICACHE_WARMUP=0`, the group
+barrier and the `vl`->bytes conversion. That uniformity is itself the evidence: no memory-side
+knob can fix a fault that is downstream of memory.
+
+**Prime suspect** (`spatz_vlsu.sv:632`): `commit_finished_q[fu]` uses **exact equality**,
+`commit_counter_q == commit_counter_max`. Any commit that advances the counter PAST max makes it
+never match, so `mem_finish_ready` never asserts and the load never completes — exactly the
+measured signature. The commit delta is element-size dependent (`1 << vsew`, 2 B at e16, vs
+`ELENB` 4 B) and `switch_to_tail_phase` re-bases the counter mid-instruction, so an overshoot is
+possible at e16 and impossible at e32 where element and word size coincide. A sim-only
+`[VLSU OVERSHOOT]` detector is in the tree to confirm or refute this; it deliberately does NOT
+relax the comparison, because the fix belongs at the source of the overshoot.
+
+**Three of my own calls were wrong and were corrected in-flight**, all recorded in
+`docs/fp16_matmul_deadlock.md`: (1) `ICACHE_WARMUP=0` called a breakthrough — the user correctly
+predicted the benchmark uses `flh` too, and it hangs there as well; (2) "shape-dependent" — the
+small shape hangs too, just later, which is what made a 13k-cycle repro possible; (3) "scalar path
+excluded" from ten byte-identical periods — those were boot and DMA, before any remote traffic
+existed, so no MSHR knob COULD differ there. **Never conclude equivalence from periods in which
+the mechanism under test is not exercised.**
+
+**Fast repro** (minutes, not hours): `512x64x256` fp16, `hardware/matmul_fp16_512x64x256.elf`,
+deadlock at cyc 13000-14000.
+
+**Deliverable unaffected.** `spatz_vlsu_burst_ew16` remains proven inert on fp32: arms A and D are
+byte-identical over **305 probe-periods** across INSNG/FPU/STALLG/MSHRG/MEMOG, both opening the
+timed region at exactly cyc=53000 (`scripts/check_arm_equivalence.py`).
