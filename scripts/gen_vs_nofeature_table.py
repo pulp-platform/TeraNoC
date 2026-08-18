@@ -33,6 +33,31 @@ def fin(p):
     if m: return int(m[-1])
     return 'run' if b'[FPU] bench' in d else None
 
+# ---- desync-timeout-trap detector -------------------------------------------------------------
+# A group whose own 16 cores drift apart loses every intra-group merge partner, so each remote
+# burst load waits out the full hold window and TIMES OUT instead of merging. That is ~12x slower
+# and self-reinforcing, and the barrier then serialises the fleet behind the straggler. Two arms
+# of one shape at one config can differ by >1.9x purely on whether this fired, so a cycle count
+# quoted without checking it is not a point estimate.
+#
+# `mshr_timeout=+N` is per-1000-cycle-window and is 0 in a healthy run (single digits total).
+# The alarm is SUSTAINED nonzero, not the total: a brief spike at a phase change is normal.
+TRAP_RUN = 10          # consecutive windows with a timeout before we call it trapped
+
+_TO = re.compile(rb'^\[FPU\] bench .*?mshr_timeout=\+(\d+)', re.M)
+
+def trap(p):
+    """-> (total timeouts, longest consecutive-window run, trapped?)  or None if no log."""
+    if not os.path.exists(p): return None
+    d = open(p, 'rb').read().replace(b'\n# ', b'\n')     # Questa prefixes every line with '# '
+    v = [int(x) for x in _TO.findall(d)]
+    if not v: return None
+    best = cur = 0
+    for n in v:
+        cur = cur + 1 if n else 0
+        best = max(best, cur)
+    return sum(v), best, best >= TRAP_RUN
+
 # ---- parse the no-feature baseline out of the plain-text table -------------------------------
 ref = {}
 for ln in open(SRC):
@@ -55,7 +80,9 @@ for s in shapes:
     if not r: continue
     rows.append(dict(shape=s, **r,
                      dflt=fin(f'{T}/mx_dflt_{s}_run.log'),
-                     latest=fin(f'{T}/mx_latest_{s}_run.log')))
+                     latest=fin(f'{T}/mx_latest_{s}_run.log'),
+                     dflt_trap=trap(f'{T}/mx_dflt_{s}_run.log'),
+                     latest_trap=trap(f'{T}/mx_latest_{s}_run.log')))
 rows.sort(key=lambda r: -(r['floor'] / r['dflt']) if isinstance(r['dflt'], int) else 1)
 
 def cyc(v):  return f"{v:,}" if isinstance(v, int) else ('run' if v == 'run' else '-')
@@ -74,19 +101,40 @@ L.append('latest   = shipping default + runtime MSHR CSR : cfg_runtime=1, presca
 L.append('%        = efficiency, floor/actual, floor = M*N*P/1024 (1024 FPU lanes)')
 L.append('spdup    = baseline / arm.  >1.00 means the feature is faster.')
 L.append('lim      = operand that limits the shape (A / B / - none), from the source table.')
+L.append('!        = DESYNC-TIMEOUT TRAP fired in that arm: >=10 consecutive 1000-cycle windows')
+L.append('           with mshr_timeout>0.  The group lost its intra-group merge partners, so every')
+L.append('           remote load waits out the full hold window instead of merging (~12x slower,')
+L.append('           self-reinforcing) and the barrier serialises the fleet behind it.  A flagged')
+L.append('           cycle count is NOT a point estimate -- the same config can run ~1.9x faster.')
 L.append('')
 hdr = (f"{'shape':<15}{'floor':>9}{'baseline':>10}{'base%':>7}"
-       f"{'dflt':>10}{'dflt%':>7}{'spdup':>7}"
-       f"{'latest':>10}{'lat%':>7}{'spdup':>7}  lim")
+       f"{'dflt':>10}{'dflt%':>7}{'spdup':>7} "
+       f"{'latest':>10}{'lat%':>7}{'spdup':>7} " + " lim")
 L.append(hdr)
 L.append('-' * len(hdr))
+
+def flag(t):
+    return '!' if t and t[2] else ' '
+
 sd = sl = 0
 for r in rows:
     L.append(f"{r['shape']:<15}{r['floor']:>9,}{r['base']:>10,}{100*r['floor']/r['base']:>7.1f}"
              f"{cyc(r['dflt']):>10}{pct(r['floor'], r['dflt']):>7}{spd(r['base'], r['dflt']):>7}"
+             f"{flag(r['dflt_trap'])}"
              f"{cyc(r['latest']):>10}{pct(r['floor'], r['latest']):>7}{spd(r['base'], r['latest']):>7}"
+             f"{flag(r['latest_trap'])}"
              f"  {r['lim']}")
 L.append('-' * len(hdr))
+
+# ---- trap summary: name every flagged arm explicitly, so it can never be read as background ----
+_tr = [(r['shape'], nm, r[f'{nm}_trap'])
+       for r in rows for nm in ('dflt', 'latest') if r[f'{nm}_trap'] and r[f'{nm}_trap'][2]]
+if _tr:
+    L.append('DESYNC-TIMEOUT TRAP fired in the following arms -- do not quote these as point '
+             'estimates:')
+    for sh, nm, (tot, run, _) in sorted(_tr, key=lambda x: -x[2][1]):
+        L.append(f'   {sh:<15} {nm:<7} {tot:>6} timeouts, longest sustained run {run} windows')
+    L.append('')
 
 def med(a):
     a = sorted(a); h = len(a)//2
@@ -117,15 +165,17 @@ def tsv_spd(b, v):  return f'{b/v:.2f}' if isinstance(v, int) else ''
 
 TH = ['M', 'N', 'P', 'Ideal cycles', 'Baseline (no MSHR/burst)', 'Baseline eff.',
       'Default', 'Default eff.', 'Default speedup',
-      'Runtime CSR', 'Runtime CSR eff.', 'Runtime CSR speedup', 'Limited by']
+      'Runtime CSR', 'Runtime CSR eff.', 'Runtime CSR speedup', 'Limited by', 'Desync trap']
 TL = ['\t'.join(TH)]
 for r in rows:
     M, N, P = r['shape'].split('x')          # split so each dimension sorts numerically in a table
+    tp = [nm for nm in ('dflt', 'latest') if r[f'{nm}_trap'] and r[f'{nm}_trap'][2]]
     TL.append('\t'.join([
         M, N, P, str(r['floor']), str(r['base']), f"{100*r['floor']/r['base']:.1f}%",
         tsv_num(r['dflt']),   tsv_pct(r['floor'], r['dflt']),   tsv_spd(r['base'], r['dflt']),
         tsv_num(r['latest']), tsv_pct(r['floor'], r['latest']), tsv_spd(r['base'], r['latest']),
-        r['lim'] if r['lim'] in ('A', 'B') else '—']))
+        r['lim'] if r['lim'] in ('A', 'B') else '—',
+        ', '.join(tp) if tp else '']))
 open(TSV, 'w').write('\n'.join(TL) + '\n')
 
 print(f'wrote {TSV}')
