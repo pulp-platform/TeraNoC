@@ -214,22 +214,30 @@ Two diagnostics on `1024x128x256`, same ELF, one knob each:
 
 | arm | `subs_single` | `subs_burst` | bench opens | cum util | timeouts |
 |---|---:|---:|---:|---:|---:|
-| base | 2 | 8 | 54,000 | 5.8% | 5,490 |
-| `diagS1` | **1** | 8 | **23,000** | 80.5% | **0** |
-| `diagB1` | 2 | **1** | 50,000 | 42.3% | **0** |
+| base | 2 | 8 | 54,000 | 4.7% | 5,490 |
+| `diagS1` | **1** | 8 | **23,000** | **74–90%** | **0** |
+| `diagB1` | 2 | **1** | 50,000 | **7–9%** | **0** |
 
-**Either bypass removes the timeouts**, so the pathology requires *both* classes to be holding for
-subscribers simultaneously — entries occupy ways while blocked and only `serve_timeout` (effective
-2,032 cycles at `prescale_w=4`) releases them. The base arm's utilisation oscillates on exactly that
-period.
+Two separate effects, and it took the `diagB1` control to tell them apart:
 
-**The two fixes are not equivalent.** Scalar bypass keeps the 8-way burst coalescing and reaches
-80.5%; burst bypass keeps a near-worthless 2-way scalar merge and reaches 42.3%. **Disable the
-scalar hold, not the burst hold.**
+**Timeouts need both classes holding.** Only the base arm accumulates them; `diagS1` keeps
+`subs_burst=8` and `diagB1` keeps `subs_single=2`, and neither times out alone. Entries occupy
+ways while blocked and only `serve_timeout` (effective 2,032 cycles at `prescale_w=4`) releases
+them, which is the period the base arm's utilisation oscillates on.
 
-**The scalar hold also wrecks warm-up**: the benchmark window opens at 23,000 cycles with it off
-versus 50,000–54,000 with it on — ~30,000 cycles recovered before the timed region starts. That cost
-is invisible in the cycle count and was found only because the probe prints the window open.
+**But the timeouts are not the performance problem.** `diagB1` has **zero** timeouts and still runs
+at 7–9% — barely better than the 4.7% base. Removing the burst hold removes the timeouts and leaves
+the machine just as slow.
+
+**The scalar hold at `share_a = 2` is the whole story.** It is the only knob whose removal restores
+performance (`diagS1`, 74–90%), and it is also what wrecks warm-up: the benchmark window opens at
+23,000 cycles with it off versus 50,000–54,000 with it on — about 30,000 cycles recovered before the
+timed region even starts. That cost is invisible in the cycle count and was found only because the
+probe prints the window open.
+
+⚠️ An earlier revision of this section reported `diagB1` at 42.3% and called it a weaker fix. That
+was an early-run transient: it has since decayed to 7–9% and is still falling. **Burst bypass is not
+a fix here at all.**
 
 ### Design implication
 
