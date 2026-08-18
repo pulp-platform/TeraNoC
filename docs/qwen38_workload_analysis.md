@@ -179,20 +179,104 @@ genuinely no divider in the vector unit, not merely no instruction for one.
 **Trap:** `VFWDOTP_VV/VF` *is* in the decoder, but fpnew's `SDOTP` unit is `DISABLED`
 (`spatz_pkg.sv:405`). Do not use it — it decodes into a unit that isn't there.
 
-### 3.3 fp16 really is 2x — verified
+### 3.3 fp16 is 2x for `vfmacc`, and **1x for `vfwmacc`** — verified
 
-`spatz_vfu.sv:137` gates lanes on element width:
+The lane count doubles at e16. `spatz_vfu.sv:103`:
 
 ```systemverilog
-(spatz_req.vtype.vsew == EW_32 ? 4'hf : 8'hff)
+nr_elem_word = (N_FU * (1 << (MAXEW - spatz_req.vtype.vsew))) >> is_narrowing;
 ```
 
-The VFU processes `N_FU * ELEN = 128` bits/cycle regardless of format — 4 lanes at fp32,
-**8 lanes at fp16**. Per core: 4 fp32 FMA/cycle or 8 fp16 FMA/cycle.
+4 elements/cycle at EW_32, **8 at EW_16**; `:137` and `:141` follow, `:846` sets
+`fpu_vectorial_op = 1'b1`, and `:843-844` resolve the format to `fpnew_pkg::FP16`. Each of the
+four 32-bit fpnew instances then does packed 2xfp16. So **`vfmacc.vv` at e16 really is 2x.**
 
-fp16 buys three things at once: 2x arithmetic, 2x weights per L1 byte, and 2x payload per NoC
-burst (a 16-word burst carries 32 fp16 values instead of 16 fp32). Highest value-per-effort item
-in this plan, at either mesh.
+**But the widening FMA is not.** `spatz_decoder.sv:1114-1119` decodes `VFWMACC_VV` with
+`widen_vs1 = widen_vs2 = 1`, and at `spatz_vfu.sv:843-844` that forces **both** `fpu_src_fmt` and
+`fpu_dst_fmt` to `FP32`. Spatz implements widening by *pre-converting* operands in the VRF read
+path (`:932-940`, `widen_fp16_to_fp32`) and running the FPU in plain FP32, processing the lower
+half of the source word and then the upper half in two separate passes (`widening_upper_q`
+toggles at `:220`; the source address advances only on alternate cycles, `:561-562`). Net rate:
+**4 elements/cycle — exactly the fp32 rate.**
+
+| instruction at `e16` | lanes/cycle | accumulate in | speedup |
+|---|---:|---|---:|
+| `vfmacc.vv` / `vfmadd.vv` | **8** | fp16 | **2.0x** |
+| `vfwmacc.vv` | 4 | fp32 | 1.0x |
+
+**This is a real design choice, not a detail.** You get either the 2x arithmetic *or* fp32
+accumulation, never both from a single instruction.
+
+- A K=5120 dot product accumulated purely in fp16 (11-bit mantissa) will lose accuracy badly.
+  The fix is **blocked accumulation**: run `vfmacc` in fp16 over short K-blocks (64-128), then
+  widen-and-add each block sum into an fp32 accumulator. That keeps most of the 2x and bounds
+  the error growth to the block length.
+- **For decode this may not matter at all.** At batch < 4 the kernel is weight-streaming-bound
+  (§4.2), so arithmetic rate is not the constraint — the win is entirely that fp16 halves the
+  weight bytes, the L1 footprint and the NoC payload. There, `vfwmacc` at 1x arithmetic is free
+  and numerically safe. **Prefill wants the 2x and needs the blocking; decode does not.**
+
+Independent of the instruction choice, fp16 always buys: 2x weights per L1 byte, and 2x payload
+per NoC burst (a 16-word burst carries 32 fp16 values instead of 16 fp32).
+
+### 3.5 The burst path is gated to `EW_32` — the one thing that must change
+
+`spatz_vlsu.sv` refuses burst mode for any element width but 32, in two places:
+
+```systemverilog
+:200   use_port0_burst_req = ... && (mem_spatz_req.vtype.vsew == EW_32) && ...
+:1155  burst_mode_req[port] = ... && (mem_spatz_req.vtype.vsew == EW_32) && ...
+```
+
+`git blame` puts both in the original burst commits (`7887c96f` 2026-02-04, `9ffe73c7`
+2026-02-09) — conservative scoping when the burst path was built, not an upstream constraint.
+
+**What an fp16 vector load does today.** It falls back to the 4-port word-interleaved path. That
+is *not* slower in raw bytes: `mem_counter_delta = MemDataWidthB` (4 B per port per handshake)
+and `mem_req_strb[k] = k < mem_counter_delta` (`:1774-1776`) give a full 32-bit word strobe
+regardless of `vsew`, so `vle16.v` moves 16 B/cycle/core exactly like `vle32.v`. The `size` field
+at `:1807` tracks `vsew` but only governs the single-element path.
+
+**What it loses is everything this project is about:**
+
+| lost | why |
+|---|---|
+| 16x fewer NoC request packets | one 64 B burst becomes 16 separate word requests |
+| the MSHR **burst class** | `hold_subs_burst`, `merged_burst`, the measured 16.00x B-merge — all idle |
+| ParityDrain 2-wide response | `group_mshr_drain_beats = 2` is a burst-entry feature |
+| `spatz_vlsu_block_alloc` (-6.1%), `dual_load` (-2.8%) | both are burst-path optimisations |
+
+Single-word requests still coalesce (`group_mshr_enable_single = 1`), so it is not zero — but the
+burst-merge contribution that the whole 23-shape campaign measured is switched off.
+
+**How hard is lifting it?** The burst machinery is byte- and word-granular throughout, so on
+inspection nothing structural depends on element width: `FullBurstBytes = MaxBurstWords(16) *
+MemDataWidthB(4)` = 64 B, `vl` is already in bytes after `proc_spatz_req`, `BurstAlignBits` = 6,
+`mem_counter_*` are byte counters, and the downstream expander generates consecutive *word*
+addresses. It looks like deleting two conditions. **Do not assume that** — verify:
+
+1. **The tail path.** `burst_has_tail` / `switch_to_tail_phase` is exactly where the burst+tail
+   store hang lived. A vl that is not a multiple of 64 B at e16 exercises it differently.
+2. **A size limit that bites at e16.** `use_port0_burst_req` also requires
+   `vl <= NrOutstandingLoads * MemDataWidthB`. At `spatz_vlsu_rob_depth = 64` that is 256 B,
+   which at e16 is 128 elements — **exactly `e16, m4` at VLEN=512**. `e16, m8` (512 B) exceeds it
+   and would silently drop off the burst path with no error.
+3. **ROB granularity.** ROB ids are per 32-bit word; at e16 one word carries two elements, so the
+   commit-side element accounting needs checking.
+
+Suggested check: one matched A/B on a single shape with the gate lifted, confirming the
+`[GroupMerge]` burst-merge ratio is non-zero and the `gen_burst_only_in_port0_mode` assertion
+(`:1861`) stays silent.
+
+### 3.6 Toolchain — no changes needed
+
+Verified by compiling and disassembling with the in-tree `install/llvm/bin/clang` and the stock
+`-march=rv32imafvzfh` from `runtime.mk`: `vsetvli e16,m4`, `vle16.v`, `vfmacc.vv`, `vfwmacc.vv`,
+`vfredusum.vs`, and the scalar `flh` / `fmadd.h` all assemble to correct encodings. The scalar
+side is fully decoded too — `FLH`/`FSH` in `spatz_fpu_sequencer.sv`, and `FADD_H`, `FMADD_H`,
+`FCVT_S_H`, `FMIN_H`/`FMAX_H` in `spatz_decoder.sv`. Note the arch string does **not** advertise
+`zvfh`, so the compiler will not auto-vectorise or accept fp16 vector *intrinsics*; inline asm —
+which is how every kernel in this tree is already written — is unaffected.
 
 ### 3.4 The transcendentals you must write
 
@@ -319,7 +403,7 @@ would be 4x worse.
 |---|---|---|---:|---|
 | 1 | **GEMM / skinny-GEMM** (all projections + FFN) | all | ~95% | **exists**, fp32: `sp-fmatmul-opt-burst-merge`, 84-96% at 4x4, 77.5% at 8x8 |
 | 2 | **GEMV** (batch-1 decode) | all | — | exists: `gemv-opt` (fp32), `gemv` (fp16) |
-| 3 | **fp16 GEMM** with `vfwmacc` | all | — | **to write** — 2x everything |
+| 3 | **fp16 GEMM** | all | — | **to write** — 2x memory always; 2x arithmetic only with fp16 accumulate (see 3.3) |
 | 4 | **RMSNorm** | all | <1% | **to write** (needs rsqrt) |
 | 5 | **SwiGLU** | all | <1% | **to write** (needs sigmoid) |
 | 6 | **Gated DeltaNet step** | 48 | 0.3% flops, high memory | **to write** — the distinguishing kernel; head-parallel work split |
