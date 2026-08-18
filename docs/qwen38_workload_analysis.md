@@ -278,6 +278,55 @@ side is fully decoded too — `FLH`/`FSH` in `spatz_fpu_sequencer.sv`, and `FADD
 `zvfh`, so the compiler will not auto-vectorise or accept fp16 vector *intrinsics*; inline asm —
 which is how every kernel in this tree is already written — is unaffected.
 
+### 3.3b How the 2x is actually built: fpnew generates a SECOND, NARROWER FMA
+
+Worth stating precisely, because it changes the area argument. The ADDMUL unit is `MERGED`
+(`spatz_pkg.sv:402`), so it elaborates `fpnew_opgroup_multifmt_slice`, which splits itself into
+lanes (`fpnew_opgroup_multifmt_slice.sv:84,172-179`):
+
+```systemverilog
+NUM_LANES      = width / min_fp_width(cfg)                       // fpnew_pkg.sv:441-443
+LANE_FORMATS   = cfg[fmt] & (width / fp_width(fmt) > lane_no)    // fpnew_pkg.sv:446-454
+```
+
+Each lane is its own `fpnew_fma_multi`, parameterised by *that lane's* format mask. At
+`Width = ELEN = 32` with `{FP32, FP16}`:
+
+| lane | width | formats | can do |
+|---|---:|---|---|
+| 0 | **32-bit** `fpnew_fma_multi` | FP32 + FP16 | one fp32 **or** one fp16 |
+| 1 | **16-bit** `fpnew_fma_multi` | FP16 only | one fp16 |
+
+So the fp16 2x is **not** two numbers packed through one 32-bit multiplier. It is a genuinely
+separate, half-width FMA sitting beside the fp32 one. Per fpnew instance: 1 fp32/cycle or
+2 fp16/cycle; x4 instances per core; x256 cores = 1024 fp32 or 2048 fp16 MAC/cycle at 4x4.
+
+**Three consequences.**
+
+1. **The fp16 silicon is already in the shipping netlist and already paid for.** `FpFmtMask[FP16]`
+   is 1 today, so lane 1 exists in every build, used or not. Software moving to fp16 costs zero
+   additional area. (Conversely, the area you would recover by dropping fp16 is exactly that
+   16-bit FMA: `NUM_LANES` falls to 1.) Note `:84` passes `1'b1` for the vector argument rather
+   than `EnableVectors`, so the lane is generated whenever the format is in the mask.
+
+2. **Enabling bf16 adds NO lanes** -- a correction to 3.1. bf16 (`FP16ALT`) is also 16 bits, so
+   `min_fp_width` is unchanged and `NUM_LANES` stays 2; bf16 simply joins the format masks of the
+   two FMAs that already exist. And its mantissa is *narrower* than fp16's (7 vs 10), so the
+   existing datapath is already wide enough. The cost is format decode and mux, not a new
+   multiplier. That makes "enable bf16 so the target model's native format runs directly"
+   substantially cheaper than a new-datapath argument would suggest.
+
+3. **fp8 would add two more lanes**, giving 4 fp8/cycle per instance (4096 MAC/cycle at 4x4):
+
+   | lane | width | formats |
+   |---|---:|---|
+   | 0 | 32-bit | FP32 + FP16 + FP8 |
+   | 1 | 16-bit | FP16 + FP8 |
+   | 2 | 8-bit | FP8 |
+   | 3 | 8-bit | FP8 |
+
+   That is real added area -- two whole FMAs per instance, 8 per core -- unlike the bf16 case.
+
 ### 3.4 The transcendentals you must write
 
 None exist for Spatz today. The `mempool_softmax_f16.h` / `mempool_layernorm_f16.h` kernels in
