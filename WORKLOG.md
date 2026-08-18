@@ -9664,3 +9664,49 @@ it reproduces the `share_a == 2` collapse that `63e6849f` already fixes (bfb:tim
 `TARGET_SYNTHESIS` with the backend flow, decide whether `cfg_runtime=1` warrants a second netlist,
 and the 8x8 batch ladder (needs the 4x4 arms cleared -- a mesh switch rewrites the shared
 `hardware/generated/`).
+
+## 2026-08-18 · Qwen3.8-27B target-workload investigation
+
+**Purpose.** Pick the LLM target workload and extract the kernels worth implementing, at both
+4x4 and 8x8. Analysis only; nothing simulated.
+
+**Implementation.** `docs/qwen38_workload_analysis.md`. Model facts from `Qwen/Qwen3.8-27B`'s
+published `config.json` (released 2026-08-14); every hardware claim audited against the RTL in
+this tree and cited file:line.
+
+**Result — three findings that change the plan.**
+
+1. *Qwen3.8-27B is a hybrid linear-attention model, not a plain transformer.*
+   `full_attention_interval: 4` gives 48 Gated DeltaNet layers and 16 full-attention layers.
+   The kernel list is therefore not the usual GEMM + softmax + RoPE.
+
+2. *The model is bf16; this hardware has bf16 disabled.* `spatz_pkg.sv:384`
+   `FpFmtMask = {RVF, 0, 1, 0, 0, 0}` and `fpnew_pkg.sv:52-59` shows `FP16ALT` = {8 exp, 7 man}
+   = bfloat16. Also NO int8 (`IntFmtMask = {0,1,1,0}`), no divide/sqrt anywhere in the vector
+   unit (`DIVSQRT: DISABLED`, `FDivSqrt=0`), no `vfrec7`/`vfrsqrt7`, no FP compare-to-mask, no
+   `vrgather`. `VFWDOTP` decodes but its fpnew unit is DISABLED — a trap. IEEE fp16 does work
+   and is genuinely 2x (`spatz_vfu.sv:137` gates lanes `EW_32 ? 4'hf : 8'hff`), and `vfwmacc`
+   gives fp16xfp16 -> fp32 accumulate.
+
+3. *The DeltaNet recurrent state is 3.00 MiB per sequence per layer* (48 v-heads x 128x128 fp32;
+   `mamba_ssm_dtype: float32`). This is a capacity class no GEMM shape exercises, and the two
+   meshes diverge on it:
+   - 4x4 (3.61 MiB usable): 83% of L1 at B=1 fp32. Compute-boundness needs B>=4. **No batch
+     satisfies both.**
+   - 8x8 (14.86 MiB usable): B=8 fp16 = 81% of L1, and B>=8 is exactly the compute-bound
+     threshold. **They coincide.**
+
+**Second, independent route to the paper plan's scaling claim.** Compute and L1 scale 4x from
+4x4 to 8x8, but L2 bandwidth only 2x (`l2_banks` 16 -> 32). Since decode AI = batch, the
+compute-bound threshold doubles: B>=4 at 4x4, B>=8 at 8x8. §3.3 of `paper_plan_llm_inference.md`
+derives "scaling out raises the batch requirement" from the kernel work split (M>=128 -> M>=512);
+this derives the same conclusion from bandwidth. The work split remains the binding constraint.
+
+**Also recorded.** `mempool_softmax_f16.h` / `mempool_layernorm_f16.h` cannot be reused on Spatz
+— they are XpulpV2 SIMD (`pv.shuffle2.h`, `vfcpka.h`) and Spatz configs set `xpulpimg=0`.
+RMSNorm/SwiGLU/softmax all need software transcendentals written from scratch.
+
+**Status.** Analysis complete and committed. Recommended sequence: map Qwen FFN tiles onto the
+existing fp32 GEMM (zero new code, M=128/256/512 at N=P=512 are measured rungs), then fp16 GEMM,
+then the glue kernels, then the DeltaNet step. First full-layer target should be a DeltaNet
+layer, brought up at 4x4 and measured at 8x8. No GVSOC model in this tree.
