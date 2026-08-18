@@ -138,7 +138,27 @@ def derive(M, N, P, *, num_groups=16, num_cores=256, kernel_size=8,
     # 61,344 / 122,721 / 245,540 / 491,216 -- doubling with N -- while merged_burst
     # was ZERO in every one. Every allocation was latency in the path of a load
     # that was going to miss anyway. See docs/benchmarks/gemm_results_burst_bypass.md.
-    subs_a = min(share_a, merge)
+    # share_a == 2 must ALSO bypass, and this is not symmetry-for-its-own-sake: holding the
+    # scalar-single class for a partner is only worth a way if the partner arrives quickly, and
+    # at a share degree of 2 there is exactly one other core that can ever supply it. A is the
+    # high-volume class (scalar loads, ~4x the request count of the burst class), so held entries
+    # accumulate faster than they retire, the banks saturate, and the BURST class -- which would
+    # have merged perfectly well -- is pushed out of the MSHR by capacity.
+    #
+    # MEASURED, 1024x128x256 (share_a=2, share_b=8), same ELF, ONLY this knob changed:
+    #     hold_subs_single=2   >341,000 cyc (<9.6% roofline)   12,078 timeouts,
+    #                                                          363,311 bankfull bypasses,
+    #                                                          A 1.48x  B 2.01x
+    #     hold_subs_single=1     48,630 cyc ( 67.4% roofline)        0 timeouts,
+    #                                                                0 bankfull bypasses,
+    #                                                          A 0.00x  B 8.00x
+    # A 7x+ swing. Note B recovers to its full predicted 8x only when the scalar class stops
+    # competing for ways -- giving up A coalescing entirely is far cheaper than losing B's.
+    #
+    # The failure is NON-MONOTONIC in share_a (1 is fine, 2 is catastrophic, >=4 is fine), which
+    # is why it survived a sweep where share_a was >= 4 on every shape. Do not "simplify" this
+    # back to min(share_a, merge).  See docs/paper_plan_llm_inference.md 4.1a and 7.
+    subs_a = 1 if share_a <= 2 else min(share_a, merge)
     subs_b = min(share_b, merge)
 
     knobs = {

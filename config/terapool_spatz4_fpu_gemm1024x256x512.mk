@@ -10,6 +10,6 @@ group_mshr_bank_burst_bits       := 1
 group_mshr_bank_shift_burst      := 8
 group_mshr_bank_shift_single     := 8
 group_mshr_hold_subs_burst       := 8
-group_mshr_hold_subs_single      := 2
+group_mshr_hold_subs_single      := 1
 group_mshr_merge_reqs            := 8
 include $(MEMPOOL_DIR)/config/terapool_spatz4_fpu.mk
