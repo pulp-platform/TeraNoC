@@ -131,9 +131,26 @@ The search is now narrow: **one core's VLSU, at the moment its load data returns
 3. Watch, for the load that fills `v20`: the ROB pop, `commit_counter_*`, the VRF write-enable, and
    the instruction-retire/scoreboard-release signal. The data returns (`inflight=0`); the question
    is which of those never fires at `vsew = EW_16`.
-4. Prime suspects are the commit-side element accounting paths that are byte-granular for the
-   full-word case but switch on `commit_insn_q.vsew` for the sub-word case
-   (`spatz_vlsu.sv:1006-1008`, `:1596-1598`, `:1628`).
+4. **PRIME SUSPECT — an exact-equality completion test.** `spatz_vlsu.sv:632`:
+
+   ```systemverilog
+   assign commit_finished_q[fu] = commit_insn_valid && (commit_counter_q[fu] == commit_counter_max[fu]);
+   ```
+
+   `==`, not `>=`. If a commit ever advances the counter **past** max, this never matches, the
+   load never completes, `mem_finish_ready` (`:818`) never asserts, and the destination vector
+   register is never released — a permanent stall with the data already returned and nothing
+   outstanding. **That is exactly the measured signature.**
+
+   The commit delta is element-size dependent —
+   `commit_single_element_size = 1 << commit_insn_q.vsew` (2 B at e16) versus `ELENB` (4 B) for
+   the full-word path (`:1064-1066`) — and `switch_to_tail_phase` re-bases the counter mid
+   instruction (`:1070`). An overshoot at e16 is plausible there and is invisible at e32, where
+   element size and word size coincide so every delta divides `max` evenly.
+
+   **To confirm:** log `commit_counter_q[fu]`, `commit_counter_max[fu]` and `commit_counter_delta[fu]`
+   for the stalled core and look for `q > max`. If confirmed, the minimal fix is `>=` (with a
+   width check), but the *correct* fix is to stop the overshoot at source.
 
 ## Status of the surrounding work
 
