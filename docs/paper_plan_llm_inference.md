@@ -190,7 +190,7 @@ final. Ladder A (N=128, P=256) is still running at M=1024 and M=2048.
 |---:|---:|---:|---:|---:|---:|---:|---:|
 | 256 | 8 | 2 | 8.00x | 2.00x | 8,192 | 9,794 | **83.6%** |
 | 512 | 4 | 4 | 4.00x | 4.00x | 16,384 | 20,548 | 79.7% |
-| 1024 | 2 | 8 | 1.46x | 1.95x | 32,768 | *running* | *collapsed* |
+| 1024 | 2 | 8 | 1.42x | 1.83x | 32,768 | 979,180 | **3.4%** |
 | 2048 | 1 | 16 | — (A private) | **16.00x** | 65,536 | 124,257 | **52.7%** |
 
 **The M=2048 rung is the paper's cleanest single measurement.** It achieves the *maximum possible*
@@ -279,7 +279,7 @@ Efficiency below is `ideal/actual`, never the testbench's lane-occupancy counter
 | rung | share_a | share_b | efficiency | timeouts | bankfull bypass |
 |---|---:|---:|---:|---:|---:|
 | `256x256x512` | 8 | 2 | 86.7% | 0 | 0 |
-| `1024x128x256` | **2** | **8** | **<7.0%** *(running)* | 15,306 | **418,920** |
+| `1024x128x256` | **2** | **8** | **3.4%** (979,180 cyc) | 30,474 | **814,022** |
 | `1024x256x512` | **2** | **8** | **collapsed** *(running)* | 15,928 | **475,428** |
 | `2048x128x256` | 1 | 16 | 52.7% | 0 | 0 |
 
@@ -293,8 +293,10 @@ so the request skipped the MSHR entirely — is the counter that explains the wh
 
 | arm | `subs_single` | `subs_burst` | bench opens | efficiency | timeouts | **bfb** |
 |---|---:|---:|---:|---:|---:|---:|
-| base | 2 | 8 | 54,000 | <7.0% | 15,306 | 418,920 |
+| base | 2 | 8 | 54,000 | **3.4%** (979,180 cyc, final) | 30,474 | 814,022 |
 | `diagS1` | **1** | 8 | **23,000** | **67.4%** (48,630 cyc, final) | **0** | **0** |
+
+**Both arms are now complete: 979,180 vs 48,630 cycles — a 20.1x swing from a single knob**, and the fixed arm reaches zero on both counters.
 | `diagB1` | 2 | **1** | 50,000 | <14.2% *(running)* | **0** | **101,127** |
 
 **Performance tracks `bfb`, not timeouts.** `diagB1` removes the burst hold and its timeouts go to
@@ -306,7 +308,7 @@ arm that recovers.
 `share_a = 2` there is exactly one other core that can supply a merge partner, so held singles
 retire far slower than they arrive, occupy ways, and saturate the banks. The victim is the **burst**
 class, which would have merged perfectly well: measured B merging falls from its predicted 8.00x to
-**2.01x**. Giving up A coalescing entirely is far cheaper than losing B's.
+**1.83x**. Giving up A coalescing entirely is far cheaper than losing B's.
 
 Timeouts are a secondary symptom that needs *both* classes holding — neither single-knob arm
 produces any. They are not the performance problem.

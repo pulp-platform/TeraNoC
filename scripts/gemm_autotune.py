@@ -146,13 +146,13 @@ def derive(M, N, P, *, num_groups=16, num_cores=256, kernel_size=8,
     # have merged perfectly well -- is pushed out of the MSHR by capacity.
     #
     # MEASURED, 1024x128x256 (share_a=2, share_b=8), same ELF, ONLY this knob changed:
-    #     hold_subs_single=2   >341,000 cyc (<9.6% roofline)   12,078 timeouts,
-    #                                                          363,311 bankfull bypasses,
-    #                                                          A 1.48x  B 2.01x
+    #     hold_subs_single=2    979,180 cyc (  3.4% roofline)   30,474 timeouts,
+    #                                                          814,022 bankfull bypasses,
+    #                                                          A 1.42x  B 1.83x
     #     hold_subs_single=1     48,630 cyc ( 67.4% roofline)        0 timeouts,
     #                                                                0 bankfull bypasses,
     #                                                          A 0.00x  B 8.00x
-    # A 7x+ swing. Note B recovers to its full predicted 8x only when the scalar class stops
+    # A 20.1x swing, both arms run to completion. Note B recovers to its full predicted 8x only when the scalar class stops
     # competing for ways -- giving up A coalescing entirely is far cheaper than losing B's.
     #
     # The failure is NON-MONOTONIC in share_a (1 is fine, 2 is catastrophic, >=4 is fine), which
