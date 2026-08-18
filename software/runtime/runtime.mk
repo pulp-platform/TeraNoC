@@ -154,6 +154,12 @@ DEFINES += -DNUM_GROUP_BARRIERS=$(shell awk 'BEGIN{print $(num_cores)/$(num_grou
 # Use THIS, never `DEFINES=...` on the command line: a command-line assignment overrides
 # every `DEFINES +=` above (make gives command-line variables top precedence), silently
 # dropping NUM_CORES/NUM_GROUPS/VLEN/... and failing the build.
+#
+# AND FORCE THE REBUILD. The app target depends on main.c.o, not on the define set, so if the
+# ELF is newer than the source `make <app> EXTRA_DEFINES=...` does NOTHING and reports success
+# -- the same false-clean failure as `make compile` skipping vlog. Delete the binary first:
+#   rm -f software/bin/apps/<cat>/<app> && make <app> config=<cfg> EXTRA_DEFINES="-DX=1"
+# Verify with `strings <elf> | grep <a-string-only-the-define-adds>` before trusting the build.
 DEFINES += $(EXTRA_DEFINES)
 # Spatz related
 DEFINES += -DRVF=$(rvf) -DRVD=$(rvd)
