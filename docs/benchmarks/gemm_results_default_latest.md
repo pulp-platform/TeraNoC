@@ -1,9 +1,11 @@
 # GEMM benchmark results — pure defaults (`dflt`) and full latest stack (`latest`)
 
-Generated 2026-08-17 20:24. **Re-runnable**: `python3 /tmp/claude-620771/gen_dflt_latest_doc.py`.
+Generated 2026-08-18 06:25. **Re-runnable**: `python3 /tmp/claude-620771/gen_dflt_latest_doc.py`.
 
-**Status: 22/23 `dflt` complete, 21/23 `latest` complete.** This file regenerates as arms land; re-run the generator rather than trusting a stale copy.
+**Status: 23/23 `dflt` complete, 23/23 `latest` complete.** This file regenerates as arms land; re-run the generator rather than trusting a stale copy.
 
+
+> ⚠️ **`512x512x512` `dflt` (322,144, +109.6%) hit the desync-timeout trap** — a group's cores drifted apart, every remote load then timed out instead of merging, and the barrier serialised the fleet behind it (1,935 timeouts, 2,253 bankfull bypasses; `bar_max` 55,704 cycles). The `latest` arm of the same shape, at verified-identical parameters, landed at 152,639 (-0.7% vs reference). Do not read this row as a configuration result. See `gemm_results_vs_nofeature.txt`.
 ## What these arms measure, and why neither has been run before
 
 Every prior arm in this campaign pins `group_mshr_hold_prescale_w=0` for cycle-accurate one-knob
@@ -38,7 +40,7 @@ negative is faster.
 
 | M×N×P | ideal | baseline | p=0 twin | **dflt (p=4)** | util | Δ base | **latest (CSR,p=4)** | util | Δ base |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 128x1024x512 | 65,536 | 67,693 | 67,005 | **67,860** | 96.6% | +0.2% | **_run_** | — | — |
+| 128x1024x512 | 65,536 | 67,693 | 67,005 | **67,860** | 96.6% | +0.2% | **68,085** | 96.3% | +0.6% |
 | 256x1024x256 | 65,536 | 68,253 | 68,410 | **67,887** | 96.5% | -0.5% | **68,047** | 96.3% | -0.3% |
 | 128x512x512 | 32,768 | 34,489 | 34,041 | **34,301** | 95.5% | -0.5% | **34,743** | 94.3% | +0.7% |
 | 256x512x256 | 32,768 | 34,821 | 34,547 | **34,671** | 94.5% | -0.4% | **34,603** | 94.7% | -0.6% |
@@ -47,7 +49,6 @@ negative is faster.
 | 256x512x512 | 65,536 | 71,218 | 71,116 | **74,720** | 87.7% | +4.9% | **74,918** | 87.5% | +5.2% |
 | 512x512x128 | 32,768 | 38,325 | 38,885 | **37,732** | 86.8% | -1.5% | **37,848** | 86.6% | -1.2% |
 | 128x128x512 | 8,192 | 9,792 | 9,401 | **9,514** | 86.1% | -2.8% | **9,512** | 86.1% | -2.9% |
-| 512x512x512 | 131,072 | 153,707 | 154,734 | **_run_** | — | — | **_run_** | — | — |
 | 512x256x256 | 32,768 | 37,632 | 38,260 | **38,652** | 84.8% | +2.7% | **37,412** | 87.6% | -0.6% |
 | 256x128x256 | 8,192 | 10,014 | 9,944 | **9,794** | 83.6% | -2.2% | **9,842** | 83.2% | -1.7% |
 | 512x256x512 | 65,536 | 78,314 | 79,653 | **78,424** | 83.6% | +0.1% | **78,993** | 83.0% | +0.9% |
@@ -61,15 +62,16 @@ negative is faster.
 | 256x32x512 | 4,096 | 6,752 | 6,598 | **6,804** | 60.2% | +0.8% | **6,564** | 62.4% | -2.8% |
 | 512x32x512 | 8,192 | 16,238 | 15,088 | **13,836** | 59.2% | -14.8% | **15,365** | 53.3% | -5.4% |
 | 256x32x256 | 2,048 | 4,081 | 3,771 | **3,846** | 53.3% | -5.8% | **3,667** | 55.8% | -10.1% |
+| 512x512x512 | 131,072 | 153,707 | 154,734 | **322,144** | 40.7% | +109.6% | **152,639** | 85.9% | -0.7% |
 
 ## Summary
 
-- **`dflt` utilisation, 22 shapes so far**: median **83.6%**, range 53.3%–96.6%. (Baseline's median over the same 22 shapes: **82.7%**.)
-- **`latest` utilisation, 21 shapes so far**: median **83.2%**, range 53.3%–96.3%.
-- **Prescaler cost (`dflt` vs its `p=0` twin), 22 shapes so far**: mean **-0.19%**, median **+0.49%**, range -8.30% to +5.07%.
-  Not uniform — 4 of 22 exceed ±3%; treat as a per-shape effect, not a flat tax, until the full 23 land.
-- **`dflt` vs 2026-08-03 baseline**: median **-0.97%**, 15/22 faster.
-- **`latest` vs baseline**: median **-1.24%**, 14/21 faster.
+- **`dflt` utilisation, 23 shapes so far**: median **83.6%**, range 40.7%–96.6%. (Baseline's median over the same 23 shapes: **83.7%**.)
+- **`latest` utilisation, 23 shapes so far**: median **84.0%**, range 53.3%–96.3%.
+- **Prescaler cost (`dflt` vs its `p=0` twin), 23 shapes so far**: mean **+4.52%**, median **+0.52%**, range -8.30% to +108.19%.
+  Not uniform — 5 of 23 exceed ±3%; treat as a per-shape effect, not a flat tax, until the full 23 land.
+- **`dflt` vs 2026-08-03 baseline**: median **-0.61%**, 15/23 faster.
+- **`latest` vs baseline**: median **-0.69%**, 15/23 faster.
 
 ## `512x256x512` — RESOLVED: the collapse is specific to `prescale_w = 0`
 

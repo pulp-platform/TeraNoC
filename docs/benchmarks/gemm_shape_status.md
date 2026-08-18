@@ -1,6 +1,6 @@
 # GEMM shape status — every shape, every phase, side by side
 
-Generated 2026-08-17 10:53. **Re-runnable**: `python3 scripts/gen_shape_status.py`.
+Generated 2026-08-18 03:48. **Re-runnable**: `python3 scripts/gen_shape_status.py`.
 
 
 The other `gemm_results_*.md` files are a **chain**: each measures one phase against the phase
