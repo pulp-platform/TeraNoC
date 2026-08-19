@@ -1,5 +1,10 @@
 TeraNoC RTL [VPERF] -- 4x4, terapool_spatz4_fpu, matmul_gvsoc_probe.elf (256x32x256, e32/m2)
 cores=256  benchmark window win=3845 cycles (identical on every core)
+TOTAL BENCHMARK: the run reports 4188 cycles for the kernel; the 3845-cycle VPERF window is the
+software-delimited timed region (csr_trace_any_global set at kernel entry, cleared at exit), so it
+excludes init and verification. Gate any comparison at the SAME software markers, not at absolute
+cycle numbers. On the 1000-cycle probe grid the window brackets as: pre->bench at cyc 22000, last
+bench sample 25000, bench->pre at 26000.
 
 FLEET MEANS
   win            mean=3845.0      min=3845     max=3845    

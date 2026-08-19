@@ -1,0 +1,44 @@
+TeraNoC RTL [MSHRLIFE] -- Request D, 4x4 terapool_spatz4_fpu, matmul_gvsoc_probe.elf (256x32x256)
+Config pinned to the [VPERF] A+B run: all 91 defines verified identical.
+
+SPAN RECONCILIATION (the check the probe exists to make)
+  hold   =  46.93 cyc   alloc (mshr_q_valid rises) -> request issued (mshr_q[e].issued rises)
+  flight =  22.37 cyc   issued -> FIRST response beat (|mshr_rb_we[e])
+  drain  =  66.11 cyc   first beat -> entry freed (mshr_q_valid falls)
+  -----------------------------------
+  sum    = 135.41
+  life   = 135.41 cyc   stamped INDEPENDENTLY (alloc -> freed)
+  residual 0.00 (0.0% of life)  -> spans are disjoint and complete; safe to compare
+  freed_without_beat = 0
+
+BY CLASS (a pooled drain mean is NOT comparable against a per-burst-entry number)
+  single entries (burst_len==1): n=8,690  mean drain = 108.46 cyc
+  burst  entries (burst_len >1): n=9,072  mean drain =  25.55 cyc
+  burst beats per entry = 145,152 / 9,072 = 16.00 exactly (no response-cache dilution)
+  cyc per beat over the drain span = 1.597
+
+BEAT ARRIVAL SPACING (first beat -> LAST beat; arrival only, excludes subscriber service)
+  entries = 9,072
+  mean first-to-last span = 23.68 cyc
+  mean beats per entry    = 16.00
+  RATE within an entry    = (145,152 - 9,072) / 214,788 = 0.634 beats/cyc
+
+  Beats counted with $countones(mshr_rb_we[e]), not one-per-cycle: with DrainBeats=2 a cycle can
+  capture two, and counting cycles would understate the rate by up to 2x.
+
+>>> COMPARISON WITH THE GVSOC MODEL, AND THE SURPRISE
+      RTL   0.634 beats/cyc within an entry
+      model 0.96                              -> the MODEL is ~1.5x FASTER per entry
+
+  This REFUTES the prediction (~2.0) made before the run. The RTL does not win by making one
+  burst's beats return quickly; per entry it is slower than the model.
+
+  It reconciles with the core-side result (RTL 2.00 words/commit-cycle vs model 1.00) only through
+  CONCURRENCY: RTL throughput comes from many slow entries overlapping, not from any single entry
+  being fast. Per-entry return width and aggregate throughput are different axes, and the RTL wins
+  on the second while losing on the first.
+
+⚠️ SCOPE: remote, ENTRY-CAPTURED bursts only. Bypassed bursts have no entry (mshr_tag=0) and are
+invisible here -- and they are 50.5% of this workload. Because a burst bypasses exactly when banks
+are full, entry-captured bursts are the UNCONGESTED subset, so 0.634 is if anything optimistic.
+Intra-group bursts never reach the MSHR at all.

@@ -1,0 +1,17 @@
+gx,gy,inst,MshrNum,hold_n,hold_sum,flight_n,flight_sum,drain_n,drain_sum,life_n,life_sum,freed_without_beat
+0,0,mempool_tb.dut.i_mempool_cluster.gen_groups_x[0].gen_groups_y[0].gen_rtl_group.i_group.i_mempool_group.gen_group_mshr.i_group_mshr.gen_mshr_lifetime,64,816,5888,816,18896,816,18047,816,42831,0
+0,1,mempool_tb.dut.i_mempool_cluster.gen_groups_x[0].gen_groups_y[1].gen_rtl_group.i_group.i_mempool_group.gen_group_mshr.i_group_mshr.gen_mshr_lifetime,64,1124,95625,1124,21249,1124,128018,1124,244892,0
+0,2,mempool_tb.dut.i_mempool_cluster.gen_groups_x[0].gen_groups_y[2].gen_rtl_group.i_group.i_mempool_group.gen_group_mshr.i_group_mshr.gen_mshr_lifetime,64,1127,23761,1127,24061,1127,91561,1127,139383,0
+0,3,mempool_tb.dut.i_mempool_cluster.gen_groups_x[0].gen_groups_y[3].gen_rtl_group.i_group.i_mempool_group.gen_group_mshr.i_group_mshr.gen_mshr_lifetime,64,1129,30199,1129,23912,1129,57382,1129,111493,0
+1,0,mempool_tb.dut.i_mempool_cluster.gen_groups_x[1].gen_groups_y[0].gen_rtl_group.i_group.i_mempool_group.gen_group_mshr.i_group_mshr.gen_mshr_lifetime,64,1129,28303,1129,23719,1129,87689,1129,139711,0
+1,1,mempool_tb.dut.i_mempool_cluster.gen_groups_x[1].gen_groups_y[1].gen_rtl_group.i_group.i_mempool_group.gen_group_mshr.i_group_mshr.gen_mshr_lifetime,64,1149,97765,1149,25179,1149,78344,1149,201288,0
+1,2,mempool_tb.dut.i_mempool_cluster.gen_groups_x[1].gen_groups_y[2].gen_rtl_group.i_group.i_mempool_group.gen_group_mshr.i_group_mshr.gen_mshr_lifetime,64,1175,141952,1175,26442,1175,82490,1175,250884,0
+1,3,mempool_tb.dut.i_mempool_cluster.gen_groups_x[1].gen_groups_y[3].gen_rtl_group.i_group.i_mempool_group.gen_group_mshr.i_group_mshr.gen_mshr_lifetime,64,1144,52852,1144,25368,1144,72710,1144,150930,0
+2,0,mempool_tb.dut.i_mempool_cluster.gen_groups_x[2].gen_groups_y[0].gen_rtl_group.i_group.i_mempool_group.gen_group_mshr.i_group_mshr.gen_mshr_lifetime,64,1141,33914,1141,28091,1141,70989,1141,132994,0
+2,1,mempool_tb.dut.i_mempool_cluster.gen_groups_x[2].gen_groups_y[1].gen_rtl_group.i_group.i_mempool_group.gen_group_mshr.i_group_mshr.gen_mshr_lifetime,64,1157,13557,1157,28186,1157,60153,1157,101896,0
+2,2,mempool_tb.dut.i_mempool_cluster.gen_groups_x[2].gen_groups_y[2].gen_rtl_group.i_group.i_mempool_group.gen_group_mshr.i_group_mshr.gen_mshr_lifetime,64,1143,44024,1143,25167,1143,74688,1143,143879,0
+2,3,mempool_tb.dut.i_mempool_cluster.gen_groups_x[2].gen_groups_y[3].gen_rtl_group.i_group.i_mempool_group.gen_group_mshr.i_group_mshr.gen_mshr_lifetime,64,1145,17568,1145,26511,1145,66411,1145,110490,0
+3,0,mempool_tb.dut.i_mempool_cluster.gen_groups_x[3].gen_groups_y[0].gen_rtl_group.i_group.i_mempool_group.gen_group_mshr.i_group_mshr.gen_mshr_lifetime,64,1167,111885,1167,27036,1167,82511,1167,221432,0
+3,1,mempool_tb.dut.i_mempool_cluster.gen_groups_x[3].gen_groups_y[1].gen_rtl_group.i_group.i_mempool_group.gen_group_mshr.i_group_mshr.gen_mshr_lifetime,64,1164,31272,1164,25560,1164,64491,1164,121323,0
+3,2,mempool_tb.dut.i_mempool_cluster.gen_groups_x[3].gen_groups_y[2].gen_rtl_group.i_group.i_mempool_group.gen_group_mshr.i_group_mshr.gen_mshr_lifetime,64,1147,31885,1147,25392,1147,84950,1147,142227,0
+3,3,mempool_tb.dut.i_mempool_cluster.gen_groups_x[3].gen_groups_y[3].gen_rtl_group.i_group.i_mempool_group.gen_group_mshr.i_group_mshr.gen_mshr_lifetime,64,905,73062,905,22570,905,53824,905,149456,0
