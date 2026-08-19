@@ -1,5 +1,62 @@
 # fp16 sp-fmatmul deadlock — investigation state
 
+## 2026-08-19 (late, FINAL) — ROOT CAUSE: 16-bit vector STORES wedge; e16 loads are fine
+
+Established from per-hart execution traces, not inference. Counting how many of the 256 harts ever
+executed each PC in the hung `build_fp16b` run:
+
+| instruction | PC | harts that executed it | executions |
+|---|---|---|---|
+| `vle16.v` (load) | `0x80000348` | **256 / 256** | 512 |
+| `vle16.v` (load) | `0x80000394` | **256 / 256** | 512 |
+| `vse16.v` (store) | `0x800002e4` | **2 / 256** | 4 |
+| `vse16.v` (store) | `0x800002f0` | **2 / 256** | 4 |
+
+**254 of 256 harts have their last retired instruction at `0x800002d8`** — `addi s10,s10,8`, the
+instruction immediately before the first `vse16.v`:
+
+```
+800002d4:  vfmacc.vf  v0, ft7, v20     <- accepted, executed twice
+800002d8:  addi       s10, s10, 8      <- LAST RETIRED, on 254/256 harts
+800002dc:  slli       a2, a2, 1
+800002e0:  add        a2, s5, a2
+800002e4:  vse16.v    v0, (a2)         <- WEDGE
+```
+
+**Control:** in the fp32 kernel all **256/256** harts reach and pass `vse32.v` at the structurally
+identical point, and the run completes at 97.6% FPU utilisation. Instruction retirement is
+neck-and-neck up to the wedge (fp16 3,365 vs fp32 3,151 retired by cycle 12,238), so nothing is
+merely slow — it is a hard stop at the first 16-bit vector store.
+
+### Why every earlier hypothesis was on the wrong side
+
+`use_port0_burst_req` requires `is_load` (`spatz_vlsu.sv:224`). **Stores never take the burst path
+at all.** So the burst gate, its five conjuncts, 64-byte alignment, `SPATZ_VLSU_BURST_EW16`,
+`flh`-vs-`flw`, and the MSHR read-coalescing story could never have explained a store hang. This
+was derivable from the code hours before it was derived.
+
+### Leading suspect
+
+An e32 store presents a **full** byte strobe (`4'b1111`); an e16 store presents a **half** one
+(`4'b0011` / `4'b1100`). A partial-strobe write may never have been exercised end to end in this
+design. Checked by hand and *not* obviously wrong so far: strobe generation
+(`spatz_vlsu.sv:1821-1833` — the single-element branch has a correct `EW_16` mask of 3; the generic
+branch is byte-delta based) and `mem_counter_delta` (`:1249-1259`, all arms in bytes). Remaining
+surfaces: the store VRF-read handshake at e16, the store commit/ROB path, and downstream
+propagation of a partial strobe through tile → group → MSHR → bank (including whether anything
+treats `strb` as a full-word qualifier, which would be a hang rather than corruption).
+
+### Method note
+
+The stuck PC came from the per-hart `trace_hart_0x*.dasm` files that a hung run leaves on disk —
+no new simulation, no waveform, no GUI. Reading them should have been the *first* step; the whole
+investigation reasoned about the memory system for hours without ever establishing where the
+program actually was. GCC `objdump` cannot decode vector instructions and prints them as raw words
+(`0x2065027`); use `install/llvm/bin/llvm-objdump -d --mattr=+m,+f,+d,+v,+zfh`.
+
+---
+
+
 ## 2026-08-19 (late) — THE BURST PATH IS NOT THE VARIABLE; earlier sections are superseded
 
 **The single decisive experiment.** Same 512x512x512 shape, same RTL, only the element width and

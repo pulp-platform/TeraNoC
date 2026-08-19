@@ -9851,3 +9851,21 @@ and VLSU-commit hypotheses.
 
 **Status.** Hang still unexplained. Next: localise the stuck PC — the whole investigation so far
 reasoned about the memory system without ever reading where the program actually is.
+
+## 2026-08-19 (late, cont.) — ROOT CAUSE: e16 vector STORES wedge, e16 loads are fine
+
+**Result.** Per-hart trace counts across all 256 cores: `vle16.v` executed by 256/256 harts (512
+executions each); `vse16.v` by 2/256 (4 executions). 254/256 harts stop at the instruction
+immediately before the first `vse16.v`. fp32 control passes `vse32.v` on 256/256.
+
+**Why every earlier hypothesis missed.** `use_port0_burst_req` requires `is_load`, so stores never
+take the burst path — the burst gate could not have explained a store hang under any conjunct
+values. Derivable from code quoted hours earlier.
+
+**Method.** The stuck PC came from `trace_hart_0x*.dasm` files a hung run already leaves on disk —
+no new sim, no waveform. Should have been step one. Note GCC objdump cannot decode vector
+instructions; use `install/llvm/bin/llvm-objdump --mattr=+m,+f,+d,+v,+zfh`.
+
+**Next.** Leading suspect is partial byte strobes: e32 stores present 4'b1111, e16 stores 4'b0011 /
+4'b1100, likely never exercised end to end. Agents auditing store VRF-read, store commit/ROB, and
+downstream strobe propagation.
