@@ -332,3 +332,28 @@ Bypassed bursts also reach both tile response ports by a **different** mechanism
 round-robin channel hash plus the bypass-retag side table (`:883-905`) — not ParityDrain proper. So
 there are two service classes with two distinct 2-wide mechanisms, and neither `[MSHRLIFE*]` probe
 observes the second.
+
+### ⚠️ 256x32x256 is INSENSITIVE to concurrency effects — do not A/B channel changes on it alone
+
+Reported by the GVSOC side after building the transport half of ParityDrain in their model. Their
+measured deltas against the RTL goldens:
+
+| shape | before | after | change |
+|---|---|---|---|
+| 128x128x512 | +64.7% | +38.8% | large |
+| 512x512x128 | +16.2% | −1.4% | large |
+| **256x32x256 (our reference)** | — | — | **0.5%** (6,185 → 6,153) |
+
+The reference shape has little **concurrent** burst traffic, so a change that spreads beats of
+*different* bursts across channels has almost nothing to relieve there. Any channel-assignment or
+port-arbitration A/B run only on 256x32x256 will look inert whether or not it works.
+
+**And the distinction that produced it is worth keeping separately:** alternating channels did
+*not* change the per-burst beat rate (still 1.00/cycle) — one burst's beats still serialise at the
+requester — yet wall-clock improved ~15% on the concurrent shapes. **Contention relief and
+per-burst width are different quantities**, and an unchanged rate is not evidence a
+channel/arbitration change did nothing. Reading the flat rate as a refutation would have reverted a
+change that halved their calibration error.
+
+Pick a shape with real concurrent burst traffic when the mechanism under test is about sharing a
+resource between *different* transactions.
