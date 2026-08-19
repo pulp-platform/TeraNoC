@@ -10,8 +10,9 @@ assign pending_results = result_tag.wb ? (spatz_req.vtype.vsew == EW_32 ? 4'hf :
 The **selector** (`result_tag.wb`) belongs to the instruction whose result is at the FU output.
 The **element width** (`spatz_req.vtype.vsew`) is read from the **live incoming request**. With
 `spatz_ipu.sv:12 Pipeline = 1`, those are different instructions whenever the pipe is non-empty.
-`vfu_tag_t` (`:66`) carries `.wb`, `.id`, `.vd_addr`, `.last` — but **not** the element width, so
-there is nothing to read the correct width from, and the code reaches for the live request instead.
+`vfu_tag_t` (`:49-66`) **already carries `vsew`** (`:52`), captured from `spatz_req.vtype.vsew` at
+issue (`:539`) and travelling with the operands through the pipeline. The correct width was right
+there and simply was not used.
 
 ### The mechanism
 
@@ -50,11 +51,25 @@ back-pressure became visible, exactly as the earlier correction suspected. fp32 
 both the selector and the width come from `spatz_req` at issue — which is why only `:141` is a
 hazard.
 
-### Fix shape
+### The fix — one word
 
-Carry the element width (or the resolved mask) in `vfu_tag_t` so `pending_results` uses the
-**result's own** width instead of the live request's. Note the `EW_32 ? 4'hf : 8'hff` idiom is also
-wrong for `EW_8` and `EW_16` on their own terms — it should be width-derived, not a two-way select.
+```diff
+-assign pending_results = result_tag.wb ? (spatz_req.vtype.vsew == EW_32 ? 4'hf : 8'hff) : '1;
++assign pending_results = result_tag.wb ? (result_tag.vsew      == EW_32 ? 4'hf : 8'hff) : '1;
+```
+
+The invariant being restored: **whatever mask decided which lanes to FEED must be the mask that
+decides when they are all DONE.** `valid_operations` (`:137`) builds the feed mask from
+`spatz_req` at issue; `result_tag.vsew` is that same instruction's width carried forward, so the
+two now refer to one instruction instead of two.
+
+Applied and building as `build_vfufix`, which then re-runs the *same* probe ELF that wedges on
+unfixed RTL, followed by the real fp16 matmul at 256x32x256.
+
+Residual, deliberately not changed in the same edit: the `EW_32 ? 4'hf : 8'hff` two-way select is
+independently questionable for `EW_8`/`EW_16` (it yields an 8-byte mask for every non-`EW_32`
+width). It is *self-consistent* between `:137` and the fixed `:141`, so it is not this bug, and
+folding a second change into the fix would make the A/B unreadable.
 
 ### Confirming test
 
