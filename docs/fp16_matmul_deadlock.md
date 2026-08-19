@@ -14,6 +14,50 @@ Skipping the warm-up only DELAYS the wedge by ~4,000 cycles; the run reaches 86.
 utilisation and 64% cumulative, then dies anyway. Changing the warm-up's N to another legal
 value does not even delay it. **Any "fix" that targets the warm-up is papering over the bug.**
 
+### Warm-up N sweep: MEASURED, and it falsifies the stride-parity hypothesis
+
+| ICACHE_WARMUP_N | A-row stride (words) | parity | hang cycle | reached benchmark? |
+|---:|---:|---|---:|---|
+| 6 (default) | 3 | **odd** | 13,000 | no |
+| 8 | 4 | even | **13,000** | no |
+| 16 | 8 | even | **13,000** | no |
+| (warm-up disabled) | n/a | n/a | 17,000 | yes, 86.2% util |
+
+An analysis had predicted that the "N must be EVEN" rule is written in ELEMENTS while the
+property it protects is in 32-BIT WORDS -- so at fp16 the real requirement would be N = 0 (mod 4),
+making 6 (= 2 mod 4) the worst legal choice and 8 the fix. **The measurement refutes it:** 8 and
+16 both have even word strides and both deadlock at the identical cycle as 6.
+
+The stride-parity observation is still a REAL latent contract bug worth fixing on its own merits
+(see below), but it is NOT the cause of this deadlock.
+
+**Three variants, three different signatures** -- which is itself a clue that the wedge is a
+downstream consequence rather than a single deterministic fault:
+
+| N | stuck reqs | fingerprint |
+|---:|---:|---|
+| 6 | 2,385 | `p=1 id=62/63`, address in `b` (vector burst port) |
+| 8 | 4,876 | `p=0 id=0/1`, address in `a` (scalar port) |
+| 16 | **0** | none at all |
+
+### Genuine findings from the warm-up analysis (independent of the deadlock)
+
+1. **`ICACHE_WARMUP_N` = 6 is the exact minimum for full I-cache coverage.** Verified against the
+   disassembly: `matmul_8xVL` compiles to six basic blocks, and W=2 misses 340 bytes, W=4 misses
+   118 bytes, W>=6 (even) covers every block the real N=64 run executes. The existing comment is
+   correct and 8 is genuinely legal.
+2. **ODD `ICACHE_WARMUP_N` is ILLEGAL and UNGUARDED.** The loop-exit test is `beq` against an
+   even bound, so for odd W the break never fires and the loop exits via the back-edge with
+   n = W+1, having loaded W+2 B rows -- reading up to 2 rows PAST `b`, which is immediately
+   followed by `c` in memory. `main.c` guards only the REAL N (`gemm_l.N % 2`), so
+   `-DICACHE_WARMUP_N=7` compiles and runs silently corrupt.
+3. **The "even N" rule is element-based but protects a word-based property.** At fp32 the word
+   stride IS N so "even" suffices; when `elem_t` halved the rule silently weakened by 2x. Worth
+   restating in words, independently of this bug.
+4. **`ICACHE_WARMUP_N` is invisible to sweep hygiene** -- it is a bare `#ifndef` in main.c, never
+   emitted by `runtime.mk`, so a gate that diffs the emitted define set will not see it change.
+   Pass it via `EXTRA_DEFINES` and delete the ELF first.
+
 ### The stuck fingerprint is IDENTICAL across every arm
 
 ```
