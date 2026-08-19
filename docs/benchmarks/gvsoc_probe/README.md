@@ -224,3 +224,30 @@ directly comparable rather than being from different workloads.
 compute. The verified cycle identity is
 `win = pair_commit + wait_beats + no_insn + store/residual + vrf_bp`, which is a **cycle-accounting**
 identity, not a latency decomposition. Do not sum it into an L breakdown.
+
+---
+
+## Response-path widths — three stages, TWO roots (not one)
+
+Recorded because it was misread once and the misreading nearly became another team's design.
+
+| stage | width | derived from |
+|---|---|---|
+| target-side burst expander (request → per-bank reads) | **3** | `RemoteBurstIssueWidth = NumRemoteRespPortsPerTile = 1 + NOC_RESP_CHANNEL_NUM` (`mempool_tile.sv:71`) |
+| NoC response channels (beat return) | **2** | `NumRemoteRespPortsPerTile-1:1` — index 0 is the *local* port and is excluded from every response array (`mempool_pkg.sv:505`, `mempool_group.sv:88-95`) |
+| MSHR ParityDrain receive + core-complex `NumRespPorts` | **2** | `MshrDrainBeats = GROUP_MSHR_DRAIN_BEATS` (`mempool_tile.sv:77`) |
+
+⚠️ **The "single source of truth" comment at `mempool_tile.sv:72-76` documents `MshrDrainBeats` on
+line 77, NOT `RemoteBurstIssueWidth` on line 71** — it sits between the two declarations. So
+`MshrDrainBeats` is one root for two stages (MSHR drain + core resp ports), while the expander has
+a *different* root. There are two roots here, not one.
+
+All three expander lanes are genuinely wired — `mempool_tile.sv:1063-1068` maps
+`lane = 0 .. RemoteBurstIssueWidth-1` with no gaps — so the 3 is not a dangling array. Beat
+**production** at the target is 3-wide; beat **return** is 2-wide. The binding constraint on
+arrivals at a requester's MSHR should therefore be the return path, and a model that takes
+`RemoteBurstIssueWidth` as its emission width is reading the wrong stage's number.
+
+⚠️ ParityDrain has hard preconditions (`mempool_tile.sv:91-95`): it `$error`s unless
+`NumCoresPerTile == 1` and `NumDataPortsPerCore >= 3`, because the `core_id+(b&1)` retag assumes
+one core per tile whose data port 1 is the burst-issuing VLSU port 0.
