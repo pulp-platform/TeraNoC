@@ -1,5 +1,51 @@
 # fp16 sp-fmatmul deadlock — investigation state
 
+## ✅ CONFIRMED BY CONTROLLED EXPERIMENT — `spatz_vfu.sv:141`
+
+Three fenced phases, controls first, on **unfixed** RTL (`build_vfutag`). Verdicts were written
+down *before* the run, including the two outcomes that would have refuted the hypothesis:
+
+| phase | content | predicted | result |
+|---|---|---|---|
+| **A** | e16 vector ops, **no** adjacent `mul` | pass | ✅ `A_E16_NO_MUL_OK` |
+| **B** | `mul` + **e32** vector op | pass | ✅ `B_MUL_PLUS_E32_OK` |
+| **C** | `mul` + **e16** vector op | **wedge** | ✅ **WEDGED, 256/256 harts** |
+
+The wedge is at the phase-C entry, all 256 cores:
+
+```
+80000480: li       a0, 64                     <- 173 harts stop here
+80000484: vsetvli  a0, a0, e16, m2, ta, ma    <-  82 harts stop here
+80000488: mul      a0, s2, s3                 <- scalar op -> VFU at EW_32
+8000048c: vfadd.vv v6, v0, v0                 <-   1 hart  stops here (e16 op)
+```
+
+`raw_sum = 256000` against `raw_cap = 256000` — **100% pegged**, a genuine hang, not the
+tracing-disabled false positive that the classifier used to produce.
+
+### What this establishes
+
+**Neither e16 alone nor `mul` alone breaks anything — only the pairing.** Phase A proves e16 vector
+work is fine. Phase B proves a `mul` offloaded to the VFU is fine. Phase C differs from B in one
+respect only: the `vsetvli` before it sets `e16` instead of `e32`. That is exactly the condition
+under which `pending_results` (`:141`) reads the live `spatz_req.vtype.vsew` to judge a result
+belonging to an *earlier* instruction, builds `8'hff` where only `4'hf` can ever arrive, and leaves
+`&(result_valid | ~pending_results)` false forever.
+
+### Method note
+
+The controls are what make this interpretable. A bare "fp16 hangs" observation is consistent with a
+dozen mechanisms; A and B passing narrows it to the pairing and excludes both single-variable
+explanations in the same run. Registering the refuting outcomes in advance also mattered — an
+earlier false HUNG on this very arm (`raw_sum=199`, tracing simply not enabled) would otherwise
+have read as a phase-A wedge, i.e. as a refutation of a correct hypothesis.
+
+Fix verification (`build_vfufix`, same probe ELF, one-word change) is still running; it had cleared
+phase A and was executing phase B when the unfixed arm died.
+
+---
+
+
 ## 2026-08-19 — ROOT CAUSE: `spatz_vfu.sv:141`, an element-width tag hazard
 
 ```systemverilog
