@@ -9816,3 +9816,38 @@ deadlock at cyc 13000-14000.
 **Deliverable unaffected.** `spatz_vlsu_burst_ew16` remains proven inert on fp32: arms A and D are
 byte-identical over **305 probe-periods** across INSNG/FPU/STALLG/MSHRG/MEMOG, both opening the
 timed region at exactly cyc=53000 (`scripts/check_arm_equivalence.py`).
+
+## 2026-08-19 (late) — fp16 hang: the burst path is NOT the variable; two findings retracted
+
+**Purpose.** Root-cause the fp16 matmul hang that had defeated warm-up, dual_load, stride-parity
+and VLSU-commit hypotheses.
+
+**Implementation / experiments.**
+- Ran the knob-off arm against knob-on at a fixed shape. `SPATZ_VLSU_BURST_EW16` read out of each
+  build's `compile.tcl` rather than inferred from directory names.
+- Built a fast repro: shape moved to 256x32x256 via `<app>/script/matmul.json`, header regenerated
+  with `gen_data.py` (the build does NOT auto-regenerate it), ELF copied to a private absolute
+  path `hardware/matmul_fp16_small.elf` so no later software build can invalidate a running sim.
+- Added `hardware/scripts/stallg_state.sh` — a correct `[STALLG]` reader.
+- Added a sim-only `[BURSTWHY]` probe to `spatz_vlsu.sv` (prints all five burst-eligibility
+  conjuncts per load instruction). Now lower value given the result below, but harmless.
+
+**Result.**
+- **Decisive:** fp16 hangs with the burst knob OFF (71,000) *and* ON (102,000), while fp32 at the
+  same 512³ shape and same RTL runs healthy at 97.6% FPU utilisation. With the knob off, e16 takes
+  the original legacy path — so the burst work is not implicated and the burst gate is irrelevant
+  to this hang. **This should have been the first experiment.**
+- **Retracted two findings** as instrument artifacts, against a healthy fp32 control: "every stuck
+  entry has `burst_len=1`" (fp32: 31,496/31,496) and "16 ROB entries per address on the vector
+  port" (fp32: 15.61 mean, max 16). Neither distinguishes fp16 from fp32. The control had to come
+  from the `[CMS WARN]` stream of a *running* arm — a cleanly-finished run has nothing in flight at
+  exit, so the end-of-run dump structurally cannot serve as one.
+- **One real RTL bug found, probably separate:** `mempool_group_mshr.sv:2223` "MSHR clock gate
+  dropped a resp_buf write" at cycle 11,376. Not silenced — the knob-off arm hangs without it ever
+  firing, so it is very likely a second defect rather than the hang.
+- **Instrument bug fixed:** `[STALLG]` prints one CSV field per group; parsing only field 0 called a
+  healthy run hung (cost one wrong "the GVSOC run is hung" call). `stallg_state.sh` sums all groups
+  and separates a true hang (0/16 retiring **and** `raw>0`) from pre-trace (0/16 with `raw==0`).
+
+**Status.** Hang still unexplained. Next: localise the stuck PC — the whole investigation so far
+reasoned about the memory system without ever reading where the program actually is.

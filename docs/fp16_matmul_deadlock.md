@@ -1,6 +1,78 @@
 # fp16 sp-fmatmul deadlock — investigation state
 
-## 2026-08-19 CONSOLIDATED FINDINGS (read this first; earlier sections are superseded)
+## 2026-08-19 (late) — THE BURST PATH IS NOT THE VARIABLE; earlier sections are superseded
+
+**The single decisive experiment.** Same 512x512x512 shape, same RTL, only the element width and
+one knob differ. Knob value read out of each build's `compile.tcl`, not inferred from the
+directory name:
+
+| build | `SPATZ_VLSU_BURST_EW16` | workload | result |
+|---|---|---|---|
+| `build_fp32ref` | 0 | fp32 512³ | **healthy** — cyc 100,000, `bench`, 16/16 groups retiring, **97.6% FPU util** |
+| `build_fp16nb` | **0** | fp16 512³ | **HANG** at 71,000 — 0/16 groups retiring, `raw` pegged |
+| `build_fp16b` | **1** | fp16 512³ | **HANG** at 102,000 — same signature |
+
+With the knob at 0, e16 loads take the **original legacy multi-port word-interleaved path** — the
+code exactly as it was before any burst work. It still hangs. Therefore the burst gate, its five
+`use_port0_burst_req` conjuncts (`spatz_vlsu.sv:223-234`), and 64-byte base alignment are all
+**irrelevant to this hang**, and the `spatz_vlsu_burst_ew16` change is not implicated.
+
+This should have been the *first* experiment. Hours went into the burst gate before it was run.
+
+### Retractions — two findings were instrument artifacts, not signal
+
+Both came from the core-memory scoreboard (`[CMS FINAL]`) dump of the fp16 arm, and both are
+**withdrawn**. The healthy fp32 control (from the >1000-cycle `[CMS WARN]` stream of a *running*
+arm — a cleanly-finished run has nothing in flight at exit, so the end-of-run dump structurally
+cannot serve as the control):
+
+| reading | fp16 "evidence" | healthy fp32 control | verdict |
+|---|---|---|---|
+| every stuck entry has `burst_len=1` ⇒ bursts never engaged | 6,173 / 6,173 | **31,496 / 31,496** | artifact |
+| 16 ROB entries share one address on the vector port ⇒ per-beat offset lost | 14.93 mean, max 16 | **15.61 mean, max 16** | artifact — this is just how a burst appears at the CMS tap |
+
+Neither distinguishes fp16 from fp32. Also: the arm did not *hang*, it was **killed** by a real
+assertion, so its `[CMS FINAL]` list is a snapshot at the moment of death, not a picture of a wedge.
+
+### What actually survives
+
+- **The hang.** All 16 groups at `ins=0` with `raw` pegged. In the 512³ arms it occurs **before the
+  timed window opens** — no `[FPU] bench` line is ever printed.
+- **A genuine RTL bug, probably a second one.** `mempool_group_mshr.sv:2223`
+  `"MSHR clock gate dropped a resp_buf write: entry=1 slot=0"`, cycle 11,376. A `resp_buf` slot's
+  next-state differs from its current value while `mshr_rb_en[e][b]` is low, so the write is
+  silently dropped. **Do not silence this assertion** — it exists precisely to catch the
+  stale-data failure it is reporting. It is likely *not* the hang: `build_fp16nb` hangs without it
+  ever firing.
+- **The scalar port is healthy** (1.00 entries/address, same as fp32), so `flh` vs `flw` is closed.
+- **The software port is clean**: normalising types and diffing `main.c` and `kernel/sp-fmatmul.c`
+  against the fp32 originals yields only type substitutions.
+
+### Instrumentation fixed along the way
+
+`[STALLG]` prints **one CSV field per group**. A reader that parses only field 0 reports a healthy
+run as hung — group 0 is legitimately 0 in many periods. This produced a wrong "the GVSOC
+deliverable run is hung" call. Use `hardware/scripts/stallg_state.sh`, which sums all groups,
+strips QuestaSim's leading `# `, and separates `HUNG` (0/16 retiring **and** `raw>0`) from
+`IDLE/pre-trace` (0/16 with `raw==0`, i.e. tracing simply not enabled yet).
+
+### Next
+
+1. **Fast repro built** — `hardware/matmul_fp16_small.elf` (256x32x256, 142 KB vs 1.1 MB), so the
+   loop is minutes rather than hours. Shape lives in `<app>/script/matmul.json`; the header must be
+   regenerated manually with `python3 script/gen_data.py -c script/matmul.json` (the build does not
+   do it).
+2. **Localise the PC.** The whole investigation so far reasoned about the memory system without ever
+   reading where the program is stuck. That is the gap.
+3. Working hypothesis to test, not assume: this fork's VLSU additions (burst, ROB64,
+   ParityDrain/TwinROB0 2-wide commit, H1 runahead) were all developed and validated at e32 only,
+   and may have broken sub-word handling that upstream Spatz had working. Note `vl` is converted to
+   **bytes** early (`spatz_vlsu.sv:187-201`), so any later code treating it as elements — or
+   hardcoding a `>>2` word conversion — is a suspect.
+
+---
+
+## 2026-08-19 (earlier) — warm-up analysis (superseded by the knob-off experiment above)
 
 ### The warm-up is NOT the cause — the deadlock is in normal kernel operation
 
