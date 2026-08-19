@@ -151,9 +151,40 @@ with **one** nonblocking assignment per counter — several entries can hit the 
 cycle, and per-entry NBA updates to a shared accumulator would be silently lost to last-write-wins
 (the same reason the existing `gen_stats` block stages its increments).
 
+### ⚠️ PIN THE KNOBS — a bare `make` silently uses different ones
+
+`scripts/gemm_autotune.py` sets per-shape MSHR knobs via `extra_vlog_defs`; the `config/*.mk`
+file defaults are **different**. Launching a comparison run with a bare `make` therefore builds a
+*different machine* from the tuned run you are comparing against, with nothing to indicate it.
+
+That happened here: the first Request D build differed from the delivered A+B build in **five**
+defines, including the ones that directly set how long an entry is held:
+
+| define | A+B (tuned, 256x32x256) | bare `make` default |
+|---|---|---|
+| `GROUP_MSHR_HOLD_SUBS_SINGLE` | **8** | 4 |
+| `GROUP_MSHR_HOLD_SUBS_BURST` | **2** | 4 |
+| `GROUP_MSHR_MERGE_REQS` | **8** | 4 |
+| `GROUP_MSHR_BANK_SHIFT_SINGLE` | **5** | 9 |
+| `GROUP_MSHR_BANK_SHIFT_BURST` | **5** | 7 |
+
+Replicate the reference run's defines verbatim and **diff the FULL set**, not a hand-picked
+subset:
+
+```bash
+DEFS=$(grep -aoE '\+define\+GROUP_MSHR[A-Z_0-9]*=[0-9]+' build_<ref>/compile.tcl \
+       | sed 's/+define+/-D/' | sort -u | tr '\n' ' ')
+make ... buildpath=build_new extra_vlog_defs="$DEFS"
+# then, SAME pattern on both sides or the diff is meaningless:
+for d in build_<ref> build_new; do
+  grep -aoE '\+define\+[A-Z_0-9]+=[0-9]+' $d/compile.tcl | sed 's/+define+//' | sort -u > /tmp/$d.defs
+done
+diff /tmp/build_<ref>.defs /tmp/build_new.defs   # must be empty
+```
+
 ### Run
 
-`build_mshrlife`, config `terapool_spatz4_fpu` (4x4), preloading `hardware/matmul_gvsoc_probe.elf`
+`build_mshrlife3`, config `terapool_spatz4_fpu` (4x4), preloading `hardware/matmul_gvsoc_probe.elf`
 — **the same ELF and shape (256x32x256) as the Request A+B `[VPERF]` run**, so the two datasets are
 directly comparable rather than being from different workloads.
 
