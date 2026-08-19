@@ -71,6 +71,25 @@ independently questionable for `EW_8`/`EW_16` (it yields an 8-byte mask for ever
 width). It is *self-consistent* between `:137` and the fixed `:141`, so it is not this bug, and
 folding a second change into the fix would make the A/B unreadable.
 
+### Eliminated by RTL audit (17 agents, adversarially verified) — do not re-chase
+
+| surface | verdict |
+|---|---|
+| `spatz_mem_req.size` (`spatz_vlsu.sv:1863`) | **Dead silicon.** Declared at `spatz_pkg.sv:294`, driven here, and *never read* anywhere in the compiled tree — `spatz_mempool_cc.sv:279-296` wires addr/write/data/strb/id/burst_len and drops it; `mempool_pkg.sv` has no such field to carry it. So the memory system cannot distinguish an e16 store from an e32 one at all. It is also unconditional (no `is_load` qualifier), so if it mattered `vle16` would break too. |
+| VLSU byte arithmetic (`:1165` request partition, `:1086` commit partition) | **Clean, EW-invariant.** Both are byte-domain after the single conversion at `:190`; two elaboration `$error`s (`:1886`, `:1889`) force `MemDataWidth==ELEN` and `NrMemPorts==N_FU`, so the request-side and commit-side maxima are *identical expressions* at every `vsew`. Verified with a worked example and with parameters pinned from the failing build's own `compile.tcl` (NrMemPorts=4, MemDataWidthB=4, ELEN=32, VLEN=512). |
+| Fork features — ParityDrain/TwinROB0, H1 runahead, block ROB alloc | **Clean.** Every quantity is byte- or word-granular, never element-granular (`commit_pair_active` tests `commit_counter_q[0][2:0]` and a byte difference). |
+| Exact-equality commit completion (`:632-633`) | **Already refuted empirically.** The in-tree comment warns an e16 delta could overshoot into a permanent stall, but the sim-only `[VLSU OVERSHOOT]` probe added for exactly this fired **zero** times. |
+
+**Left open by the audit, and deliberately not chased:** `spatz_vlsu.sv:942`
+`mem_is_addr_unaligned = rs1[1:0] != 0`. The store address is `base + (j<<1)`, so at **odd `j`**
+it is 2 mod 4 — unaligned — which the e32 control (`<<2`) can never reach. That flips the store
+onto the single-element datapath (delta 2 instead of 4, width-dependent strobe at `:1821-1830`).
+Genuinely e16-only and genuinely different; the runtime parity of `j` was never verified.
+
+It does not need to be chased, because **phase C of the confirming test contains no memory traffic
+at all** — it is `mul` + `vfadd.vv` in a loop. If phase C wedges, every VLSU hypothesis above
+(including this one) is exonerated in a single measurement rather than one at a time.
+
 ### Confirming test
 
 `software/apps/spatz_apps/sp-vfu-ew-tag-probe` runs three fenced phases, controls first:
