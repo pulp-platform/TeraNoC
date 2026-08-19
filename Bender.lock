@@ -57,7 +57,7 @@ packages:
     - common_verification
     - idma
   fpnew:
-    revision: a8e0cba6dd50f357ece73c2c955d96efc3c6c315
+    revision: 841b19b9fc0148ee7cbf91c295e801c6bf21a421
     version: null
     source:
       Git: https://github.com/pulp-platform/cvfpu.git

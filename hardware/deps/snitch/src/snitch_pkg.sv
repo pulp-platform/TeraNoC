@@ -135,12 +135,20 @@ package snitch_pkg;
                     XF8     ? 8 :  // Xf8 ext.
                     0;             // Unused in case of no FP
 
+  // cvfpu v0.3.0: NUM_FP_FORMATS 6 -> 9 and fmt_logic_t is ASCENDING [0:8], so this
+  // CONCATENATION must be written to the full width -- a 6-bit literal would be padded on the
+  // index-0 side and shift every format by +3. Three new struct members are also mandatory in a
+  // named assignment pattern. MX and PACE are unused here.
   localparam fpnew_pkg::fpu_features_t FPU_FEATURES = '{
     Width:         fpnew_pkg::maximum(FLEN, 32),
     EnableVectors: XFVEC,
     EnableNanBox:  1'b0,
-    FpFmtMask:     {RVF, RVD, XF16, XF8, XF16ALT, XF8ALT},
-    IntFmtMask:    {XFVEC && XF8, XFVEC && (XF16 || XF16ALT), 1'b1, 1'b0}
+    //              FP32 FP64 FP16  FP8  FP16ALT  FP8ALT  FP6   FP6a  FP4
+    FpFmtMask:     {RVF, RVD, XF16, XF8, XF16ALT, XF8ALT, 1'b0, 1'b0, 1'b0},
+    IntFmtMask:    {XFVEC && XF8, XFVEC && (XF16 || XF16ALT), 1'b1, 1'b0},
+    MxFpFmtMask:   9'b0,
+    MxIntFmtMask:  4'b0,
+    PaceFeatures:  '{default: 0}
   };
 
   // Latencies of FP ops (number of regs)
@@ -162,16 +170,21 @@ package snitch_pkg;
                     LAT_COMP_FP16,
                     LAT_COMP_FP8,
                     LAT_COMP_FP16ALT,
-                    LAT_COMP_FP8ALT}, // ADDMUL
+                    LAT_COMP_FP8ALT,
+                    'd0,              // FP6
+                    'd0,              // FP6ALT
+                    'd0},             // FP4   -- ADDMUL
                  '{default: LAT_DIVSQRT}, // DIVSQRT
                  '{default: LAT_NONCOMP}, // NONCOMP
                  '{default: LAT_CONV},    // CONV
-                 '{default: LAT_SDOTP}},  // SDOTP
+                 '{default: LAT_SDOTP},   // SDOTP
+                 '{default: 'd0}},       // MXDOTP
     UnitTypes: '{'{default: fpnew_pkg::MERGED}, // ADDMUL
                  '{default: fpnew_pkg::DISABLED}, // DIVSQRT
                  '{default: fpnew_pkg::PARALLEL}, // NONCOMP
                  '{default: fpnew_pkg::MERGED},   // CONV
-                 '{default: fpnew_pkg::MERGED}},  // SDOTP
+                 '{default: fpnew_pkg::MERGED},   // SDOTP
+                 '{default: fpnew_pkg::DISABLED}}, // MXDOTP (asserts width==64)
     PipeConfig: fpnew_pkg::BEFORE
   };
 
@@ -183,16 +196,21 @@ package snitch_pkg;
                     LAT_COMP_FP16,
                     LAT_COMP_FP8,
                     LAT_COMP_FP16ALT,
-                    LAT_COMP_FP8ALT}, // ADDMUL
+                    LAT_COMP_FP8ALT,
+                    'd0,              // FP6
+                    'd0,              // FP6ALT
+                    'd0},             // FP4   -- ADDMUL
                  '{default: LAT_DIVSQRT}, // DIVSQRT
                  '{default: LAT_NONCOMP}, // NONCOMP
                  '{default: LAT_CONV},    // CONV
-                 '{default: LAT_SDOTP}},  // SDOTP
+                 '{default: LAT_SDOTP},   // SDOTP
+                 '{default: 'd0}},       // MXDOTP
     UnitTypes: '{'{default: fpnew_pkg::DISABLED},   // ADDMUL
                  '{default: fpnew_pkg::MERGED}, // DIVSQRT
                  '{default: fpnew_pkg::DISABLED},   // NONCOMP
                  '{default: fpnew_pkg::DISABLED},   // CONV
-                 '{default: fpnew_pkg::DISABLED}},  // SDOTP
+                 '{default: fpnew_pkg::DISABLED},   // SDOTP
+                 '{default: fpnew_pkg::DISABLED}},  // MXDOTP
     PipeConfig: fpnew_pkg::BEFORE
   };
 

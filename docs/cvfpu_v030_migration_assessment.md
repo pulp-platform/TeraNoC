@@ -118,8 +118,23 @@ A correct translation is provably **cycle-identical** (no latency change from an
 one fast arm settles it:
 
 * **Arm 0** — current tree, `sp-fmatmul` 256x32x256 on `terapool_spatz4_fpu` (4x4, 256 cores).
-  Golden is **4,081 cycles** (`docs/benchmarks/gemm_results.md:65`); our instrumented builds read
-  **4,188** (≈2.6% instrumentation overhead — use the matching baseline).
+  Golden is **4,081 cycles** (`docs/benchmarks/gemm_results.md:65`); our current builds read
+  **4,188**.
+
+  ⚠️ **That 107-cycle gap is NOT instrumentation overhead** — an earlier version of this line said
+  it was, and that was wrong. A cycle-accurate sim's cycle count is invariant to passive probes:
+  TB counters and `$countones` observe the design without participating in it, so they cost
+  wall-clock, not simulated cycles. The gap is **baseline drift**. `sp-fmatmul-gvsoc-probe` and
+  `sp-fmatmul-opt-burst-merge` have byte-identical `main.c` and `kernel/`, both run 256x32x256,
+  and both compile `HOLD_SUBS_SINGLE=8` / `HOLD_SUBS_BURST=2` — matching the golden row's
+  A-sh=8 / B-sh=2. What differs is the RTL: the golden table was last regenerated **2026-08-03**
+  (`4d3d9d17`) and at least a dozen functional commits have landed since, including
+  `c05d54c1` noc_router_remapping 0→2, `ee38f5ff` bank_publish→1, `8ca4f060` hold window 2047,
+  `fa00ffb5` drain_from_q→1, `f7a7e90f` MSHR C2 spill bypass, and `7737baee`, a C1 rank/slot
+  truncation **bug fix**.
+
+  So use 4,188 as the same-tree baseline for any arm built today, and treat every row of the
+  2026-08-03 golden table as stale by an unquantified amount until re-measured.
 * **Arm 1** — same ELF, same pinned defines, v0.3.0 RTL. **Must reproduce the same cycle count.**
   Any delta means the translation is wrong, not that the FPU is different.
 
