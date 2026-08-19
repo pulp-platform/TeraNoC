@@ -302,3 +302,33 @@ sides of every bypass, not merely in different files.** This particular assumpti
 to arithmetic because it was topological — no residual, ratio, or internal consistency check could
 have surfaced it. Counting at the point of delivery, downstream of where the classes rejoin, has
 no such gap.
+
+### ⚠️ Second blind spot: MSHR-BYPASSED bursts have no entry
+
+`mempool_group_mshr.sv:883-889`: a multi-beat load that finds a **full bank at allocation** is
+*"forwarded to the NoC with mshr_tag=0, NO ENTRY"*. No entry means no `resp_buf` write, and all
+three `[MSHRLIFE*]` probes key off `|mshr_rb_we[e]` — so **bypassed beats are invisible to them**,
+independently of the remote/local split above.
+
+**On the 4x4 reference shape this is half the workload**, from the `[BYP]` counters in the same
+run (⚠️ they are **cumulative** — take the last value per group; summing all periods overcounts by
+~7x):
+
+| | |
+|---|---|
+| bypassed forwards | 132,420 (orphans 0) |
+| words committed (`2*pair_commit + single_commit`) | 262,144 |
+| **bypass fraction** | **50.5%** |
+
+This is *not* the config bypass — `cfg_bypass_burst = !cfg_mshr_enable \|\| (cfg_hold_subs_burst == 1)`
+and `hold_subs_burst = 2` here, so the global bypass is off. It is congestion-driven.
+
+⚠️ **The split is not random.** A burst bypasses precisely when banks are full at allocation, so
+entry-captured bursts are the *uncongested* subset. Any rate derived from `[MSHRLIFE-BEATS]` is
+therefore biased toward the fast case, and must be quoted as *"for the 49.5% of bursts that get an
+entry"* rather than as a property of the response path.
+
+Bypassed bursts also reach both tile response ports by a **different** mechanism — slave-side
+round-robin channel hash plus the bypass-retag side table (`:883-905`) — not ParityDrain proper. So
+there are two service classes with two distinct 2-wide mechanisms, and neither `[MSHRLIFE*]` probe
+observes the second.
