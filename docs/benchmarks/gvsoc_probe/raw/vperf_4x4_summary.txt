@@ -1,0 +1,28 @@
+TeraNoC RTL [VPERF] -- 4x4, terapool_spatz4_fpu, matmul_gvsoc_probe.elf (256x32x256, e32/m2)
+cores=256  benchmark window win=3845 cycles (identical on every core)
+
+FLEET MEANS
+  win            mean=3845.0      min=3845     max=3845    
+  insn_act       mean=2009.6      min=1865     max=2169    
+  no_insn        mean=876.3       min=364      max=1473    
+  pair_commit    mean=512.0       min=512      max=512     
+  single_commit  mean=0.0         min=0        max=0       
+  wait_beats     mean=1345.9      min=1168     max=1517    
+  vrf_bp         mean=55.0        min=44       max=69      
+  req_stall      mean=0.0         min=0        max=0       
+  insn_ret       mean=40.0        min=40       max=40      
+  dual_adv       mean=32.0        min=32       max=32      
+  blk_stall      mean=64.0        min=64       max=64      
+  infl_sum       mean=3183.0      min=2417     max=3855    
+  act_cyc        mean=2946.4      min=2344     max=3463    
+
+DERIVED
+  N_window = infl_sum/win      = 0.828
+  N_active = infl_sum/act_cyc  = 1.080    <- YOUR definition (VLSU has work)
+  L        = infl_sum/insn_ret = 79.58 cyc (Little's law; insn_ret counts commit_insn_pop)
+  pair_commit=131072 single_commit=0 -> 100.0% of commit cycles 2-wide
+  words committed = 2*pair + single = 262144  (2.00 words per commit cycle)
+
+POPULATION CAVEAT: insn_ret counts ALL VLSU instructions (loads AND stores), not burst
+loads only. Your 129.3 split is burst-loads-only and you noted it exceeds your
+all-instruction L. Compare like with like before treating the gap as physics.
