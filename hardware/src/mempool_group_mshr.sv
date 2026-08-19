@@ -5036,11 +5036,21 @@ module mempool_group_mshr
     logic [63:0] ml_drain_s_sum, ml_drain_s_n;              // burst_len == 1
     logic [63:0] ml_drain_b_sum, ml_drain_b_n, ml_bl_b_sum; // burst_len  > 1, + total beats
     logic [BurstLenWidth-1:0] ml_bl [MshrNum];              // burst_len captured at allocation
+    // BEAT ARRIVAL SPACING within a single entry. The drain span above answers "how long does an
+    // entry live", which is NOT the same as "how fast do its beats come back" -- an entry that
+    // serves merge partners outlives its beats. first-beat -> LAST-beat is the arrival rate of one
+    // burst from the target group, i.e. the response path, isolated from subscriber service.
+    // Beats are counted with $countones, not one-per-cycle: with DrainBeats=2 a cycle can capture
+    // two, and counting cycles instead of beats would understate the rate by up to 2x.
+    logic [31:0] ml_t_last  [MshrNum];
+    logic [31:0] ml_nbeats  [MshrNum];
+    logic [63:0] ml_bspan_sum, ml_bspan_n, ml_bcap_sum;     // burst entries with >= 2 beats
 
     always_ff @(posedge clk_i) begin
       automatic logic [63:0] a_hold, a_flight, a_drain, a_life;
       automatic logic [63:0] n_hold, n_flight, n_drain, n_life, n_nobeat;
       automatic logic [63:0] a_drain_s, n_drain_s, a_drain_b, n_drain_b, a_bl_b;
+      automatic logic [63:0] a_bspan, n_bspan, a_bcap;
       automatic logic [31:0] t_a;
       if (!rst_ni) begin
         ml_cyc <= '0; ml_vld_q <= '0; ml_seen_issue <= '0; ml_seen_first <= '0;
@@ -5049,10 +5059,12 @@ module mempool_group_mshr
         ml_nobeat_n <= '0;
         ml_drain_s_sum <= '0; ml_drain_s_n <= '0;
         ml_drain_b_sum <= '0; ml_drain_b_n <= '0; ml_bl_b_sum <= '0;
+        ml_bspan_sum <= '0; ml_bspan_n <= '0; ml_bcap_sum <= '0;
       end else begin
         a_hold='0; a_flight='0; a_drain='0; a_life='0;
         n_hold='0; n_flight='0; n_drain='0; n_life='0; n_nobeat='0;
         a_drain_s='0; n_drain_s='0; a_drain_b='0; n_drain_b='0; a_bl_b='0;
+        a_bspan='0; n_bspan='0; a_bcap='0;
         ml_cyc <= ml_cyc + 1;
         for (int e = 0; e < MshrNum; e++) begin
           // An entry can be allocated and issued in the SAME cycle; ml_t_alloc[e] is
@@ -5065,6 +5077,7 @@ module mempool_group_mshr
             ml_seen_issue[e] <= 1'b0;
             ml_seen_first[e] <= 1'b0;
             ml_bl[e]         <= mshr_q[e].burst_len;
+            ml_nbeats[e]     <= '0;
           end
           if (mshr_q_valid[e] && mshr_q[e].issued && !ml_seen_issue[e]) begin
             ml_t_issue[e]    <= ml_cyc;
@@ -5076,6 +5089,11 @@ module mempool_group_mshr
             ml_seen_first[e] <= 1'b1;
             a_flight = a_flight + 64'(ml_cyc - ml_t_issue[e]); n_flight = n_flight + 1;
           end
+          // every beat, including the first: stamp the latest arrival and accumulate the count
+          if (mshr_q_valid[e] && (|mshr_rb_we[e])) begin
+            ml_t_last[e]  <= ml_cyc;
+            ml_nbeats[e]  <= ml_nbeats[e] + 32'($countones(mshr_rb_we[e]));
+          end
           if (!mshr_q_valid[e] && ml_vld_q[e]) begin
             if (ml_seen_first[e]) begin
               a_drain = a_drain + 64'(ml_cyc - ml_t_first[e]); n_drain = n_drain + 1;
@@ -5083,6 +5101,13 @@ module mempool_group_mshr
                 a_drain_b = a_drain_b + 64'(ml_cyc - ml_t_first[e]);
                 n_drain_b = n_drain_b + 1;
                 a_bl_b    = a_bl_b    + 64'(ml_bl[e]);
+                // A single-beat entry has no arrival spacing to measure; excluding it keeps the
+                // rate from being diluted by entries that trivially span 0 cycles.
+                if (ml_nbeats[e] >= 32'd2) begin
+                  a_bspan = a_bspan + 64'(ml_t_last[e] - ml_t_first[e]);
+                  n_bspan = n_bspan + 1;
+                  a_bcap  = a_bcap  + 64'(ml_nbeats[e]);
+                end
               end else begin
                 a_drain_s = a_drain_s + 64'(ml_cyc - ml_t_first[e]);
                 n_drain_s = n_drain_s + 1;
@@ -5102,6 +5127,8 @@ module mempool_group_mshr
         ml_drain_s_sum <= ml_drain_s_sum + a_drain_s; ml_drain_s_n <= ml_drain_s_n + n_drain_s;
         ml_drain_b_sum <= ml_drain_b_sum + a_drain_b; ml_drain_b_n <= ml_drain_b_n + n_drain_b;
         ml_bl_b_sum    <= ml_bl_b_sum    + a_bl_b;
+        ml_bspan_sum <= ml_bspan_sum + a_bspan; ml_bspan_n <= ml_bspan_n + n_bspan;
+        ml_bcap_sum  <= ml_bcap_sum  + a_bcap;
       end
     end
 
@@ -5113,6 +5140,9 @@ module mempool_group_mshr
       if (ml_life_n != 0)
         $display("[MSHRLIFE-BL] %m drain_single_n=%0d drain_single_sum=%0d drain_burst_n=%0d drain_burst_sum=%0d burst_beats_sum=%0d",
                  ml_drain_s_n, ml_drain_s_sum, ml_drain_b_n, ml_drain_b_sum, ml_bl_b_sum);
+      if (ml_bspan_n != 0)
+        $display("[MSHRLIFE-BEATS] %m entries=%0d first_to_last_sum=%0d beats_captured_sum=%0d",
+                 ml_bspan_n, ml_bspan_sum, ml_bcap_sum);
     end
   end
   // pragma translate_on

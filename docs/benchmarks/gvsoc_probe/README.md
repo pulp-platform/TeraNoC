@@ -137,6 +137,36 @@ alive while it serves every merged subscriber, not merely while beats arrive. An
 several merge partners therefore legitimately outlives `beats / 2-per-cycle`. Do not treat
 `16 beats / 2 per cycle = 8 cycles` as the RTL expectation and difference against it.
 
+### Beat arrival spacing — `[MSHRLIFE-BEATS]`
+
+Added at the GVSOC side's request after they localised their 1-beat/cycle limit to the *response
+path*, not the MSHR: their beat-rate counters read 4.80 beats/cyc into the MSHR and 10.79 out of it
+(OUT above IN is multicast working), while only 1.00 reaches the VLSU per core. So the binding
+constraint is how fast the 16 beats of ONE burst come back from the target group.
+
+```
+[MSHRLIFE-BEATS] <hier> entries= first_to_last_sum= beats_captured_sum=
+```
+  * mean first-to-last beat span   = `first_to_last_sum / entries`
+  * mean beats per entry           = `beats_captured_sum / entries`
+  * beats per cycle within an entry = `(beats_captured_sum - entries) / first_to_last_sum`
+
+Three choices that each avoid a real bias:
+
+  * **Beats are counted with `$countones(mshr_rb_we[e])`, not one per cycle.** With
+    `DrainBeats=2` a cycle can capture two; counting cycles would understate the arrival rate by
+    up to 2x — the same size as the effect being measured.
+  * **first-to-LAST is deliberately distinct from `drain`.** `drain` is first-beat → entry-freed
+    and a coalescer outlives its beats while serving merge partners. first-to-last excludes
+    subscriber service, so it measures the response path alone.
+  * **Entries with a single captured beat are excluded** — they trivially span 0 cycles and would
+    pull the rate toward "infinitely fast".
+
+⚠️ **Compare rates, not spans, if the beat counts differ.** This MSHR has a response cache, so an
+entry can be satisfied partly from a cache hit rather than from a full set of fresh NoC beats. If
+`beats_captured / entries` lands well below `burst_len`, the spans are measuring different amounts
+of work and only beats-per-cycle is comparable.
+
 ### Output
 
 One line per group MSHR instance at `final`:
