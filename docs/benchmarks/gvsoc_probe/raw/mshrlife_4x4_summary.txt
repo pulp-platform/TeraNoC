@@ -26,12 +26,28 @@ BEAT ARRIVAL SPACING (first beat -> LAST beat; arrival only, excludes subscriber
   Beats counted with $countones(mshr_rb_we[e]), not one-per-cycle: with DrainBeats=2 a cycle can
   capture two, and counting cycles would understate the rate by up to 2x.
 
->>> COMPARISON WITH THE GVSOC MODEL, AND THE SURPRISE
+>>> COMPARISON WITH THE GVSOC MODEL -- AND A CORRECTION TO HOW IT WAS FIRST READ
       RTL   0.634 beats/cyc within an entry
-      model 0.96                              -> the MODEL is ~1.5x FASTER per entry
+      model 0.96
 
-  This REFUTES the prediction (~2.0) made before the run. The RTL does not win by making one
-  burst's beats return quickly; per entry it is slower than the model.
+  FIRST READING (WRONG, and it produced a wrong recommendation): "the model is ~1.5x FASTER per
+  entry, so widening their return path would move them further from the RTL -- hold the fix."
+
+  ⚠️ CORRECTED: 0.96 is not fast, it is SATURATED. The model's burst beats serialise at one per
+  cycle somewhere on its path, so 0.96 is 96% of a hard structural ceiling of 1.0. The RTL's 0.634
+  sits under NO ceiling -- DrainBeats=2, with beats spread across overlapping entries. Comparing a
+  saturated rate against an unsaturated one and calling the larger "faster" is a category error --
+  the same one this handover warns about elsewhere under "contention relief and per-burst width are
+  different quantities". The "hold the steering half" recommendation derived from it is WITHDRAWN.
+
+  Corroborating that the RTL is not ceiling-bound: [VPERF] pair_commit=512, single_commit=**0**,
+  min==max==512 on every one of the 256 cores. The VLSU never commits a lone word, which cannot
+  hold across 512 consecutive commit cycles if beats arrived single-file. RTL pinned at 2-wide;
+  model pinned at 1-wide (1216 beats in 1212 distinct cycles).
+  (That is the COMMIT stage -- it bounds arrival from below, it is not an arrival histogram.)
+
+  The original prediction (~2.0 per entry) was still not met, and the concurrency reading still
+  holds: RTL throughput comes from overlapping entries, not from any single entry being fast.
 
   It reconciles with the core-side result (RTL 2.00 words/commit-cycle vs model 1.00) only through
   CONCURRENCY: RTL throughput comes from many slow entries overlapping, not from any single entry
