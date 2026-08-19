@@ -42,3 +42,29 @@ BEAT ARRIVAL SPACING (first beat -> LAST beat; arrival only, excludes subscriber
 invisible here -- and they are 50.5% of this workload. Because a burst bypasses exactly when banks
 are full, entry-captured bursts are the UNCONGESTED subset, so 0.634 is if anything optimistic.
 Intra-group bursts never reach the MSHR at all.
+
+TIME-AVERAGED ENTRY OCCUPANCY -- [MSHRLIFE-OCC], per-cycle accumulator (build_occ, same pinned config)
+  over the WHOLE RUN : 2,405,109 / 537,600 = 4.47 of 64   ( 7.0% full)
+  over ACTIVE cycles : 2,405,109 / 127,578 = 18.85 of 64  (29.5% full)
+  active cycles = 23.7% of all cycles
+  GVSOC model (their corrected per-cycle accumulator): 2.99 of 64, whole-run
+
+VERDICT against the rule both sides registered in advance (near 3 -> entry path closed;
+near 39 -> real occupancy deficit): CLOSED. Neither side is near saturation, and the entry
+path does not explain the 2.00-vs-1.00 words/cycle gap at the core.
+
+⚠️ A WHOLE-RUN OCCUPANCY MEAN IS MOSTLY A MEASUREMENT OF IDLE TIME. 76% of cycles here have no
+live entry at all, so 4.47 and 2.99 are only comparable if the two runs have similar active
+fractions. The physically meaningful number is the active one: 18.85 of 64, 29.5% full, when the
+MSHR is actually working -- still unsaturated, but a very different picture of the machine than
+"7% full" suggests. Report both denominators; never one alone.
+
+STATE OF THE ENTRY PATH after this measurement -- every term now measured on BOTH sides:
+  entry rate      ~0.0222 vs 0.0245 per cycle per group   similar
+  entry lifetime  135.41 vs 121.83 cyc                    similar (10%)
+  occupancy       4.47 vs 2.99 of 64 (whole-run)          similar, both far from full
+  per-entry beat arrival  0.634 vs 0.96 beats/cyc         the MODEL is FASTER
+  words/cycle at the core 2.00 vs 1.00                    2x, UNEXPLAINED
+No entry-path term explains the gap. The non-entry traffic turned out to be the store stream on
+both sides, which is off the load critical path. The cause is somewhere neither side has
+instrumented.
