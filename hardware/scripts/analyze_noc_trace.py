@@ -47,7 +47,19 @@ STAGE_ORDER = {
 REQ_STAGES  = {"CORE_REQ", "MSHR_REQ_IN", "MSHR_REQ_OUT", "RTR_REQ", "SLAVE_REQ_IN"}
 RESP_STAGES = {"SLAVE_RSP_OUT", "RTR_RSP", "MSHR_RSP_IN", "MSHR_RSP_OUT", "CORE_RSP"}
 
-META_MOD = 32  # meta_id wraps at 2^MetaIdWidth (=32 for Spatz RobDepth=32)
+# meta_id wraps at 2**MetaIdWidth. This was hardcoded 32 (Spatz RobDepth=32); builds with
+# SPATZ_VLSU_ROB_DEPTH=64 wrap at 64. Override with --meta-mod, or better, keep the matcher
+# DIFFERENCE-based (below) which tolerates any modulus dividing 2**MetaIdWidth.
+META_MOD = 64
+
+# ParityDrain (group_mshr_drain_beats=2): for a REMOTE multi-beat entry the MSHR retags beat b to
+# core_id+(b&1) (mempool_group_mshr.sv:3939-3948, :4098-4104) and pins the destination tile resp
+# port to 1+(b&1) (:3729-3731, :4003). The tile response crossbar steers on rdata.core_id
+# (mempool_tile.sv:886,:974) and the flat id is NumDataPortsPerCore*c+p (:1166), so at the CORE
+# taps the retag appears as a CHANGE OF loc_p, not of the `core` column -- `core` there is the
+# tracer genvar (tb_noc_req_resp_tracer.svh:137,:144) and is identically 0.
+# Local (tgt_g == loc_g) bursts never enter the MSHR and are never retagged.
+PARITY_DRAIN = True
 
 
 def stage_rank(stage):
@@ -56,7 +68,8 @@ def stage_rank(stage):
 
 class Txn:
     """One remote transaction (possibly a burst owning several meta_ids)."""
-    __slots__ = ("og", "ot", "core", "base_mid", "burst", "mids",
+    __slots__ = ("og", "ot", "core", "base_mid", "burst",
+                 "req_port", "remote", "beats",
                  "addr", "tgt_g", "tgt_t", "tgt_bank", "wen",
                  "events", "stage_first", "beats_resp", "req_cyc")
 
@@ -66,7 +79,12 @@ class Txn:
         self.core = row["core"]
         self.base_mid = row["mid"]
         self.burst = max(1, row["burst"])
-        self.mids = {(self.base_mid + i) % META_MOD for i in range(self.burst)}
+        # NO mid-SET. Set membership breaks whenever META_MOD is wrong (a base-36 burst gets
+        # {4..19} at META_MOD=32 and matches none of its own beats). Difference arithmetic
+        # b=(mid-base)%META_MOD is correct for any modulus dividing 2**MetaIdWidth.
+        self.req_port = row.get("loc_p", 0)      # requester core data port == its core_id
+        self.remote   = (row["tgt_g"] != row["loc_g"])
+        self.beats    = set()                    # DISTINCT beat indices seen at CORE_RSP
         self.addr = row["addr"]
         self.tgt_g = row["tgt_g"]
         self.tgt_t = row["tgt_t"]
@@ -85,9 +103,24 @@ class Txn:
         if st == "CORE_RSP":
             self.beats_resp += 1
 
+    def owns(self, row):
+        """Does this response row belong to this transaction?
+
+        b is a DIFFERENCE, never set membership. The port test encodes the ParityDrain retag:
+        beat b of a REMOTE multi-beat entry arrives on req_port+(b&1). Without it, attribution
+        is ambiguous (measured: 695,467 ambiguous attachments and 3,649 duplicated beats on a
+        healthy fp32 trace) even though completion may survive by FIFO luck."""
+        b = (row["mid"] - self.base_mid) % META_MOD
+        if b >= self.burst or b in self.beats:
+            return False
+        if PARITY_DRAIN and self.burst > 1 and self.remote and row["stage"] == "CORE_RSP":
+            return row.get("loc_p", 0) == self.req_port + (b & 1)
+        return row.get("loc_p", 0) == self.req_port
+
     @property
     def complete(self):
-        return self.beats_resp >= self.burst
+        # DISTINCT beats, so a duplicated or stolen response cannot mask a lost one.
+        return len(self.beats) >= self.burst
 
     @property
     def last_stage(self):
@@ -141,6 +174,8 @@ def build_transactions(rows):
     """
     lanes = defaultdict(list)
     for r in rows:
+        # Lane by (og,ot,core); at the CORE taps `core` is the tracer genvar and the
+        # real requester identity is loc_p, which Txn.owns() tests explicitly.
         lanes[(r["og"], r["ot"], r["core"])].append(r)
 
     txns = []
@@ -161,7 +196,9 @@ def build_transactions(rows):
             # attach to the newest open txn that owns this mid
             placed = False
             for t in open_txns:
-                if r["mid"] in t.mids:
+                if t.owns(r):
+                    if st == "CORE_RSP":
+                        t.beats.add((r["mid"] - t.base_mid) % META_MOD)
                     t.add(r)
                     if st == "CORE_RSP" and t.complete:
                         open_txns.remove(t)
