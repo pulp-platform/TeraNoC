@@ -1,4 +1,70 @@
-# fp16 sp-fmatmul deadlocks at 512x512x512 — investigation state
+# fp16 sp-fmatmul deadlock — investigation state
+
+## 2026-08-19 CONSOLIDATED FINDINGS (read this first; earlier sections are superseded)
+
+### The warm-up is NOT the cause — the deadlock is in normal kernel operation
+
+| variant | hang cycle | signature |
+|---|---:|---|
+| `ICACHE_WARMUP_N=6` (default) | 13,000 | `ins=0 raw=16000` |
+| `ICACHE_WARMUP_N=8` (legal alternative) | **13,000** | `ins=0 raw=16000` |
+| `ICACHE_WARMUP=0` (no warm-up at all) | **17,000** | `ins=0 raw=16000` |
+
+Skipping the warm-up only DELAYS the wedge by ~4,000 cycles; the run reaches 86.2% FPU
+utilisation and 64% cumulative, then dies anyway. Changing the warm-up's N to another legal
+value does not even delay it. **Any "fix" that targets the warm-up is papering over the bug.**
+
+### The stuck fingerprint is IDENTICAL across every arm
+
+```
+WN8       p=1  hart=0xf8  id=62,63  age=1836  addr=0x00030a40   (inside b)
+no-warmup p=1  hart=0x9f  id=62,63  age=1723  addr=0x000323c0   (inside b)
+```
+
+Different arms, different harts, different addresses — but **always port 1 (the VLSU burst
+port), always ROB ids 62 AND 63, always a B-matrix address**. With `spatz_vlsu_rob_depth=64`
+those are the last two entries of the ROB ring, and `spatz_vlsu_block_alloc=1` reserves a
+16-id window in a single cycle. A burst allocated across the ring wrap is the boundary
+condition that fits every observation: it needs thousands of cycles of drift to occur, it
+produces the same fingerprint each time, and no single iteration is defective — which is why
+static inspection of the kernel and the MSHR kept coming up empty.
+
+### Everything else, eliminated with evidence
+
+Eight+ knobs change nothing: the new burst-EW gate, `dual_load` (2 and 1 hang at the identical
+cycle), `resp_wait_subs_single`, `enable_single`, `hold_window_burst`, `ICACHE_WARMUP`,
+`ICACHE_WARMUP_N`, the group barrier, and the `vl`->bytes conversion. **Open test:** arm V
+reverts the whole aggressive VLSU stack (`block_alloc=0`, `rob_depth=32`, `dual_load=1`) --
+per the design docs that stack was developed and validated at e32 ONLY.
+
+### Two instrumentation defects found and fixed (both cost hours)
+
+1. **The tracer was blind to the warm-up.** Rows were gated on `csr_trace_any_global`, which
+   software sets at `mempool_start_benchmark()`. The warm-up runs before that, so every arm
+   that hung in the warm-up produced an EMPTY trace, and the only trace ever captured came from
+   the `ICACHE_WARMUP=0` arm -- which was healthy at the time. Fixed: `+tracer_all`.
+2. **The analyzer called healthy runs broken.** `META_MOD` hardcoded 32 (builds use 64),
+   set-membership instead of difference arithmetic, a response COUNTER instead of distinct beat
+   indices, and no awareness of the ParityDrain `core_id+(b&1)` retag (which surfaces as a
+   change of `loc_p`, since the `core` column at the CORE taps is the tracer genvar). It
+   reported 37-45% incomplete on a healthy fp32 arm. Fixed and validated to ~100% on fp32.
+
+**Methodology lessons, both of which produced false root causes tonight:**
+* Always run the KNOWN-GOOD arm through the same analysis. Every metric that looked damning for
+  fp16 looked equally damning for a healthy fp32 run.
+* Never conclude a knob is inert from periods where the mechanism is not yet exercised (ten
+  byte-identical boot/DMA periods are not evidence).
+* A cycle counter that has not advanced is not a hang: with the tracer on, 1,000 cycles took
+  ~16 minutes, and a healthy arm was killed on a 90-second sample.
+
+### Fast repro
+`512x64x256` fp16, `hardware/matmul_fp16_512x64x256.elf`, wedge at cyc 13,000
+(or `matmul_fp16_nowarmup.elf`, wedge at 17,000 -- that one is INSIDE the benchmark window and
+is therefore traceable without `+tracer_all`).
+
+---
+
+# (historical) original notes below
 
 2026-08-18. **Open bug.** Root cause NOT found. This records what has been eliminated (with
 evidence) so the next person does not repeat it, and hands over the one correction that
