@@ -4997,4 +4997,99 @@ module mempool_group_mshr
   end
 `endif
 
+  // ---------------------------------------------------------------------------
+  // [MSHRLIFE] -- per-entry lifetime spans, for the GVSOC performance calibration
+  // (Request D, TeraNoC_gvsoc/docs/rtl_probe_request.md). Sim-only, no timing effect.
+  //
+  // The three spans are cut at REGISTERED boundaries and are DISJOINT BY
+  // CONSTRUCTION, so hold+flight+drain == entry lifetime rather than being three
+  // independently-defined numbers that happen to be compared:
+  //   hold   : entry allocated (valid rises)      -> request issued (issued rises)
+  //   flight : request issued                     -> FIRST response beat captured
+  //   drain  : first beat captured                -> entry freed (valid falls)
+  // life is stamped independently (alloc -> free) so the sum can be CHECKED against
+  // it rather than assumed; a mismatch means an entry took a path these spans miss
+  // (e.g. freed before any beat, or a CACHED-state revisit).
+  //
+  // Accumulation is staged into blocking locals and committed with ONE nonblocking
+  // assignment per counter: several entries can hit the same boundary in one cycle,
+  // and per-entry nonblocking updates to a shared accumulator would be lost to
+  // last-write-wins (the same reason gen_stats stages its increments).
+  // ---------------------------------------------------------------------------
+`ifndef VERILATOR
+`ifndef TARGET_SYNTHESIS
+  // pragma translate_off
+  if (1) begin : gen_mshr_lifetime
+    logic [31:0] ml_cyc;
+    logic [31:0] ml_t_alloc [MshrNum];
+    logic [31:0] ml_t_issue [MshrNum];
+    logic [31:0] ml_t_first [MshrNum];
+    logic [MshrNum-1:0] ml_seen_issue, ml_seen_first, ml_vld_q;
+    logic [63:0] ml_hold_sum, ml_flight_sum, ml_drain_sum, ml_life_sum;
+    logic [63:0] ml_hold_n,   ml_flight_n,   ml_drain_n,   ml_life_n;
+    logic [63:0] ml_nobeat_n;   // freed without ever capturing a beat (drain undefined)
+
+    always_ff @(posedge clk_i) begin
+      automatic logic [63:0] a_hold, a_flight, a_drain, a_life;
+      automatic logic [63:0] n_hold, n_flight, n_drain, n_life, n_nobeat;
+      automatic logic [31:0] t_a;
+      if (!rst_ni) begin
+        ml_cyc <= '0; ml_vld_q <= '0; ml_seen_issue <= '0; ml_seen_first <= '0;
+        ml_hold_sum <= '0; ml_flight_sum <= '0; ml_drain_sum <= '0; ml_life_sum <= '0;
+        ml_hold_n <= '0; ml_flight_n <= '0; ml_drain_n <= '0; ml_life_n <= '0;
+        ml_nobeat_n <= '0;
+      end else begin
+        a_hold='0; a_flight='0; a_drain='0; a_life='0;
+        n_hold='0; n_flight='0; n_drain='0; n_life='0; n_nobeat='0;
+        ml_cyc <= ml_cyc + 1;
+        for (int e = 0; e < MshrNum; e++) begin
+          // An entry can be allocated and issued in the SAME cycle; ml_t_alloc[e] is
+          // nonblocking so it still holds the previous life's value here. Use the
+          // live stamp in that case, never the stale register.
+          t_a = (mshr_q_valid[e] && !ml_vld_q[e]) ? ml_cyc : ml_t_alloc[e];
+
+          if (mshr_q_valid[e] && !ml_vld_q[e]) begin
+            ml_t_alloc[e]    <= ml_cyc;
+            ml_seen_issue[e] <= 1'b0;
+            ml_seen_first[e] <= 1'b0;
+          end
+          if (mshr_q_valid[e] && mshr_q[e].issued && !ml_seen_issue[e]) begin
+            ml_t_issue[e]    <= ml_cyc;
+            ml_seen_issue[e] <= 1'b1;
+            a_hold = a_hold + 64'(ml_cyc - t_a); n_hold = n_hold + 1;
+          end
+          if (mshr_q_valid[e] && (|mshr_rb_we[e]) && ml_seen_issue[e] && !ml_seen_first[e]) begin
+            ml_t_first[e]    <= ml_cyc;
+            ml_seen_first[e] <= 1'b1;
+            a_flight = a_flight + 64'(ml_cyc - ml_t_issue[e]); n_flight = n_flight + 1;
+          end
+          if (!mshr_q_valid[e] && ml_vld_q[e]) begin
+            if (ml_seen_first[e]) begin
+              a_drain = a_drain + 64'(ml_cyc - ml_t_first[e]); n_drain = n_drain + 1;
+            end else begin
+              n_nobeat = n_nobeat + 1;
+            end
+            a_life = a_life + 64'(ml_cyc - ml_t_alloc[e]); n_life = n_life + 1;
+          end
+          ml_vld_q[e] <= mshr_q_valid[e];
+        end
+        ml_hold_sum   <= ml_hold_sum   + a_hold;   ml_hold_n   <= ml_hold_n   + n_hold;
+        ml_flight_sum <= ml_flight_sum + a_flight; ml_flight_n <= ml_flight_n + n_flight;
+        ml_drain_sum  <= ml_drain_sum  + a_drain;  ml_drain_n  <= ml_drain_n  + n_drain;
+        ml_life_sum   <= ml_life_sum   + a_life;   ml_life_n   <= ml_life_n   + n_life;
+        ml_nobeat_n   <= ml_nobeat_n   + n_nobeat;
+      end
+    end
+
+    final begin
+      if (ml_life_n != 0)
+        $display("[MSHRLIFE] %m MshrNum=%0d hold_n=%0d hold_sum=%0d flight_n=%0d flight_sum=%0d drain_n=%0d drain_sum=%0d life_n=%0d life_sum=%0d freed_without_beat=%0d",
+                 MshrNum, ml_hold_n, ml_hold_sum, ml_flight_n, ml_flight_sum,
+                 ml_drain_n, ml_drain_sum, ml_life_n, ml_life_sum, ml_nobeat_n);
+    end
+  end
+  // pragma translate_on
+`endif
+`endif
+
 endmodule : mempool_group_mshr

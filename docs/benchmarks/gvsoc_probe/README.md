@@ -74,3 +74,65 @@ attributed to them silently.
   behind the current 4x4 experiments.
 * **Request D (MSHR entry lifetime)** — not started; needs new probes in
   `mempool_group_mshr.sv`. Only meaningful alongside Request C.
+
+---
+
+## Request D — MSHR entry lifetime (`[MSHRLIFE]`)
+
+Added 2026-08-19 at the GVSOC side's request, after their 8x8 split showed the mesh-scaling term is
+almost entirely the memory round trip: L grows 129.3 → 180.3 from 4x4 to 8x8, **flight accounts for
++52.3 of the +51**, and commit actually *improves* (49.1 → 42.5).
+
+Probe: `hardware/src/mempool_group_mshr.sv`, block `gen_mshr_lifetime`, immediately before
+`endmodule`. Sim-only (`ifndef VERILATOR` / `ifndef TARGET_SYNTHESIS` + `pragma translate_off`), so
+it cannot affect timing or the netlist.
+
+### ⚠️ Span boundary definitions — check these against yours BEFORE comparing numbers
+
+All three spans are cut at **registered** boundaries and are **disjoint by construction**, so
+`hold + flight + drain == entry lifetime` rather than being three independently-defined numbers
+that merely get compared:
+
+| span | starts at | ends at |
+|---|---|---|
+| `hold` | entry allocated — `mshr_q_valid[e]` rises | request issued — `mshr_q[e].issued` rises |
+| `flight` | request issued | **first** response beat captured — `\|mshr_rb_we[e]` |
+| `drain` | first response beat captured | entry freed — `mshr_q_valid[e]` falls |
+
+`life` is stamped **independently** (alloc → free) so the sum can be *checked* against it rather
+than assumed. A mismatch means some entries took a path these spans miss — e.g. freed before any
+beat arrived, or a `MSHR_CACHED` revisit. Entries freed without ever capturing a beat are counted
+separately as `freed_without_beat` and are **excluded from `drain_n`**, so `drain_sum/drain_n` is
+not diluted by them.
+
+This matters because the GVSOC-side MSHR numbers at 8x8 are hold 15 / flight 28 / drain 9 (≈52)
+against a VLSU-observed flight of 132.6 — an ~80-cycle unexplained remainder. **A boundary
+disagreement produces a gap of exactly that size**, so definitions must be reconciled before the
+remainder is treated as real physics.
+
+### Output
+
+One line per group MSHR instance at `final`:
+
+```
+[MSHRLIFE] <hier> MshrNum=N hold_n=.. hold_sum=.. flight_n=.. flight_sum=..
+           drain_n=.. drain_sum=.. life_n=.. life_sum=.. freed_without_beat=..
+```
+
+Means are `*_sum / *_n`. Sums are 64-bit. Accumulation is staged into blocking locals and committed
+with **one** nonblocking assignment per counter — several entries can hit the same boundary in one
+cycle, and per-entry NBA updates to a shared accumulator would be silently lost to last-write-wins
+(the same reason the existing `gen_stats` block stages its increments).
+
+### Run
+
+`build_mshrlife`, config `terapool_spatz4_fpu` (4x4), preloading `hardware/matmul_gvsoc_probe.elf`
+— **the same ELF and shape (256x32x256) as the Request A+B `[VPERF]` run**, so the two datasets are
+directly comparable rather than being from different workloads.
+
+### Caveat carried over from Request A+B
+
+`wait_beats` in `[VPERF]` is VLSU **occupancy**, not critical-path exposure — it overlaps VFU
+compute. The verified cycle identity is
+`win = pair_commit + wait_beats + no_insn + store/residual + vrf_bp`, which is a **cycle-accounting**
+identity, not a latency decomposition. Do not sum it into an L breakdown.
