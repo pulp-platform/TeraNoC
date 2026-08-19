@@ -110,6 +110,33 @@ against a VLSU-observed flight of 132.6 — an ~80-cycle unexplained remainder. 
 disagreement produces a gap of exactly that size**, so definitions must be reconciled before the
 remainder is treated as real physics.
 
+### ⚠️ Split by burst length — a pooled drain mean is not comparable
+
+The MSHR allocates entries for **single-word** requests (`burst_len==1`) as well as bursts. Those
+drain in a couple of cycles, so a pooled drain mean is dragged far below the per-burst-entry
+number another model would report for a 16-beat entry. Comparing a pooled mean against a
+per-burst number looks arithmetically fine and is wrong by a large factor.
+
+So a second line is emitted:
+
+```
+[MSHRLIFE-BL] <hier> drain_single_n= drain_single_sum= drain_burst_n= drain_burst_sum= burst_beats_sum=
+```
+
+  * drain per burst entry = `drain_burst_sum / drain_burst_n`
+  * cycles per beat       = `drain_burst_sum / burst_beats_sum`
+
+`burst_beats_sum` accumulates each entry's **actually captured** `burst_len`, not an assumed
+`MaxBurstWords` — an entry that allocated as a burst but completed short would otherwise silently
+inflate the per-beat rate.
+
+### ⚠️ `drain` is not pure beat delivery
+
+The span is *first beat captured → entry freed*, and this MSHR is a **coalescer**: an entry stays
+alive while it serves every merged subscriber, not merely while beats arrive. An entry serving
+several merge partners therefore legitimately outlives `beats / 2-per-cycle`. Do not treat
+`16 beats / 2 per cycle = 8 cycles` as the RTL expectation and difference against it.
+
 ### Output
 
 One line per group MSHR instance at `final`:

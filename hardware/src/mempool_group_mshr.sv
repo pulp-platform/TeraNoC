@@ -5028,19 +5028,31 @@ module mempool_group_mshr
     logic [63:0] ml_hold_sum, ml_flight_sum, ml_drain_sum, ml_life_sum;
     logic [63:0] ml_hold_n,   ml_flight_n,   ml_drain_n,   ml_life_n;
     logic [63:0] ml_nobeat_n;   // freed without ever capturing a beat (drain undefined)
+    // Split by burst length. A pooled drain mean is NOT comparable against another model's
+    // per-burst-entry number: single-word entries (burst_len==1) drain in a couple of cycles and
+    // drag the pooled mean down, while a 16-beat entry is the thing under study. Keeping the
+    // burst-entry beat total as well makes cycles-per-beat derivable (drain_b_sum / bl_b_sum)
+    // rather than requiring the reader to assume every burst entry carried MaxBurstWords beats.
+    logic [63:0] ml_drain_s_sum, ml_drain_s_n;              // burst_len == 1
+    logic [63:0] ml_drain_b_sum, ml_drain_b_n, ml_bl_b_sum; // burst_len  > 1, + total beats
+    logic [BurstLenWidth-1:0] ml_bl [MshrNum];              // burst_len captured at allocation
 
     always_ff @(posedge clk_i) begin
       automatic logic [63:0] a_hold, a_flight, a_drain, a_life;
       automatic logic [63:0] n_hold, n_flight, n_drain, n_life, n_nobeat;
+      automatic logic [63:0] a_drain_s, n_drain_s, a_drain_b, n_drain_b, a_bl_b;
       automatic logic [31:0] t_a;
       if (!rst_ni) begin
         ml_cyc <= '0; ml_vld_q <= '0; ml_seen_issue <= '0; ml_seen_first <= '0;
         ml_hold_sum <= '0; ml_flight_sum <= '0; ml_drain_sum <= '0; ml_life_sum <= '0;
         ml_hold_n <= '0; ml_flight_n <= '0; ml_drain_n <= '0; ml_life_n <= '0;
         ml_nobeat_n <= '0;
+        ml_drain_s_sum <= '0; ml_drain_s_n <= '0;
+        ml_drain_b_sum <= '0; ml_drain_b_n <= '0; ml_bl_b_sum <= '0;
       end else begin
         a_hold='0; a_flight='0; a_drain='0; a_life='0;
         n_hold='0; n_flight='0; n_drain='0; n_life='0; n_nobeat='0;
+        a_drain_s='0; n_drain_s='0; a_drain_b='0; n_drain_b='0; a_bl_b='0;
         ml_cyc <= ml_cyc + 1;
         for (int e = 0; e < MshrNum; e++) begin
           // An entry can be allocated and issued in the SAME cycle; ml_t_alloc[e] is
@@ -5052,6 +5064,7 @@ module mempool_group_mshr
             ml_t_alloc[e]    <= ml_cyc;
             ml_seen_issue[e] <= 1'b0;
             ml_seen_first[e] <= 1'b0;
+            ml_bl[e]         <= mshr_q[e].burst_len;
           end
           if (mshr_q_valid[e] && mshr_q[e].issued && !ml_seen_issue[e]) begin
             ml_t_issue[e]    <= ml_cyc;
@@ -5066,6 +5079,14 @@ module mempool_group_mshr
           if (!mshr_q_valid[e] && ml_vld_q[e]) begin
             if (ml_seen_first[e]) begin
               a_drain = a_drain + 64'(ml_cyc - ml_t_first[e]); n_drain = n_drain + 1;
+              if (ml_bl[e] > BurstLenWidth'(1)) begin
+                a_drain_b = a_drain_b + 64'(ml_cyc - ml_t_first[e]);
+                n_drain_b = n_drain_b + 1;
+                a_bl_b    = a_bl_b    + 64'(ml_bl[e]);
+              end else begin
+                a_drain_s = a_drain_s + 64'(ml_cyc - ml_t_first[e]);
+                n_drain_s = n_drain_s + 1;
+              end
             end else begin
               n_nobeat = n_nobeat + 1;
             end
@@ -5078,6 +5099,9 @@ module mempool_group_mshr
         ml_drain_sum  <= ml_drain_sum  + a_drain;  ml_drain_n  <= ml_drain_n  + n_drain;
         ml_life_sum   <= ml_life_sum   + a_life;   ml_life_n   <= ml_life_n   + n_life;
         ml_nobeat_n   <= ml_nobeat_n   + n_nobeat;
+        ml_drain_s_sum <= ml_drain_s_sum + a_drain_s; ml_drain_s_n <= ml_drain_s_n + n_drain_s;
+        ml_drain_b_sum <= ml_drain_b_sum + a_drain_b; ml_drain_b_n <= ml_drain_b_n + n_drain_b;
+        ml_bl_b_sum    <= ml_bl_b_sum    + a_bl_b;
       end
     end
 
@@ -5086,6 +5110,9 @@ module mempool_group_mshr
         $display("[MSHRLIFE] %m MshrNum=%0d hold_n=%0d hold_sum=%0d flight_n=%0d flight_sum=%0d drain_n=%0d drain_sum=%0d life_n=%0d life_sum=%0d freed_without_beat=%0d",
                  MshrNum, ml_hold_n, ml_hold_sum, ml_flight_n, ml_flight_sum,
                  ml_drain_n, ml_drain_sum, ml_life_n, ml_life_sum, ml_nobeat_n);
+      if (ml_life_n != 0)
+        $display("[MSHRLIFE-BL] %m drain_single_n=%0d drain_single_sum=%0d drain_burst_n=%0d drain_burst_sum=%0d burst_beats_sum=%0d",
+                 ml_drain_s_n, ml_drain_s_sum, ml_drain_b_n, ml_drain_b_sum, ml_bl_b_sum);
     end
   end
   // pragma translate_on
