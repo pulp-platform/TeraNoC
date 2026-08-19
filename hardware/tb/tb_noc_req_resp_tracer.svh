@@ -123,6 +123,18 @@ always @(posedge clk or negedge rst_n) begin
   else        tracer_cycle <= tracer_cycle + 1;
 end
 
+// Diagnostic: report the first cycle the tracer actually opens, and flush periodically.
+// Without $fflush a SIGTERM'd vsim loses every buffered row, which is indistinguishable from
+// "the gate was closed" -- both leave a header-only file.
+logic tracer_active_q;
+always_ff @(posedge clk) begin
+  tracer_active_q <= tracer_active;
+  if (tracer_active && !tracer_active_q)
+    $display("[TRACER] window OPEN at t=%0t cyc=%0d (csr=%0b all=%0b)", $time, tracer_cycle,
+             csr_trace_any_global, tracer_all);
+  if (tracer_active && (tracer_cycle % 500 == 0)) $fflush(tracer_fd);
+end
+
 assign tracer_active = tracer_en && (csr_trace_any_global || tracer_all) &&
                        (longint'($time) >= tracer_lo_ns) &&
                        (longint'($time) <= tracer_hi_ns);
