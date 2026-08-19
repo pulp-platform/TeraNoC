@@ -319,8 +319,22 @@ boundaries splits its 132,420 into two unrelated mechanisms:
 
 | | count | share | why |
 |---|---|---|---|
-| before the window | 68,481 | 51.7% | `CFG_ENABLE = 0` is the MSHR's **reset state** (`:1380`), so init, DMA and I$ warm-up bypass **by design** |
-| during the window | 63,939 | 48.3% | the **store stream** — C = M·P = 65,536 elements, a 97.6% match. Admission requires `req_is_load` (`:1387`); the MSHR is a *read* coalescer, so every store bypasses by construction |
+| before the window | 68,481 | 51.7% | **init/copy STORES** — `main.c:329-340` DMA-copies A and B then `init_matrix()` writes A, B and the checksum |
+| during the window | 63,939 | 48.3% | the **C store stream** — C = M·P = 65,536 elements, a 97.6% match |
+
+Both shares are the **same** mechanism: MSHR admission requires `req_is_load` (`:1387`), so every
+store bypasses a read coalescer by construction, and the `[BYP]` counter has no load/store filter.
+
+⚠️ **An earlier revision attributed the pre-window share to `CFG_ENABLE = 0` being the MSHR's reset
+state (`:1380`). That is wrong for these builds.** That comment describes the **CSR flow**
+(`MshrCfgRuntime=1`). Our runs set `GROUP_MSHR_CFG_RUNTIME=0`, and `:491` reads
+
+```systemverilog
+assign cfg_mshr_enable = mempool_pkg::MshrCfgRuntime ? cfg_i.enable : 1'b1;
+```
+
+which collapses to `1'b1` — **the MSHR is enabled from reset here**, so nothing bypasses for that
+reason. Quoting a comment that describes a configuration the build does not select.
 
 Corroborating that it was never congestion: `[BFBHASH] full_events = 0`,
 `avg_free_banks = 13.4 of 16`, `bank_ovf_hist` all zeros, and `bank_alloc_hist` uniform at **62 on
@@ -379,3 +393,18 @@ measured rather than inferred.
 the stage where it *surfaced* rather than where it *originated* — a wedge PC (where the core
 stopped, not what stopped it) and a serialisation read at the drain (where it showed, not where it
 was caused). Same error in different domains.
+
+### ⚠️ Two window numbers, two spans — state which
+
+| number | span |
+|---|---|
+| **3,845** | `[VPERF] win` — cycles with `csr_trace_any_global` high (the TB's traced region) |
+| **4,188** | the app's own timer, `mempool_start_benchmark()` … end ("The execution took N cycles") |
+
+343 cycles apart (8.9%). The app timer opens slightly before tracing and closes after. **Use 4,188
+for wall-clock comparison against another simulator's elapsed time**; per-window rates
+(`pair_commit`, `N_active`, `arr_*`) are normalised by 3,845 and stay internally consistent.
+
+Three denominator collisions arose in this collaboration — the I$ warm-up, whole-sim vs window, and
+traced-region vs app-timer. **None was an implementation bug**; every one was two correct
+instruments measuring spans differing by a phase. Standing rule: state the span with every number.
