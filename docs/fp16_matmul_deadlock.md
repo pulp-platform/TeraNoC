@@ -1,6 +1,6 @@
 # fp16 sp-fmatmul deadlock — investigation state
 
-## 2026-08-19 (late, FINAL) — ROOT CAUSE: 16-bit vector STORES wedge; e16 loads are fine
+## 2026-08-19 (late) — LOCALISED: the wedge surfaces at the first `vse16.v`
 
 Established from per-hart execution traces, not inference. Counting how many of the 256 harts ever
 executed each PC in the hung `build_fp16b` run:
@@ -27,6 +27,35 @@ instruction immediately before the first `vse16.v`:
 identical point, and the run completes at 97.6% FPU utilisation. Instruction retirement is
 neck-and-neck up to the wedge (fp16 3,365 vs fp32 3,151 retired by cycle 12,238), so nothing is
 merely slow — it is a hard stop at the first 16-bit vector store.
+
+### ⚠️ Correction — what this evidence does and does not prove
+
+An instruction appearing in the Snitch trace means Spatz **accepted** it, not that it **completed**.
+So the table above proves the machine blocks with the first `vse16.v` unable to be *issued* — i.e.
+Spatz's instruction queue is full — but it does **not** prove the store is the operation that fails
+to complete. The queue could equally be full of earlier vector ops awaiting load data.
+
+Two checks that were expected to discriminate, and did not:
+
+| check | fp16 (hung) | fp32 (healthy) | verdict |
+|---|---|---|---|
+| stuck requests are reads or writes | 5,791, **all `R`** | — | reads dominate; the store is not visibly stuck |
+| count of >1000-cycle stuck-read warnings | 5,791 | **31,496** | fp32 has *more* — not diagnostic |
+| max stuck-read age | ~1,998 | ~1,977 | identical — no unbounded growth |
+
+So "e16 stores wedge and e16 loads are fine" is **too strong**. What is solid:
+
+1. 254/256 harts block at exactly the point where the next vector op is the first `vse16.v`; fp32
+   passes the analogous point on 256/256 and completes at 97.6% FPU utilisation.
+2. e16 loads take the burst path correctly — `[BURSTWHY]` reports **378/378 burst=1**, all five
+   conjuncts passing at `vl=128B`, identical to fp32. The RTL change works as designed.
+3. Harts `0x26`/`0x27` *did* accept all eight `vse16.v` stores and clear a request-sent
+   `sfence.vma`, then parked on the barrier load at `0x80000294`. So the store path is not
+   universally broken — which points at a **resource exhaustion / deadlock** that two cores beat.
+
+Open question: which operation never completes. Note CLAUDE.md documents `group_mshr_num` as
+"peak outstanding bursts — too small → sim deadlock", which is the right shape of failure for
+"two cores got through, then everything blocked".
 
 ### Why every earlier hypothesis was on the wrong side
 
