@@ -1,5 +1,77 @@
 # fp16 sp-fmatmul deadlock — investigation state
 
+## 2026-08-19 — ROOT CAUSE: `spatz_vfu.sv:141`, an element-width tag hazard
+
+```systemverilog
+// spatz_vfu.sv:141
+assign pending_results = result_tag.wb ? (spatz_req.vtype.vsew == EW_32 ? 4'hf : 8'hff) : '1;
+```
+
+The **selector** (`result_tag.wb`) belongs to the instruction whose result is at the FU output.
+The **element width** (`spatz_req.vtype.vsew`) is read from the **live incoming request**. With
+`spatz_ipu.sv:12 Pipeline = 1`, those are different instructions whenever the pipe is non-empty.
+`vfu_tag_t` (`:66`) carries `.wb`, `.id`, `.vd_addr`, `.last` — but **not** the element width, so
+there is nothing to read the correct width from, and the code reaches for the live request instead.
+
+### The mechanism
+
+1. Snitch has no multiplier — `snitch.sv:1043-1046` offloads `MUL`/`MULH`/`MULHSU`/`MULHU`. Every
+   `mul` becomes a **Spatz VFU scalar op**, issued at `vsew = EW_32`, mask `4'hf`, and only lane 0
+   is fed (`:780`, `:968`).
+2. The IPU is pipelined, so the mul's result surfaces a cycle or more later.
+3. If the *next* instruction sets `vsew = EW_16`, the mul's result is judged against `8'hff` —
+   the idiom treats every non-`EW_32` width as if it were `EW_64`.
+4. `&(result_valid | ~pending_results)` = `&(16'h000f | 16'hff00)` = `&16'hff0f` = **0**, forever.
+5. `result_ready` (`:380`, `:392`) and `vfu_rsp_valid_o` (`:273`) never assert. The VFU is wedged,
+   its operation queue fills, Snitch can no longer issue, and the core stops.
+
+### Why this matches the trace evidence exactly
+
+The wedge PC found independently from the per-hart traces was `0x800002d8`, and the two
+instructions immediately before it are:
+
+```
+800002d0:  mul        a2, s10, a6      <- scalar op -> Spatz VFU at EW_32
+800002d4:  vfmacc.vf  v0, ft7, v20     <- sets the live request to EW_16
+800002d8:  addi       s10, s10, 8      <- LAST RETIRED on 254/256 harts
+```
+
+That is precisely the poison pairing. Two independent methods — trace localisation and an RTL
+audit — converged on the same instruction pair.
+
+### Why every earlier hypothesis failed
+
+The bug is in the **VFU**, not the memory system. It has nothing to do with loads, stores, burst
+eligibility, byte strobes, alignment, the MSHR, or `flh` vs `flw`. The store was simply where the
+back-pressure became visible, exactly as the earlier correction suspected. fp32 is immune because
+`vsew` stays `EW_32`, so the mask matches whichever instruction it is read from.
+
+`valid_operations` at `:137` uses the same `EW_32 ? 4'hf : 8'hff` idiom but is **self-consistent** —
+both the selector and the width come from `spatz_req` at issue — which is why only `:141` is a
+hazard.
+
+### Fix shape
+
+Carry the element width (or the resolved mask) in `vfu_tag_t` so `pending_results` uses the
+**result's own** width instead of the live request's. Note the `EW_32 ? 4'hf : 8'hff` idiom is also
+wrong for `EW_8` and `EW_16` on their own terms — it should be width-derived, not a two-way select.
+
+### Confirming test
+
+`software/apps/spatz_apps/sp-vfu-ew-tag-probe` runs three fenced phases, controls first:
+
+| phase | content | expectation |
+|---|---|---|
+| A | e16 vector ops, **no** adjacent `mul` | pass |
+| B | `mul` + **e32** vector op | pass |
+| C | `mul` + **e16** vector op | **wedge** |
+
+A and B passing while C wedges isolates it to the *pairing* — not e16 alone, not `mul` alone.
+Codegen verified: 32 adjacent `mul`+`vfadd.vv v4` pairs at e32 and 32 `mul`+`vfadd.vv v6` at e16.
+
+---
+
+
 ## 2026-08-19 (late) — LOCALISED: the wedge surfaces at the first `vse16.v`
 
 Established from per-hart execution traces, not inference. Counting how many of the 256 harts ever
