@@ -32,6 +32,27 @@ under which `pending_results` (`:141`) reads the live `spatz_req.vtype.vsew` to 
 belonging to an *earlier* instruction, builds `8'hff` where only `4'hf` can ever arrive, and leaves
 `&(result_valid | ~pending_results)` false forever.
 
+### ✅ FIX VERIFIED — same probe ELF, one-word change
+
+`build_vfufix`, identical ELF, RTL differing only in `spatz_vfu.sv:141`
+(`result_tag.vsew` instead of `spatz_req.vtype.vsew`):
+
+| arm | phase A | phase B | phase C (`mul`+e16) |
+|---|---|---|---|
+| **unfixed** | passed | passed | **HUNG at the phase-C entry**, 256/256 harts, `raw` 256000/256000 |
+| **fixed** | passed | passed | **executes to completion** — harts reach the post-phase-C barrier |
+
+Motion check over 50 s: the fixed arm retired **+4,922** instructions and its lead PC advanced from
+inside phase C (`0x80000568`) to the post-phase barrier (`0x800019b8`), 93 harts already through.
+The unfixed arm is frozen at 101,853 retired instructions, having never executed one iteration of
+that loop.
+
+A/B validity was established before either result: both builds compiled 533 modules with
+`spatz_vfu` compiled exactly once from `working_dir/spatz` (not the stale `deps/spatz`), and their
+work libraries were sealed either side of the edit — unfixed at 07:10:42, edit at 07:12:29, fixed
+at 07:13:28. The two arms were also bit-identical through both control phases, which is the
+expected signature for a fix that is inert outside the hazard.
+
 ### Method note
 
 The controls are what make this interpretable. A bare "fp16 hangs" observation is consistent with a
