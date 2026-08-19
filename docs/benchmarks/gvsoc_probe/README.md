@@ -251,3 +251,32 @@ arrivals at a requester's MSHR should therefore be the return path, and a model 
 ⚠️ ParityDrain has hard preconditions (`mempool_tile.sv:91-95`): it `$error`s unless
 `NumCoresPerTile == 1` and `NumDataPortsPerCore >= 3`, because the `core_id+(b&1)` retag assumes
 one core per tile whose data port 1 is the burst-issuing VLSU port 0.
+
+### ParityDrain is TWO retags, not one
+
+`mempool_group_mshr.sv:124`: *"beat b of ANY burst entry leaves on resp port `1+(b&1)` with
+`core_id+(b&1)` — uniform law"*.
+
+| retag | what it changes |
+|---|---|
+| port `1+(b&1)` | which return channel **transports** the beat |
+| core_id `+(b&1)` | the identity the beat carries, i.e. which VLSU port **steers** it at the destination |
+
+⚠️ **Alternating the channel without retagging the identity is a half-fix that measures as a
+failure of the whole idea.** `:885-888` documents it: *"under the legacy contract every beat echoes
+the ORIGINAL core_id, so all beats collapse to [one port]"*. Two channels of transport, still one
+beat per cycle delivered — which reads as "the return path was not the constraint after all". The
+parity must be applied to the thing that STEERS at the destination, not only to the thing that
+TRANSPORTS.
+
+⚠️ **Hard precondition, asserted at `:1610-1622`:** the retag is `+1`, not a hash or modulo, so it
+only lands on the right port pair when the burst's base `core_id` is exactly 1 (the VLSU burst base
+port). The RTL `$fatal`s rather than misroute silently:
+
+```
+ParityDrain: burst entry %0d sub %0d core_id=%0d != 1 (retag would misroute).
+```
+
+Plus the tile-level guards at `mempool_tile.sv:91-95` — `NumCoresPerTile == 1` and
+`NumDataPortsPerCore >= 3`, because the flat `+1` retag has no room to land otherwise. A
+4-cores-per-tile configuration reintroduces the blocker.
