@@ -280,3 +280,25 @@ ParityDrain: burst entry %0d sub %0d core_id=%0d != 1 (retag would misroute).
 Plus the tile-level guards at `mempool_tile.sv:91-95` — `NumCoresPerTile == 1` and
 `NumDataPortsPerCore >= 3`, because the flat `+1` retag has no room to land otherwise. A
 4-cores-per-tile configuration reintroduces the blocker.
+
+### ⚠️ Reading rule: `[N-1:1]` means "remote only — index 0 is local"
+
+The group MSHR sits **only on the NoC-facing ports**. Its request array is declared
+`[NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]` — indexed from **1** — and port 0 is the
+local interconnect, routed elsewhere entirely (`mempool_group.sv:304`,
+`master_local_req_valid[t] = tcdm_master_req_valid[0][t]`). The response arrays use the same
+`[NumRemoteRespPortsPerTile-1:1]` slice for the same reason.
+
+**Consequence: an intra-group burst never appears in any MSHR counter, while its beats still reach
+the VLSU.** So every MSHR-side instrument shares one blind spot, and no cross-check *between* MSHR
+counters can reveal it — they are all on the same side of the bypass.
+
+`[MSHRLIFE]` and `[MSHRLIFE-BEATS]` therefore measure **remote** bursts only. Label any rate
+derived from them accordingly; "burst beat arrival rate" without the qualifier invites the reader
+to take it as all bursts.
+
+The generalisation worth keeping: **two instruments are only independent if they sit on different
+sides of every bypass, not merely in different files.** This particular assumption was invisible
+to arithmetic because it was topological — no residual, ratio, or internal consistency check could
+have surfaced it. Counting at the point of delivery, downstream of where the classes rejoin, has
+no such gap.
