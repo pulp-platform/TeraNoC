@@ -307,34 +307,29 @@ no such gap.
 
 `mempool_group_mshr.sv:883-889`: a multi-beat load that finds a **full bank at allocation** is
 *"forwarded to the NoC with mshr_tag=0, NO ENTRY"*. No entry means no `resp_buf` write, and all
-three `[MSHRLIFE*]` probes key off `|mshr_rb_we[e]` — so **bypassed traffic is invisible to them**,
-independently of the remote/local split above. That much is structural and stands.
+`[MSHRLIFE*]` probes key off `|mshr_rb_we[e]` — so **bypassed traffic is invisible to them**. That
+much is structural and stands.
 
-⚠️ **CORRECTION (2026-08-19).** An earlier revision of this file claimed *"on the 4x4 reference
-shape this is half the workload — 132,420 of 262,144 words, 50.5%, congestion-driven"*. **That was
-wrong three ways** and is retracted:
+#### The `[BYP]` counter, fully decomposed — no anomaly
 
-1. **Wrong class.** `[BYP] fwd` is gated on `req_len[t][p] == BurstLenWidth'(1)`
-   (`:2541-2547`) — it counts **single-word** bypassed requests, not bypassed bursts.
-2. **Wrong cause.** The same run reports `full_events = 0` and
-   `avg_free_banks_x1000 = 13358` — **13.4 of 16 banks free on average, no bank ever full**. The
-   actual bank-full bypass counter is separate: `bankfull_bypass = 432` per group (~6,900 total),
-   not 132,420.
-3. **Wrong denominator.** 132,420 is a *request* count; 262,144 is a *word* count. A burst request
-   carries up to 16 words, so the ratio compares quantities differing by up to 16x per item.
+An earlier revision claimed *"50.5% of the workload bypasses, congestion-driven"*. **Retracted.**
+`[BYP] fwd` gates only on `(mshr_tag == '0) && (req_len == 1)` (`:2541-2547`) — single-word
+requests, **no load/store filter**. Differencing the cumulative counter against the benchmark-window
+boundaries splits its 132,420 into two unrelated mechanisms:
 
-**What the run actually shows:** the MSHR is *not* saturated and its banks are *not* concentrated —
-`bank_alloc_hist` is `62` on every one of the 16 banks, dead uniform, with `bank_ovf_hist` all zero.
+| | count | share | why |
+|---|---|---|---|
+| before the window | 68,481 | 51.7% | `CFG_ENABLE = 0` is the MSHR's **reset state** (`:1380`), so init, DMA and I$ warm-up bypass **by design** |
+| during the window | 63,939 | 48.3% | the **store stream** — C = M·P = 65,536 elements, a 97.6% match. Admission requires `req_is_load` (`:1387`); the MSHR is a *read* coalescer, so every store bypasses by construction |
 
-**What remains genuinely open:** 132,420 single-word requests did leave without an MSHR entry, and
-neither known mechanism explains it — `cfg_bypass_single` is false at `hold_subs_single=8`, and the
-banks were never full. Worth understanding, but it is about *singles*, not bursts, and it is not
-congestion.
+Corroborating that it was never congestion: `[BFBHASH] full_events = 0`,
+`avg_free_banks = 13.4 of 16`, `bank_ovf_hist` all zeros, and `bank_alloc_hist` uniform at **62 on
+every one of the 16 banks**. The real bank-full counter is `bankfull_bypass = 432` per group
+(~6,900 total), not 132,420.
 
-**Method note:** the counters that settled this (`bank_alloc_hist`, `bank_ovf_hist`, `[BFBHASH]`)
-were in the same transcript the whole time. The error came from reading one counter's *name* and
-the RTL comment near it, instead of reading its *gate condition* and cross-checking against the
-dedicated bank-full counter sitting beside it.
+⚠️ **Method:** a cumulative counter's *total* is an average over regimes that may share nothing.
+Difference it against the phase boundaries before quoting it — here a single total concealed a
+52/48 split that no consistency check on the total could have separated.
 
 ### ⚠️ 256x32x256 is INSENSITIVE to concurrency effects — do not A/B channel changes on it alone
 
