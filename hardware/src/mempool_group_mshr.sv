@@ -5045,6 +5045,12 @@ module mempool_group_mshr
     logic [31:0] ml_t_last  [MshrNum];
     logic [31:0] ml_nbeats  [MshrNum];
     logic [63:0] ml_bspan_sum, ml_bspan_n, ml_bcap_sum;     // burst entries with >= 2 beats
+    // TIME-AVERAGED OCCUPANCY. Deliberately accumulated EVERY CYCLE, not sampled at period
+    // boundaries: an instantaneous sample is an estimator, not a mean, and the GVSOC side found
+    // theirs biased high by exactly 2x when they compared the two. ml_occ_active counts cycles
+    // with at least one live entry, so the mean can be quoted over both denominators (whole run,
+    // and cycles the MSHR has any work) instead of leaving the denominator implicit.
+    logic [63:0] ml_occ_sum, ml_occ_active;
 
     always_ff @(posedge clk_i) begin
       automatic logic [63:0] a_hold, a_flight, a_drain, a_life;
@@ -5060,12 +5066,15 @@ module mempool_group_mshr
         ml_drain_s_sum <= '0; ml_drain_s_n <= '0;
         ml_drain_b_sum <= '0; ml_drain_b_n <= '0; ml_bl_b_sum <= '0;
         ml_bspan_sum <= '0; ml_bspan_n <= '0; ml_bcap_sum <= '0;
+        ml_occ_sum <= '0; ml_occ_active <= '0;
       end else begin
         a_hold='0; a_flight='0; a_drain='0; a_life='0;
         n_hold='0; n_flight='0; n_drain='0; n_life='0; n_nobeat='0;
         a_drain_s='0; n_drain_s='0; a_drain_b='0; n_drain_b='0; a_bl_b='0;
         a_bspan='0; n_bspan='0; a_bcap='0;
         ml_cyc <= ml_cyc + 1;
+        ml_occ_sum <= ml_occ_sum + 64'($countones(mshr_q_valid));
+        if (|mshr_q_valid) ml_occ_active <= ml_occ_active + 1;
         for (int e = 0; e < MshrNum; e++) begin
           // An entry can be allocated and issued in the SAME cycle; ml_t_alloc[e] is
           // nonblocking so it still holds the previous life's value here. Use the
@@ -5143,6 +5152,8 @@ module mempool_group_mshr
       if (ml_bspan_n != 0)
         $display("[MSHRLIFE-BEATS] %m entries=%0d first_to_last_sum=%0d beats_captured_sum=%0d",
                  ml_bspan_n, ml_bspan_sum, ml_bcap_sum);
+      $display("[MSHRLIFE-OCC] %m MshrNum=%0d cycles=%0d occ_sum=%0d active_cycles=%0d",
+               MshrNum, ml_cyc, ml_occ_sum, ml_occ_active);
     end
   end
   // pragma translate_on

@@ -360,3 +360,27 @@ change that halved their calibration error.
 
 Pick a shape with real concurrent burst traffic when the mechanism under test is about sharing a
 resource between *different* transactions.
+
+### `[MSHRLIFE-OCC]` — time-averaged entry occupancy
+
+```
+[MSHRLIFE-OCC] <hier> MshrNum=64 cycles=.. occ_sum=.. active_cycles=..
+```
+  * mean occupancy (whole run)    = `occ_sum / cycles`
+  * mean occupancy (active only)  = `occ_sum / active_cycles`
+
+⚠️ **Accumulated every cycle, never sampled.** The GVSOC side quoted an instantaneous count taken
+at 8192-cycle window boundaries as if it were a mean; rebuilding it as a per-cycle accumulator
+changed **6.0 → 2.99**, a clean 2× bias. Sampling a time-varying quantity at fixed points and
+calling it a mean is wrong, and period boundaries are the worst available phase because they
+correlate with whatever the workload does periodically.
+
+Both denominators are reported because my entry counts span the **whole sim**, not just the
+3,845-cycle benchmark window — deriving occupancy from an entry count against a window denominator
+that does not match it produced a 4.6-to-39 range on this very question, which is why it had to be
+measured rather than inferred.
+
+**Generalisation worth keeping:** two failures on this thread came from attributing a quantity to
+the stage where it *surfaced* rather than where it *originated* — a wedge PC (where the core
+stopped, not what stopped it) and a serialisation read at the drain (where it showed, not where it
+was caused). Same error in different domains.
