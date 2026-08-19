@@ -53,6 +53,21 @@ work libraries were sealed either side of the edit — unfixed at 07:10:42, edit
 at 07:13:28. The two arms were also bit-identical through both control phases, which is the
 expected signature for a fix that is inert outside the hazard.
 
+### ✅ CONFIRMED ON THE REAL WORKLOAD, not just the probe
+
+The synthetic probe isolates the mechanism; this is the kernel that actually motivated the work.
+Same app, same shape (256x32x256 fp16), same config — only the RTL differs:
+
+| | unfixed (`build_fp16nb`) | fixed (`build_vfufix2`) |
+|---|---|---|
+| state | **HUNG** at cyc 205,000 | **RUNNING**, `tag=bench` |
+| groups retiring | **0 / 16** | **16 / 16** |
+| `[FPU] bench` lines emitted | **0** — never reached the timed region | accumulating |
+| retired instructions | frozen | 50,338 and climbing |
+
+On unfixed RTL the fp16 matmul never opens its benchmark window at all. On fixed RTL it enters the
+timed region with every group working. One word.
+
 ### Method note
 
 The controls are what make this interpretable. A bare "fp16 hangs" observation is consistent with a
