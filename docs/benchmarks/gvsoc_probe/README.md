@@ -303,35 +303,38 @@ to arithmetic because it was topological — no residual, ratio, or internal con
 have surfaced it. Counting at the point of delivery, downstream of where the classes rejoin, has
 no such gap.
 
-### ⚠️ Second blind spot: MSHR-BYPASSED bursts have no entry
+### ⚠️ Second blind spot: MSHR-BYPASSED requests have no entry
 
 `mempool_group_mshr.sv:883-889`: a multi-beat load that finds a **full bank at allocation** is
 *"forwarded to the NoC with mshr_tag=0, NO ENTRY"*. No entry means no `resp_buf` write, and all
-three `[MSHRLIFE*]` probes key off `|mshr_rb_we[e]` — so **bypassed beats are invisible to them**,
-independently of the remote/local split above.
+three `[MSHRLIFE*]` probes key off `|mshr_rb_we[e]` — so **bypassed traffic is invisible to them**,
+independently of the remote/local split above. That much is structural and stands.
 
-**On the 4x4 reference shape this is half the workload**, from the `[BYP]` counters in the same
-run (⚠️ they are **cumulative** — take the last value per group; summing all periods overcounts by
-~7x):
+⚠️ **CORRECTION (2026-08-19).** An earlier revision of this file claimed *"on the 4x4 reference
+shape this is half the workload — 132,420 of 262,144 words, 50.5%, congestion-driven"*. **That was
+wrong three ways** and is retracted:
 
-| | |
-|---|---|
-| bypassed forwards | 132,420 (orphans 0) |
-| words committed (`2*pair_commit + single_commit`) | 262,144 |
-| **bypass fraction** | **50.5%** |
+1. **Wrong class.** `[BYP] fwd` is gated on `req_len[t][p] == BurstLenWidth'(1)`
+   (`:2541-2547`) — it counts **single-word** bypassed requests, not bypassed bursts.
+2. **Wrong cause.** The same run reports `full_events = 0` and
+   `avg_free_banks_x1000 = 13358` — **13.4 of 16 banks free on average, no bank ever full**. The
+   actual bank-full bypass counter is separate: `bankfull_bypass = 432` per group (~6,900 total),
+   not 132,420.
+3. **Wrong denominator.** 132,420 is a *request* count; 262,144 is a *word* count. A burst request
+   carries up to 16 words, so the ratio compares quantities differing by up to 16x per item.
 
-This is *not* the config bypass — `cfg_bypass_burst = !cfg_mshr_enable \|\| (cfg_hold_subs_burst == 1)`
-and `hold_subs_burst = 2` here, so the global bypass is off. It is congestion-driven.
+**What the run actually shows:** the MSHR is *not* saturated and its banks are *not* concentrated —
+`bank_alloc_hist` is `62` on every one of the 16 banks, dead uniform, with `bank_ovf_hist` all zero.
 
-⚠️ **The split is not random.** A burst bypasses precisely when banks are full at allocation, so
-entry-captured bursts are the *uncongested* subset. Any rate derived from `[MSHRLIFE-BEATS]` is
-therefore biased toward the fast case, and must be quoted as *"for the 49.5% of bursts that get an
-entry"* rather than as a property of the response path.
+**What remains genuinely open:** 132,420 single-word requests did leave without an MSHR entry, and
+neither known mechanism explains it — `cfg_bypass_single` is false at `hold_subs_single=8`, and the
+banks were never full. Worth understanding, but it is about *singles*, not bursts, and it is not
+congestion.
 
-Bypassed bursts also reach both tile response ports by a **different** mechanism — slave-side
-round-robin channel hash plus the bypass-retag side table (`:883-905`) — not ParityDrain proper. So
-there are two service classes with two distinct 2-wide mechanisms, and neither `[MSHRLIFE*]` probe
-observes the second.
+**Method note:** the counters that settled this (`bank_alloc_hist`, `bank_ovf_hist`, `[BFBHASH]`)
+were in the same transcript the whole time. The error came from reading one counter's *name* and
+the RTL comment near it, instead of reading its *gate condition* and cross-checking against the
+dedicated bank-full counter sitting beside it.
 
 ### ⚠️ 256x32x256 is INSENSITIVE to concurrency effects — do not A/B channel changes on it alone
 
