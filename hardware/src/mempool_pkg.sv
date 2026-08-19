@@ -38,7 +38,7 @@ package mempool_pkg;
   localparam bit XFDOTP     = RVF ? 1 : 0;
   localparam bit XFAUX      = 0;
   localparam bit XF16       = RVF ? 1 : 0;
-  localparam bit XF16ALT    = 0;
+  localparam bit XF16ALT    = 1;
   localparam bit XF8        = RVF ? 1 : 0;
   localparam bit XF8ALT     = 0;
   /// Enable div/sqrt unit (buggy - use with caution)

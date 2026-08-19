@@ -117,27 +117,43 @@ Audited against `working_dir/spatz/hw/ip/spatz/src/` — the *compiled* Spatz, n
 `hardware/deps/spatz`, which is stale and unused. **All of §3 is mesh-independent**: 4x4 and 8x8
 instantiate the identical core, same `n_fpu=4`, `vlen=512`, `rvf=1`, `rvd=0`.
 
-### 3.1 Number formats — `spatz_pkg.sv:384`
+### 3.1 Number formats — `spatz_pkg.sv:392`
+
+> **UPDATED 2026-08-19 — bf16 is now ENABLED.** This section previously read the pre-v0.3.0
+> six-format mask and concluded bf16 was off. Two things changed since: cvfpu was upgraded to
+> pulp-v0.3.0 (`NUM_FP_FORMATS` 6 -> 9, so the mask is nine entries wide and every old line
+> reference has moved), and the `FP16ALT` bit was then set. The "**Consequence**" paragraph below
+> — offline bf16 -> fp16 conversion — **no longer applies**.
 
 ```systemverilog
-//              FP32  FP64  FP16  FP8   FP16a FP8a
-FpFmtMask    : {RVF,  1'b0, 1'b1, 1'b0, 1'b0, 1'b0},
+//              FP32  FP64  FP16  FP8   FP16a FP8a  FP6   FP6a  FP4
+FpFmtMask    : {RVF,  1'b0, 1'b1, 1'b0, 1'b1, 1'b0, 1'b0, 1'b0, 1'b0},
 //              INT8  INT16 INT32 INT64
 IntFmtMask   : {1'b0, 1'b1, 1'b1, 1'b0}
 ```
 
-In `fpnew_pkg.sv:52-59`, `FP16ALT` is `{8 exp, 7 mantissa}` — **that is bfloat16, and it is 0.**
+In `fpnew_pkg.sv:27`, `FP16ALT` is `binary16alt` = `{8 exp, 7 mantissa}` — that is bfloat16, and
+it is now **1** (enum index 4; `fmt_logic_t` is ASCENDING `[0:8]`, so it is the 5th entry).
+The format is selected at *runtime* by CSR `0x800` (`CSR_FMODE`), not by a distinct opcode space,
+so fp16 and bf16 share one instruction encoding.
 
 | format | supported | note |
 |---|---|---|
 | fp32 | yes | what current kernels use |
 | **fp16 (IEEE)** | **yes** | 2x throughput — see 3.3 |
-| **bf16** | **NO** | the format the model ships in |
+| **bf16** | **yes** | enabled 2026-08-19; the format the model ships in |
 | fp8 | no | |
 | **int8** | **NO** | so no int8 quantised inference |
 | int16 / int32 | yes | |
 
-**Consequence.** Weights must be converted bf16 -> fp16 offline. These are not interchangeable:
+**Cost.** ADDMUL is MERGED, so its pipe depth is the max over enabled merged formats (FP16ALT
+contributes 0 regs vs FP32's 1) and its widths come from the super-format (8e/7m is strictly
+inside FP32's 8e/23m) — so **no added pipeline stages and nothing widens**. NONCOMP is PARALLEL,
+so FP16ALT does get its own slice: that is the area cost. Measured cycle-neutral (regression
+bit-identical; see WORKLOG 2026-08-19). Post-synthesis area/timing not yet quantified.
+
+**Superseded consequence (kept for history).** While bf16 was off, weights had to be converted
+bf16 -> fp16 offline. These are not interchangeable:
 bf16 has an 8-bit exponent (range ~1e38); fp16 has 5 bits (max 65504, smallest normal 6e-5). LLM
 weights usually survive; *activations* — attention logits before softmax, residual-stream outliers
 — are the known overflow risk. Mitigation is per-tensor scaling: real work, and it belongs in the

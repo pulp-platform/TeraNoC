@@ -117,7 +117,7 @@ package snitch_pkg;
 
   // Transprecision floating-point extensions configuration
   localparam bit XF16    = 1; // Is half-precision float extension (Xf16) enabled
-  localparam bit XF16ALT = 0; // Is alt. half-precision float extension (Xf16alt) enabled
+  localparam bit XF16ALT = 1; // Is alt. half-precision float extension (Xf16alt) enabled
   localparam bit XF8     = ZQUARTERINX; // Is quarter-precision float extension (Xf8) enabled
   localparam bit XF8ALT  = 0; // Is alt. quarter-precision float extension (Xf8alt) enabled
   localparam bit XFVEC   = 1; // Is vectorial float SIMD extension (Xfvec) enabled

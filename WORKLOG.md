@@ -9869,3 +9869,345 @@ instructions; use `install/llvm/bin/llvm-objdump --mattr=+m,+f,+d,+v,+zfh`.
 **Next.** Leading suspect is partial byte strobes: e32 stores present 4'b1111, e16 stores 4'b0011 /
 4'b1100, likely never exercised end to end. Agents auditing store VRF-read, store commit/ROB, and
 downstream strobe propagation.
+
+## 2026-08-19 14:10 — RETRACTION + true root cause, cvfpu v0.3.0 port, and a bad gate threshold
+
+**Retraction.** The preceding entry ("e16 vector STORES wedge, e16 loads are fine") is **wrong**.
+A retired instruction in the Snitch trace means *accepted*, not *completed*, so "254/256 harts stop
+just before the first `vse16.v`" showed only where cores stopped, not what stopped them. Running the
+*same* ELF on unfixed vs fixed RTL — the only variable being the fix — settled it: on unfixed RTL the
+e16 load/store probe never printed `PHASE1_LOADS_OK` and wedged inside phase A's `vle16` loop; on
+fixed RTL it cleared that phase and ran on. The memory path was never at fault.
+
+**True root cause — `spatz_vfu.sv:141`** (committed `5b3136f`):
+`pending_results` selected on `result_tag.wb` but took its *width* from the live
+`spatz_req.vtype.vsew`. `spatz_ipu` has `Pipeline=1`, so those are different instructions. Snitch
+offloads `mul` to the VFU as a scalar op at EW_32 (mask `4'hf`); with an e16 op behind it the result
+is judged against `8'hff`, so `&(result_valid | ~pending_results) = &(16'h000f | 16'hff00) = 0`
+forever. One-word fix: take the width from `result_tag.vsew`, already captured in the tag.
+
+**Method note worth keeping.** My registered caveat was *wrong reasoning*, not a bad measurement —
+the stuck PC landed exactly where I had predicted "memory bug", and it wasn't one. Registering a
+prediction only helps if its logic is sound. Infer cause from a controlled A/B, not from a stall site.
+
+**cvfpu pulp-v0.3.0 migration (task #85, in flight).** `Bender.yml` fpnew `pulp-v0.1.3` -> `pulp-v0.3.0`
+(`841b19b`, tag confirmed); `Bender.lock` hand-edited to that revision only (verified by diff, no
+`bender update`). `spatz_pkg.sv{,.tpl}` + `deps/snitch/snitch_pkg.sv`: `FpFmtMask` widened 6 -> 9,
+added `MxFpFmtMask`/`MxIntFmtMask`/`PaceFeatures`, `PipeRegs` 6 -> 9 columns + MXDOTP row (DISABLED --
+the MXDOTP slice asserts width==64 and we are 32), `PipeConfig: BEFORE -> INSIDE`. Elaborates clean:
+**Errors=0, Warnings=87**.
+
+**Latent trap fixed.** `spatz_pkg.sv.tpl` had a *third* `FpFmtMask` (the `cfg['mempool'] == False`
+arm) still 6 elements wide and missing the three new members. `fmt_logic_t` is ASCENDING `[0:8]` and
+this is a concatenation, so a 6-element literal zero-pads on the index-0 side and silently shifts
+every format by +3 (FP32 off, FP8 on). Dead code for every config we build -- so the running gate is
+unaffected -- but it could not compile against v0.3.0. Now 9-wide with the new members.
+
+**Gate threshold was WRONG.** I had recorded "must reproduce 4188 cycles". No transcript contains
+4188 as a result -- every hit is a coincidental substring inside an unrelated CSV field
+(`acc=...,4188,...`, `idle=24188`). Gating on it would have been unfalsifiable. The real baseline for
+`matmul_gvsoc_probe.elf`, agreed exactly by three completed runs (`build_vperf`, `build_occ`,
+`build_mshrlife4`):
+`cycles=1846` | `busy=2156908 of 3938304 lane-cycles over 3846 benchmark cycles -> util=54.77%` |
+`[EOC] ended at 67210.00 ns (retval = 0)`. `INSIDE` keeps register *count* unchanged, so the
+prediction under test is that all four numbers are untouched.
+
+**bf16 (task #86) — index pinned.** v0.3.0's `FP_ENCODINGS` puts bf16 `{8 exp, 7 man}` at **index 4**,
+i.e. the **5th** concatenation element (`FP16a`), *not* index 5 (`FP8ALT`). Confirmed twice: the
+encodings table in `fpnew_pkg.sv` and the column header already in our own mask. Live arm is `RVD=0`
+(single-precision). bf16 is lane-neutral: FP16 is already enabled so `min_fp_width` stays 16 and
+`max_num_lanes` does not move. Edits: 5th element `1'b0 -> 1'b1` in both `spatz_pkg.sv` and `.tpl`,
+plus `XF16ALT 0 -> 1` in `mempool_pkg.sv:41` and `deps/snitch/snitch_pkg.sv:120`.
+
+**Housekeeping.** Five QuestaSim sims were wedged at ~98% CPU each -- sim clock 300k-530k cycles past
+the last retired instruction. All four fp16 ones were compiled *before* 07:09 (when the probe that
+found the bug was written) and wedge in the 11k-16k band: four instances of the now-fixed hazard.
+The fifth was the tag probe itself, hung by design with its verdict recorded (#83). Killed by PID
+against `/proc/PID/cwd`; all transcripts and traces are preserved. Freed ~5 cores.
+`build_1/2/3/4` are frozen (Aug 3-17) but cheap -- left alone pending the user's call.
+
+### 14:35 — CORRECTION to the entry above: 4,188 is REAL; my "corrected" 1,846 was the warm-up
+
+The claim above that "4188 was never a result, every hit is a coincidental substring" is **wrong**,
+and so is the replacement baseline I put in its place. Both errors, in order:
+
+1. **4,188 is a genuine measurement:** `[UART] The execution took 4188 cycles.` -- the app's own
+   timer, identical in all three completed runs of `matmul_gvsoc_probe.elf` (`build_vperf`,
+   `build_occ`, `build_mshrlife4`), and already documented in
+   `docs/benchmarks/gvsoc_probe/README.md:402-404`, which says in bold **"Use 4,188"**.
+   My error: `grep -l 4188` returned ~10 transcripts, I opened **three** -- none of which had ever
+   run that ELF -- found substring hits in all three, and generalised. I never opened `build_vperf`,
+   the one that mattered. Sampling the reachable files instead of the relevant one.
+2. **`cycles=1846` is the I-cache warm-up, not the kernel.** It prints 16 times, once per group,
+   *before* the `----- (256x256) sp fmatmul -----` banner. Gating on it would have tested a phase
+   largely insensitive to the FPU change. Textbook invisible-phase trap.
+
+**The gate, corrected (monitor re-armed on this):**
+- `[UART] The execution took 4188 cycles` — app timer, the number to lead with
+- `[FPU FINAL] busy=2156908 of 3938304 lane-cycles over 3846 benchmark cycles -> util=54.77%`
+- `retval = 0`
+
+4,188 and 3,846 are two different spans of the same run (app timer opens before tracing and closes
+after; 343 cycles = 8.9% wider). Always say which one is meant.
+
+**Method rules added to memory:** filter transcripts by ELF *before* looking for a number; anchor
+the grep to the number's label (`execution took 4188 cycles`, never bare `4188`); locate a count
+relative to the phase banner; and treat a *negative* finding ("this appears nowhere") as needing
+more evidence than a positive one, since it licenses discarding an agreed figure.
+
+### 14:50 — the 4,081 vs 4,188 gap is BASELINE DRIFT, not instrumentation (peer pushback was right)
+
+The GVSOC session rejected my "≈2.6% instrumentation overhead" attribution on first principles: a
+cycle-accurate simulation's **cycle count is invariant to passive instrumentation** — TB counters,
+`$countones` probes and trace writers observe the design without participating in it, so they cost
+wall-clock, not simulated cycles. A 2.6% cycle delta therefore has to be functional. Correct, and I
+should have rejected my own label on those grounds instead of writing it into a doc.
+
+Their candidate was that the two ELFs are different programs. Checked, and it is not that:
+
+| check | result |
+|---|---|
+| `sp-fmatmul-gvsoc-probe/main.c` vs `sp-fmatmul-opt-burst-merge/main.c` | **byte-identical** (623 lines) |
+| `kernel/` dirs | identical (`diff -rq` clean) |
+| probe dims `A[256*32] B[32*256] C[256*256]` | **256x32x256** = the golden shape |
+| probe build `HOLD_SUBS_SINGLE=8`, `HOLD_SUBS_BURST=2` | matches golden row `A-sh=8 / B-sh=2` |
+
+Same source, same kernel, same shape, same MSHR knobs. **The variable is the RTL.** The golden table
+was last regenerated **2026-08-03** (`4d3d9d17`); since then at least a dozen functional commits
+landed — `c05d54c1` noc_router_remapping 0→2, `ee38f5ff` bank_publish→1, `8ca4f060` hold window 2047,
+`fa00ffb5` drain_from_q→1, `f7a7e90f` MSHR C2 spill bypass, `8d199128` two Spatz PPA knobs on, and
+`7737baee`, a C1 rank/slot truncation **bug fix**. 4,081 is 3 Aug RTL; 4,188 is today's.
+
+**Consequence, which is bigger than the 107 cycles.** Every row of the 2026-08-03 table is stale by
+an unquantified amount, and the drift is concentrated in the NoC response path and the MSHR drain —
+exactly what the GVSOC model reproduces. 256x32x256 sits at 0.96x (MSHR barely engaged), so its 2.6%
+is a *lower* bound; shapes where the MSHR does real work have had more changed underneath them. Part
+of their 15.7% mean absolute anchor error may be staleness rather than model error, and the anchors
+alone cannot separate the two. Offered to re-measure whichever anchors they name.
+
+Withdrew the 2.6% caveat on their +50.8% entirely: their 6,153 is the golden app at the golden shape,
+so 4,081 is the right denominator and the error is all theirs.
+
+Doc corrected: `docs/cvfpu_v030_migration_assessment.md` no longer claims instrumentation overhead.
+Verified while there that every row of `gemm_results.md` is fp32 (floor column = M·N·P/1024), so the
+VFU fp16 fix requires no regeneration of that table.
+
+**Lesson.** I had this written down already — `project_matmul_perf_roadmap` says "DRIFT: old
+3836/3786 not cycle-comparable (re-measure baselines!)" — and did not apply it to a table I was
+quoting as golden. A committed benchmark table is a *dated measurement*, not a constant.
+
+### 15:35 — GVSOC arrival-width deliverable: the gap is WIDTH, not commit policy
+
+`build_arr` completed and reproduces the reference exactly — `execution took 4188 cycles`,
+`busy=2156908 of 3938304 over 3846 benchmark cycles`, `retval=0` — so the histogram ships attached
+to a valid arm rather than a requeue. RTL is cvfpu **v0.1.3** (pre-upgrade, 0 `fpnew_mxdotp_multi`
+refs, compiled 13:26); knobs `HOLD_SUBS 8/2`, `MERGE_REQS=8`, `BANK_SHIFT 5/5`, `BURST_BITS=1`,
+`HOLD_WINDOW_BURST=2047`, `MSHR_NUM=64`, `NOC_ROUTER_REMAPPING=2`, `SPATZ_VLSU_BURST_EW16=0`.
+
+256/256 cores, every one identical on `win=3845 arr_words=1280 ports=4`:
+
+| metric | min | mean | max |
+|---|---|---|---|
+| arrival width | 1.1841 | **1.2667** | 1.3375 |
+| 2-wide fraction of arrival cycles | 0.1841 | 0.2664 | 0.3375 |
+| words per MULTI-arrival cycle | 2.0000 | **2.0013** | 2.0283 |
+| sustained rate (`arr_words/win`) | — | **0.3329** | — |
+
+**The load never presents wider than 2** despite `ports=4`. The entry path is 1.27 because ~73% of
+arrival cycles carry one word and ~27% carry two. GVSOC's 1.31 sits inside the per-core range — that
+side was measuring correctly; the 2.00 entry-path assumption is the error. Supports their pivot to
+the bypass path's 2-wide return (2 is the true ceiling), with the caveat that 2-wide occurs only
+26.6% of the time, so sizing the return path for 2-wide-as-common would overshoot the same way.
+
+Integrity: `arr_h1 + arr_h2p == arr_cyc` exact on all 256 cores, `(arr_words-arr_h1)/arr_h2p` = 2.0
+to 4 dp. ⚠️ **One-shot artifact** — `[VARRIVE]` has been reverted out of `spatz_vlsu.sv`; only
+`build_arr`'s compiled library still has it. Doc: `docs/benchmarks/gvsoc_probe/varrive_arrival_width.md`.
+
+**Audit false alarm worth recording.** A 4-agent health audit reported, marked CRITICAL and
+"positively verified", that `build_arr` had **zero** `[VARRIVE]` lines and the deliverable could never
+be produced. I had already read and aggregated 256 lines from that file; re-verified twice and
+discarded the claim. Acting on it would have requeued a completed valid run. It also wrongly claimed
+`build_fpu030/compile.tcl` had no `-D` defines (it has 3,433) and that the v0.3.0 identity was
+unverifiable — settled decisively instead by `fpnew_mxdotp_multi*` being compiled in `build_fpu030`
+(4 refs) and absent from every pre-upgrade build (0). Subagent verdicts are evidence, not findings.
+
+### 16:05 — CORRECTION: [VARRIVE] was never reverted; and the arrival width does not isolate loads
+
+Two corrections, one mine and one that voids my own headline number.
+
+**1. "The probe was reverted / this is a one-shot artifact" was FALSE.** `[VARRIVE]` is at
+`spatz_vlsu.sv:2042-2097` and always was. I had grepped
+`TeraNoC_Spatz/working_dir/spatz/hw/ip/spatz/src/` — the real path is
+`TeraNoC_Spatz/**TeraNoC**/working_dir/...`. One dropped path component, a directory that does not
+exist, an empty result read as absence. I propagated it to the GVSOC session, the artifact and the
+worklog, and told them not to ask for re-runs. **Fifth instance today of a negative from a search
+whose scope could not contain the answer** — and the most embarrassing, because it happened in the
+message immediately after we jointly named the pattern.
+
+**2. The 1.2667 arrival width does not measure load arrival width.** GVSOC proved it from my source:
+`:2068` counts `$countones(spatz_mem_rsp_valid_i)` with **no write mask**; `:280` shows store acks
+assert that same valid (the ack test qualifies on `.write`); `:1673` shows `rob_push` excludes
+writes. So arrivals = loads + store acks, commits = loads only, and 1280 − 1024 = 256 = the C stores.
+Proven from source — the A-vs-C degeneracy I flagged is resolved without needing an `N != p` shape.
+
+The histogram damage is worse than the total: a store ack sharing a cycle with a load scores as a
+2-wide arrival, so `arr_h2p` never measured load+load. Against 269 two-wide cycles and 256 store
+acks, true load+load cycles lie in **13 … 269** — factor of 20, conclusion inside it. The deficit is
+**UNDETERMINED**, not 1.27x. GVSOC has stopped sizing anything against it.
+
+**Fix implemented (their spec, one-line mask):** parallel write-filtered counters
+`rsp_load_valid[pp] = spatz_mem_rsp_valid_i[pp] && !spatz_mem_rsp_i[pp].write` feeding
+`c_ld_words/c_ld_cyc/c_ld_h1/c_ld_h2p`, emitted as `[VARRIVE-LD]` inside the SAME `begin/end` as
+`[VARRIVE]` (that block is load-bearing — a bare `if` there once produced 3.8M lines / 1.0 GB).
+Running as `build_ldarr`, `config=terapool_spatz4_fpu_gemm256x32x256`, knobs verified identical to
+`build_arr`. Predictions registered before the result: `ld_words=1024`, `arr_words=1280`, app timer
+`4188`. The 4188 check doubles as the proof that the added counters are genuinely passive.
+
+**Lesson, stated as an invariant:** a counter's name is a claim about what it isolates, and that
+claim needs checking against the signal it actually sums. `arr_words` looked trustworthy precisely
+because it was tight (stdev 0.0247 across 256 cores) — but every core carries the same store traffic,
+so uniformity was evidence of a systematic contaminant, not of correctness.
+
+### 17:40 — fp16 sweep prep: util metric is NOT cross-precision valid, and 7 generators would have doubled it
+
+**CONFIRMED (audit tried twice to refute and failed): the TB utilisation counter cannot compare fp32
+against fp16.** `fpu_busy_q` is `logic [N_FPU-1:0]` — one bit per LANE (`.busy_o(fpu_busy_d[fpu])`,
+each instance ELEN-wide) — and the denominator `FU_Lanes = FU_NumCores * N_FPU` = 1024 carries no
+element-width term (a grep of the whole 608-line `tb_fpu_util.svh` for vsew|EW_16|elen returns zero,
+file confirmed present). But `nr_elem_word = N_FU * (1 << (MAXEW - vsew))` gives 4 elem/word at EW_32
+and **8 at EW_16**, and the ADDMUL PipeRegs row is FP32=1 / FP16=1 — identical depth, so no
+compensating latency. One busy lane-cycle = 1 fp32 MAC but **2** fp16 MACs.
+
+Refutations attempted and failed: (1) widening ops would equalise it — the fp16 kernel uses NONE
+(grep count 0), only non-widening `vfmul.vf`/`vfmacc.vf` at e16,m2, and its own comment says "the
+same byte count as e32,m2 … Twice the arithmetic per byte fetched"; (2) wrong checkout / ELEN —
+both spatz checkouts identical on every load-bearing line, ratio still 2x at rvd=1.
+
+**Still valid within one precision** (period-to-period, group-to-group, arm-to-arm), so the existing
+fp32 sweeps and the group-alignment analyses are unaffected. Only cross-precision rows are invalid.
+
+**LANDMINE AVOIDED.** Seven doc generators hardcode `ideal = M*N*P/1024` with no precision term
+(`gen_sweep_doc.py:65`, `gen_shape_status.py:102`, `gen_win2047_doc.py:75`, `gen_sweep_doc_c2.py:68`,
+`gen_sweep_doc_opt3.py:65`, `gen_sweep_doc_phase.py:72`, `gen_vs_nofeature_table.py:114`). Generating
+the fp16 table with those would have made **every fp16 efficiency read exactly 2x too high and
+inverted the comparison**. `scripts/fp16_sweep_report.py` is already correct (`PEAK = {32:1024,
+16:2048}`) and is the base to build on. wave.tcl side is clean — 45 files, no util/throughput
+arithmetic at all.
+
+**Shape set: 15 of 29 legal at fp16.** All 14 rejections share one cause — `shift_burst=4 must be > 4`
+(needs p_gap >= 32 words) — mirroring a real elaboration `$error` at `mempool_group_mshr.sv:525`, so
+they would fail to build, not merely mis-tune. Sweep the 15, record the 14 as structurally excluded.
+`gemm_autotune` does NOT emit `spatz_vlsu_burst_ew16`; it must be added per arm. Pin `kernel_size=8`
+(-> e16,m2 = 128 B, safely under the 256 B `use_port0_burst_req` ceiling; kernel_size=2 -> e16,m8 =
+512 B would silently leave the burst path).
+
+**Monitoring defects found today, all mine, all caught by verifying before acting:** unanchored
+`cyc=` also matching `arr_cyc=`; a frozen-detector that flagged every *elaborating* build (vsimk is
+0% while voptk2 works); a wedge check globbing `trace_hart_0x0000000[0-9a-f]` = **16 of 256** harts
+(false-alarmed `build_vfufix` while hart 252 advanced +2308/20s); and an mshr "sustained" test that
+summed 5 windows and fired on **one** isolated spike (1 nonzero window of 256 — while the fp32 runs
+show 20% nonzero and nobody flagged those).
+
+---
+
+## 2026-08-19 — fp16 sweep dashboard: the per-group heatmap rendered nothing
+
+**Purpose.** User reported the "Per-group occupancy · every group, every 1000-cycle slice"
+illustration was broken.
+
+**Root cause — two independent layers, both mine.**
+1. *Missing stylesheet.* I replaced the per-group view's markup (a 4x4 grid of cards:
+   `.mesh/.cell/.cellhd/.gid/.gval/.meshblock`) with a row-per-group heatmap
+   (`.hblock/.heat/.hrow/.hlabel/.hcells/.hmean/.spread/.legend`) and **never wrote the matching
+   CSS**. The old selectors were left behind, matching nothing. Verified: 10 blocks / 160 rows /
+   1,184 cells emitted, **0 CSS rules** for any of the new classes. Each cell is a bare empty
+   `<i>` — inline, no content, zero width — so there was nothing to paint. The data was always
+   present and correct; only the presentation was absent.
+   *Lesson:* renaming markup classes is a two-file edit. Grep emitted `class="x"` against defined
+   `.x{` and require every one to have a rule — the page does not error, it just renders blank.
+2. *Every cell was level 0 anyway.* All 10 live arms are still in I-cache warm-up, so
+   `csr_trace_any_global` gates every per-group counter. Even styled correctly this was 160 rows of
+   flat `--zero`. Gated arms now collapse to one honest line naming the gate, instead of drawing a
+   grid of nothing.
+
+**Also fixed.** Cell colour was an inline `style="background:#..."` from a hardcoded light-only
+ramp — an inline style beats any `[data-theme]`/media rule, so dark mode was structurally
+unfixable and a *low* value would have glowed *brighter* than a busy one on a dark ground. Now
+emitted as `data-l="0..8"` with `--r1..--r8` defined in all three theme states (bare `:root`,
+`prefers-color-scheme: dark` guarded by `:not([data-theme="light"])`, and `[data-theme="dark"]`),
+dark running dark->light so "bright = busy" holds in both. `--zero` moved off the blue hue so
+"gated" cannot be misread as "low".
+
+**Validation — rendered it, did not just diff the source.** No live arm has signal yet, so I fed
+the real generator a synthetic arm with a planted slow set {g3,g6,g9,g12} at 0.30 vs 0.88 and
+screenshotted the output in google-chrome headless. The heatmap recovers the planted structure:
+**group spread 60.9 pp (max 90%, min 29%)** against a planted 58 pp + noise, ramp levels span 2..8,
+3 full blocks + 7 collapsed. Confirmed in light, `prefers-color-scheme: dark`, and explicit
+`data-theme="dark"`. Test artifacts and the synthetic JSON removed afterwards.
+
+**Two tooling traps hit while verifying (both cost a wrong reading first).**
+- zsh treats `$c[...]` as **array subscripting**, so `grep -cE "\.$c[ ,{:]"` died with
+  `bad math expression` and printed an empty count for all 8 classes — which read as "no CSS rule
+  found" for reasons unrelated to the actual defect. Use `${c}`.
+- A Python wrapper using `%` formatting on the page HTML raised `TypeError: not enough arguments
+  for format string` because the CSS contains `100%`. The exception left the previous wrapper file
+  in place, so the screenshot **silently rendered the stale tones** and looked like a successful
+  check. Only the byte count (5,289) gave it away.
+
+**Status.** Fixed in `scripts/gen_fp16_sweep_html.py`; artifact republished. The 5-minute
+`refresh_dash.sh` loop calls the same generator, so it picks the fix up unchanged (not edited in
+place — bash re-reads a running script by byte offset).
+
+---
+
+## 2026-08-19 — bf16 (XF16ALT / FP16ALT) enabled and committed
+
+**Purpose.** User approved keeping bf16 after asking whether it costs hardware.
+
+**What it actually is.** Two INDEPENDENT changes that happened to be edited in the same minute,
+which I initially conflated:
+1. `XF16ALT` localparams (`mempool_pkg.sv:41`, `deps/snitch/src/snitch_pkg.sv:120`) — **decoder
+   only**. `snitch_pkg`'s copy is entirely dead: `FPU_FEATURES`, `NSX`, `FP_PRESENT`, `FLEN` have
+   zero consumers repo-wide. `mempool_pkg`'s copy reaches only the Snitch scalar decoder
+   (`mempool_tile:260` -> `spatz_mempool_cc:152` -> `snitch.sv:33`), where every use is a legality
+   gate that *also* requires `fcsr.fmode==1`. It does not enable FP (`FP_EN = RVF||RVD`), does not
+   change FLEN (constant 32 in mempool_pkg), does not touch the register file; FLH/FSH were already
+   legal via XF16. Cost: a few decode gates.
+2. `spatz_pkg::FpFmtMask` FP16ALT bit — **the real hardware**. This is the only path to the one
+   elaborated `fpnew_top` (`spatz_vfu.sv:1014`).
+
+**CORRECTION.** I told the user the GVSOC anchors needed rebuilding because launching them now
+would use "a different FPU format mask, because of XF16ALT". The concern was right, the mechanism
+was wrong: **XF16ALT never reaches the FPU** — 0 references in `spatz_pkg.sv` and `spatz_vfu.sv`.
+On that basis I dropped a planned mutation of the shared tree (temporarily flipping XF16ALT across
+two anchor builds with a trap-restore) and launched the anchors unpinned, which is both simpler and
+avoids a shared-state hazard. Justified because the change is cycle-neutral by construction *and*
+by measurement, not because the mask is identical.
+
+**Cost, established from RTL.** ADDMUL is MERGED -> pipe depth is the max over enabled merged
+formats (FP16ALT 0 regs < FP32 1 reg) and widths come from the super-format (8e/7m inside FP32's
+8e/23m) => **no added pipeline stage, nothing widens**. NONCOMP is PARALLEL -> FP16ALT gets its own
+slice, which is the area cost. **Not zero overhead** — reported as such rather than rubber-stamping
+the user's "if there is no added hardware overhead" condition. Post-synthesis area/timing unmeasured.
+
+**Commits.** spatz `5f79868`; main repo below. `spatz_vlsu.sv` (VARRIVE probe) deliberately left
+unstaged in the spatz tree.
+
+**Also corrected: `docs/qwen38_workload_analysis.md` §3.1 was stale and actively wrong** — it quoted
+the pre-v0.3.0 six-entry mask and asserted bf16 "**is 0** / **NO**", with a "Consequence" paragraph
+requiring offline bf16->fp16 weight conversion. Updated with the nine-entry mask, the enabled bit,
+the runtime CSR-0x800 selection, and the cost note; the old consequence is kept but marked
+superseded.
+
+**A dashboard caveat of mine was also wrong, caught by the first real datum.** The page claimed
+"util understates fp16 by exactly 2x". The first completed arm falsifies it: 256x32x256 gives
+util 37.5% vs eff 33.6% — the same scale, not 2x apart. At full occupancy fp16 retires 2048 MAC/cyc
+*and* `ideal = M*N*P/2048`, so both read 100%: util and eff share a scale WITHIN one precision. The
+0.90 ratio here is just the non-MAC share of busy lane-cycles (2,097,152 required vs 2x1,170,708
+busy). The 2x is real only when an fp16 util figure is read as fp32-equivalent THROUGHPUT. Fixed on
+the page with the measured numbers cited so it can be re-checked.
+
+**Monitor defect (another anchored-pattern miss).** The sweep watchdog grepped `'Execution took'`
+(capital E) but the UART marker is lowercase `The execution took N cycles.`, so it counted zero
+completions and reported a **normal completion as a death**. v2 checks the vanished arm's own
+transcript instead of a global count. Replaced by new filename, never edited in place.
