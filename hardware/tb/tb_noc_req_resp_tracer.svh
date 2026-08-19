@@ -24,7 +24,8 @@
 // Tier-2 (define TRACER_TRACE_HOPS) — per-hop mesh router directional taps.
 //
 // Include inside the mempool_tb module (after tb_noc_bottleneck_profiling.svh).
-// Gating: csr_trace_any_global (benchmark window) AND an optional time window
+// Gating: csr_trace_any_global (benchmark window, bypass with +tracer_all) AND an optional
+//   time window
 //   via +tracer_lo_ns=<ns> / +tracer_hi_ns=<ns>; disable entirely with +notracer.
 // ============================================================================
 
@@ -79,6 +80,11 @@ logic         tracer_en;
 longint unsigned tracer_lo_ns;
 longint unsigned tracer_hi_ns;
 logic         tracer_active;
+// +tracer_all: record OUTSIDE the benchmark window too. The csr_trace_any_global gate makes
+// the tracer structurally blind to anything before mempool_start_benchmark() -- including the
+// I-cache warm-up pass, which is exactly where the fp16 deadlock fires
+// (docs/fp16_matmul_deadlock.md). Without this the only capturable arms are the healthy ones.
+logic         tracer_all;
 string        tracer_dir;
 string        tracer_path;
 
@@ -93,6 +99,8 @@ initial begin
   void'($value$plusargs("tracer_dir=%s",   tracer_dir));
   if ($value$plusargs("notracer=%d", notr)) tracer_en = 1'b0;
   if ($test$plusargs("notracer"))           tracer_en = 1'b0;
+  tracer_all = $test$plusargs("tracer_all");
+  if (tracer_all) $display("[TRACER] +tracer_all: ignoring the csr_trace benchmark-window gate");
 
   if (tracer_en) begin
     void'($system($sformatf("mkdir -p %s", tracer_dir)));
@@ -115,7 +123,7 @@ always @(posedge clk or negedge rst_n) begin
   else        tracer_cycle <= tracer_cycle + 1;
 end
 
-assign tracer_active = tracer_en && csr_trace_any_global &&
+assign tracer_active = tracer_en && (csr_trace_any_global || tracer_all) &&
                        (longint'($time) >= tracer_lo_ns) &&
                        (longint'($time) <= tracer_hi_ns);
 
