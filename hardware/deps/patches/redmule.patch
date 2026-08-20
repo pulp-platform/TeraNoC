@@ -28,7 +28,7 @@ index d6d00ae..8f3345e 100644
    assign cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.d1_len = reg_file_i.hwpe_params[W_ITERS][15:0];
    assign cntrl_streamer_o.z_stream_sink_ctrl.addressgen_ctrl.d1_stride = JMP;
 diff --git a/hardware/deps/redmule/rtl/redmule_scheduler.sv b/hardware/deps/redmule/rtl/redmule_scheduler.sv
-index f028c90..7d28750 100644
+index f028c90..efc7a44 100644
 --- a/hardware/deps/redmule/rtl/redmule_scheduler.sv
 +++ b/hardware/deps/redmule/rtl/redmule_scheduler.sv
 @@ -417,7 +417,11 @@ module redmule_scheduler
@@ -44,7 +44,20 @@ index f028c90..7d28750 100644
    assign y_height = y_cols_iter_q == reg_file_i.hwpe_params[W_ITERS][15:0]-1 && reg_file_i.hwpe_params[LEFTOVERS][7:0] != '0 ? reg_file_i.hwpe_params[LEFTOVERS][7:0] : D;
  
    always_ff @(posedge clk_i or negedge rst_ni) begin : z_width_register
-@@ -565,11 +569,12 @@ module redmule_scheduler
+@@ -559,17 +563,24 @@ module redmule_scheduler
+   // Check if the new Y rows are loaded and ready to be pushed
+   // Only enable this check when the results of an iteration are available
+   assign check_y_loaded    = flgs_z_buffer_i.loaded;
+-  assign check_y_loaded_en = z_wait_counter_q == PIPE_REGS && ~w_done;
++  // Gate on Y actually being used (OP_SELECTION[0]): MATMUL never streams Y, so the
++  // z-buffer never reaches `loaded` and the engine writes Z directly (EMPTY->PUSHED). Without this
++  // gate the check races w_done: fast memory finishes W before the check window and skips it, but
++  // high-latency (mesh) memory trips the window while W is still loading and deadlocks LOAD_W
++  // waiting for a Y that never comes. Behaviour is unchanged when Y is used.
++  assign check_y_loaded_en = z_wait_counter_q == PIPE_REGS && ~w_done
++                          && reg_file_i.hwpe_params[OP_SELECTION][0];
+ 
+   /******************************
     *           FLAGS            *
     ******************************/
  
@@ -59,3 +72,194 @@ index f028c90..7d28750 100644
  
    always_ff @(posedge clk_i or negedge rst_ni) begin : first_load_register
      if(~rst_ni) begin
+diff --git a/hardware/deps/redmule/rtl/redmule_streamer.sv b/hardware/deps/redmule/rtl/redmule_streamer.sv
+index 911b078..e10423f 100644
+--- a/hardware/deps/redmule/rtl/redmule_streamer.sv
++++ b/hardware/deps/redmule/rtl/redmule_streamer.sv
+@@ -102,6 +102,12 @@ hci_outstanding_rob #(
+ );
+ 
+ flags_fifo_t z_fifo_flags;
++hci_streamer_flags_t z_sink_flags;
++logic z_sink_done_pending_q;
++logic z_sink_done;
++logic [31:0] z_store_outstanding_q;
++logic z_store_req_fire;
++logic z_store_rsp_fire;
+ logic [NumStreamSources:0][$clog2(NumStreamSources+1)-1:0] priority_encoding;
+ assign priority_encoding[0] = 0;
+ assign priority_encoding[1] = 1;
+@@ -158,9 +164,61 @@ hci_outstanding_sink #(
+   .tcdm                ( zstream2cast                ),
+   .stream              ( z_stream_i                  ),
+   .ctrl_i              ( ctrl_i.z_stream_sink_ctrl   ),
+-  .flags_o             ( flags_o.z_stream_sink_flags )
++  .flags_o             ( z_sink_flags                )
+ );
+ 
++// The sink's done pulse only means that every Z store has entered i_z_fifo.
++// Keep the job active until that FIFO drains and all issued stores are
++// acknowledged; otherwise a following software clear can discard queued stores
++// or let the next job observe incomplete output.
++assign z_store_req_fire = virt_tcdm_rob[3].req_valid && virt_tcdm_rob[3].req_ready;
++assign z_store_rsp_fire = virt_tcdm_rob[3].resp_valid && virt_tcdm_rob[3].resp_ready;
++
++always_ff @(posedge clk_i or negedge rst_ni) begin : z_store_outstanding_reg
++  if (!rst_ni) begin
++    z_store_outstanding_q <= '0;
++  end else begin
++    case ({z_store_req_fire, z_store_rsp_fire})
++      2'b10: z_store_outstanding_q <= z_store_outstanding_q + 1'b1;
++      2'b01: begin
++        if (z_store_outstanding_q != '0) begin
++          z_store_outstanding_q <= z_store_outstanding_q - 1'b1;
++        end
++      end
++      default: z_store_outstanding_q <= z_store_outstanding_q;
++    endcase
++  end
++end
++
++`ifndef SYNTHESIS
++always_ff @(posedge clk_i) begin : z_store_outstanding_assert
++  if (rst_ni) begin
++    assert (!(z_store_rsp_fire && !z_store_req_fire && (z_store_outstanding_q == '0)))
++      else $error("RedMulE Z-store response arrived with no outstanding store");
++  end
++end
++`endif
++
++assign z_sink_done = (z_sink_done_pending_q || z_sink_flags.done) &&
++                     z_fifo_flags.empty && (z_store_outstanding_q == '0);
++
++always_ff @(posedge clk_i or negedge rst_ni) begin : z_sink_done_pending_reg
++  if (!rst_ni) begin
++    z_sink_done_pending_q <= 1'b0;
++  end else if (clear_i) begin
++    z_sink_done_pending_q <= 1'b0;
++  end else if (z_sink_done) begin
++    z_sink_done_pending_q <= 1'b0;
++  end else if (z_sink_flags.done) begin
++    z_sink_done_pending_q <= 1'b1;
++  end
++end
++
++always_comb begin : z_sink_flags_comb
++  flags_o.z_stream_sink_flags = z_sink_flags;
++  flags_o.z_stream_sink_flags.done = z_sink_done;
++end
++
+ // Store interface.
+ hci_outstanding_intf #(
+   .DW ( DW ),
+diff --git a/hardware/deps/redmule/rtl/redmule_top.sv b/hardware/deps/redmule/rtl/redmule_top.sv
+index b999862..2e6e761 100644
+--- a/hardware/deps/redmule/rtl/redmule_top.sv
++++ b/hardware/deps/redmule/rtl/redmule_top.sv
+@@ -279,7 +279,7 @@ redmule_w_buffer #(
+   .w_buffer_i  ( w_buffer_fifo.data )
+ );
+ 
+-logic [Width-1:0][BITW-1:0] z_buffer_d, y_bias_q;
++logic [Width-1:0][BITW-1:0] z_buffer_d, y_bias_q, engine_bias;
+ redmule_z_buffer #(
+   .DW            ( DATAW              ),
+   .FpFormat      ( FpFormat           ),
+@@ -298,6 +298,13 @@ redmule_z_buffer #(
+   .z_strb_o      ( z_buffer_q.strb    )
+ );
+ 
++// MATMUL does not stream an initial Y/Z addend. The reusable Z buffer still
++// contains results from the preceding output traversal, so feeding it into the
++// first FMA would seed later traversals with stale data. GEMM keeps the loaded
++// addend; MATMUL starts every output traversal from +0 as architecturally
++// required.
++assign engine_bias = reg_file.hwpe_params[OP_SELECTION][0] ? y_bias_q : '0;
++
+ /*---------------------------------------------------------------*/
+ /* |                          Engine                           | */
+ /*---------------------------------------------------------------*/
+@@ -371,7 +378,7 @@ redmule_engine     #(
+   .rst_ni             ( rst_ni           ),
+   .x_input_i          ( x_buffer_q       ),
+   .w_input_i          ( w_buffer_q       ),
+-  .y_bias_i           ( y_bias_q         ),
++  .y_bias_i           ( engine_bias      ),
+   .z_output_o         ( z_buffer_d       ),
+   .fma_is_boxed_i     ( fma_is_boxed     ),
+   .noncomp_is_boxed_i ( noncomp_is_boxed ),
+diff --git a/hardware/deps/redmule/sw/hal_redmule.h b/hardware/deps/redmule/sw/hal_redmule.h
+index b809ed1..d7cd78e 100644
+--- a/hardware/deps/redmule/sw/hal_redmule.h
++++ b/hardware/deps/redmule/sw/hal_redmule.h
+@@ -8,22 +8,26 @@
+ #ifndef __HAL_REDMULE_H__
+ #define __HAL_REDMULE_H__
+ 
++#include <stdint.h>
++
+ /* LOW-LEVEL HAL */
+ #define REDMULE_ADDR_BASE REDMULE_BASE_ADD
+ #define REDMULE_ADDR_SPACE 0x00000100
+ 
+-#define HWPE_WRITE(value, offset) *(int *)(REDMULE_ADDR_BASE + offset) = value
+-#define HWPE_READ(offset) *(int *)(REDMULE_ADDR_BASE + offset)
++#define HWPE_REG32(offset) \
++  (*(volatile uint32_t *)((uintptr_t)REDMULE_ADDR_BASE + (uintptr_t)(offset)))
++#define HWPE_WRITE(value, offset) (HWPE_REG32(offset) = (uint32_t)(value))
++#define HWPE_READ(offset) HWPE_REG32(offset)
+ 
+-static inline void redmule_x_add_set(unsigned int value) {
++static inline void redmule_x_add_set(uint32_t value) {
+   HWPE_WRITE(value, REDMULE_REG_OFFS + REDMULE_REG_X_PTR);
+ }
+ 
+-static inline void redmule_w_add_set(unsigned int value) {
++static inline void redmule_w_add_set(uint32_t value) {
+   HWPE_WRITE(value, REDMULE_REG_OFFS + REDMULE_REG_W_PTR);
+ }
+ 
+-static inline void redmule_z_add_set(unsigned int value) {
++static inline void redmule_z_add_set(uint32_t value) {
+   HWPE_WRITE(value, REDMULE_REG_OFFS + REDMULE_REG_Z_PTR);
+ }
+ 
+@@ -54,12 +58,11 @@ static inline unsigned int redmule_get_meta_uncorrectable_count() {
+ 
+ static inline void hwpe_trigger_job() { HWPE_WRITE(0, REDMULE_TRIGGER); }
+ 
+-static inline int hwpe_acquire_job() { return HWPE_READ(REDMULE_ACQUIRE); }
++static inline int hwpe_acquire_job() { return (int32_t)HWPE_READ(REDMULE_ACQUIRE); }
+ 
+ static inline unsigned int hwpe_get_status() { return HWPE_READ(REDMULE_STATUS); }
+ 
+ static inline void hwpe_soft_clear() {
+-  volatile int i;
+   HWPE_WRITE(0, REDMULE_SOFT_CLEAR);
+ }
+ 
+@@ -74,16 +77,16 @@ void redmule_cfg(unsigned int x, unsigned int w, unsigned int z, uint16_t m_size
+   uint32_t mcfg_reg1 = 0;
+   uint32_t arith_reg = 0;
+ 
+-  mcfg_reg0 = (k_size << 16) | (m_size << 0);
+-  mcfg_reg1 = (w_col_off << 16) | (n_size << 0);
++  mcfg_reg0 = ((uint32_t)k_size << 16) | (uint32_t)m_size;
++  mcfg_reg1 = ((uint32_t)w_col_off << 16) | (uint32_t)n_size;
+ 
+-  arith_reg = (gemm_op << 10) | (gemm_fmt << 7);
++  arith_reg = ((uint32_t)gemm_op << 10) | ((uint32_t)gemm_fmt << 7);
+ 
+-  redmule_x_add_set((unsigned int)x);
+-  redmule_w_add_set((unsigned int)w);
+-  redmule_z_add_set((unsigned int)z);
+-  redmule_mcfg_set((unsigned int)mcfg_reg0, (unsigned int)mcfg_reg1);
+-  redmule_arith_set((unsigned int)arith_reg);
++  redmule_x_add_set(x);
++  redmule_w_add_set(w);
++  redmule_z_add_set(z);
++  redmule_mcfg_set(mcfg_reg0, mcfg_reg1);
++  redmule_arith_set(arith_reg);
+ }
+ 
+ #endif
