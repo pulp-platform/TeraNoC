@@ -19,7 +19,7 @@ dependencies:
   floo_noc:             { git: "https://github.com/pulp-platform/FlooNoC.git",              version: 0.8.1   }
   scm:                  { path: "hardware/deps/scm"                                                          }
   redmule:              { git: "https://github.com/pulp-platform/redmule.git",              rev: mbertuletti/outstanding   }
-  hci:                  { git: "https://github.com/pulp-platform/hci.git",                  rev: 86c7319   }
+  hci:                  { git: "https://github.com/pulp-platform/hci.git",                  version: 2.5.0   }
 
 workspace:
   checkout_dir: "./hardware/deps"

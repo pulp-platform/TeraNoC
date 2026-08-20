@@ -1,3 +1,16 @@
+diff --git a/hardware/deps/redmule/rtl/redmule_complex.sv b/hardware/deps/redmule/rtl/redmule_complex.sv
+index 8354bf4..752257e 100644
+--- a/hardware/deps/redmule/rtl/redmule_complex.sv
++++ b/hardware/deps/redmule/rtl/redmule_complex.sv
+@@ -78,7 +78,7 @@ module redmule_complex
+   output core_inst_req_t               core_inst_req_o   ,
+   input  core_data_rsp_t               core_data_rsp_i   ,
+   output core_data_req_t               core_data_req_o   ,
+-  hci_outstanding_intf.initiator              tcdm
++  hci_variablelatency_intf.initiator          tcdm
+ );
+ 
+ localparam int unsigned XExt = (CoreType == CV32X) ? 1 : 0;
 diff --git a/hardware/deps/redmule/rtl/redmule_memory_scheduler.sv b/hardware/deps/redmule/rtl/redmule_memory_scheduler.sv
 index d6d00ae..8f3345e 100644
 --- a/hardware/deps/redmule/rtl/redmule_memory_scheduler.sv
@@ -73,10 +86,10 @@ index f028c90..efc7a44 100644
    always_ff @(posedge clk_i or negedge rst_ni) begin : first_load_register
      if(~rst_ni) begin
 diff --git a/hardware/deps/redmule/rtl/redmule_streamer.sv b/hardware/deps/redmule/rtl/redmule_streamer.sv
-index 911b078..e10423f 100644
+index f44d741..86f0a66 100644
 --- a/hardware/deps/redmule/rtl/redmule_streamer.sv
 +++ b/hardware/deps/redmule/rtl/redmule_streamer.sv
-@@ -102,6 +102,12 @@ hci_outstanding_rob #(
+@@ -135,6 +135,12 @@ hci_core_rob #(
  );
  
  flags_fifo_t z_fifo_flags;
@@ -89,20 +102,20 @@ index 911b078..e10423f 100644
  logic [NumStreamSources:0][$clog2(NumStreamSources+1)-1:0] priority_encoding;
  assign priority_encoding[0] = 0;
  assign priority_encoding[1] = 1;
-@@ -158,9 +164,61 @@ hci_outstanding_sink #(
+@@ -199,9 +205,61 @@ hci_core_sink #(
    .tcdm                ( zstream2cast                ),
    .stream              ( z_stream_i                  ),
    .ctrl_i              ( ctrl_i.z_stream_sink_ctrl   ),
 -  .flags_o             ( flags_o.z_stream_sink_flags )
-+  .flags_o             ( z_sink_flags                )
++  .flags_o             ( z_sink_flags                 )
  );
  
 +// The sink's done pulse only means that every Z store has entered i_z_fifo.
 +// Keep the job active until that FIFO drains and all issued stores are
 +// acknowledged; otherwise a following software clear can discard queued stores
 +// or let the next job observe incomplete output.
-+assign z_store_req_fire = virt_tcdm_rob[3].req_valid && virt_tcdm_rob[3].req_ready;
-+assign z_store_rsp_fire = virt_tcdm_rob[3].resp_valid && virt_tcdm_rob[3].resp_ready;
++assign z_store_req_fire = virt_tcdm_rob[3].req && virt_tcdm_rob[3].gnt;
++assign z_store_rsp_fire = virt_tcdm_rob[3].r_valid && virt_tcdm_rob[3].r_ready;
 +
 +always_ff @(posedge clk_i or negedge rst_ni) begin : z_store_outstanding_reg
 +  if (!rst_ni) begin
@@ -150,10 +163,10 @@ index 911b078..e10423f 100644
 +end
 +
  // Store interface.
- hci_outstanding_intf #(
-   .DW ( DW ),
+ hci_core_intf #(
+   .WAIVE_RQ4_ASSERT  ( 1'b1 ),
 diff --git a/hardware/deps/redmule/rtl/redmule_top.sv b/hardware/deps/redmule/rtl/redmule_top.sv
-index b999862..2e6e761 100644
+index 0cc9072..1579bc2 100644
 --- a/hardware/deps/redmule/rtl/redmule_top.sv
 +++ b/hardware/deps/redmule/rtl/redmule_top.sv
 @@ -279,7 +279,7 @@ redmule_w_buffer #(

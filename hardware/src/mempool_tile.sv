@@ -1167,7 +1167,7 @@ module mempool_tile
       EW:  0,
       EHW: 0
     };
-    hci_outstanding_intf #(
+    hci_variablelatency_intf #(
       .DW (RMDataWidth                         ),
       .UW (idx_width(RMOutstandingTransactions)),
       .IW (idx_width(RMNumStreams)             )

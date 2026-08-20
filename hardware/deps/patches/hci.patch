@@ -1,0 +1,13 @@
+diff --git a/hardware/deps/hci/rtl/core/hci_core_rob.sv b/hardware/deps/hci/rtl/core/hci_core_rob.sv
+index d07249a..0a7a8d0 100644
+--- a/hardware/deps/hci/rtl/core/hci_core_rob.sv
++++ b/hardware/deps/hci/rtl/core/hci_core_rob.sv
+@@ -74,7 +74,7 @@ module hci_core_rob
+   // Memory queue
+   logic [ROB_NW-1:0][IW-1:0] mem_req_id_p, mem_req_id_q;
+   logic [ROB_NW-1:0][DW-1:0] mem_resp_data_p, mem_resp_data_q;
+-  logic [ROB_NW-1:0][EW-1:0] mem_resp_ecc_p, mem_resp_ecc_q;
++  logic [ROB_NW-1:0][hci_package::iomsb(EW):0] mem_resp_ecc_p, mem_resp_ecc_q;
+   logic [ROB_NW-1:0] mem_resp_opc_p, mem_resp_opc_q;
+   logic [ROB_NW-1:0] mem_resp_valid_p, mem_resp_valid_q;
+ 

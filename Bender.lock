@@ -105,8 +105,8 @@ packages:
     dependencies:
     - common_cells
   hci:
-    revision: 86c7319ef4601c1586e44ce27f6d58e3e1466525
-    version: null
+    revision: 8ed2c83871dbe13a8f3ef5ef6c148b6259b7f1c3
+    version: 2.5.0
     source:
       Git: https://github.com/pulp-platform/hci.git
     dependencies:
@@ -162,7 +162,7 @@ packages:
     - common_cells
     - common_verification
   redmule:
-    revision: e43bf1a1b2965202ff4c88608a79d1f4a170d78e
+    revision: 449b2c33ce4fa9f3aec8a33114f8c7aaac659288
     version: null
     source:
       Git: https://github.com/pulp-platform/redmule.git
