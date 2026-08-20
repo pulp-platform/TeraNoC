@@ -262,6 +262,14 @@ group_mshr_bank_shift_burst  ?=
 # Intra-load burst bits in the hash-3 burst bank index: clog2(bursts per vector load) =
 # clog2(VL/MaxBurstWords) -> m1=0, m2=1, m4=2, m8=3. Empty = 1 (m2).
 group_mshr_bank_burst_bits ?=
+# Response cache (MSHR_CACHED). Empty/1 = ON (default, keeps responded entries as a small
+# read-response cache); 0 = DRAIN_RESP goes straight to IDLE, disabling same-address reuse.
+group_mshr_resp_cache ?=
+# Cache reuse target / cache-phase timeout. Empty or 0 = legacy (self-invalidate at hold_subs,
+# cache phase re-armed from serve_timeout). With group_mshr_cfg_runtime=1 these are RESET values
+# only -- software owns them at runtime.
+group_mshr_cache_reuse_target ?=
+group_mshr_cache_timeout ?=
 # Cache self-invalidate (idea 1, docs/mshr_bank_hash_design.md). 0/unset = OFF (bit-identical);
 # 1 = a CACHED entry frees itself once it has served its per-type sharing target
 # (group_mshr_hold_subs_single for scalar/single, group_mshr_hold_subs_burst for burst), turning a
@@ -374,6 +382,15 @@ ifneq ($(strip $(group_mshr_bank_hash)),)
 endif
 ifneq ($(strip $(group_mshr_cache_self_inval)),)
   vlog_defs += -DGROUP_MSHR_CACHE_SELF_INVAL=$(group_mshr_cache_self_inval)
+endif
+ifneq ($(strip $(group_mshr_resp_cache)),)
+  vlog_defs += -DGROUP_MSHR_RESP_CACHE=$(group_mshr_resp_cache)
+endif
+ifneq ($(strip $(group_mshr_cache_reuse_target)),)
+  vlog_defs += -DGROUP_MSHR_CACHE_REUSE_TARGET=$(group_mshr_cache_reuse_target)
+endif
+ifneq ($(strip $(group_mshr_cache_timeout)),)
+  vlog_defs += -DGROUP_MSHR_CACHE_TIMEOUT=$(group_mshr_cache_timeout)
 endif
 ifneq ($(strip $(group_mshr_cache_victim_rr)),)
   vlog_defs += -DGROUP_MSHR_CACHE_VICTIM_RR=$(group_mshr_cache_victim_rr)

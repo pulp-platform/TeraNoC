@@ -455,6 +455,12 @@ int main() {
         .bank_shift_single  = MSHR_CFG_BANK_SHIFT_SINGLE,
         .bank_shift_burst   = MSHR_CFG_BANK_SHIFT_BURST,
         .bank_burst_bits    = MSHR_CFG_BANK_BURST_BITS,
+        // Idea 2 (fp16 half-word aliasing): keep the CACHED line resident past the cohort
+        // that filled it, so the second of the two fp16 scalar loads that alias one 32-bit
+        // word hits it instead of allocating a fresh entry that waits out serve_timeout for
+        // peers the line already served. 0 = legacy.
+        .cache_reuse_target = MSHR_CFG_CACHE_REUSE_TARGET,
+        .cache_timeout      = MSHR_CFG_CACHE_TIMEOUT,
     };
     uint32_t mshr_st = 0;
     if (mshr_cfg_is_group_writer()) mshr_st = mshr_cfg_apply_group(&mshr_cfg);
@@ -570,7 +576,7 @@ int main() {
     // Utilization = actual performance / theoretical peak
     long unsigned int utilization = performance / (2 * active_cores * N_FPU);
 
-    printf("\n----- (%dx%d) sp fmatmul -----\n", gemm_l.M, gemm_l.P);
+    printf("\n----- (%dx%dx%d) sp fmatmul -----\n", gemm_l.M, gemm_l.N, gemm_l.P);
     printf("The execution took %u cycles.\n", timer);
     printf("The performance is %u OP/1000cycle (%u%%o utilization).\n",
            performance, utilization);

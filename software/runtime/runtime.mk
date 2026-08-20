@@ -148,6 +148,9 @@ DEFINES += -DMSHR_CFG_SERVE_TIMEOUT=$(if $(group_mshr_serve_timeout),$(group_msh
 DEFINES += -DMSHR_CFG_BANK_SHIFT_SINGLE=$(if $(group_mshr_bank_shift_single),$(group_mshr_bank_shift_single),5)
 DEFINES += -DMSHR_CFG_BANK_SHIFT_BURST=$(if $(group_mshr_bank_shift_burst),$(group_mshr_bank_shift_burst),5)
 DEFINES += -DMSHR_CFG_BANK_BURST_BITS=$(if $(group_mshr_bank_burst_bits),$(group_mshr_bank_burst_bits),1)
+# 0 = legacy. fp16 kernels override cache_reuse_target locally; fp32 keeps the legacy path.
+DEFINES += -DMSHR_CFG_CACHE_REUSE_TARGET=$(if $(group_mshr_cache_reuse_target),$(group_mshr_cache_reuse_target),0)
+DEFINES += -DMSHR_CFG_CACHE_TIMEOUT=$(if $(group_mshr_cache_timeout),$(group_mshr_cache_timeout),0)
 DEFINES += -DNUM_GROUP_BARRIERS=$(shell awk 'BEGIN{print $(num_cores)/$(num_groups)}')
 # Per-build extra defines (app/kernel A/B knobs), e.g.
 #   make <app> config=<cfg> EXTRA_DEFINES="-DGBAR_PLOOP=1 -DKERNEL_SIZE=4"

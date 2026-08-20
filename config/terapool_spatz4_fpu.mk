@@ -149,11 +149,18 @@ tile_id_remap ?= 0
 #       enable it before the timed region; a binary that does not costs +55.6% (measured), which the
 #       [MSHRCFG] testbench line reports at benchmark start.
 #
-# DEFAULT 0 ON PURPOSE. This file is included by 25 flavours including terapool_spatz4_fpu_backend_4x4,
-# so flipping it here changes what the backend tapes out. The runtime path is NOT ready for that: it
-# has an unexplained 3-12x slowdown on 512x256x512 and 128x128x512 (docs/mshr_runtime_csr_verification.md).
-# Set it per flavour, or on the make command line, until that is root-caused.
-group_mshr_cfg_runtime   ?= 0
+# DEFAULT 1 since 2026-08-20 (user request): the per-shape MSHR tuning is written by
+# mshr_cfg_apply_group() at runtime, so a build without CSRs silently ignores it and runs the
+# elaborated values instead. Reset `enable=0` means init/DMA/I$ warm-up still never allocate.
+#
+# The previous comment here claimed an "unexplained 3-12x slowdown on 512x256x512 and 128x128x512"
+# and cited docs/mshr_runtime_csr_verification.md. That citation does not support it: the doc's V1
+# gate is bit-identical (34,596 == 34,596) and V3 reports MSHR work counters BYTE-IDENTICAL with a
+# +265 cyc (+0.77%) cold-start cost. The only ~12x in the repo is the MSHR desync trap in
+# gemm_results_vs_nofeature.txt -- a different mechanism, not attributed to the CSR path.
+# The real risk the old comment named IS valid and is handled below: at CfgRuntime=1 the config
+# file stops const-folding, so the backend flavours pin it back to 0 explicitly.
+group_mshr_cfg_runtime   ?= 1
 group_mshr_num           ?= 64
 # Ways (entries) per bank; banks = group_mshr_num / group_mshr_ways_per_bank. 16 entries / 2 ways
 # = 8 banks x 2 ways (user experiment). WARNING: 16 entries is HALF of the 32 concurrent request
@@ -425,6 +432,18 @@ group_mshr_bank_shift_single ?= 9
 # allocator prefers -- keeping other cache lines resident longer. Reclaim-on-demand is controlled
 # separately by group_mshr_cache_reclaimable below.
 group_mshr_cache_self_inval ?= 1
+# Response cache (MSHR_CACHED): 1 = keep responded entries as a small read-response cache;
+# 0 = MSHR_DRAIN_RESP -> MSHR_IDLE directly, no same-address reuse. Set 0 to remove the
+# cohort-splitting path described in mempool_group_mshr.sv (EnableRespCache).
+group_mshr_resp_cache ?= 1
+# Cache reuse target (fp16 half-word aliasing): 0 = legacy self-invalidate at hold_subs_*.
+# Non-zero keeps a CACHED line resident until served_cnt reaches it, so the second of the two
+# scalar fp16 loads that alias one 32-bit word is served from the line instead of allocating a
+# fresh entry that waits out serve_timeout for peers the line already served.
+# Legal [0, group_mshr_merge_reqs]. Reset value only -- software sets it per kernel.
+group_mshr_cache_reuse_target ?= 0
+# CACHED-phase residency countdown. 0 = legacy (re-arm from group_mshr_serve_timeout).
+group_mshr_cache_timeout ?= 0
 # CACHED-victim selection within a bank (pass-2 reclaim). 0 = legacy lowest-index-first:
 # the lowest reclaimable CACHED way is ALWAYS the victim -> way-0 lines thrash while
 # high-way lines stay pinned. 1 = per-bank round-robin victim start pointer, advanced past
@@ -620,4 +639,7 @@ spatz_vlsu_dual_load ?= 2
 # KEEP fp16 KERNELS AT LMUL <= 4: burst eligibility also caps vl at
 # NrOutstandingLoads*4 = 256 B, and e16,m8 is 512 B -- it would silently take the non-burst
 # path. The gen_burst_ew_vl_ceiling probe warns when that happens.
-spatz_vlsu_burst_ew16 ?= 0
+# DEFAULT 1 since 2026-08-20 (user request): at 0 an fp16 vector load never reaches the MSHR
+# burst class, so no burst merging, ParityDrain or BlockAlloc happens and an fp16 measurement
+# is not comparable with fp32. Keep fp16 kernels at LMUL <= 4 (see the note above).
+spatz_vlsu_burst_ew16 ?= 1

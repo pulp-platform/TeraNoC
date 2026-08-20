@@ -444,6 +444,11 @@ int main() {
         .bank_shift_single  = MSHR_CFG_BANK_SHIFT_SINGLE,
         .bank_shift_burst   = MSHR_CFG_BANK_SHIFT_BURST,
         .bank_burst_bits    = MSHR_CFG_BANK_BURST_BITS,
+        // fp32 has one load per 32-bit word, so there is no half-word second cohort to
+        // catch: idea 2 is deliberately left OFF here. 0 = legacy self-invalidate at
+        // hold_subs_*, bit-identical to before these CSRs existed.
+        .cache_reuse_target = 0,
+        .cache_timeout      = 0,
     };
     uint32_t mshr_st = 0;
     if (mshr_cfg_is_group_writer()) mshr_st = mshr_cfg_apply_group(&mshr_cfg);
@@ -559,7 +564,7 @@ int main() {
     // Utilization = actual performance / theoretical peak
     long unsigned int utilization = performance / (2 * active_cores * N_FPU);
 
-    printf("\n----- (%dx%d) sp fmatmul -----\n", gemm_l.M, gemm_l.P);
+    printf("\n----- (%dx%dx%d) sp fmatmul -----\n", gemm_l.M, gemm_l.N, gemm_l.P);
     printf("The execution took %u cycles.\n", timer);
     printf("The performance is %u OP/1000cycle (%u%%o utilization).\n",
            performance, utilization);

@@ -53,8 +53,12 @@ module mempool_group_mshr
   // declarations and always_ff below. (M4 bypass-vs-MSHR is intentionally not a
   // fairness point -- bypass is non-backpressurable -- so it is never rotated.)
   parameter bit EnableRrFairness = `ifdef GROUP_MSHR_ENABLE_RR `GROUP_MSHR_ENABLE_RR `else 1'b1 `endif,
-  // Keep responded entries as a small read-response cache.
-  parameter bit EnableRespCache = 1'b1,
+  // Keep responded entries as a small read-response cache. 0 = an entry goes straight from
+  // MSHR_DRAIN_RESP to MSHR_IDLE, so a later same-address request can never be served from a
+  // resident line -- which also removes the cohort-splitting path where some members of a
+  // coalescing group hit the line while the rest arrive after it self-invalidates and then wait
+  // out group_mshr_serve_timeout for peers that will never come.
+  parameter bit EnableRespCache = `ifdef GROUP_MSHR_RESP_CACHE `GROUP_MSHR_RESP_CACHE `else 1'b1 `endif,
   // Simulation-only statistics/prints (translate_off).
   parameter bit EnableStats   = `ifdef GROUP_MSHR_ENABLE_STATS `GROUP_MSHR_ENABLE_STATS `else 1'b0 `endif,
   // Stats print period in cycles while trace is active (0 disables periodic prints).
@@ -194,6 +198,16 @@ module mempool_group_mshr
   // AMO invalidation is the only release path. 0 = off (served_cnt maintained but unused).
   localparam bit CacheSelfInval =
     `ifdef GROUP_MSHR_CACHE_SELF_INVAL `GROUP_MSHR_CACHE_SELF_INVAL `else 1'b0 `endif;
+  // Cache reuse target / cache-phase timeout (group_mshr_cache_reuse_target, _cache_timeout).
+  // Both 0 = LEGACY, bit-identical to before they existed: self-invalidate at hold_subs_*, and
+  // re-arm the cache phase from serve_timeout. Non-zero decouples cache residency from the
+  // subscriber-sharing target -- the fp16 case, where two scalar loads alias one 32-bit word and
+  // the second cohort must find the line still resident. Only the RESET values; with
+  // MshrCfgRuntime=1 software owns them (mempool_group_mshr_cfg.sv).
+  localparam int unsigned CacheReuseTarget =
+    `ifdef GROUP_MSHR_CACHE_REUSE_TARGET `GROUP_MSHR_CACHE_REUSE_TARGET `else 0 `endif;
+  localparam int unsigned CacheTimeout =
+    `ifdef GROUP_MSHR_CACHE_TIMEOUT `GROUP_MSHR_CACHE_TIMEOUT `else 0 `endif;
   // RR cache-victim selection (group_mshr_cache_victim_rr): per-bank round-robin start pointer
   // for the pass-2 CACHED-reclaim scan, instead of always taking the lowest-index reclaimable
   // CACHED way (which thrashes way 0 of each bank while high ways stay pinned). The pointer
@@ -366,6 +380,10 @@ module mempool_group_mshr
   logic [mempool_pkg::MshrCfgSubsW-1:0]    cfg_hold_subs_single, cfg_hold_subs_burst;
   logic [mempool_pkg::MshrCfgHoldCntW-1:0] cfg_hold_window_single, cfg_hold_window_burst;
   logic [mempool_pkg::MshrCfgHoldCntW-1:0] cfg_serve_timeout;
+  logic [mempool_pkg::MshrCfgSubsW-1:0]    cfg_cache_reuse_target;
+  logic [mempool_pkg::MshrCfgHoldCntW-1:0] cfg_cache_timeout;
+  // Effective cache-phase countdown: the dedicated value when set, else the legacy serve_timeout.
+  logic [mempool_pkg::MshrCfgHoldCntW-1:0] cfg_cache_hold_ticks_src;
   logic [mempool_pkg::MshrCfgShiftW-1:0]   cfg_bank_shift_single, cfg_bank_shift_burst;
   logic                                    cfg_bank_burst_bits, cfg_mshr_enable;
   // R3: hold_subs == 1 means "this class does not merge -- bypass it". That gives the value the
@@ -505,6 +523,12 @@ module mempool_group_mshr
                                                               : mempool_pkg::MshrCfgShiftW'(BankSelShiftBurst);
   assign cfg_bank_burst_bits    = mempool_pkg::MshrCfgRuntime ? cfg_i.bank_burst_bits
                                                               : (BankBurstBits != 0);
+  assign cfg_cache_reuse_target = mempool_pkg::MshrCfgRuntime ? cfg_i.cache_reuse_target
+                                                              : mempool_pkg::MshrCfgSubsW'(CacheReuseTarget);
+  assign cfg_cache_timeout      = mempool_pkg::MshrCfgRuntime ? cfg_i.cache_timeout
+                                                              : mempool_pkg::MshrCfgHoldCntW'(CacheTimeout);
+  // 0 => legacy: the cache phase re-arms from serve_timeout, exactly as before.
+  assign cfg_cache_hold_ticks_src = (cfg_cache_timeout != '0) ? cfg_cache_timeout : cfg_serve_timeout;
   // A class bypasses when its merge target is 1 (nothing to merge with) or the MSHR is disabled.
   assign cfg_bypass_single      = !cfg_mshr_enable || (cfg_hold_subs_single == mempool_pkg::MshrCfgSubsW'(1));
   assign cfg_bypass_burst       = !cfg_mshr_enable || (cfg_hold_subs_burst  == mempool_pkg::MshrCfgSubsW'(1));
@@ -3375,10 +3399,17 @@ module mempool_group_mshr
     // CacheReclaimable=0 this becomes the normal capacity-release path for resident cache lines.
     if (CacheSelfInval && EnableRespCache) begin
       for (int e = 0; e < MshrNum; e++) begin
+        // cfg_cache_reuse_target == 0 keeps the legacy operand (the per-type sharing target), so
+        // this expression is structurally what it was before the CSR existed. Non-zero replaces it
+        // with the reuse target, letting the line outlive the cohort that filled it -- served_cnt
+        // saturates at ServedCntMax == MshrMergeReqs, which is also the CSR's upper bound, so the
+        // target is always reachable and a line can never be pinned by an unreachable threshold.
         if (mshr_d_valid[e] && (mshr_d[e].state == MSHR_CACHED) &&
             (mshr_d[e].sub_reqs_num == '0) &&
             (mshr_d[e].served_cnt >=
-             ServedCntW'((mshr_d[e].burst_len == BurstLenWidth'(1)) ? cfg_hold_subs_single : cfg_hold_subs_burst))) begin
+             ((cfg_cache_reuse_target != '0)
+                ? ServedCntW'(cfg_cache_reuse_target)
+                : ServedCntW'((mshr_d[e].burst_len == BurstLenWidth'(1)) ? cfg_hold_subs_single : cfg_hold_subs_burst)))) begin
           mshr_d_valid[e] = 1'b0;
           mshr_d[e]       = '0;
           mshr_wr_all[e] = 1'b1;
@@ -4157,7 +4188,7 @@ module mempool_group_mshr
             // is not an allocation victim either -- so its way would be pinned for good. A cache
             // HIT re-enters DRAIN_RESP and returns here, which refreshes the window, so a
             // frequently-used line keeps its way and only an idle one ages out.
-            mshr_d[mshr_i].hold_cnt = hold_ticks(cfg_serve_timeout);
+            mshr_d[mshr_i].hold_cnt = hold_ticks(cfg_cache_hold_ticks_src);
           end else begin
             // Pop the drained head beat.
             if (mshr_d[mshr_i].resp_buf_cnt != '0) begin

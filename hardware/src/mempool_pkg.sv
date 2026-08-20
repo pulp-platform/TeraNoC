@@ -647,6 +647,11 @@ package mempool_pkg;
     `ifdef GROUP_MSHR_HOLD_SUBS_BURST `GROUP_MSHR_HOLD_SUBS_BURST `else MshrDefHoldSubs `endif;
   localparam integer unsigned MshrDefServeTimeout =
     `ifdef GROUP_MSHR_SERVE_TIMEOUT `GROUP_MSHR_SERVE_TIMEOUT `else 0 `endif;
+  // Both 0 = legacy (see mshr_cfg_t). Reset values only when MshrCfgRuntime=1.
+  localparam integer unsigned MshrDefCacheReuseTarget =
+    `ifdef GROUP_MSHR_CACHE_REUSE_TARGET `GROUP_MSHR_CACHE_REUSE_TARGET `else 0 `endif;
+  localparam integer unsigned MshrDefCacheTimeout =
+    `ifdef GROUP_MSHR_CACHE_TIMEOUT `GROUP_MSHR_CACHE_TIMEOUT `else 0 `endif;
   localparam integer unsigned MshrDefBankSelShift =
     `ifdef GROUP_MSHR_BANK_SHIFT `GROUP_MSHR_BANK_SHIFT `else 5 `endif;
   localparam integer unsigned MshrDefBankShiftSingle =
@@ -689,6 +694,17 @@ package mempool_pkg;
     logic [MshrCfgShiftW-1:0]        bank_shift_single;   // bank-hash address bit select, singles
     logic [MshrCfgShiftW-1:0]        bank_shift_burst;    // ... bursts
     logic                            bank_burst_bits;     // BankBurstBits (0 or 1)
+    // Cache reuse target (fp16 half-word aliasing). 0 = LEGACY: a CACHED line self-invalidates at
+    // hold_subs_{single,burst}, exactly as before this field existed. Non-zero = the line instead
+    // survives until served_cnt reaches THIS value, so a second cohort addressing the other half
+    // of the same 32-bit word is served from the line rather than splitting off a fresh entry that
+    // waits out serve_timeout for peers already served. Range [1, MshrMergeReqs] -- served_cnt
+    // saturates at ServedCntMax = MshrMergeReqs, so a larger target is unreachable by construction.
+    logic [MshrCfgSubsW-1:0]         cache_reuse_target;
+    // CACHED-phase residency countdown. 0 = LEGACY: the cache phase re-arms from serve_timeout.
+    // Non-zero = arm from this instead, so cache residency is tunable independently of how long a
+    // RESP_HOLD entry waits for subscribers.
+    logic [MshrCfgHoldCntW-1:0]      cache_timeout;
   } mshr_cfg_t;
 
   // CSR indices, mirrored by software/runtime/mshr_cfg.h -- keep the two in step.
@@ -701,6 +717,8 @@ package mempool_pkg;
   localparam integer unsigned MSHR_CSR_BANK_SHIFT_BURST   = 6;
   localparam integer unsigned MSHR_CSR_BANK_BURST_BITS    = 7;
   localparam integer unsigned MSHR_CSR_SERVE_TIMEOUT      = 8;
+  localparam integer unsigned MSHR_CSR_CACHE_REUSE_TARGET = 9;
+  localparam integer unsigned MSHR_CSR_CACHE_TIMEOUT      = 10;
   localparam integer unsigned MSHR_CSR_STATUS             = 15;
 
   // CFG_STATUS sticky error bits. Software reads this after configuring; a set bit means the

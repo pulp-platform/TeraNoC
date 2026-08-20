@@ -33,6 +33,8 @@
 #define MSHR_CSR_BANK_SHIFT_BURST   6
 #define MSHR_CSR_BANK_BURST_BITS    7
 #define MSHR_CSR_SERVE_TIMEOUT      8   // response-side, SINGLE-only; NOT the hold window
+#define MSHR_CSR_CACHE_REUSE_TARGET 9   // 0 = legacy: self-invalidate at hold_subs_*
+#define MSHR_CSR_CACHE_TIMEOUT     10   // 0 = legacy: cache phase re-arms from serve_timeout
 #define MSHR_CSR_STATUS            15   // read: sticky errors; write: clear
 
 // ---- CFG_STATUS sticky bits. Non-zero means the config in effect is NOT the one requested. -----
@@ -62,6 +64,14 @@ typedef struct {
   uint32_t bank_shift_single;   ///< bank-hash address bit select, singles
   uint32_t bank_shift_burst;    ///< ... bursts
   uint32_t bank_burst_bits;     ///< 0 or 1
+  /// Cache reuse target. 0 = LEGACY (a CACHED line self-invalidates once served_cnt reaches
+  /// hold_subs_*). Non-zero keeps the line resident until served_cnt reaches this value, so a
+  /// second cohort hitting the other half of the same 32-bit word is served from the line rather
+  /// than allocating a fresh entry that then waits out serve_timeout for peers already served.
+  /// This is the fp16 case: two scalar fp16 loads alias one word. Legal [0, merge_reqs].
+  uint32_t cache_reuse_target;
+  /// CACHED-phase residency countdown. 0 = LEGACY (re-arm from serve_timeout).
+  uint32_t cache_timeout;
 } mshr_cfg_t;
 
 /// The group this core belongs to.
@@ -129,6 +139,8 @@ static inline uint32_t mshr_cfg_apply_group(const mshr_cfg_t *c) {
   mshr_cfg_write(g, tile, MSHR_CSR_HOLD_WINDOW_SINGLE,c->hold_window_single);
   mshr_cfg_write(g, tile, MSHR_CSR_HOLD_WINDOW_BURST, c->hold_window_burst);
   mshr_cfg_write(g, tile, MSHR_CSR_SERVE_TIMEOUT,     c->serve_timeout);
+  mshr_cfg_write(g, tile, MSHR_CSR_CACHE_REUSE_TARGET,c->cache_reuse_target);
+  mshr_cfg_write(g, tile, MSHR_CSR_CACHE_TIMEOUT,     c->cache_timeout);
 
   mshr_cfg_write(g, tile, MSHR_CSR_ENABLE, 1);          // arm last
   __asm__ volatile("fence" ::: "memory");

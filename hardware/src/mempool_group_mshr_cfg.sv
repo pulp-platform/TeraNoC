@@ -34,11 +34,23 @@ module mempool_group_mshr_cfg
   parameter int unsigned DefBankShiftSingle  = 5,
   parameter int unsigned DefBankShiftBurst   = 5,
   parameter int unsigned DefBankBurstBits    = 0,
+  // 0 = legacy (self-invalidate at hold_subs / re-arm cache phase from serve_timeout).
+  parameter int unsigned DefCacheReuseTarget = 0,
+  parameter int unsigned DefCacheTimeout     = 0,
   // Legal ranges, enforced at runtime.
   parameter int unsigned MergeReqs           = 4,     // hold_subs upper bound
   parameter int unsigned HoldCntHwMax        = 2047,  // window/timeout upper bound
   parameter int unsigned BankShiftMin        = 5,
   parameter int unsigned BankShiftMax        = 10,
+  // Burst-hash overlap floor. The static [BankShiftMin,BankShiftMax] window is NOT the real
+  // rule: mempool_group_mshr.sv:525 requires bank_shift_burst >= BurstAlignBits + bank_burst_bits,
+  // which equals BankShiftMin(5) only at bank_burst_bits<=1. At bank_burst_bits=2 (LMUL=4) the
+  // true floor is 6, so a runtime write of 5 would pass the window check and still overlap the
+  // intra-load burst bits -- double-counting a bit and collapsing half the banks, with no
+  // elaboration $error to catch it because that assertion sees only the reset values.
+  // Checked at ENABLE rather than per write: software sets BANK_SHIFT_BURST before
+  // BANK_BURST_BITS, so a per-write test would compare against a stale burst_bits.
+  parameter int unsigned BurstAlignBits      = 4,
   // Mirrors the MSHR's elaboration guard at mempool_group_mshr.sv:328 -- serve_timeout == 0 pins a
   // CACHED way forever when the serve target is never reached and the entry is not an eviction
   // victim. Only then is 0 refused.
@@ -74,7 +86,9 @@ module mempool_group_mshr_cfg
       serve_timeout     : MshrCfgHoldCntW'(DefServeTimeout),
       bank_shift_single : MshrCfgShiftW'(DefBankShiftSingle),
       bank_shift_burst  : MshrCfgShiftW'(DefBankShiftBurst),
-      bank_burst_bits   : (DefBankBurstBits != 0)
+      bank_burst_bits   : (DefBankBurstBits != 0),
+      cache_reuse_target: MshrCfgSubsW'(DefCacheReuseTarget),
+      cache_timeout     : MshrCfgHoldCntW'(DefCacheTimeout)
     };
     assign status_o = '0;
     // Silence unused-input lint in this arm.
@@ -104,20 +118,34 @@ module mempool_group_mshr_cfg
              MshrCfgHoldCntW, HoldCntHwMax);
 
     // Range checks. Each mirrors an elaboration guard in mempool_group_mshr.sv.
-    logic subs_ok, cnt_ok, shift_s_ok, shift_b_ok, tmo_ok;
+    logic subs_ok, cnt_ok, shift_s_ok, shift_b_ok, tmo_ok, burst_hash_ok, reuse_ok;
     assign subs_ok    = (wr_data_i >= 32'd1) && (wr_data_i <= MergeReqs);
     assign cnt_ok     = (wr_data_i <= HoldCntHwMax);
     assign shift_s_ok = (wr_data_i >= BankShiftMin) && (wr_data_i <= BankShiftMax);
     assign shift_b_ok = shift_s_ok;
     // serve_timeout == 0 means "never expires"; legal unless the MSHR config needs the backstop.
     assign tmo_ok     = cnt_ok && !(ServeTimeoutMustBeNonZero && (wr_data_i == 32'd0));
+    // Reuse target: same upper bound as hold_subs (served_cnt saturates at MergeReqs, so anything
+    // above is unreachable), but 0 is additionally legal and means "legacy self-invalidate".
+    assign reuse_ok   = (wr_data_i <= MergeReqs);
+    // Evaluated on the SETTLED config, not on wr_data_i, because the two fields arrive in
+    // separate writes.
+    assign burst_hash_ok = (32'(cfg_q.bank_shift_burst) >=
+                            32'(BurstAlignBits) + 32'(cfg_q.bank_burst_bits));
 
     always_comb begin
       cfg_d    = cfg_q;
       status_d = status_q;   // sticky: only software-visible clear (write of index 15) resets it
       if (wr_valid_i) begin
         unique case (wr_idx_i)
-          IdxW'(MSHR_CSR_ENABLE)             : cfg_d.enable             = wr_data_i[0];
+          IdxW'(MSHR_CSR_ENABLE)             : if (!wr_data_i[0]) cfg_d.enable = 1'b0;
+                                               // Arming with an overlapping burst hash is a
+                                               // silent-corruption config, so refuse to arm and
+                                               // leave the MSHR disabled: the TB already shouts
+                                               // "[MSHRCFG WARN] ... MSHR DISABLED" on that, which
+                                               // is far louder than a quietly halved bank count.
+                                               else if (burst_hash_ok) cfg_d.enable = 1'b1;
+                                               else status_d[MSHR_STATUS_RANGE] = 1'b1;
           IdxW'(MSHR_CSR_HOLD_SUBS_SINGLE)   : if (subs_ok) cfg_d.hold_subs_single = MshrCfgSubsW'(wr_data_i);
                                                else status_d[MSHR_STATUS_RANGE] = 1'b1;
           IdxW'(MSHR_CSR_HOLD_SUBS_BURST)    : if (subs_ok) cfg_d.hold_subs_burst  = MshrCfgSubsW'(wr_data_i);
@@ -138,6 +166,10 @@ module mempool_group_mshr_cfg
                                                else cfg_d.bank_shift_burst = MshrCfgShiftW'(wr_data_i);
           IdxW'(MSHR_CSR_BANK_BURST_BITS)    : if (mshr_busy_i) status_d[MSHR_STATUS_BANK_BUSY] = 1'b1;
                                                else cfg_d.bank_burst_bits = wr_data_i[0];
+          IdxW'(MSHR_CSR_CACHE_REUSE_TARGET) : if (reuse_ok) cfg_d.cache_reuse_target = MshrCfgSubsW'(wr_data_i);
+                                               else status_d[MSHR_STATUS_RANGE] = 1'b1;
+          IdxW'(MSHR_CSR_CACHE_TIMEOUT)      : if (cnt_ok)   cfg_d.cache_timeout      = MshrCfgHoldCntW'(wr_data_i);
+                                               else status_d[MSHR_STATUS_RANGE] = 1'b1;
           IdxW'(MSHR_CSR_STATUS)             : status_d = '0;   // write to 15 clears the sticky bits
           default                            : status_d[MSHR_STATUS_BAD_INDEX] = 1'b1;
         endcase
@@ -155,7 +187,9 @@ module mempool_group_mshr_cfg
           serve_timeout     : MshrCfgHoldCntW'(DefServeTimeout),
           bank_shift_single : MshrCfgShiftW'(DefBankShiftSingle),
           bank_shift_burst  : MshrCfgShiftW'(DefBankShiftBurst),
-          bank_burst_bits   : (DefBankBurstBits != 0)
+          bank_burst_bits   : (DefBankBurstBits != 0),
+          cache_reuse_target: MshrCfgSubsW'(DefCacheReuseTarget),
+          cache_timeout     : MshrCfgHoldCntW'(DefCacheTimeout)
         };
         status_q <= '0;
       end else begin
