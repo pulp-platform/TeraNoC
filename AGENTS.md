@@ -45,6 +45,25 @@
 - Name new app tests by purpose (`vector-burst-test`, `sp-fmatmul-opt-burst-merge`) and keep each app in its own folder with `main.c`.
 - When debugging stalls, keep wave dumps enabled and note the key signal path in the change description.
 
+## Distributed Simulation (badile fleet)
+Full guide: `docs/badist_fleet.md`. `~/badist` is the generic service (msc26f31's, copied
+per user); `scripts/badist/teranoc_fleet.py` is our client.
+- `badist nodes` first, then **always `--dry-run` before a real submit** — it validates the
+  spec and reports how many nodes admit the job.
+- Results are unpacked into `hardware/<run-prefix>_<arm>/transcript`, the same layout a local
+  sweep produces, so every scraper in `scripts/` works unchanged.
+- **The VCS licence is the cap, not the fleet.** Our simv holds `VCS-Base-Runtime-Pkg` (100
+  seats department-wide, one held per arm for its whole life) — *not* the `VCSRuntime_Net` in
+  badist's README, which does not exist on our server. Keep the governor
+  (`--max-parallel`/`--reserve-licenses`); jobs held `pending` by it are correct.
+  `--backend verilator` takes no seat at all but is **4x4 only**.
+- `/usr/scratch/fenga1/...` and `/home` are fleet-visible; `/scratch` and `/tmp` are
+  node-local. `cload badile` does not exist — use `badist nodes` or `rup badile01 …`;
+  `suninfo badile` lists the machines (`badile01-49` are the 64 GB Ryzens).
+- These are colleagues' desktops. Do not fan out trivial work; run `badist stats <batch>`
+  afterwards and feed the observed numbers back into the next submit; `badist gc <batch>`
+  when the results are safely gathered.
+
 ## Commit & Pull Request Guidelines
 - Match recent history: imperative, scope-first subjects such as `mempool_group_mshr: harden burst response handling`.
 - Keep commits focused; separate RTL, software, and config churn where practical.

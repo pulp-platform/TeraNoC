@@ -248,6 +248,75 @@ TB profiling is gated by `csr_trace_any_global` (a CSR the benchmark software se
 
 QuestaSim debug TCL lives in `hardware/scripts/questa/` (`wave.tcl` + specialized `wave_*.tcl`, plus MSHR/hang debug scripts). Verilator waveform dump is off by default — uncomment the `--trace` line in `hardware/Makefile` (~line 468). For cycle-level waveform analysis use the `waveform-analysis` skill (WAL over WLF→VCD→FST). Tools referenced: QuestaSim 2023.4-zr (primary), VCS 2024.09-zr, Verilator, Spike.
 
+## Distributed Simulation (badile fleet)
+
+`fenga1` runs at load ~105 on 96 threads with a sweep on it. The badile fleet is ~25
+idle 12-core Ryzen 9900X desktops. **`docs/badist_fleet.md` is the full guide** — this
+is the short form.
+
+Two pieces, deliberately separate: **`~/badist`** is the generic service (hosts, jobs,
+resources, results — knows nothing about simulators; written by msc26f31, reference in
+`~/badist/README.md` + `~/badist/AGENTS.md`), and **`scripts/badist/teranoc_fleet.py`**
+is our client (what an arm is, how VCS/Verilator are invoked, where results land).
+
+```sh
+badist nodes                                                   # fleet health FIRST
+scripts/badist/teranoc_fleet.py submit --arms arms.txt --run-prefix run6 --dry-run
+scripts/badist/teranoc_fleet.py submit --arms arms.txt --run-prefix run6
+scripts/badist/teranoc_fleet.py status ; scripts/badist/teranoc_fleet.py fetch
+scripts/badist/teranoc_fleet.py license                        # VCS seat headroom
+```
+
+`arms.txt` is `<name> <elf> [image]` per line (paths relative to `hardware/`); or drive
+it from `scripts/gemm_sweep_shapes.txt` with `--shapes ... --elf-template ...`.
+
+- **Results land in `hardware/<run-prefix>_<arm>/transcript`**, the same layout
+  `launch_bp_sweep.sh` produces locally, so `gen_fp16_sweep_dash.py` and every other
+  scraper works unchanged. That routing is carried by the job's opaque `meta` blob.
+- **⚠️ The VCS licence, not the fleet, is the cap.** Our simv holds
+  **`VCS-Base-Runtime-Pkg`** — *not* the `VCSRuntime_Net` in badist's README, which does
+  not exist on our server. 100 seats department-wide, one per arm held for the arm's
+  whole life; 90 were in use when this was written. The client ships a governor
+  (`--max-parallel 24 --reserve-licenses 20`); jobs held `pending` by it are correct
+  behaviour, not a hang. **Distributing does not create seats** — it buys a full 4.4 GHz
+  core per arm instead of nine tenths of a contended one.
+- **Fall back, do not wait.** `--fallback questa` runs VCS and, if VCS exits before
+  simulation time 0 (the only trace a refused seat leaves), re-runs the same ELF under
+  QuestaSim *in the same job*. Questa's pool is `msimhdlsim` — **400 seats**, ~105 in use
+  — and VCS/Questa cycle counts are validated identical, so the results pool. The price:
+  Questa needs **15.9 GB** against VCS's 2.0 GB, and a job that might fall back must be
+  *placed* for that, so a 62 GB node drops from ~10 slots to 3. Setting `--fallback` also
+  drops `+vcs+lic+wait` (a queued simv never fails, so the fallback would never fire).
+  The Questa image is a compiled **build directory** (`build_bp_q`), shared read-only by
+  every arm via symlinks; build it with
+  `make -o update-floogen compile config=terapool_spatz4_fpu buildpath=build_bp_q group_mshr_merge_reqs=16`
+  and diff its `+define+` set against the VCS image first.
+- **`--backend verilator` takes no licence at all**, so it can use the whole fleet — but
+  it is **4x4 only** (it fails at 8x8), and its cycle counts have never been validated
+  against VCS here. Image `vbuild_4x4/Vmempool_tb_verilator`, a single 456 MB binary.
+- **`/usr/scratch/fenga1/...` and `/home` are automounted on every node; `/scratch` and
+  `/tmp` are node-local.** The client refuses any image or ELF that is not fleet-visible,
+  and refuses an ELF under `software/bin` (rebuilt in place, read at simulation *time 0*
+  — a rebuild mid-launch silently hands jobs a different workload).
+- **`cload badile` does not work** (the system `cload` only knows tortin, mont-fort,
+  attelas, pisoc, design, sassauna, vilan, dolent, gpu). Use `badist nodes`, or
+  `rup badile01 …`. `suninfo badile` lists every machine with its specs — `badile01-49`
+  are the 64 GB Ryzens, `badile101-111` are 2–4 core 16 GB and out of scope.
+- **`scripts/badist/workload.sh`** answers "what is running and what is blocking it":
+  seat pools, fenga1 load and local sims, per-arm sweep phase, fleet batches and node
+  health. Its `arms` view cross-references the ledger, so a fleet arm reads `on-fleet`
+  rather than being mistaken for a dead local run — and a genuinely dead arm (4 KB
+  transcript, no process, untouched 15 min) is called **DEAD**, not "loading".
+- **⚠️ A refused VCS seat kills the simv in seconds and says so only on stderr.** On
+  2026-08-21 that silently killed **38 of 61** arms of a local sweep whose launcher sent
+  stderr to `/dev/null`; each left a 4 KB banner-only transcript and read as "still
+  loading" for hours. Never discard stderr from a simulator launch.
+- The controller is optional: killing `submit` stops new dispatch only. Running arms keep
+  going, keep reporting and still deliver — check `badist status`, do not resubmit.
+- **Validated 2026-08-21:** `16_512x128x128` on badile34 returned **7,876 cycles**, exactly
+  the local figure, in 2,362 s against 67 min on a load-106 fenga1 — 1.7× faster, RSS
+  2.03 GB.
+
 ## Coding Conventions
 
 - `.editorconfig` enforced: 2 spaces, LF, 80 cols (100 for `*.sv`/`*.svh`), tabs in Makefiles
