@@ -112,9 +112,13 @@ module mempool_group_mshr_cfg
     // 230,224 -> 179,222 with alloc_single 15,356 -> 48,816, which read as a 43% "improvement".
     // Third instance of this bug class after HoldCntW and ServedCntMax, and the only one that fired
     // in a shipped configuration. Catch it at elaboration rather than in a benchmark table.
-    if ((32'd1 << MshrCfgSubsW) <= MergeReqs)
-      $error("[mshr_cfg] MshrCfgSubsW=%0d cannot represent MergeReqs=%0d; a legal write would truncate.",
-             MshrCfgSubsW, MergeReqs);
+    // The bound is 2*MergeReqs, not MergeReqs: cache_reuse_target shares this field and reuse_ok
+    // admits up to 2*MergeReqs. Guarding only against MergeReqs would have let the exact same
+    // truncation back in one field over.
+    if ((32'd1 << MshrCfgSubsW) <= (2 * MergeReqs))
+      // SV has no implicit string concatenation -- one literal, or {"a","b"}.
+      $error("[mshr_cfg] MshrCfgSubsW=%0d cannot represent 2*MergeReqs=%0d (the cache_reuse_target upper bound); a legal write would truncate.",
+             MshrCfgSubsW, 2 * MergeReqs);
     if ((32'd1 << MshrCfgHoldCntW) <= HoldCntHwMax)
       $error("[mshr_cfg] MshrCfgHoldCntW=%0d cannot represent HoldCntHwMax=%0d; a legal write would truncate.",
              MshrCfgHoldCntW, HoldCntHwMax);
@@ -127,9 +131,14 @@ module mempool_group_mshr_cfg
     assign shift_b_ok = shift_s_ok;
     // serve_timeout == 0 means "never expires"; legal unless the MSHR config needs the backstop.
     assign tmo_ok     = cnt_ok && !(ServeTimeoutMustBeNonZero && (wr_data_i == 32'd0));
-    // Reuse target: same upper bound as hold_subs (served_cnt saturates at MergeReqs, so anything
-    // above is unreachable), but 0 is additionally legal and means "legacy self-invalidate".
-    assign reuse_ok   = (wr_data_i <= MergeReqs);
+    // Reuse target: bounded by 2*MergeReqs, NOT MergeReqs. The target counts served sub-requests
+    // CUMULATIVELY across the successive cohorts one cached line serves, whereas hold_subs indexes
+    // the concurrent sub_reqs[] array and so keeps the tighter bound. At fp16 two scalar loads
+    // alias one 32-bit word, so the same S cores touch the line twice and its useful life ends at
+    // 2S -- with S = MergeReqs = 16 on every 128x*x512 shape, the needed target is exactly 32.
+    // Capping at MergeReqs made that write illegal, which is why the software zeroed it instead
+    // and those shapes ran with the reuse mechanism switched off entirely.
+    assign reuse_ok   = (wr_data_i <= (2 * MergeReqs));
     // Evaluated on the SETTLED config, not on wr_data_i, because the two fields arrive in
     // separate writes.
     assign burst_hash_ok = (32'(cfg_q.bank_shift_burst) >=

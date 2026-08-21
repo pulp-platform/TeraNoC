@@ -10494,3 +10494,208 @@ combined. The five isolated arms span −9.0% to −94.4% and bracket them.
 - A v1 baseline conflates the knob with the ELF: on `256x32x256` the v1 delta reads +8.5% while the
   same-ELF delta is **exactly 0.0%**; on `512x32x512` the two disagree in SIGN (+4.7% vs −9.0%).
   Always isolate against the same binary.
+
+---
+
+## 2026-08-21 · idea 2 in plain terms, and why the first reading of it was wrong
+
+**The mechanism, without jargon.** When several cores need the same far-away word, the MSHR
+bundles them: one fetch serves all. It then parks the word in a small holding slot in case someone
+else asks. fp16 packs two numbers per 32-bit word, so the SAME set of cores asks for the SAME word
+twice -- once per half. The first round works. Then the slot deletes itself the instant that round
+is served. The second round arrives to find it gone: a few cores got in just before it vanished,
+the rest did not. Those stragglers open a fresh entry and wait for partners who already have the
+data and will never come -- so they ride out `serve_timeout` (2047 cyc) doing nothing. That is the
+whole fp16 collapse, and it is why removing the cache (`resp_cache=0`) fixes it: with no slot,
+nobody can be half-served by one.
+
+**Idea 2** keeps the slot alive for the second round instead of deleting it after the first:
+retire at `served_cnt >= 2 x hold_subs_single` rather than `1 x`.
+
+**The measurement that settles what idea 2 actually does** (512x64x256, fp16):
+
+    config        fill   hit   self_inval   evict   cache valid_avg
+    legacy (v1)    260     0          260       0            0.18
+    idea 2          49    33           32       0           32.34
+
+**Legacy gets ZERO cache hits from 260 lines** -- every line dies before the second round arrives.
+That single number is the bug. **Idea 2 gets 33 hits from 49 fills, and 32 lines retire by
+REACHING their target**, which can only happen if the second cohort arrived and completed. So the
+reuse works exactly as designed.
+
+**CORRECTION -- the first diagnosis of the RH rise was wrong.** Seeing RH jump (512x64x256:
+244 -> 2898) alongside `cache_timeout=0`, I concluded lines were squatting for 2047 cycles waiting
+for a second round that never came, and proposed a SHORT cache timeout. The lifecycle counters
+refute that: lines are being hit and retiring on target, not ageing out. The user's objection was
+correct -- in this kernel the second round ALWAYS comes, because it is the same cores one k-step
+later, so a line MUST survive until the whole second cohort is served or the partial-hit split
+recurs. **Shortening the timeout would have re-created the very bug idea 2 exists to fix.**
+
+**What the cost actually is: WAY CAPACITY, not lifetime.** `valid_avg` 0.18 -> 32.34 of 64 entries
+(`valid_max` 34). At 4 ways/bank that is roughly half of every bank held by resident lines, leaving
+too few for active traffic: `mshr_overflow` 0 -> 155 (requests that wanted an entry and had to
+bypass) and merges 902 -> 99. So idea 2 buys reuse and pays for it in allocation pressure, and on
+shapes that were not splitting much the pressure costs more than the reuse returns
+(512x128x128: RH 0 -> 1371; 512x32x512: 23 -> 1579), while on the worst shapes it helps
+(128x1024x512: 15866 -> 478; 512x256x512: 12552 -> 1177).
+
+**Open question, raised by the user and NOT answered by this arm:** whether 2047 is even long
+enough. 17 of 49 lines neither hit nor self-invalidated, and those are the candidates for having
+aged out mid-second-round. If they did, the fix is a LONGER cache residency, not a shorter one --
+the opposite of the first proposal. Distinguishing needs a counter for "cache line aged out",
+which does not exist today (the RTL counts fill/hit/evict/self_inval/store_update/amo_inval, and
+a timeout death shows up as none of them).
+
+**Status.** 61-arm idea-2 sweep running (33 fp16 + 28 fp32) with `cache_timeout=0` (= 2047 via the
+serve_timeout fallback). Nothing killed. Early finishers are all shapes where the reuse target
+provably cannot act (rc0 RH=0), so they measure the per-shape compile-time tuning, not idea 2:
+fp16 -24.2/-18.6/-13.3/-4.2%, fp32 (reuse=0 by construction, the clean tuning test) -4.8%/+1.3%.
+The double-digit fp16 figures are NOT attributable to tuning alone.
+
+
+---
+
+## 2026-08-21 · idea 2: the reuse TARGET VALUE decides win vs collapse, not shape size
+
+**Result (8 arms where idea 2 is actually ACTIVE).** The split is total and tracks one number:
+
+    target = 16  (subs_s=8)   -24.2%  -18.6%  -17.4%  -13.3%   -4.2%     all GAIN
+    target =  8  (subs_s=4)  +706.5% +1243.7% +1590.6%                   all COLLAPSE
+
+Five gains, three collapses, no overlap. The discriminator is NOT working-set size (an earlier
+reading of mine): `256x128x256` and `512x32x512` have the same 4,096-cycle ideal and land on
+opposite sides. It is whether the CACHED line is retired after two cohorts of EIGHT or two of
+FOUR. At target=8 the line holds a way for a full residency and delivers only 8 sub-requests
+before dying -- churn, nearly pure capacity cost. At target=16 the same residency is amortised
+over twice the traffic. **Testable prediction:** forcing `hold_subs_single=8` on the 512x*
+shapes should convert those collapses into gains. One -D override, no RTL change.
+
+**A row that is NOT an idea-2 result.** `128x128x512` shows +1692.7% vs rc0, but its
+`subs_s=16` makes the target `2*16=32`, above `merge_reqs=16`, so the derivation falls back to
+0 and the arm runs the LEGACY cache-ON policy. Its 3.1% is exactly what v1 measured. That row
+re-measures the original bug; it says nothing about idea 2. Four shapes are in this class
+(subs_s=16), plus four more where subs_s=1 makes the scalar class bypass entirely. **Always
+check whether the knob under test is actually engaged before attributing a delta to it.**
+
+**Standing vs the alternatives.** Even at its best (-24%) idea 2 does not reach what rc0 gets by
+removing the cache outright, and at its worst it is ~17x worse than either baseline. Its value
+now reads as a diagnostic for WHEN cache residency pays, rather than as a candidate fix.
+
+**Caveat carried forward:** all these arms run `cache_timeout=0`, which the RTL resolves to
+`serve_timeout` = 2047 cycles rather than a short deadline. The design called for a short
+dedicated residency; without it a line that has not met its target squats 2047 cycles. So this
+is idea 2 with its safety valve missing, and the target=8 collapse is exactly the failure that
+valve was meant to prevent.
+
+
+### 2026-08-21 — idea-2 collapse: ROOT CAUSE is bank-full BYPASS splitting the cohort (user, from waveform)
+
+**Time/purpose.** The idea-2 sweep splits perfectly by derived target: every `target=16` arm gains
+4-24% (n=6), every `target=8` arm collapses 7-28x (n=9, worst `512x256x128` at +2706%, RH=37,103).
+Capacity was the known cost (`valid_avg` 0.18 -> 32.34 of 64, `mshr_overflow` 0 -> 155) but the
+mechanism that turns capacity pressure into a 28x stall was not established. The user found it in
+the waveform.
+
+**Mechanism.** When an MSHR bank is FULL, an arriving request **bypasses** the MSHR and goes
+straight out. That is fine in isolation -- but it splits a cohort. Part of a round bypasses
+(bank full at that instant); the bank then frees a way; a LATER member of the same round arrives,
+finds room, and **allocates a fresh entry** whose subscriber target counts peers that have
+**already been served via the bypass path and will never subscribe**. The entry then rides out
+`serve_timeout` (2047) waiting for requesters that no longer exist. Idea 2 makes this far more
+likely because it deliberately keeps lines resident longer, so banks sit full far more often --
+which is exactly why the collapse tracks the target and not the shape.
+
+**Evidence, and a probe limitation worth recording.** The `[RH STUCK]` signature on a collapsed arm
+(`512x256x128`, 251 episodes) is uniform:
+
+    subs=2/4  byp=0  stl=0  peers=0  bank[inv=1 wait=0 drain=0 hold=3 cached=0]
+
+Two of four subscribed; NO same-address traffic arrives afterwards (`byp=0`, `stl=0`); no duplicate
+entry (`peers=0`). The missing peers are not late, they are **gone** -- already served elsewhere.
+
+**`byp=0` is NOT evidence against this.** `rh_byp` is incremented only while the entry is already
+in `MSHR_RESP_HOLD` (mempool_group_mshr.sv:2460-2476); it counts same-address requests that leave
+with `mshr_tag == 0` *after* the hold begins. The peers in this mechanism bypassed **before** the
+entry was allocated, so the counter is structurally blind to them. Anyone reading `byp=0` as
+"no bypass involved" will reach the wrong conclusion. A probe that counted bypasses per ADDRESS
+(not per live entry) would show this directly.
+
+**Proposed fix (user).** Add a hardware parameter: when the target bank is full, do NOT bypass --
+deassert `ready` and backpressure the request. Timing should be unaffected: bank-full is a function
+of registered valid bits and can be computed in parallel with the address hash, so once the hash
+selects the bank the backpressure decision is already available; no added logic levels on the
+backend path.
+
+**Assessment.** This is the right primary attack: it is the only option that keeps the merge.
+The alternatives (let a late allocator detect absent peers and set target=1, or shorten the
+timeout adaptively) recover the stall but forfeit the coalescing that idea 2 exists to buy.
+Two things to design for, neither fatal:
+
+1. **Forward progress.** Bypass is currently the escape valve. If a bank fills with entries all
+   waiting for subscribers, and those subscribers are backpressured behind that same full bank,
+   the wait is circular: entries wait for peers, peers wait for space. `serve_timeout` still
+   breaks it, but at 2047 cycles a port would stall that long -- potentially costing more than
+   the bypass did. Prefer BOUNDED backpressure: fall back to bypass after K stalled cycles, or
+   release the holder as soon as a backpressure event is seen on its bank.
+2. **Head-of-line blocking.** If `ready` is per-port rather than per-bank, one full bank stalls
+   every request on that port, including requests targeting idle banks. With 16 banks that is a
+   large collateral cost. Check whether the stall can be made bank-scoped.
+
+On timing the argument is sound, with one caveat: `ready` is usually the MORE critical path (it is
+the backward combinational path), so adding a term to it deserves a real timing check rather than
+the parallel-computation argument alone.
+
+**Status.** Mechanism recorded; fix not yet implemented. Related: the derivation should arguably
+refuse to emit a target it cannot satisfy rather than emitting 8 and relying on the timeout --
+9 of 9 target-8 arms collapsed with no exceptions.
+
+---
+
+## 2026-08-21 21:00 · cache_reuse_target: widen the CSR field so 32 is expressible
+
+**Purpose.** The four `128x*x512` shapes are the only fp16 arms that keep `RH > 0` under
+bank-full backpressure, and `128x128x512` proves the two are independent: backpressure and
+idea-2 are **bit-identical** there (132,519 cyc, RH=963 both), because idea-2 logged zero
+bank-full bypasses on that shape. Their common signature is `split_m = (M/16)/8 = 1`, hence
+`split_p = 16` and `hold_subs_single = 16` — the maximum the merge window can express.
+
+At fp16 two scalar loads alias one 32-bit word, so the same S cores touch each line twice and
+its useful life ends at `2S`. With `S = 16` the needed `cache_reuse_target` is exactly **32**,
+which the hardware could not express, so `mshr_cfg.h` fell back to **0** and those four shapes
+ran with the reuse mechanism switched off entirely — the only shapes in the sweep that did.
+
+Measured on `128x256x512` (`[MSHRLIFE]`, spans are disjoint by construction):
+`flight` 18.1 cyc (NoC healthy), `drain` **235.7 cyc mean / 2,723 worst group**, 92 % of entry
+lifetime, and `[BFBHASH]` shows **15.0 of 16 banks free** with **zero** full events — the MSHR
+is idle, not congested. Entries sit waiting for a 16th subscriber and die on `serve_timeout`.
+
+**Implementation.** Three independent ceilings, all pinned at `MshrMergeReqs`:
+- `mempool_pkg.sv` — `MshrCfgSubsW` **5 → 6**. `cache_reuse_target` shares the field with
+  `hold_subs_*`; 5 bits caps at 31, so 32 was not representable and would store 0.
+- `mempool_group_mshr_cfg.sv` — `reuse_ok` bound `MergeReqs` → **`2*MergeReqs`**; the
+  field-vs-range truncation guard widened to the same bound. `subs_ok` keeps `≤ MergeReqs`:
+  `hold_subs` indexes the concurrent `sub_reqs[]` array, whereas `served_cnt` is CUMULATIVE
+  across the successive cohorts one cached line serves. That asymmetry is why the array does
+  not have to grow.
+- `mempool_group_mshr.sv` — `ServedCntMax` `MshrMergeReqs` → **`2*MshrMergeReqs`** (one bit per
+  entry). Sized at `MergeReqs` the counter is 5 bits, 32 wraps to 0 and the compare
+  `served_cnt >= target` could never fire. Worst case before it fires is
+  `2*MergeReqs + (MergeReqs-1) = 47 < 63`, so the widened counter cannot wrap either.
+- `software/runtime/mshr_cfg.h` — dropped the `2S > MergeReqs → 0` fallback (bound is now `2S`).
+
+**Result.** Re-deriving from the header: the four `128x*x512` shapes go `TARGET 0 → 32`; every
+other shape is unchanged (`512x*` 8, `1024x128x128` 0, `256x512x512` 16). Nothing else in the
+sweep is perturbed. Build note: a `$error` string split across two lines fails in VCS —
+SystemVerilog has no implicit string concatenation.
+
+**Status.** RTL + SW changed, image `build_vcs_reuse32` built, NOT committed pending numbers.
+Experiment dispatched on the badile fleet (`badist`, batch `reuse32`), 5 arms:
+`r32/r00` × `{128x256x512, 128x128x512}` on the new image (target 32 vs 0, single variable),
+plus `rej_128x256x512` = the new ELF on the OLD image, whose `reuse_ok` still caps at 16 so the
+write of 32 is REFUSED and the reset value stands. If that arm reproduces run5's 259,736
+exactly, the CSR write is proven to be the only variable and the image difference is excluded.
+
+**Open.** `hold_subs_single = 16` is an ASSUMPTION: `split_p = CPG/split_m` asserts a 16-way
+A-share when `split_m=1`, and nothing measures it. If the true degree is 4 or 8 then the target
+is being doubled on top of a wrong number and the real fix is to lower `subs_s`. The
+`subs_s ∈ {4,8,16}` sweep needs no rebuild and would separate the two.

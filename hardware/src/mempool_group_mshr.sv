@@ -439,7 +439,14 @@ module mempool_group_mshr
   // MshrCfgRuntime = 0 still folds to the old width, so a fixed-function build is unchanged.
   localparam int unsigned ServedCntElabMax = (HoldSubsSingle > HoldSubsBurst)
                                              ? HoldSubsSingle : HoldSubsBurst;
-  localparam int unsigned ServedCntMax     = mempool_pkg::MshrCfgRuntime ? MshrMergeReqs
+  // 2*MshrMergeReqs, not MshrMergeReqs. served_cnt is CUMULATIVE over the successive cohorts one
+  // cached line serves, and cache_reuse_target may now be written up to 2*MergeReqs (the fp16
+  // half-word case: the same S cores touch the line twice, so its useful life ends at 2S). Sized
+  // at MergeReqs the counter is 5 bits, 32 is not representable, it wraps to 0, and the compare
+  // `served_cnt >= target` could never fire -- the line would be pinned until a timeout. One extra
+  // bit per entry. Worst case before the compare fires is 2*MergeReqs + (MergeReqs-1) = 47 < 63,
+  // so the widened counter cannot wrap either.
+  localparam int unsigned ServedCntMax     = mempool_pkg::MshrCfgRuntime ? (2 * MshrMergeReqs)
                                                                          : ServedCntElabMax;
   localparam int unsigned ServedCntW       = idx_width(ServedCntMax + 1);
   localparam int unsigned RespBufCountW    = idx_width(RespBufWords + 1);
@@ -3454,7 +3461,7 @@ module mempool_group_mshr
         // cfg_cache_reuse_target == 0 keeps the legacy operand (the per-type sharing target), so
         // this expression is structurally what it was before the CSR existed. Non-zero replaces it
         // with the reuse target, letting the line outlive the cohort that filled it -- served_cnt
-        // saturates at ServedCntMax == MshrMergeReqs, which is also the CSR's upper bound, so the
+        // is sized to ServedCntMax == 2*MshrMergeReqs, which is also the CSR's upper bound, so the
         // target is always reachable and a line can never be pinned by an unreachable threshold.
         if (mshr_d_valid[e] && (mshr_d[e].state == MSHR_CACHED) &&
             (mshr_d[e].sub_reqs_num == '0) &&

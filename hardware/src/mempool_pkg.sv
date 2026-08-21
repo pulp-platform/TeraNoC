@@ -683,7 +683,11 @@ package mempool_pkg;
   //
   // Third instance of one bug class -- after HoldCntW and ServedCntMax -- and the only one that
   // fires in a shipped configuration. The others were latent.
-  localparam integer unsigned MshrCfgSubsW      = 5;   // [1, MshrMergeReqs]; 1 == "bypass this class"
+  // 6, not 5: hold_subs_* need only span [1, MshrMergeReqs] (16), but cache_reuse_target shares
+  // this width and its legal range is [0, 2*MshrMergeReqs] (32) -- two successive cohorts of the
+  // SAME line, which is the whole point of the reuse target. 5 bits caps at 31, so the shipped
+  // 128x*x512 value of 32 could not be represented at all.
+  localparam integer unsigned MshrCfgSubsW      = 6;   // hold_subs [1, MergeReqs]; reuse target [0, 2*MergeReqs]
   localparam integer unsigned MshrCfgShiftW     = 4;   // raw shift; the RTL muxes over a small range
 
   typedef struct packed {

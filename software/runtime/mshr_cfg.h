@@ -342,14 +342,16 @@ enum {
   // Fall back to 0 (legacy) rather than clamp, in three cases:
   //   fp32              -- one load per word, no second cohort to catch;
   //   subs_single < 2   -- the class BYPASSES, so no entry is ever allocated to cache;
-  //   2S > MergeReqs    -- the CSR write would be REFUSED and the reset value would silently
-  //                        stand; and clamping to MergeReqs == S is the legacy operand anyway,
-  //                        while a non-zero target would ALSO override hold_subs_burst for
-  //                        burst entries -- a capacity change with no matching benefit.
+  // The old third case -- 2S > MergeReqs -> 0 -- is GONE. It existed because the CSR refused any
+  // target above MergeReqs and a refused write leaves the reset value silently in force. The
+  // hardware bound is now 2*MergeReqs (mempool_group_mshr_cfg.sv reuse_ok, MshrCfgSubsW=6,
+  // ServedCntMax=2*MergeReqs), which is exactly what 2S needs. That fallback was firing on every
+  // 128x*x512 shape -- S=16 there, so 2S=32 -- and switching the reuse mechanism off on precisely
+  // the four shapes whose entries then sat in RESP_HOLD until serve_timeout.
   MSHR_D_CACHE_REUSE_TARGET =
-      (GEMM_ELEM_BYTES != 2)                        ? 0
-    : (MSHR_D_HOLD_SUBS_SINGLE < 2)                 ? 0
-    : (MSHR_D_CACHE_REUSE_RAW > (int)MSHR_MERGE_REQS) ? 0
+      (GEMM_ELEM_BYTES != 2)                              ? 0
+    : (MSHR_D_HOLD_SUBS_SINGLE < 2)                       ? 0
+    : (MSHR_D_CACHE_REUSE_RAW > 2 * (int)MSHR_MERGE_REQS) ? 0
     : MSHR_D_CACHE_REUSE_RAW,
 
   MSHR_D_HOLD_WINDOW_SINGLE = (MSHR_D_SPLIT_P < 2) ? 0 : MSHR_CFG_HOLD_WINDOW_SINGLE,
