@@ -444,6 +444,19 @@ group_mshr_resp_cache ?= 1
 group_mshr_cache_reuse_target ?= 0
 # CACHED-phase residency countdown. 0 = legacy (re-arm from group_mshr_serve_timeout).
 group_mshr_cache_timeout ?= 0
+
+# Bank-full policy for a mergeable miss. 0 = bypass the MSHR (legacy), 1 = backpressure: hold
+# ready low until a way frees, which is what the design already does when the bank has a free way
+# but the request lost that bank's single alloc slot.
+#
+# A bypass splits a cohort -- part of a round leaves without an MSHR tag, the bank frees, and a
+# later member allocates a fresh entry whose subscriber target counts peers already served, so it
+# waits out serve_timeout. Measured on the idea-2 sweep: arms with a non-zero cache_reuse_target
+# sit bank-full far more often and show ~500x the bank-full bypass count of arms where the target
+# is inactive (median 1,579 vs 3) -- and those are the arms that collapse 7-28x.
+#
+# Reset value only (group_mshr_cfg_runtime=1 -> software owns it via CSR 11).
+group_mshr_bankfull_backpressure ?= 1
 # CACHED-victim selection within a bank (pass-2 reclaim). 0 = legacy lowest-index-first:
 # the lowest reclaimable CACHED way is ALWAYS the victim -> way-0 lines thrash while
 # high-way lines stay pinned. 1 = per-bank round-robin victim start pointer, advanced past

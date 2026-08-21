@@ -208,6 +208,10 @@ module mempool_group_mshr
     `ifdef GROUP_MSHR_CACHE_REUSE_TARGET `GROUP_MSHR_CACHE_REUSE_TARGET `else 0 `endif;
   localparam int unsigned CacheTimeout =
     `ifdef GROUP_MSHR_CACHE_TIMEOUT `GROUP_MSHR_CACHE_TIMEOUT `else 0 `endif;
+  // Bank-full policy: 0 = bypass (legacy), 1 = backpressure. Reset value only when
+  // MshrCfgRuntime=1; software owns it thereafter.
+  localparam int unsigned BankfullBackpressure =
+    `ifdef GROUP_MSHR_BANKFULL_BACKPRESSURE `GROUP_MSHR_BANKFULL_BACKPRESSURE `else 0 `endif;
   // RR cache-victim selection (group_mshr_cache_victim_rr): per-bank round-robin start pointer
   // for the pass-2 CACHED-reclaim scan, instead of always taking the lowest-index reclaimable
   // CACHED way (which thrashes way 0 of each bank while high ways stay pinned). The pointer
@@ -382,6 +386,7 @@ module mempool_group_mshr
   logic [mempool_pkg::MshrCfgHoldCntW-1:0] cfg_serve_timeout;
   logic [mempool_pkg::MshrCfgSubsW-1:0]    cfg_cache_reuse_target;
   logic [mempool_pkg::MshrCfgHoldCntW-1:0] cfg_cache_timeout;
+  logic                                   cfg_bankfull_bp;
   // Effective cache-phase countdown: the dedicated value when set, else the legacy serve_timeout.
   logic [mempool_pkg::MshrCfgHoldCntW-1:0] cfg_cache_hold_ticks_src;
   logic [mempool_pkg::MshrCfgShiftW-1:0]   cfg_bank_shift_single, cfg_bank_shift_burst;
@@ -527,6 +532,8 @@ module mempool_group_mshr
                                                               : mempool_pkg::MshrCfgSubsW'(CacheReuseTarget);
   assign cfg_cache_timeout      = mempool_pkg::MshrCfgRuntime ? cfg_i.cache_timeout
                                                               : mempool_pkg::MshrCfgHoldCntW'(CacheTimeout);
+  assign cfg_bankfull_bp        = mempool_pkg::MshrCfgRuntime ? cfg_i.bankfull_backpressure
+                                                              : (BankfullBackpressure != 0);
   // 0 => legacy: the cache phase re-arms from serve_timeout, exactly as before.
   assign cfg_cache_hold_ticks_src = (cfg_cache_timeout != '0) ? cfg_cache_timeout : cfg_serve_timeout;
   // A class bypasses when its merge target is 1 (nothing to merge with) or the MSHR is disabled.
@@ -3204,11 +3211,21 @@ module mempool_group_mshr
               req_in_ready[tile_i][port_i]  = 1'b0;
               req_out_valid[tile_i][port_i] = 1'b0;
             end else if (req_can_merge[tile_i][port_i] && !req_alloc_found[tile_i][port_i] &&
-                         bank_has_free[req_bank[tile_i][port_i]]) begin
+                         (bank_has_free[req_bank[tile_i][port_i]] || cfg_bankfull_bp)) begin
               // Mergeable miss that lost this bank's single allocation slot this cycle, but a free way
               // exists: STALL and retry. Next cycle it either wins the slot or HIT-merges the entry the
               // winner just created (same address) -> full coalescing preserved, no extra entry, no
               // bypass. This is the stall-and-merge half of the per-bank single-alloc scheme.
+              //
+              // cfg_bankfull_bp extends the SAME stall to a genuinely FULL bank, where the legacy
+              // policy bypasses. A bypass splits the cohort: part of a round leaves without an
+              // MSHR tag, the bank frees, and a later member allocates a fresh entry whose
+              // subscriber target counts peers already served -- it then waits out serve_timeout.
+              // Stalling instead lets the late peer merge into the resident entry once reachable.
+              // Bounded by serve_timeout (a held entry always releases), so a full bank cannot
+              // wedge a port permanently. bank_has_free is already computed and consumed on this
+              // very line, so the added term is one OR against a config bit: no new logic level
+              // between the bank hash and this decision.
               req_in_ready[tile_i][port_i]  = 1'b0;
               req_out_valid[tile_i][port_i] = 1'b0;
             end else begin

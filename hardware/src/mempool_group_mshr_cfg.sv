@@ -37,6 +37,7 @@ module mempool_group_mshr_cfg
   // 0 = legacy (self-invalidate at hold_subs / re-arm cache phase from serve_timeout).
   parameter int unsigned DefCacheReuseTarget = 0,
   parameter int unsigned DefCacheTimeout     = 0,
+  parameter int unsigned DefBankfullBp      = 0,
   // Legal ranges, enforced at runtime.
   parameter int unsigned MergeReqs           = 4,     // hold_subs upper bound
   parameter int unsigned HoldCntHwMax        = 2047,  // window/timeout upper bound
@@ -88,7 +89,8 @@ module mempool_group_mshr_cfg
       bank_shift_burst  : MshrCfgShiftW'(DefBankShiftBurst),
       bank_burst_bits   : (DefBankBurstBits != 0),
       cache_reuse_target: MshrCfgSubsW'(DefCacheReuseTarget),
-      cache_timeout     : MshrCfgHoldCntW'(DefCacheTimeout)
+      cache_timeout     : MshrCfgHoldCntW'(DefCacheTimeout),
+      bankfull_backpressure: (DefBankfullBp != 0)
     };
     assign status_o = '0;
     // Silence unused-input lint in this arm.
@@ -170,6 +172,10 @@ module mempool_group_mshr_cfg
                                                else status_d[MSHR_STATUS_RANGE] = 1'b1;
           IdxW'(MSHR_CSR_CACHE_TIMEOUT)      : if (cnt_ok)   cfg_d.cache_timeout      = MshrCfgHoldCntW'(wr_data_i);
                                                else status_d[MSHR_STATUS_RANGE] = 1'b1;
+          // Policy bit, not a magnitude: any non-zero write enables backpressure. No range check
+          // is possible or needed, and it is safe while the MSHR is busy -- it only steers the
+          // stall-vs-bypass decision for requests arriving after the write.
+          IdxW'(MSHR_CSR_BANKFULL_BP)        : cfg_d.bankfull_backpressure = wr_data_i[0];
           IdxW'(MSHR_CSR_STATUS)             : status_d = '0;   // write to 15 clears the sticky bits
           default                            : status_d[MSHR_STATUS_BAD_INDEX] = 1'b1;
         endcase
@@ -189,7 +195,8 @@ module mempool_group_mshr_cfg
           bank_shift_burst  : MshrCfgShiftW'(DefBankShiftBurst),
           bank_burst_bits   : (DefBankBurstBits != 0),
           cache_reuse_target: MshrCfgSubsW'(DefCacheReuseTarget),
-          cache_timeout     : MshrCfgHoldCntW'(DefCacheTimeout)
+          cache_timeout     : MshrCfgHoldCntW'(DefCacheTimeout),
+          bankfull_backpressure: (DefBankfullBp != 0)
         };
         status_q <= '0;
       end else begin

@@ -652,6 +652,8 @@ package mempool_pkg;
     `ifdef GROUP_MSHR_CACHE_REUSE_TARGET `GROUP_MSHR_CACHE_REUSE_TARGET `else 0 `endif;
   localparam integer unsigned MshrDefCacheTimeout =
     `ifdef GROUP_MSHR_CACHE_TIMEOUT `GROUP_MSHR_CACHE_TIMEOUT `else 0 `endif;
+  localparam integer unsigned MshrDefBankfullBp =
+    `ifdef GROUP_MSHR_BANKFULL_BACKPRESSURE `GROUP_MSHR_BANKFULL_BACKPRESSURE `else 0 `endif;
   localparam integer unsigned MshrDefBankSelShift =
     `ifdef GROUP_MSHR_BANK_SHIFT `GROUP_MSHR_BANK_SHIFT `else 5 `endif;
   localparam integer unsigned MshrDefBankShiftSingle =
@@ -705,6 +707,22 @@ package mempool_pkg;
     // Non-zero = arm from this instead, so cache residency is tunable independently of how long a
     // RESP_HOLD entry waits for subscribers.
     logic [MshrCfgHoldCntW-1:0]      cache_timeout;
+    // Bank-full policy for a MERGEABLE miss. 0 = LEGACY: bypass the MSHR and go straight to the
+    // NoC. 1 = BACKPRESSURE: stall the request until a way frees, exactly as the design already
+    // does when the bank has a free way but the request lost that bank's single alloc slot.
+    //
+    // Why: a bypass SPLITS a cohort. Part of a round bypasses (bank full at that instant), the
+    // bank then frees, and a later member of the same round allocates a FRESH entry whose
+    // subscriber target counts peers that have already been served via the bypass path and will
+    // never subscribe -- so it waits out serve_timeout. Measured on the idea-2 sweep: arms with a
+    // non-zero cache_reuse_target keep lines resident longer, sit bank-full far more often, and
+    // show ~500x the bank-full bypass count of the arms where the target is inactive
+    // (median 1,579 vs 3), which is where the 7-28x collapses live.
+    //
+    // Stalling instead lets the late peer MERGE into the resident entry once it is reachable,
+    // which is the outcome the bypass destroys. Bounded by serve_timeout: a held entry always
+    // releases eventually, so a full bank cannot wedge a port permanently.
+    logic                            bankfull_backpressure;
   } mshr_cfg_t;
 
   // CSR indices, mirrored by software/runtime/mshr_cfg.h -- keep the two in step.
@@ -719,6 +737,7 @@ package mempool_pkg;
   localparam integer unsigned MSHR_CSR_SERVE_TIMEOUT      = 8;
   localparam integer unsigned MSHR_CSR_CACHE_REUSE_TARGET = 9;
   localparam integer unsigned MSHR_CSR_CACHE_TIMEOUT      = 10;
+  localparam integer unsigned MSHR_CSR_BANKFULL_BP       = 11;
   localparam integer unsigned MSHR_CSR_STATUS             = 15;
 
   // CFG_STATUS sticky error bits. Software reads this after configuring; a set bit means the

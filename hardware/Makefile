@@ -270,6 +270,7 @@ group_mshr_resp_cache ?=
 # only -- software owns them at runtime.
 group_mshr_cache_reuse_target ?=
 group_mshr_cache_timeout ?=
+group_mshr_bankfull_backpressure ?=
 # Cache self-invalidate (idea 1, docs/mshr_bank_hash_design.md). 0/unset = OFF (bit-identical);
 # 1 = a CACHED entry frees itself once it has served its per-type sharing target
 # (group_mshr_hold_subs_single for scalar/single, group_mshr_hold_subs_burst for burst), turning a
@@ -391,6 +392,9 @@ ifneq ($(strip $(group_mshr_cache_reuse_target)),)
 endif
 ifneq ($(strip $(group_mshr_cache_timeout)),)
   vlog_defs += -DGROUP_MSHR_CACHE_TIMEOUT=$(group_mshr_cache_timeout)
+endif
+ifneq ($(strip $(group_mshr_bankfull_backpressure)),)
+  vlog_defs += -DGROUP_MSHR_BANKFULL_BACKPRESSURE=$(group_mshr_bankfull_backpressure)
 endif
 ifneq ($(strip $(group_mshr_cache_victim_rr)),)
   vlog_defs += -DGROUP_MSHR_CACHE_VICTIM_RR=$(group_mshr_cache_victim_rr)

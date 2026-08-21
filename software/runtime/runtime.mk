@@ -151,6 +151,7 @@ DEFINES += -DMSHR_CFG_BANK_BURST_BITS=$(if $(group_mshr_bank_burst_bits),$(group
 # 0 = legacy. fp16 kernels override cache_reuse_target locally; fp32 keeps the legacy path.
 DEFINES += -DMSHR_CFG_CACHE_REUSE_TARGET=$(if $(group_mshr_cache_reuse_target),$(group_mshr_cache_reuse_target),0)
 DEFINES += -DMSHR_CFG_CACHE_TIMEOUT=$(if $(group_mshr_cache_timeout),$(group_mshr_cache_timeout),0)
+DEFINES += -DMSHR_CFG_BANKFULL_BP=$(if $(group_mshr_bankfull_backpressure),$(group_mshr_bankfull_backpressure),0)
 # The HARDWARE merge capacity. Elaboration-only in RTL, but software needs it: the CSR range
 # check refuses a cache_reuse_target above it, and served_cnt saturates at it.
 DEFINES += -DMSHR_MERGE_REQS=$(if $(group_mshr_merge_reqs),$(group_mshr_merge_reqs),4)

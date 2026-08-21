@@ -982,6 +982,7 @@ module mempool_group
     .DefBankBurstBits         (MshrDefBankBurstBits   ),
     .DefCacheReuseTarget      (MshrDefCacheReuseTarget),
     .DefCacheTimeout          (MshrDefCacheTimeout    ),
+    .DefBankfullBp            (MshrDefBankfullBp      ),
     .MergeReqs                (MshrDefMergeReqs       ),
     // Same expression as mempool_group_mshr.sv:425. MaxBurstWords is a package constant, so the
     // two cannot drift; BurstAlignBits itself is a localparam inside the MSHR and not visible here.

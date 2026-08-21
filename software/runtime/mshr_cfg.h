@@ -35,6 +35,7 @@
 #define MSHR_CSR_SERVE_TIMEOUT      8   // response-side, SINGLE-only; NOT the hold window
 #define MSHR_CSR_CACHE_REUSE_TARGET 9   // 0 = legacy: self-invalidate at hold_subs_*
 #define MSHR_CSR_CACHE_TIMEOUT     10   // 0 = legacy: cache phase re-arms from serve_timeout
+#define MSHR_CSR_BANKFULL_BP       11   // 0 = legacy: bank-full mergeable miss BYPASSES the MSHR
 #define MSHR_CSR_STATUS            15   // read: sticky errors; write: clear
 
 // ---- CFG_STATUS sticky bits. Non-zero means the config in effect is NOT the one requested. -----
@@ -72,6 +73,11 @@ typedef struct {
   uint32_t cache_reuse_target;
   /// CACHED-phase residency countdown. 0 = LEGACY (re-arm from serve_timeout).
   uint32_t cache_timeout;
+  /// Bank-full policy for a mergeable miss. 0 = bypass the MSHR (legacy), 1 = backpressure until a
+  /// way frees. A bypass splits the cohort: the peers that bypass are served without ever
+  /// subscribing, so a later member's fresh entry waits out serve_timeout for requesters that no
+  /// longer exist. See WORKLOG 2026-08-21.
+  uint32_t bankfull_backpressure;
 } mshr_cfg_t;
 
 /// The group this core belongs to.
@@ -141,6 +147,7 @@ static inline uint32_t mshr_cfg_apply_group(const mshr_cfg_t *c) {
   mshr_cfg_write(g, tile, MSHR_CSR_SERVE_TIMEOUT,     c->serve_timeout);
   mshr_cfg_write(g, tile, MSHR_CSR_CACHE_REUSE_TARGET,c->cache_reuse_target);
   mshr_cfg_write(g, tile, MSHR_CSR_CACHE_TIMEOUT,     c->cache_timeout);
+  mshr_cfg_write(g, tile, MSHR_CSR_BANKFULL_BP,      c->bankfull_backpressure);
 
   mshr_cfg_write(g, tile, MSHR_CSR_ENABLE, 1);          // arm last
   __asm__ volatile("fence" ::: "memory");
@@ -395,6 +402,13 @@ enum {
                             : MSHR_D_CACHE_REUSE_TARGET,       \
     .cache_timeout      = (GEMM_ELEM_BYTES == 2)         \
                             ? MSHR_CFG_CACHE_TIMEOUT : 0,      \
+    /* Bank-full backpressure. Taken straight from the build knob rather than derived: it is a
+       policy bit, not a shape-dependent magnitude, and it is the direct counterpart to the
+       reuse target -- a resident-longer cache is exactly what makes banks sit full, so an arm
+       that sets a reuse target is the one that needs this. Left at the knob's value for fp32
+       too: the mechanism (bypass splits a cohort) is precision-independent, unlike the fp16
+       half-word aliasing that motivates cache_reuse_target. */          \
+    .bankfull_backpressure = MSHR_CFG_BANKFULL_BP,             \
   }
 #endif // GEMM_M
 
