@@ -2360,7 +2360,21 @@ module mempool_group_mshr
   // ------------------------------------------------------------------------
   logic [MshrNum-1:0] mshr_issue_timeout_dbg;
   logic [MshrNum-1:0] mshr_issue_subs_dbg;
+  // RESPONSE-side timeout deaths. Neither of these was counted anywhere: the only timeout counter
+  // in this file is mshr_issue_timeout_cnt_dbg, which is REQUEST-side and gated on hold_window !=
+  // 0 -- and hold_window_single is 0 in every shipping config, so scalar entries were invisible.
+  //   resp_hold_timeout : a RESP_HOLD entry gave up waiting for subscribers (serve_timeout hit 0)
+  //                       and delivered to whoever HAD subscribed. The 2047-cycle fp16 stall.
+  //   cache_timeout     : a CACHED line aged out before reaching its reuse target. This is the
+  //                       one that decides whether the cache residency is long ENOUGH: a line
+  //                       that dies here took its second cohort's data with it, so the partial-hit
+  //                       split recurs. It shows up as neither hit nor self_inval, which is why
+  //                       "17 of 49 lines unaccounted" could not be diagnosed before.
+  logic [MshrNum-1:0] mshr_resp_hold_timeout_dbg;
+  logic [MshrNum-1:0] mshr_cache_timeout_dbg;
   logic [31:0]        mshr_issue_timeout_cnt_dbg;
+  logic [31:0]        mshr_resp_hold_timeout_cnt_dbg;
+  logic [31:0]        mshr_cache_timeout_cnt_dbg;
   logic [31:0]        mshr_issue_subs_cnt_dbg;
 
   always_comb begin
@@ -2388,11 +2402,17 @@ module mempool_group_mshr
     if (!rst_ni) begin
       mshr_issue_timeout_cnt_dbg <= '0;
       mshr_issue_subs_cnt_dbg    <= '0;
+      mshr_resp_hold_timeout_cnt_dbg <= '0;
+      mshr_cache_timeout_cnt_dbg     <= '0;
     end else begin
       mshr_issue_timeout_cnt_dbg <=
           mshr_issue_timeout_cnt_dbg + 32'($countones(mshr_issue_timeout_dbg));
       mshr_issue_subs_cnt_dbg    <=
           mshr_issue_subs_cnt_dbg    + 32'($countones(mshr_issue_subs_dbg));
+      mshr_resp_hold_timeout_cnt_dbg <=
+          mshr_resp_hold_timeout_cnt_dbg + 32'($countones(mshr_resp_hold_timeout_dbg));
+      mshr_cache_timeout_cnt_dbg     <=
+          mshr_cache_timeout_cnt_dbg     + 32'($countones(mshr_cache_timeout_dbg));
     end
   end
 
@@ -3035,6 +3055,9 @@ module mempool_group_mshr
     mshr_wr_all = '0;
     mshr_id_we  = '0;
     mshr_rb_we  = '0;
+    // One-cycle pulses; set only at the two response-side death sites below.
+    mshr_resp_hold_timeout_dbg = '0;
+    mshr_cache_timeout_dbg     = '0;
 `ifndef TARGET_SYNTHESIS
     dup_beat_detected = 1'b0;
     dup_beat_mshr = 0; dup_beat_beat = 0; dup_beat_meta = 0;
@@ -3623,6 +3646,7 @@ module mempool_group_mshr
           end else begin
             // Expired: stop waiting for subscribers that are not coming and deliver the buffered
             // word to whoever HAS subscribed. Same re-arm the merge-target path performs.
+            mshr_resp_hold_timeout_dbg[e] = 1'b1;
             mshr_d[e].state         = MSHR_DRAIN_RESP;
             mshr_d[e].beats_left    = BurstLenWidth'(1);
             mshr_d[e].beat_pending  = '0;
@@ -3644,6 +3668,10 @@ module mempool_group_mshr
           if (mshr_d[e].hold_cnt != '0) begin
             if (hold_tick[e]) mshr_d[e].hold_cnt = mshr_d[e].hold_cnt - HoldCntW'(1);
           end else begin
+            // Cache line aged out WITHOUT reaching its reuse target: its second cohort never
+            // completed in time. Distinct from self-invalidate, and the number that says whether
+            // the residency is too SHORT.
+            mshr_cache_timeout_dbg[e] = 1'b1;
             mshr_d_valid[e] = 1'b0;
             mshr_d[e]       = '0;
             mshr_wr_all[e] = 1'b1;
@@ -4532,6 +4560,9 @@ module mempool_group_mshr
         $display("  resps: from_mshr=%0d from_bypass=%0d",
                  resp_mshr, resp_bypass);
         if (EnableRespCache) begin
+          $display("  timeouts: resp_hold=%0d cache_aged=%0d issue=%0d   bankfull_bypass=%0d",
+                   mshr_resp_hold_timeout_cnt_dbg, mshr_cache_timeout_cnt_dbg,
+                   mshr_issue_timeout_cnt_dbg, req_bankfull_bypass_cnt_dbg);
           $display("  cache: valid_avg=%0f valid_max=%0d hit=%0d fill=%0d evict=%0d store_update=%0d amo_inval=%0d self_inval=%0d",
                    avg_cache_valid, cache_max_valid, cache_hit, cache_fill, cache_evict,
                    cache_store_update, cache_amo_inval, cache_self_inval);
