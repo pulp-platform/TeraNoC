@@ -522,4 +522,9 @@ spatz_vlsu_dual_load ?= 2
 # KEEP fp16 KERNELS AT LMUL <= 4: burst eligibility also caps vl at
 # NrOutstandingLoads*4 = 256 B, and e16,m8 is 512 B -- it would silently take the non-burst
 # path. The gen_burst_ew_vl_ceiling probe warns when that happens.
-spatz_vlsu_burst_ew16 ?= 0
+# DEFAULT 1 since 2026-08-20, matching terapool_spatz4_fpu.mk. This flavour does not include the
+# 4x4 base, so the knob has to be repeated here or no -D is emitted at all and the RTL falls back
+# to its `ifdef default of 0 -- which silently discards every CSR write mshr_cfg_apply_group() makes.
+group_mshr_cfg_runtime ?= 1
+
+spatz_vlsu_burst_ew16 ?= 1

@@ -446,16 +446,11 @@ int main() {
   // one designated writer each, in parallel; the barrier makes the configuration visible to every
   // core before the first timed access.
   {
-    static const mshr_cfg_t mshr_cfg = {
-        .hold_subs_single   = MSHR_CFG_HOLD_SUBS_SINGLE,
-        .hold_subs_burst    = MSHR_CFG_HOLD_SUBS_BURST,
-        .hold_window_single = MSHR_CFG_HOLD_WINDOW_SINGLE,
-        .hold_window_burst  = MSHR_CFG_HOLD_WINDOW_BURST,
-        .serve_timeout      = MSHR_CFG_SERVE_TIMEOUT,
-        .bank_shift_single  = MSHR_CFG_BANK_SHIFT_SINGLE,
-        .bank_shift_burst   = MSHR_CFG_BANK_SHIFT_BURST,
-        .bank_burst_bits    = MSHR_CFG_BANK_BURST_BITS,
-    };
+    // Shape-derived at COMPILE TIME from GEMM_M/N/P (data_gemm.h): one source per
+    // precision, no per-shape config/*.mk and no runtime division. The timeout and
+    // cache knobs stay macro-fed; MSHR_CFG_DERIVED_INIT gates the cache fields on
+    // GEMM_ELEM_BYTES so fp32 keeps the legacy path automatically.
+    static const mshr_cfg_t mshr_cfg = MSHR_CFG_DERIVED_INIT;
     uint32_t mshr_st = 0;
     if (mshr_cfg_is_group_writer()) mshr_st = mshr_cfg_apply_group(&mshr_cfg);
     mempool_barrier(num_cores);
@@ -570,7 +565,7 @@ int main() {
     // Utilization = actual performance / theoretical peak
     long unsigned int utilization = performance / (2 * active_cores * N_FPU);
 
-    printf("\n----- (%dx%d) sp fmatmul -----\n", gemm_l.M, gemm_l.P);
+    printf("\n----- (%dx%dx%d) sp fmatmul -----\n", gemm_l.M, gemm_l.N, gemm_l.P);
     printf("The execution took %u cycles.\n", timer);
     printf("The performance is %u OP/1000cycle (%u%%o utilization).\n",
            performance, utilization);

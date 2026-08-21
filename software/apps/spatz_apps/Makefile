@@ -42,6 +42,16 @@ $(BINARIES): $(BIN_DIR)/%: %/main.c.o $(RUNTIME) $(LINKER_SCRIPT) data_%.h updat
 	$(RISCV_CC) -Iinclude -o $@ $< $(RUNTIME) $(RISCV_LDFLAGS) -T$(RUNTIME_DIR)/link.ld
 	$(RISCV_OBJDUMP) $(RISCV_OBJDUMP_FLAGS) -D $@ > $@.dump
 
+# Regenerate a per-shape GEMM data header from its shape spec. data_gemm.h carries the
+# GEMM_M/N/P/ELEM_BYTES macros that runtime/mshr_cfg.h derives the MSHR tuning from at compile
+# time, so a stale header would silently mistune the run. Making it a real prerequisite means
+# editing script/matmul.json is enough -- no manual gen_data.py step, no per-shape config/*.mk.
+%/data/data_gemm.h: %/script/matmul.json %/script/gen_data.py
+	cd $(APPS_DIR)/$* && $(python) script/gen_data.py -c script/matmul.json
+
+GEMM_APPS := $(patsubst $(APPS_DIR)/%/script/matmul.json,%,$(wildcard $(APPS_DIR)/*/script/matmul.json))
+$(foreach a,$(GEMM_APPS),$(eval $(a)/main.c.o: $(a)/data/data_gemm.h))
+
 # Helper targets, here force a spatz configuration
 update_opcodes:
 	make -C $(MEMPOOL_DIR) update_opcodes config=minpool_spatz4_fpu

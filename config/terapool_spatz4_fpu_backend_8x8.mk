@@ -54,4 +54,15 @@ noc_router_remapping := 2
 # 4x4-vs-8x8 area comparison is measuring the counters as well as the mesh.
 group_mshr_enable_stats := 0
 
+# ---------------------------------------------------------------------------------------------
+# TAPE-OUT PIN. The base config flipped group_mshr_cfg_runtime to 1 on 2026-08-20 so that the
+# per-shape MSHR tuning written by mshr_cfg_apply_group() actually takes effect in simulation.
+# The backend must NOT inherit that: at CfgRuntime=1 mempool_group_mshr_cfg stops const-folding
+# and becomes real CSR flops per group, which is area this design does not need to tape out.
+# At 0 "every field const-folds to its default and the whole file disappears" (the module's own
+# note), leaving the build bit-identical to the pre-CSR design -- verified as gate V1 in
+# docs/mshr_runtime_csr_verification.md (34,596 == 34,596).
+# Keep this pin whenever the base default is 1.
+group_mshr_cfg_runtime := 0
+
 include $(MEMPOOL_DIR)/config/terapool_spatz4_fpu_8x8.mk

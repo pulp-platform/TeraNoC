@@ -213,6 +213,39 @@ def derive(M, N, P, *, num_groups=16, num_cores=256, kernel_size=8,
                    f"(clog2(MaxBurstWords)+burst_bits-1); needs P/split_p_count >= "
                    f"{2**(lo+1)} words")
 
+    # ---- EFFECTIVE knobs: what the hardware will actually run -------------------
+    # Emitting only the requested value is how 15 of 23 fp16 sweep arms came to be
+    # LABELLED with a tuning they never ran. With MshrCfgRuntime=1 an out-of-range CSR
+    # write is REFUSED (mempool_group_mshr_cfg.sv:110 clamps bank_shift to
+    # [BankShiftMin=5, BankShiftMax=10]) and the RESET value stays in force -- silently.
+    # So always report what the hardware will accept alongside what we asked for.
+    #
+    # NOTE the two limits are not the same rule. The CSR guard is a fixed [5,10] window;
+    # the real RTL constraint is shift_burst >= clog2(MaxBurstWords) + burst_bits, which
+    # is 5 only at burst_bits=1. At burst_bits=2 (LMUL=4) the true floor is 6 while the
+    # CSR guard still accepts 5 -- i.e. the guard is WEAKER than the rule it protects, and
+    # a burst_bits>=2 kernel can have an illegal shift accepted at runtime. Clamp to the
+    # stricter of the two here so this script never proposes such a value.
+    CSR_SHIFT_MIN, CSR_SHIFT_MAX = 5, 10
+    burst_floor = max(CSR_SHIFT_MIN, lo + 1)
+
+    def _eff(v, floor):
+        return min(CSR_SHIFT_MAX, max(floor, v))
+
+    eff = dict(knobs)
+    eff["group_mshr_bank_shift_single"] = _eff(knobs["group_mshr_bank_shift_single"],
+                                               CSR_SHIFT_MIN)
+    eff["group_mshr_bank_shift_burst"] = _eff(knobs["group_mshr_bank_shift_burst"],
+                                              burst_floor)
+    refused = sorted(k for k in ("group_mshr_bank_shift_single",
+                                 "group_mshr_bank_shift_burst") if eff[k] != knobs[k])
+    info.update(effective=eff, refused=refused, burst_shift_floor=burst_floor,
+                csr_shift_min=CSR_SHIFT_MIN, csr_shift_max=CSR_SHIFT_MAX)
+    if refused:
+        info["refused_note"] = (
+            "hardware will REFUSE these writes and keep the reset value; the run measures "
+            + ", ".join(f"{k.split('bank_')[-1]}={eff[k]} (asked {knobs[k]})" for k in refused))
+
     # ---- L1 capacity ----------------------------------------------------------
     if l1_bytes is None:
         # Word stride = 4 B * banks_per_tile * tiles_per_group * num_groups. The
@@ -252,6 +285,12 @@ def main():
                     help="matrix element size: 4 = fp32 (default), 2 = fp16. "
                          "Both bank shifts are WORD-address fields, so fp16 lowers "
                          "each by one; L1 capacity halves too.")
+    ap.add_argument("--effective", action="store_true",
+                    help="emit the knob set the HARDWARE will accept (bank_shift clamped to "
+                         "[5,10] and to the burst-align floor) instead of the ideal one, and "
+                         "downgrade an illegal shift from an error to a stderr CLAMPED note. "
+                         "Use when deliberately running a shape whose ideal shift is out of "
+                         "range, so the recorded config matches what actually ran.")
     args = ap.parse_args()
 
     if args.json:
@@ -269,12 +308,16 @@ def main():
                               elem_bytes=args.elem_bytes)
 
     if args.make:
-        if err:
+        if err and not args.effective:
             print("ILLEGAL_SHAPE=1", file=sys.stderr)
             for e in err:
                 print(f"  ERROR: {e}", file=sys.stderr)
             return 1
-        print(" ".join(f"{k}={v}" for k, v in knobs.items()))
+        emit = info["effective"] if args.effective else knobs
+        if args.effective and info.get("refused"):
+            # to stderr so it cannot contaminate the make-splice on stdout
+            print(f"  CLAMPED: {info['refused_note']}", file=sys.stderr)
+        print(" ".join(f"{k}={v}" for k, v in emit.items()))
         return 0
 
     print(f"GEMM {M}x{N}x{P}  ({args.num_cores} cores, {args.num_groups} groups, "
@@ -287,7 +330,13 @@ def main():
         print(f"  WARNING: {info['warn']}")
     print()
     for k, v in knobs.items():
-        print(f"  {k:<32} = {v}")
+        ev = info["effective"][k]
+        mark = f"   <-- HW REFUSES; runs {ev}" if ev != v else ""
+        print(f"  {k:<32} = {v}{mark}")
+    if info.get("refused"):
+        print(f"\n  EFFECTIVE (what the hardware runs): {info['refused_note']}")
+        print(f"  burst shift floor = {info['burst_shift_floor']} "
+              f"(max of CSR min {info['csr_shift_min']} and clog2(MaxBurstWords)+burst_bits)")
     if knobs["group_mshr_merge_reqs"] != 4:
         merge = knobs["group_mshr_merge_reqs"]
         # Name the matrix that actually drives the pool size. The degrees INVERT

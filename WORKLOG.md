@@ -10211,3 +10211,286 @@ the page with the measured numbers cited so it can be re-checked.
 (capital E) but the UART marker is lowercase `The execution took N cycles.`, so it counted zero
 completions and reported a **normal completion as a death**. v2 checks the vanished arm's own
 transcript instead of a global count. Replaced by new filename, never edited in place.
+
+---
+
+## 2026-08-20 — fp16 sweep findings, config defaults, and the RESP-HOLD root cause
+
+**fp16 vs fp32 — the efficiency drop is overhead share, not an fp16 penalty.** On the 6 shapes with
+both, fp16 is faster on every one (1.29x-1.99x, mean 1.51x) while `eff` falls, because `ideal`
+halves (peak 2048 vs 1024 MAC/cyc) and the ~2,000-3,000 cycle fixed cost does not. Measured
+overhead is the SAME in both precisions (fp32 mean 3,238 cyc, fp16 3,002), so fp16 adds none.
+`512x32x512` is the proof case: **50.3% vs fp32's 50.4%, at 1.99x** — parity once the run is long
+enough. fp16 eff tracks RUN LENGTH: 33.6% at 3,049 cyc rising to 56.2% at 14,571.
+
+**RETRACTED: the "refused bank_shift causes the drop" hypothesis.** It looked strong (+22.1 pp vs
++5.7 pp) but was CONFOUNDED: I compared the *drop* (fp32 - fp16), and the refused shapes are the
+ones with high fp32 baselines, so a shape starting at 81.8% has room to fall that one starting at
+50.4% does not. Comparing fp16 eff *itself*, refused and accepted arms interleave throughout and
+the gap is carried almost entirely by the shortest run. **Lesson: test the metric you care about
+(fp16 eff), not a difference that inherits the baseline's variance.**
+
+**RETRACTED: "the MSHR is not the cause" for 512x64x256.** I screened on event COUNT (17 timeouts
+sweep-wide) and called it too rare to matter, without ever multiplying by COST PER EVENT. Nine
+timeouts x ~1,950 cyc = 13,635 cyc = the entire overrun (21,424 vs peers' ~7,900; remove them and
+it lands at 7,789 = 52.6%, exactly the peer range). **A rate test is the wrong test for a metric
+whose events cost ~2,000 cycles each.**
+
+**ROOT CAUSE (verified): RESP_HOLD is the trigger, the timeout is a consequence.**
+| event | cycle | vs divergence |
+|---|---|---|
+| g8 mid-pack, rank 6/16 | <=17,000 | - |
+| first entry enters RESP_HOLD | **17,760** | **precedes by ~150 cyc** |
+| g8 issue collapses | ~17,911 | divergence |
+| first `mshr_timeout` | ~24,000 | **follows by ~6,240 cyc** |
+The timeout is what *ends* each freeze (serve_timeout expiry), which is why the 9 are spaced one
+per re-freeze. g8's entries reach `subs=3/4` x99 but **never 4/4**, `peers=0` in 213/213 samples.
+Only 3 groups ever enter a stuck RESP_HOLD: g3 (8 episodes) and g12 (23) **both recover**; g8 (213)
+never does. That built-in control is why 512x64x256 is the chosen GUI debug target.
+
+**`mshr_timeout` IS THE WRONG HEALTH METRIC — use RH STUCK.** `128x128x512` finished at 130,873 cyc
+against ideal 4,096 = **3.1% eff, 16.5x slower than its peers, with ZERO timeouts** and 1,056 RH
+STUCK episodes across 10 groups (g0 and g15 each held ~126,000 cyc). The timeout only fires when an
+entry is *released* by serve_timeout; an entry that stays held is invisible to it. My clean/dirty
+split (48.7% vs 35.5%) put this arm in the CLEAN bucket and is therefore wrong.
+
+**Config defaults flipped (user request), with two protections:**
+- `spatz_vlsu_burst_ew16 ?= 1` in both `terapool_spatz4_fpu.mk` and `_8x8.mk` (at 0 an fp16 vector
+  load never reaches the MSHR burst class, so the measurement is not comparable with fp32).
+- `group_mshr_cfg_runtime ?= 1` in the base, **and added to `_8x8.mk` which does NOT include the
+  base** — it was emitting no define at all, so the RTL fell back to 0 and silently discarded every
+  CSR write `mshr_cfg_apply_group()` made.
+- **Backend flavours pinned `:= 0`**: at CfgRuntime=1 the config module stops const-folding and
+  becomes real CSR flops per group. Neither backend flavour set the knob, so both would have
+  inherited the flip and taped out area they do not need.
+- **The old comment's stated reason was unfounded.** It claimed "an unexplained 3-12x slowdown on
+  512x256x512 and 128x128x512 (docs/mshr_runtime_csr_verification.md)"; that doc's V1 is
+  bit-identical (34,596 == 34,596) and V3 reports MSHR work counters BYTE-IDENTICAL at +265 cyc
+  (+0.77%). The only ~12x in the repo is the desync trap in `gemm_results_vs_nofeature.txt`, a
+  different mechanism. The backend-area risk it also named IS real and is now handled by the pin.
+  NOTE those two shapes are exactly the ones failing in this sweep, so the author saw something
+  real; the sweep has no cfg_runtime=0 control arm, so the CSR path is neither ruled in nor out.
+
+**RTL: bank-shift guard tightened** (`mempool_group_mshr_cfg.sv`). The static `[5,10]` window is not
+the real rule -- `mempool_group_mshr.sv:525` requires `bank_shift_burst >= BurstAlignBits +
+bank_burst_bits`, which equals 5 only at `bank_burst_bits<=1`. At LMUL=4 the true floor is 6 and the
+old guard would accept 5, overlapping the intra-load burst bits and halving usable banks with no
+error anywhere (the elaboration `$error` sees only reset values). Checked at ENABLE, not per write,
+because software sets BANK_SHIFT_BURST *before* BANK_BURST_BITS so a per-write test reads a stale
+value. An illegal pair now refuses to arm, routing into the TB's existing loud
+`[MSHRCFG WARN] ... MSHR DISABLED ... NOT comparable` banner.
+Verification status: the cfg module compiles clean (Errors: 0, Warnings: 0); `mempool_group.sv`
+could NOT be compiled standalone (needs macros the real build supplies from earlier files in one
+ordered vlog) -- that 4-line parameter pass-through awaits the next real build.
+
+**`gemm_autotune.py`: emits an EFFECTIVE knob set** alongside the ideal one (`--effective`), clamped
+to the stricter of the CSR window and the burst-align floor, so it can never propose a value the
+hardware refuses. **No reruns were needed**: for all 23 shapes the effective set equals what the
+arms actually ran, because every sweep shape has `burst_bits<=1` where the floor is exactly 5.
+My first check of that was VACUOUS (`--make` emits nothing for illegal shapes, so it compared a
+value against itself); redone against the real requested values.
+
+**Software: all three GEMM dimensions now printed** — `(%dx%dx%d)` with M, N and P across 38 apps
+(fp32, fp16, all 23 `sp-fp16-*`, the 4 `sp-fmatmul-rm-*` anchors). One multi-line variant in
+`sp-fmatmul-opt-burst-spread` was missed by the first pass and caught by re-grepping.
+
+**Tooling traps hit today (all mine):**
+- **`pgrep -x` takes ONE pattern.** `pgrep -x vsimk vsim` returns 0 while `pgrep -x vsimk` returns
+  20 — my GUI monitor would have reported the user's live run as dead the moment elaboration ended.
+  I have a note on this exact trap from a prior session and walked into it anyway. Match on `comm`
+  over `/proc` instead.
+- **`grep -c` counts LINES, not occurrences** — on single-line generated HTML it reported 1 where
+  the truth was 23.
+- **`re.findall(r'<th')` also matches `<thead>`** — invented a column mismatch that did not exist.
+- **The QuestaSim `# ` prefix** defeated an anchored `^\[RH STUCK\]` and reported 0 episodes for
+  every arm.
+
+---
+
+## 2026-08-20 — A/B 2x2: the four MSHR reset defines are INERT (hypothesis refuted)
+
+**Question.** A GUI run of 512x64x256 finished at 8,157 cyc / 50.2% while the batch arm of the same
+shape collapsed to 21,424 cyc / 19.1%. The only difference I could find across 101 RTL defines was
+four MSHR RESET values (`bank_shift_single/burst` 5/5 vs 9/7, `hold_subs_single/burst` 8/2 vs 4/4).
+I claimed these "must matter", contradicting my own earlier analysis that they are dead.
+
+**Result: they do not matter. All four are inert.** Four batch arms, same ELF, same mode, only the
+defines varied:
+
+| arm | bank_shift | hold_subs | UART cyc | bench cyc | busy lane-cyc |
+|---|---|---|---|---|---|
+| A | 5/5 | 8/2 | 21,792 | 21,424 | 4,450,560 |
+| C | 9/7 | 8/2 | 21,792 | 21,424 | 4,450,560 |
+| D | 5/5 | 4/4 | 21,792 | 21,424 | 4,450,560 |
+| B | 9/7 | 4/4 | 21,792 | 21,424 | 4,450,560 |
+
+Identical on every measured quantity, including RH=244 on all four. **My ORIGINAL analysis was
+right**: the MSHR resets `enable=0` (`mempool_group_mshr_cfg.sv:170`, "DEFAULT BYPASSED: init and
+warm-up never allocate"), so it never allocates before `mshr_cfg_apply_group()`, `mshr_busy` is
+therefore low, every CSR write is accepted, and no reset value survives. I abandoned a correct
+analysis because a single confounded observation seemed to contradict it.
+
+**LESSON.** The observation that "only these 4 defines differ" was TRUE but not SUFFICIENT: I diffed
+the defines and concluded the cause must be among them, without enumerating what else differed. Two
+variables were never in the diff because they are not defines at all -- the PRELOADED ELF and
+GUI-vs-batch simulation mode. A complete diff of one dimension is not a complete diff.
+
+**Still open**, arm E running: GUI's ELF in batch mode with GUI defines. ~8,000 cyc => the ELF is
+responsible (4-byte relocations through the runtime library; kernels byte-identical at identical
+addresses). 21,792 => simulation MODE changes results, which would be serious: `-voptargs=+acc`
+should change visibility, not behaviour, and it would invalidate comparing any GUI debug run against
+batch numbers.
+
+**RESOLVED — it is the ELF, and the perturbation has NO architectural content.** Arm E (the GUI's
+ELF, batch mode, GUI defines) ran 7,787 bench cyc / 52.6% / RH=29 against arm B's 21,424 / 19.1% /
+RH=244. B and E differ ONLY in the preloaded binary. E vs the GUI run differ only in simulation
+mode and agree to 5%, so `+acc` is NOT the cause and GUI debug runs stay comparable to batch.
+
+The two ELFs have: matmul kernels BYTE-IDENTICAL at identical addresses (matmul_8xVL 0x80000188 ..
+main 0x80000e60), matrices at identical L1 addresses (a 0x20000, b 0x30000, c 0x38000), identical
+compiled-in MSHR_CFG_* constants. Every difference is a 4-byte relocation through the runtime
+library, caused by one printf format string growing from "(%dx%d)" to "(%dx%dx%d)".
+
+**A format string selects between 19% and 53%.** The relocated printf runs BEFORE the timed region
+([UART] "N, P, m_start..." at transcript line 3036, [MSHRCFG] at 4568), so the two runs enter the
+kernel with different I-cache / group RO-cache state and nothing else different.
+
+ESTABLISHED: the ELF is the cause; the four defines are inert; simulation mode is not it.
+INFERRED, NOT VERIFIED: that the mechanism is pre-benchmark cache state.
+
+**LESSON, second half.** I dismissed the ELF hypothesis because the kernel was byte-identical at the
+same address. That was insufficient: IDENTICAL CODE CAN ENTER FROM A DIFFERENT MACHINE STATE. A
+binary diff answers "does the executed code differ", not "does the run start from the same place".
+
+Caveat against over-reading it as alignment luck: 9 of 18 completed fp16 arms are below 30% and
+every large shape is among them, which is too systematic for a pure knife-edge. fp32 for contrast:
+0 of 13 completed arms collapsed, 3 of 23 show any RESP-HOLD (8-23 episodes, one group).
+
+**BIMODALITY RULED OUT for 512x64x256 — each ELF is deterministic.** The v2 sweep arm reproduced
+arm E exactly. Independent measurements:
+
+    v1 ELF (2-dim printf): 21,424 cyc x4  (run_512x64x256, run_ab_C, run_ab_D, run_ab_B)
+    v2 ELF (3-dim printf):  7,787 cyc x2  (run_ab_E, run2_512x64x256)
+
+Four runs of one binary and two of the other, no variance within either. So this shape is NOT
+bimodal on identical config -- the 2.75x gap is caused by the binary, and the concern that the
+MSHR desync trap makes large shapes bimodal (152,639 vs >291,000 on 512x512x512) does not apply
+here. The layout effect is real and repeatable.
+
+Layout deltas on shapes that were HEALTHY in v1: +8.5%, +1.0%, -3.2% -- scatter both directions,
+no systematic penalty. So the effect is single-digit percent on stable shapes and 2.75x on this
+one, consistent with the shape sitting near a collapse boundary where a small timing perturbation
+decides the basin rather than shifting the result. 11 of 12 v1-collapsed shapes still pending.
+
+---
+
+## 2026-08-20 — EW16=0 control: the burst path is NOT the trigger (negative), + a blind timeout counter
+
+**Control.** 512x64x256, same ELF, same MSHR knobs, same batch mode, only `spatz_vlsu_burst_ew16`:
+
+    EW16=1:   21,424 bench cyc   eff 19.1%   RH=   244 across  3 groups   mshr_timeout=9
+    EW16=0:  113,622 bench cyc   eff  3.6%   RH=27,505 across 16 groups   mshr_timeout=0
+
+**Disabling the e16 burst path is 5.3x WORSE and produces 113x more RESP-HOLD.** The GVSOC model
+measured the opposite sign (enabling bursts cost them 5.9x), so the two are different defects that
+share a magnitude, not one phenomenon. The burst path is load-bearing for fp16 here.
+
+**Causes ruled out today, each by measurement:** the four MSHR reset defines (2x2, inert, identical
+to the digit); simulation mode (+acc vs batch agree to 5%); the e16 burst path (this control); shape
+bimodality (each ELF deterministic -- 21,424 x4 runs, 7,787 x2). **What does move it is CODE
+LAYOUT, in both directions.**
+
+**BUG FOUND: `mshr_timeout` is structurally blind on our config.** `mempool_group_mshr.sv:2352`
+gates the timeout/subscriber classifier on `hold_window_{single,burst}`:
+
+    (((mshr_d[e].burst_len == 1) ? cfg_hold_window_single : cfg_hold_window_burst) != 0)
+
+but a RESP_HOLD entry arms `hold_cnt` from **`serve_timeout`** (:3502, :4160). We run
+`hold_window_single = 0` (both reset and software-written), and RESP_HOLD is exactly the
+single-word hold state -- so every such entry fails the gate and is NEVER classified. An entry can
+sit 2,032 cycles, expire on serve_timeout, release, and increment nothing. Direct evidence above:
+mshr_timeout=0 alongside 27,505 RESP-HOLD episodes.
+
+This explains the anomaly from earlier today (128x128x512: 16.5x slow, 1,056 RH, ZERO timeouts). I
+diagnosed the symptom and switched the health metric to RH episodes without tracing the cause.
+**Every `mshr_timeout` figure in this campaign is an undercount for single-word entries**, including
+the "0 of 23 fp32 arms" claim. RH episodes are unaffected (`rh_age` counts cycles independently).
+
+**The wave script has the same blind spot.** `scripts/questa/add_group_mshr.tcl:42-45` adds
+`mshr_issue_timeout_dbg` / `_subs_dbg` / their counters -- all derived from that classifier, so all
+flat at zero for RESP_HOLD entries in the GUI. Its own header (:41) states the mechanism it fails to
+show: "released only when hold_cnt reaches serve_timeout". Watch `mshr_q[e].state == RESP_HOLD` with
+`mshr_q[e].hold_cnt` (already added at :63) instead -- noting hold_cnt is in TICKS (1 tick = 16 cyc
+at HoldPrescaleW=4) and steps at a phase set by the entry INDEX (`hold_prescale_q == e[3:0]`), which
+is deliberate anti-bunching.
+
+**Prescaler itself is sound:** all three decrement sites gated on `hold_tick`, counter sized from
+the runtime bound, `hold_ticks()` never rounds non-zero to zero. Its inaccuracy is the acknowledged
+quantisation -- serve_timeout=2047 actually expires at 2,017..2,032 cycles (2047>>4 = 127 ticks x 16
+= 2032, minus up to 15 cycles of index-dependent phase).
+
+---
+
+## 2026-08-20/21 · fp16 collapse ROOT-CAUSED: the MSHR response cache
+
+**Purpose.** fp16 GEMM collapsed to 3–7% of roofline on ~half the sweep shapes while fp32 ran at
+79–96%, and fp16 results swung up to ±64% from an unrelated 4-byte `printf` change. Find the cause.
+
+**Mechanism (user-found on the GUI waveform, confirmed against the RTL).** Two consecutive fp16
+scalar loads address the two halves of ONE 32-bit word. The first cohort of S cores merges into an
+MSHR entry; `served_cnt` reaches `hold_subs_single`; the entry drains to `MSHR_CACHED` and
+**self-invalidates immediately** (`mempool_group_mshr.sv:3376`, `CacheSelfInval`). Part of the
+second cohort (the high halves) hits the line before it dies; the rest arrive after and allocate a
+fresh entry whose subscriber target can no longer be met — its peers were already served. With
+`resp_wait_subs_single=1` delivery is blocked and the entry rides out `serve_timeout` = **2047
+cycles**. Log signature: `[RH STUCK] subs=3/4` (three arrived, exactly one stolen); fp16 shows 251
+episodes on `512x256x128` vs **8** for fp32 on the same shape.
+
+**Implementation.** Plumbed the existing `EnableRespCache` parameter to a `group_mshr_resp_cache`
+knob (it was hardwired `1'b1`), and ran a 23-shape A/B on a define-matched image — the build refuses
+to proceed unless `GROUP_MSHR_RESP_CACHE` is the only differing define.
+
+**Result (16/23 arms).**
+- Every shape with RESP-HOLD episodes gets faster: **−0.4% to −94.9%**. Every shape without is
+  unchanged to within **+1.7%**. No overlap, no counterexample.
+- `[RH STUCK]` goes to **exactly 0 on all 16 arms**, whatever the starting count (up to 6793).
+- `corr(log10(RH+1), knob gain) = −0.82` on same-ELF arms: episode count PREDICTS the cache's cost.
+- Biggest: `512x256x256` 315,159 → 19,545 cyc (**16.1×**, 5.2% → **83.8%**, the campaign's best
+  fp16 efficiency); `128x256x512` **19.7×**; `128x128x512` **17.9×** (same-ELF isolated).
+- **fp16 now beats fp32 on 13/13 paired shapes**, 1.16×–1.94× against a 2× ceiling. It was *slower*
+  on 11/19 with the cache on.
+- Not just collapsed shapes: `512x64x512` at 56.2% (never flagged) gains **19.2%**, `512x128x128`
+  **22.9%**.
+
+**Layout sensitivity was a symptom, not the cause.** The binary layout only shifts the odds of the
+race. `512x128x128` shows it both ways: layout CREATED 63 episodes (+33.7%) on a shape that had
+none, and the knob then removed them (−22.9%). `128x128x512` reproduced to +0.6% across the layout
+change and still gained 17.9× from the knob.
+
+**Status.** Root cause confirmed; `resp_cache=0` is the working fix. 7 arms still running.
+CAVEAT: the four largest gains (`512x256x256`, `128x256x512`, `512x512x128`, `512x128x256`) have no
+same-ELF baseline — their cache-ON arms were terminated mid-sweep — so those deltas are knob+layout
+combined. The five isolated arms span −9.0% to −94.4% and bracket them.
+
+**Also this session.**
+- `group_mshr` cache reuse-target + cache-timeout CSRs (commit `cadd00cd`), both default 0 = legacy,
+  reusing `served_cnt`/`hold_cnt` so no new flops. Idea 2 needs `merge_reqs >= 2*hold_subs_single`,
+  so it is unavailable on the four `subs_s=16` shapes at `merge_reqs=16` — including the two worst
+  collapses, where `resp_cache=0` already gives 17.9×/19.7×.
+- Per-shape config ELIMINATED: the MSHR tuning is now derived at COMPILE TIME from `GEMM_M/N/P`
+  emitted by `gen_data.py` into `data_gemm.h` (`software/runtime/mshr_cfg.h`, enum → constants).
+  Validated 56/56 against `scripts/gemm_autotune.py` and 28/28 against the per-shape `.mk` files
+  (incl. their `hold_window_*` overrides). Deleted 28 `.mk`, 24 `floo_noc*.yml`, 51 generated app
+  dirs; **one source per precision** remains. Window MAGNITUDES stay macro-fed — the two classes
+  take opposite values (single 0, burst 2047), so deriving them from the CSR width reproduced 1/28.
+- Housekeeping: 51 dead build/run dirs + 90 ELFs removed, 631 GB → 2.3 TB free.
+
+**Measurement traps hit and fixed.**
+- `mshr_timeout` is the WRONG metric for this pathology: it is REQUEST-side
+  (`mshr_issue_timeout_cnt_dbg`) and gated on `hold_window != 0`, and `hold_window_single = 0`, so
+  every scalar entry is excluded by construction. The response-side `serve_timeout` expiry is
+  counted NOWHERE in the RTL. `[RH STUCK]` is the only instrument that sees it — and it is
+  threshold-based (>=1000 cyc, one-shot), so it counts "how many entries stalled badly", not time lost.
+- A v1 baseline conflates the knob with the ELF: on `256x32x256` the v1 delta reads +8.5% while the
+  same-ELF delta is **exactly 0.0%**; on `512x32x512` the two disagree in SIGN (+4.7% vs −9.0%).
+  Always isolate against the same binary.

@@ -158,7 +158,16 @@ def emit_GEMM_layer(name="gemm", **kwargs):
     layer_str += f'\t.ALPHA = {kwargs["alpha"]},\n'
     layer_str += f'\t.dtype = FP{kwargs["prec"]},\n'
     layer_str += f'\t.expand = {kwargs["expand"]}\n'
-    layer_str += "};\n\n\n"
+    layer_str += "};\n\n"
+    # Compile-time shape, so the MSHR tuning can be CONSTANT-FOLDED from M/N/P instead of
+    # arriving through a per-shape config/*.mk. The struct above is a const object, not an
+    # integer constant expression, so it cannot appear in a static initialiser -- these can.
+    # GEMM_ELEM_BYTES is the MEMORY element size (fp16 -> 2); both MSHR bank shifts depend
+    # on it, because N and P count elements while the hash selects word-address bits.
+    layer_str += f"#define GEMM_M {m}\n"
+    layer_str += f"#define GEMM_N {n}\n"
+    layer_str += f"#define GEMM_P {p}\n"
+    layer_str += f'#define GEMM_ELEM_BYTES {max(1, int(kwargs["prec"]) // 8)}\n\n\n'
 
     ctypes = {"64": "double", "32": "float", "16": "__fp16", "8": "char"}
 

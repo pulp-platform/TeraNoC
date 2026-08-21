@@ -435,21 +435,11 @@ int main() {
   // one designated writer each, in parallel; the barrier makes the configuration visible to every
   // core before the first timed access.
   {
-    static const mshr_cfg_t mshr_cfg = {
-        .hold_subs_single   = MSHR_CFG_HOLD_SUBS_SINGLE,
-        .hold_subs_burst    = MSHR_CFG_HOLD_SUBS_BURST,
-        .hold_window_single = MSHR_CFG_HOLD_WINDOW_SINGLE,
-        .hold_window_burst  = MSHR_CFG_HOLD_WINDOW_BURST,
-        .serve_timeout      = MSHR_CFG_SERVE_TIMEOUT,
-        .bank_shift_single  = MSHR_CFG_BANK_SHIFT_SINGLE,
-        .bank_shift_burst   = MSHR_CFG_BANK_SHIFT_BURST,
-        .bank_burst_bits    = MSHR_CFG_BANK_BURST_BITS,
-        // fp32 has one load per 32-bit word, so there is no half-word second cohort to
-        // catch: idea 2 is deliberately left OFF here. 0 = legacy self-invalidate at
-        // hold_subs_*, bit-identical to before these CSRs existed.
-        .cache_reuse_target = 0,
-        .cache_timeout      = 0,
-    };
+    // Shape-derived at COMPILE TIME from GEMM_M/N/P (data_gemm.h): one source per
+    // precision, no per-shape config/*.mk and no runtime division. The timeout and
+    // cache knobs stay macro-fed; MSHR_CFG_DERIVED_INIT gates the cache fields on
+    // GEMM_ELEM_BYTES so fp32 keeps the legacy path automatically.
+    static const mshr_cfg_t mshr_cfg = MSHR_CFG_DERIVED_INIT;
     uint32_t mshr_st = 0;
     if (mshr_cfg_is_group_writer()) mshr_st = mshr_cfg_apply_group(&mshr_cfg);
     mempool_barrier(num_cores);
