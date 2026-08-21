@@ -3304,6 +3304,18 @@ module mempool_group_mshr
                           req_in[tile_i][port_i].wdata.data[b*8 +: 8];
                     end
                   end
+                  // CLOCK-GATE ENABLE for the byte-merge above -- REQUIRED, not an optimisation.
+                  // mshr_rb_en = mshr_wr_all | mshr_rb_we, and this path raised NEITHER, so the
+                  // `FFL holding resp_buf stayed gated while its D input changed. FFL models the
+                  // enable in simulation too, so the merged store bytes were dropped in SIM as
+                  // well as in synthesis: the CACHED line kept stale data and a later cache hit
+                  // on it returned that stale word. Caught by mshr_gate_rb_no_lost_write (:2247),
+                  // which fired as "clock gate dropped a resp_buf write: entry=8 slot=0".
+                  // resp_buf_cnt below needs no equivalent: mshr_ctl_en is (q_valid | d_valid),
+                  // already high for a live entry.
+                  if (|req_in[tile_i][port_i].be) begin
+                    mshr_rb_we[cache_hit_e][mshr_d[cache_hit_e].resp_buf_rd_ptr] = 1'b1;
+                  end
                   if (mshr_d[cache_hit_e].resp_buf_cnt == '0) begin
                     mshr_d[cache_hit_e].resp_buf_cnt = RespBufCountW'(1);
                   end
