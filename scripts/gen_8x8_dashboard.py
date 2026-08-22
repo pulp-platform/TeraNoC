@@ -39,15 +39,26 @@ def states():
                 try: last = json.loads(ln)
                 except Exception: pass
             if last:
-                # a later batch supersedes an earlier verdict for the same arm -- decided by the
-                # record's ts, NOT by batch-name order (campaign prefixes make name order != time
-                # order, which left resubmitted arms showing their old `failed`)
+                # Rank by what the arm IS, not by which record is newest. An arm can have several
+                # copies (resubmit, heal, a duplicate that was killed); killing a duplicate writes
+                # a NEWER cancelled record than the surviving copy's `running`, so latest-ts
+                # reported healthy arms as failed. Same rule as campaign_status.py.
+                st = last.get("state") or "?"
+                rank = {"running": 3, "done": 4, "succeeded": 4, "completed": 4,
+                        "submitted": 2, "dispatched": 2, "pending": 2, "queued": 2}.get(st, 1)
+                ts = last.get("ts") or 0
                 prev = ts_seen.get(arm)
-                if prev is None or (last.get("ts") or 0) >= prev:
-                    ts_seen[arm] = last.get("ts") or 0
-                    out[arm] = (last.get("state"), last.get("node", "-"))
+                if prev is None or rank > prev[0] or (rank == prev[0] and ts >= prev[1]):
+                    ts_seen[arm] = (rank, ts)
+                    out[arm] = (st, last.get("node", "-"))
         for jid, arm in ids.items():
-            if arm.startswith(("fp16_", "fp32_")) and jid not in seen and arm not in out:
+            # no jsonl = never started = QUEUED. Rank 2, so a freshly requeued job beats the
+            # cancelled copy it replaced instead of inheriting its verdict.
+            if not arm.startswith(("fp16_", "fp32_")) or jid in seen:
+                continue
+            prev = ts_seen.get(arm)
+            if prev is None or 2 > prev[0]:
+                ts_seen[arm] = (2, 0)
                 out[arm] = ("queued", "-")
     return out
 
@@ -128,6 +139,15 @@ box-shadow:var(--shadow);display:flex;flex-direction:column;gap:6px}
 .empty{color:var(--dim);font:400 13px/1.6 "IBM Plex Sans",sans-serif;
 border:1px dashed var(--line);border-radius:4px;padding:18px;text-align:center}
 code{font-family:"IBM Plex Mono",monospace}
+td.dim,tr.unpaired td{color:var(--dim)}
+.dot{color:var(--bad);font-size:9px;vertical-align:super;margin-left:3px}
+td.ratio{font-weight:600;color:var(--acc)}
+td.zero{color:var(--line)}
+td.hot{font-weight:600;color:var(--bad)}
+th.grp{text-align:center;color:var(--ink);font-size:12px;letter-spacing:.14em;padding-bottom:2px}
+.pairs th.gs,.pairs td.gs{border-left:1px solid var(--line);padding-left:12px}
+.pairs th,.pairs td{padding-right:14px}
+table tr:first-child th{border-bottom:none}
 """
 
 def main():
@@ -256,19 +276,60 @@ def main():
               '~12 cyc/s (Questa), the first completions are hours out.<br>'
               'This table fills automatically as transcripts are delivered.</div>']
     else:
-        h += ['<div class="tw"><table><tr><th>shape</th><th>prec</th><th>A-share</th>'
-              '<th>cycles</th><th>FPU util</th><th>RH</th><th>mshr&nbsp;timeout</th>'
-              '<th>bankfull</th><th>spotcheck</th></tr>']
+        # One row per SHAPE, fp16 and fp32 side by side: the pair is the comparison that
+        # matters, and a row-per-arm table buries it (the two halves of a pair can be dozens of
+        # rows apart once sorted by cycles). Shapes that exist in only one precision still appear,
+        # dimmed, so nothing is hidden by the pairing.
+        by = {}
         for r in res:
-            bad = "ok(" not in r[8] and "n/a(" not in r[8]
-            h += ['<tr><td><code>' + esc(r[0]) + '</code></td><td>' + esc(r[1]) +
-                  '</td><td class="num">' + esc(r[2]) + '</td><td class="num">' +
-                  "{:,}".format(int(r[3])) + '</td><td class="num"><b>' + esc(r[4]) +
-                  '%</b></td><td class="num">' + esc(r[5]) +
-                  '</td><td class="num">' + esc(r[6]) + '</td><td class="num">' + esc(r[7]) +
-                  '</td><td>' + ('<span class="pill bad">' + esc(r[8]) + '</span>'
-                                 if bad else esc(r[8])) + '</td></tr>']
-        h += ['</table></div>']
+            by.setdefault(r[0], {})[r[1]] = r
+        def cyc(d, pr):
+            return int(d[pr][3]) if pr in d else None
+        # paired shapes first (that is the point of the table), each group by fp16 cycles
+        order = sorted(by, key=lambda sh: (len(by[sh]) < 2,
+                                           cyc(by[sh], "fp16") or cyc(by[sh], "fp32") or 0))
+        h += ['<div class="tw"><table class="pairs"><tr><th></th><th></th>'
+              '<th colspan="5" class="grp">fp16</th>'
+              '<th colspan="5" class="grp">fp32</th><th></th></tr>'
+              '<tr><th>shape</th><th>A&#8209;share</th>'
+              '<th class="gs">cycles</th><th>util</th><th>RH</th><th>timeout</th><th>bypass</th>'
+              '<th class="gs">cycles</th><th>util</th><th>RH</th><th>timeout</th><th>bypass</th>'
+              '<th class="gs">fp32/fp16</th></tr>']
+        for sh in order:
+            d = by[sh]
+            paired = len(d) == 2
+            ash = (d.get("fp16") or d.get("fp32"))[2]
+            def cell(pr):
+                if pr not in d:
+                    return '<td class="num dim gs">&mdash;</td>' + '<td class="num dim">&mdash;</td>' * 4
+                r = d[pr]
+                # a FATAL arm still has a valid cycle count -- mark it, do not hide it
+                mark = ('<span class="dot" title="killed by $fatal after the benchmark">&#9679;</span>'
+                        if "FATAL" in r[8] else "")
+                # RH / timeout / bypass are 0 on almost every arm, so a column of bold zeros hides
+                # the few that are not. Dim the zeros; make the exceptions the thing that reads.
+                def z(v):
+                    return ('<td class="num zero">0</td>' if v.strip() in ("0", "")
+                            else '<td class="num hot">' + esc(v) + '</td>')
+                return ('<td class="num gs">' + "{:,}".format(int(r[3])) + mark +
+                        '</td><td class="num">' + esc(r[4]) + '%</td>' +
+                        z(r[5]) + z(r[6]) + z(r[7]))
+            if paired:
+                a, b = int(d["fp16"][3]), int(d["fp32"][3])
+                ratio = ('<td class="num ratio gs">%.2f&times;</td>' % (b / float(a))) if a else '<td class="gs"></td>'
+            else:
+                ratio = '<td class="num dim gs">&mdash;</td>'
+            h += ['<tr' + ('' if paired else ' class="unpaired"') + '><td><code>' + esc(sh) +
+                  '</code></td><td class="num">' + esc(ash) + '</td>' +
+                  cell("fp16") + cell("fp32") + ratio + '</tr>']
+        h += ['</table></div>',
+              '<p class="sub" style="margin-top:10px"><span class="dot">&#9679;</span> killed by '
+              '<code>$fatal</code> at <code>mempool_group_mshr.sv:2258</code> after the benchmark '
+              '&mdash; the cycle count and utilisation are valid, the spotcheck is not. '
+              '<b>fp32/fp16</b> is how many times longer fp32 takes on the same shape; dimmed '
+              'rows have completed in only one precision so far. <b>RH</b>, <b>timeout</b> and '
+              '<b>bypass</b> are zero on almost every arm, so zeros are greyed and any non-zero '
+              'is red &mdash; those are the arms where the MSHR was under pressure.</p>']
     h += ['</section>']
 
     h += ['<section><h2>Measured, not estimated</h2><div class="tw"><table>'
