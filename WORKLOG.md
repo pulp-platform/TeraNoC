@@ -10699,3 +10699,152 @@ exactly, the CSR write is proven to be the only variable and the image differenc
 A-share when `split_m=1`, and nothing measures it. If the true degree is 4 or 8 then the target
 is being doubled on top of a wrong number and the real fix is to lower `subs_s`. The
 `subs_s ∈ {4,8,16}` sweep needs no rebuild and would separate the two.
+
+---
+
+## 2026-08-22 00:10 — packed-A: hoist the 8 `lw` off their `fmv.h.x` (MLP 1 → 8)
+
+**Purpose.** The `pa_*` GUI runs showed cores parked at the `fmv.h.x` PCs
+(`matmul_8xVL`, ~0x8000058c-0x800005ec), and the working hypothesis was that `fmv.h.x`
+forces Spatz to drain its outstanding memory transactions. **It does not.** Per-hart trace
+attribution on a straggler (`run_pa_m_on` hart 0xac): at every `fmv.h.x` PC
+`stall_acc == 0` and `stall_raw == 100%`. `stall_raw` is the *integer* scoreboard waiting on
+the `lw` that feeds the move — `fmv.h.x` is only the first consumer, so the load latency is
+booked against its PC. Where Spatz really is the limiter the stall lands on `vfmacc.vf` as
+`stall_acc` (32% on a healthy core — the compute-bound signature).
+
+**What the cores are actually waiting for.** Load-to-use latency is bimodal: ~25 cyc when the
+MSHR entry finds merge partners, **~2046 cyc when it does not**. 2047 is
+`group_mshr_serve_timeout` (`config/terapool_spatz4_fpu.mk:495`), response-side and
+SINGLE-only (`software/runtime/mshr_cfg.h:35`). Measured: straggler harts 0xac/0xad (g10) and
+0xec/0xed/0xee (g14) had EVERY load at 2043-2048 while 250 of 256 cores sat in
+`mempool_barrier`; `pa_fx_on` = 366,054 cyc / RH=4012 against `pa_off` 91,859 / `pa_on` 82,859.
+Self-reinforcing: a core that waits out the timeout drifts further from its cohort and finds
+even fewer partners next time.
+
+**Implementation** (`sp-fmatmul.c`, branch `worktree-fp16-packed-a`). All three packed-A sites
+(pre-load, peeled second half, steady second half) reordered to **8 `lw` → 8 `vfmacc.vf` →
+8 `fmv.h.x`**, so the loads issue back-to-back and overlap instead of serializing. Safe by
+construction: each `w` is dead on entry to the odd block (its high half was consumed by the
+previous half-iteration), and no `fmv.h.x` can float back up onto its load because each
+redefines the `t` that the `vfmacc` above it still reads. New `PA_LW()` macro makes the load
+`asm volatile` — without that the layout is at the scheduler's discretion, which is exactly how
+`pa_m_on` ended up with distance 1.
+
+**Result** (`llvm-objdump`, true `lw`→`fmv.h.x` chains, n=24 in every binary):
+
+| binary | min | median | max |
+|---|---|---|---|
+| `pa_m_on.elf` (shipped, diagnosed) | 1 | 2 | 8 |
+| `pa_base_on.elf` (matched baseline, same defines) | 4 | 8 | 8 |
+| `pa_hoist_on.elf` (this change) | **8** | **18** | **23** |
+
+The two `pa_*_on.elf` differ **only** in this reorder — same source otherwise, same define set
+(`EXTRA_DEFINES="-DGROUP_BARRIER=1"`, config `terapool_spatz4_fpu`), rebuild verified
+byte-reproducible. Note the current source already scheduled better than the `pa_m_on` binary;
+the `volatile` is what makes the layout no longer variant-dependent.
+
+**Status.** Matched pair dispatched on the badile fleet (`badist`, prefix `pahoist`):
+`base_on` on badile07, `hoist_on` on badile34, image `build_vcs_fix`, results land in
+`hardware/pahoist_<arm>/transcript`. Not committed pending numbers.
+
+**Open.** Distance is the second-order fix; the first-order one is config —
+`hold_subs_single = 1` makes an unmatched single bypass the MSHR instead of waiting out
+`serve_timeout`, which removes the 2047-cycle tail outright rather than hiding it.
+
+---
+
+## 2026-08-22 00:55 — packed-A branch: program bankfull_bp from software; response cache off
+
+**Purpose.** Two gaps found while reviewing the GUI-run command for `pa_hoist_v.elf`.
+
+**1. `group_mshr_bankfull_backpressure=1` on the make line was a coin flip.** With
+`group_mshr_cfg_runtime=1` the CSRs own the config, but the packed-A branch had **no**
+`MSHR_CFG_BANKFULL_BP` hook: `runtime.mk` never emitted it and `mshr_cfg.h` never wrote CSR 11,
+so the field kept its elaboration reset value (`DefBankfullBp`, `mempool_group_mshr_cfg.sv:93`).
+The knob happened to work only because software never overrode it — and would have silently
+stopped working the moment the hook was ported. Ported it properly:
+- `software/runtime/runtime.mk` — emit `-DMSHR_CFG_BANKFULL_BP`
+- `software/runtime/mshr_cfg.h` — `MSHR_CSR_BANKFULL_BP 11`, struct field, the CSR write
+- `sp-fmatmul-opt-burst-merge-fp16/main.c` — populate `.bankfull_backpressure`
+- `config/terapool_spatz4_fpu.mk` (worktree) — `group_mshr_bankfull_backpressure ?= 1`
+
+The main tree already shipped `?= 1` (line 459); the missing half was always the software side.
+
+**2. Response cache — evaluated, kept ON.** `group_mshr_resp_cache ?= 1` on both trees (the knob
+was briefly set to 0 here and reverted the same session; see the decision at the end of this entry).
+The cache exists to serve a SECOND request for a line already fetched, and packed-A deletes the
+case it was built for: the old fp16 kernel fetched one 32-bit word twice (two `flh`) and the
+second round, arriving after the line had self-invalidated, is what split the cohort. Packed-A
+does one `lw` and shifts for the high half. Main tree stays `?= 1` for the fp16 idea-2 kernel and
+its bp variant, which still double-fetch.
+
+**Result.** `hardware/pa_hoist_v_bp.elf` (219,020 B), `-DMSHR_CFG_BANKFULL_BP=1` confirmed in the
+compile line, hoisted schedule intact (true `lw`→`fmv.h.x` chains n=24, min 8 / median 18 / max 23).
+
+**⚠ Two things this does NOT do.**
+- `group_mshr_resp_cache` is an **elaboration parameter** (`EnableRespCache`,
+  `mempool_group_mshr.sv:61`), not a CSR, and **every build dir lives in the main tree**, whose
+  config still says 1. The worktree default documents intent and covers worktree-side builds; a
+  main-tree GUI build needs `group_mshr_resp_cache=0` on the make line.
+- The cache has TWO consumers and packed-A removes only one. (a) the second `flh` of a word —
+  gone. (b) a **late-arriving core in the same group** requesting an A word already fetched — NOT
+  gone: with `CacheSelfInval=1` and `hold_subs_single=4` a CACHED line still serves up to 4 late
+  requesters. Disabling it sends those to a fresh entry that rides `serve_timeout`=2047, which is
+  exactly the straggler pathology measured today (harts 0xac/0xad/0xec/0xed/0xee, every load
+  ~2046 cyc). **A/B it** — same ELF, two images differing only in `group_mshr_resp_cache`.
+
+**Decision (same session): keep the response cache ON for fp16-packed-A.** Consumer (b) above is
+the deciding factor — packed-A removes the double-fetch the cache was built for, but not the
+late-arriving same-group requester, and disabling it would hand exactly those cores the
+2047-cycle `serve_timeout` path. `group_mshr_resp_cache ?= 1` restored in the worktree config,
+with the reasoning recorded there so the next reader does not re-derive it. **No ELF rebuild
+needed** — `EnableRespCache` is an elaboration parameter, so `pa_hoist_v_bp.elf` is unaffected,
+and the GUI make line simply drops `group_mshr_resp_cache=0`.
+
+---
+
+## 2026-08-22 03:05 — terapool_spatz4_fpu_8x8.mk: restore MSHR knob parity with 4x4
+
+**Purpose.** Preparing the 8x8 scale-up sweep (`docs/8x8_sweep_plan.md`) surfaced that the 8x8
+flavour defined only **28** `group_mshr_*` knobs against the 4x4 flavour's **35**. A knob absent
+from the flavour file silently falls back to the RTL `` `ifdef `` default, which is invisible in
+the config -- and **four of the seven missing defaults were the OPPOSITE of the 4x4 value**.
+
+| knob | RTL default | 4x4 | 8x8 before |
+|---|---|---|---|
+| `group_mshr_bankfull_backpressure` | 0 | 1 | **bp OFF** |
+| `group_mshr_bank_publish` | 1'b0 | 1 | **OFF** |
+| `group_mshr_drain_from_q` | 1'b0 | 1 | **OFF** |
+| `group_mshr_spill_req_in` | 1'b1 | 0 | **ON** (deadlock-relevant) |
+| `group_mshr_resp_cache` | 1'b1 | 1 | matched |
+| `group_mshr_cache_reuse_target` | 0 | 0 | matched |
+| `group_mshr_cache_timeout` | 0 | 0 | matched |
+
+The bankfull one is the worst of the four because it fails on **both** sides: the RTL elaborates
+with bypass, and `software/runtime/runtime.mk:154` keys `MSHR_CFG_BANKFULL_BP` off the same make
+variable, so the ELF would have programmed the CSR to 0 as well. An 8x8 run of the "opt2 + bp +
+bit-width fix" design would have measured the design **without bp**, with no error anywhere.
+
+**Implementation.** All seven set explicitly in `config/terapool_spatz4_fpu_8x8.mk`, with the
+parity table reproduced in the file so the next reader sees why they are spelled out rather than
+left to defaults.
+
+**Result.** Both flavours now define **35** knobs: zero absences, zero value mismatches. Verified
+by `make`-resolving the flavour (`bankfull=1 publish=1 drain_q=1 spill_in=0 resp_cache=1 reuse=0
+ctimeout=0`, `cores=1024 groups=64`). Parity check to re-run after any config edit:
+
+```sh
+ex(){ grep -oE "^group_mshr_[a-z_]* +\?=[^#]*" "$1" | sed 's/ *?= */=/;s/ *$//' | sort; }
+diff <(ex config/terapool_spatz4_fpu.mk) <(ex config/terapool_spatz4_fpu_8x8.mk)   # expect empty
+```
+
+**Also.** `group_mshr_merge_reqs` is `?= 4` in BOTH flavours and every sim run overrides it to 16
+on the command line. It must be passed to the **software** build too, not just the RTL build:
+`runtime.mk:157` defaults `MSHR_MERGE_REQS` to 4, which feeds the `cache_reuse_target` clamp at
+`mshr_cfg.h:354` (`RAW > 2*MERGE_REQS -> 0`) and would silently zero the reuse target on any shape
+whose derived value exceeds 8 -- the same failure the bit-width fix removed, by a different route.
+
+**Status.** Config committed to the working tree, not yet exercised: no 8x8 image exists, and two
+other blockers remain (missing `config/floo_noc_terapool_spatz4_fpu_8x8.yml`; `hardware/generated/`
+currently holds a 4x4 mesh). See `docs/8x8_sweep_plan.md` §4b.

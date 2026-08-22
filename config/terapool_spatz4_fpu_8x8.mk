@@ -372,6 +372,35 @@ group_mshr_serve_timeout ?= 2047
 # Adds nothing to the merge/alloc timing path -- it reuses signals already feeding req_hit_way.
 group_mshr_stall_on_resp ?= 1
 
+# ---------------------------------------------------------------------------------------------
+# PARITY WITH terapool_spatz4_fpu.mk (4x4). These seven knobs were ABSENT from this file, so an
+# 8x8 build silently fell back to the RTL `ifdef defaults -- and for FOUR of them the RTL default
+# is the OPPOSITE of what every 4x4 arm ran with. Any 8x8-vs-4x4 comparison made before this was
+# added was comparing five MSHR behaviours at once, not the mesh.
+#
+#   knob                              RTL default   4x4 value   silently wrong at 8x8?
+#   group_mshr_bankfull_backpressure  0             1           YES -- bp OFF, in HW *and* in SW
+#                                                               (runtime.mk:154 keys the CSR write
+#                                                               off this same variable, so the ELF
+#                                                               programmed MSHR_CFG_BANKFULL_BP=0)
+#   group_mshr_bank_publish           1'b0          1           YES -- publish OFF
+#   group_mshr_drain_from_q           1'b0          1           YES -- drain-from-q OFF
+#   group_mshr_spill_req_in           1'b1          0           YES -- spill ON (deadlock-relevant)
+#   group_mshr_resp_cache             1'b1          1           no  (default already matched)
+#   group_mshr_cache_reuse_target     0             0           no  (software sets it per shape)
+#   group_mshr_cache_timeout          0             0           no
+#
+# Set explicitly rather than left to the defaults: a knob whose value comes from an `ifdef fallback
+# is invisible in this file, and that invisibility is exactly what made four of them wrong.
+group_mshr_bankfull_backpressure ?= 1
+group_mshr_bank_publish          ?= 1
+group_mshr_drain_from_q          ?= 1
+group_mshr_spill_req_in          ?= 0
+group_mshr_resp_cache            ?= 1
+group_mshr_cache_reuse_target    ?= 0
+group_mshr_cache_timeout         ?= 0
+# ---------------------------------------------------------------------------------------------
+
 # Group-barrier watchdog, in cycles. 0 = NO watchdog: a barrier waits until every core in its
 # target set arrives -- the intended rendezvous semantics, and what the p-loop barrier
 # (GBAR_PLOOP in kernel/sp-fmatmul.c) needs to actually synchronize. A non-zero W force-releases
