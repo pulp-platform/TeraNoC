@@ -166,8 +166,14 @@ def main():
 
     h += ['<div class="warn"><b>Dispatched speculatively &mdash; the pilot gate was not met.</b>',
           'No arm had completed when these launched. Read every result with these in mind:<ol>',
-          '<li>Correctness is <b>self-reported per arm</b> via the <code>[SPOT]</code> probe '
-          '(one line per group, 64 expected). An arm without a full spotcheck is not a result.</li>',
+          '<li><b>fp32 arms carry no correctness signal at all.</b> All 150 fp16 apps compile the '
+          '<code>[SPOT]</code> probe (one line per group, 64 expected); <b>0 of 122 fp32 apps do</b>, '
+          'and fp32\'s only other check <code>MATMUL_VERIFY</code> is off because it wedges core 0. '
+          'Roughly half this grid is <b>performance data only</b> &mdash; treat an fp32 cycle count '
+          'as provisional unless an fp16 arm of comparable shape spotchecks clean.</li>',
+          '<li>For fp16, an arm without a full 64-group spotcheck is not a result. A run killed by '
+          '<code>$fatal</code> still prints its cycle count, so the number can be real while '
+          'everything after it &mdash; the spotcheck &mdash; is absent.</li>',
           '<li><b>L2 bandwidth per group halves at 8&times;8</b> (64 groups / 32 channels, against '
           '16/16 at 4&times;4), so a cross-mesh loss mixes mesh scaling with that halving.</li>',
           '<li>Record <b>RH per arm</b>: it gates whether backpressure can help a shape at all.</li>',
