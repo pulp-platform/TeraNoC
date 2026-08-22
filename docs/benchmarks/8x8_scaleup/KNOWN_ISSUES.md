@@ -178,3 +178,28 @@ So a long run reconstructs to better than half a point, and a short one only to 
 values are written to `results.tsv` with a leading `~` and rendered in the dashboard in italic with
 a hover note, so a reconstructed number can never be quoted as a measured one. They are also
 excluded from the computed best/worst-util headline for the same reason.
+
+## `packaging failed`: node-local disks fill with output we never collect
+
+badist packages results as the LAST step of a job (`tar | zstd` onto node-local scratch), so a full
+disk discards a simulation that has already run to completion. It was the campaign's largest
+failure mode: 24 of 51 failures, with wall times up to 24,344 s on the lost jobs.
+
+**It is not packaging size.** The collect list is already minimal -- `['transcript',
+'.sim_backend']` -- so the tarball is ~10 MB. The disk pressure is output we generate and never
+collect: each arm leaves `v4m_out/trace_events.csv` at **428 MB** plus 1,024 per-hart
+`trace_*.dasm`/`trace_spatz_insn_*` files in its run dir. Ten arms on a node is ~5 GB of waste, and
+the run dirs are not cleaned when a job ends.
+
+**Do not read it as a big-shape problem.** 18 of the 24 failures were on shapes with a >=2048
+dimension, which is convincing and wrong -- long arms are simply likelier to be resident when a
+node fills. By node, 16 of 24 were larain2 alone (7 TB, 224 KB free).
+
+`scripts/badist/scratch_guard.py` reclaims spent run dirs on nodes we have work on, and rescues
+finished-but-undelivered transcripts off an at-risk disk first. It cannot help when the disk is held
+by other users -- then it names the running arms that will lose their results instead of reporting
+a clean sweep.
+
+**`packaging failed` also masks the real cause.** `fp32_2048x32x512` on badile44 recorded it after
+7,879 s, but its transcript has no `execution took`: the simulation had already died for some other
+reason, and packaging merely failed afterwards. Check the transcript before believing the error.
