@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+"""Keep a simulator pool working right up to its reserve line, without crossing it.
+
+Idle seats are pure loss: a licence nobody is using finishes no arm. But the reserve is a promise
+to other people on a shared server, so the line is a hard floor, not a target to drift through.
+This reads the pool, computes room = issued - in_use - reserve, and hands that many QUEUED arms to
+the backend. It never decides how many actually run -- the submitted batch carries the client's own
+governor, which re-checks the pool at dispatch.
+
+Generalised from vcs_topup.py, which was VCS-only. The two pools differ in every constant that
+matters -- Questa's binding feature is mtiverification (200 seats, and it checks out msimhdlsim as
+well), VCS's is VCS-Base-Runtime-Pkg (100) -- and Questa needs ~16 GB against VCS's ~2 GB, so a
+node fits far fewer of them. Those live in BACKENDS below; the logic is identical.
+
+Never moves an arm that is already executing, already finished, or already queued for the SAME
+backend: "not running" is true of an arm this script queued twenty minutes ago, and without that
+last check the VCS version re-picked the same arms every cycle and double-submitted nine of them.
+
+Moving an arm queued for the OTHER backend is deliberate and is the whole point -- an arm sitting
+behind a full VCS pool should start now on a free Questa seat. If both copies eventually start,
+kill_duplicate_arms.py keeps the one with more progress. Cancelling the old queued copy instead
+would be worse: it nudges the scheduler into dispatching another job from that batch (measured; see
+KNOWN_ISSUES).
+"""
+import argparse, glob, json, os, re, subprocess, sys
+
+ROOT   = "/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC"
+STATE  = os.path.expanduser("~/badist/state")
+CLIENT = os.path.join(ROOT, "scripts/badist/teranoc_fleet.py")
+
+BACKENDS = {
+    "vcs": dict(feature="VCS-Base-Runtime-Pkg", server="8169@lic-synopsys.ethz.ch",
+                reserve=5, image="build_vcs_8x8/mempool_simvopt", mem_gb=12,
+                name="s8vtop", max_parallel=30),
+    # mtiverification is the binding Questa feature (200 seats); msimhdlsim has 400 and never runs
+    # out first. Governing on msimhdlsim alone once let us take 150 of the 200 while the tool
+    # reported plenty free and colleagues were locked out.
+    "questa": dict(feature="mtiverification", server="8161@lic-mentor.ethz.ch",
+                   reserve=10, image=None, mem_gb=17,
+                   name="s8qtop", max_parallel=30),
+}
+
+
+def seats(server, feature):
+    try:
+        out = subprocess.check_output(["lmutil", "lmstat", "-c", server, "-f", feature],
+                                      stderr=subprocess.STDOUT, text=True, timeout=120)
+    except Exception:
+        return None
+    m = re.search(r"Total of (\d+) licenses? issued;\s*Total of (\d+) licenses? in use", out)
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def survey(backend):
+    """running arms, queued arms (in order), and those already queued for THIS backend."""
+    running, queued, on_backend = set(), [], set()
+    for d in sorted(glob.glob(os.path.join(STATE, "*"))):
+        jf = os.path.join(d, "jobs.json")
+        if not os.path.exists(jf):
+            continue
+        try:
+            jobs = json.load(open(jf))
+        except Exception:
+            continue
+        started = {os.path.basename(f)[:-6] for f in glob.glob(os.path.join(d, "jobs", "*.jsonl"))}
+        for j in jobs:
+            m = j.get("meta") or {}
+            a = m.get("arm", "")
+            if not a.startswith(("fp16_", "fp32_")):
+                continue
+            if j["job_id"] not in started:
+                queued.append(a)
+                if (m.get("backend") or "questa") == backend:
+                    on_backend.add(a)
+                continue
+            last = None
+            for ln in open(os.path.join(d, "jobs", j["job_id"] + ".jsonl")):
+                try:
+                    last = json.loads(ln)
+                except Exception:
+                    pass
+            if last and last.get("state") == "running":
+                running.add(a)
+    return running, queued, on_backend
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--backend", choices=sorted(BACKENDS), required=True)
+    ap.add_argument("--reserve", type=int)
+    ap.add_argument("--batch", type=int, default=12)
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--allow-requeue", action="store_true",
+                    help="also pick arms already queued for this backend. Use when the pool sits "
+                         "above its reserve line while arms wait: an existing batch at its own "
+                         "--max-parallel will not dispatch into a free seat no matter how many "
+                         "there are, and a fresh batch has its own cap. Costs a duplicate queued "
+                         "copy, which kill_duplicate_arms.py resolves if both ever start.")
+    a = ap.parse_args()
+    cfg = BACKENDS[a.backend]
+    reserve = cfg["reserve"] if a.reserve is None else a.reserve
+
+    s = seats(cfg["server"], cfg["feature"])
+    if not s:
+        print("  could not read the %s pool -- doing nothing" % a.backend)
+        return 0
+    issued, in_use = s
+    room = issued - in_use - reserve
+    print("  %s %s %d/%d in use, reserve %d -> room for %d"
+          % (a.backend, cfg["feature"], in_use, issued, reserve, room))
+    if room <= 0:
+        print("  pool is at the reserve line; nothing to add")
+        return 0
+
+    running, queued, on_backend = survey(a.backend)
+    pick, seen = [], set()
+    for arm in queued:
+        if arm in running or arm in seen or (arm in on_backend and not a.allow_requeue):
+            continue
+        t = os.path.join(ROOT, "hardware", "s8_" + arm, "transcript")
+        try:
+            if os.path.exists(t) and b"execution took" in open(t, "rb").read():
+                continue          # already delivered; re-running it wastes a seat
+        except OSError:
+            pass
+        seen.add(arm); pick.append(arm)
+        if len(pick) >= min(a.batch, room):
+            break
+    if not pick:
+        print("  no queued arm is free to move (%d already waiting on %s)"
+              % (len(on_backend), a.backend))
+        return 0
+    print("  moving %d queued arm(s) to %s: %s%s"
+          % (len(pick), a.backend, ", ".join(pick[:4]), " ..." if len(pick) > 4 else ""))
+    if a.dry_run:
+        print("  --dry-run: not submitting")
+        return 0
+
+    lst = "/tmp/claude-620771/arms_%s_topup.txt" % a.backend
+    with open(lst, "w") as f:
+        for arm in pick:
+            img = (" " + cfg["image"]) if cfg["image"] else ""
+            f.write("%s s8_%s.elf%s\n" % (arm, arm, img))
+    cmd = [CLIENT, "submit", "--arms", lst, "--backend", a.backend,
+           "--run-prefix", "s8", "--name", cfg["name"],
+           "--max-parallel", str(cfg["max_parallel"]), "--mem-gb", str(cfg["mem_gb"]),
+           "--reserve-licenses", str(reserve), "--est-runtime-s", "60000", "--force"]
+    p = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                         text=True, start_new_session=True)
+    try:
+        out, _ = p.communicate(timeout=120)
+    except subprocess.TimeoutExpired:
+        out = "(controller running in background -- expected)"
+    for ln in (out or "").splitlines():
+        if "batch" in ln or "rror" in ln:
+            print("  %s" % ln)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
