@@ -42,8 +42,13 @@ def scrape(arm):
     # A run killed by $fatal still prints "execution took N" if the benchmark finished first, so
     # the cycle count can be real while everything after it (the spotcheck) is missing. That must
     # never be recorded as a clean completion.
-    fat = re.search(rb'\$finish called from file [^\n]*?([A-Za-z0-9_]+\.sv)", line (\d+)', txt)
-    fmsg = re.search(rb"(MSHR clock gate dropped[^\n]*|Fatal: [^\n]{0,120})", txt)
+    # $fatal is worded DIFFERENTLY per simulator, and 213 of 248 arms are on Questa:
+    #   VCS    : $finish called from file ".../mempool_group_mshr.sv", line 2258.
+    #   Questa : ** Fatal: <msg>   /  ** Note: $finish : .../mempool_group_mshr.sv(2247)
+    # A VCS-only pattern silently reports every Questa arm as a clean completion.
+    fat = (re.search(rb'\$finish called from file [^\n]*?([A-Za-z0-9_]+\.sv)", line (\d+)', txt)
+           or re.search(rb'\$finish[^\n]*?([A-Za-z0-9_]+\.sv)\((\d+)\)', txt))
+    fmsg = re.search(rb"(MSHR clock gate dropped[^\n]*|\*\* Fatal: [^\n]{0,110}|Fatal: [^\n]{0,110})", txt)
     return dict(state="done", cycles=int(cyc[-1]), rh=txt.count(b"RH STUCK"),
                 tmo=tot("mshr_timeout"), bf=tot("bankfull_bypass"), spot=spot,
                 fatal=(fat.group(1).decode() + ":" + fat.group(2).decode()) if fat else "",
