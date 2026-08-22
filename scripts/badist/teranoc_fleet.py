@@ -93,6 +93,7 @@ BACKENDS = {
         "cmd": '"{image}" {licwait}+PRELOAD="{elf}" -l transcript',
         "mem_gb": 4,          # measured 2.0 GB across every running terapool arm
         "licensed": True,
+        "reserve_default": 5,      # leave 5 VCS seats for the rest of the department
         "feature": VCS_LICENSE_FEATURE,
         "server": VCS_LICENSE_SERVER,
     },
@@ -816,7 +817,7 @@ def main():
                      help="our own concurrent-arm cap (VCS: also the seat cap)")
     res.add_argument("--reserve-licenses", type=int, default=None,
                      help="seats to leave free for the rest of the department "
-                          "(default: 20 for VCS, 10 for Questa's 200-seat mtiverification pool)")
+                          "(default: 5 for VCS, 10 for Questa's 200-seat mtiverification pool)")
     res.add_argument("--env", action="append", default=None,
                      help="shell line to run before the simulator (repeatable)")
     res.add_argument("--license-retries", type=int, default=12,
