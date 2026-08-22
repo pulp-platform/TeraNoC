@@ -58,6 +58,13 @@ VCS_LICENSE_SERVER = "8169@lic-synopsys.ethz.ch"
 # makes Questa the fallback rather than the thing we wait for -- and cycle counts are
 # validated bit-identical between the two (91,859 both), so results pool with VCS arms.
 QUESTA_LICENSE_FEATURE = "msimhdlsim"
+# A Questa run checks out BOTH of these, and msimhdlsim is NOT the binding one:
+#   msimhdlsim       400 seats
+#   mtiverification  200 seats   <-- the real ceiling
+# Governing on msimhdlsim alone reported "158 free" while mtiverification sat at 200/200 and
+# colleagues could not start Questa at all. We held 150 of its 200 seats before anyone noticed.
+# Always take the TIGHTEST of the two.
+QUESTA_LICENSE_FEATURES = ("msimhdlsim", "mtiverification")
 QUESTA_LICENSE_SERVER = "8161@lic-mentor.ethz.ch"
 # ABSOLUTE path, not a bare name. badist runs the job in a NON-LOGIN shell whose PATH is
 # /usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbin -- /usr/sepp/bin is not on it, so a bare
@@ -100,6 +107,7 @@ BACKENDS = {
         "mem_gb": 20,              # measured 15.9 GB headless (24.3 GB with wave logging)
         "licensed": True,
         "feature": QUESTA_LICENSE_FEATURE,
+        "features": QUESTA_LICENSE_FEATURES,   # msimhdlsim AND mtiverification
         "server": QUESTA_LICENSE_SERVER,
         "dir_image": True,
     },
@@ -340,6 +348,23 @@ def preflight(arms, backend, default_image, run_prefix, force, fallback=None,
 
 # --------------------------------------------------------------- licenses
 
+def license_free_multi(features, server):
+    """Tightest (issued, in_use, mine) across several features on one server.
+
+    A tool that consumes more than one feature is limited by the scarcest, so reporting any
+    single feature overstates headroom -- by 2x for Questa, which is how this fleet came to hold
+    150 of 200 mtiverification seats while its own governor reported plenty free.
+    """
+    worst = None
+    for f in features:
+        r = license_free(f, server)
+        if r is None:
+            continue
+        if worst is None or (r[0] - r[1]) < (worst[0] - worst[1]):
+            worst = r
+    return worst
+
+
 def license_free(feature=VCS_LICENSE_FEATURE, server=VCS_LICENSE_SERVER):
     """(issued, in_use, mine) for a FlexLM feature, or None if lmutil failed."""
     try:
@@ -513,13 +538,25 @@ def cmd_submit(args):
         if not name or not BACKENDS[name]["licensed"]:
             continue
         be = BACKENDS[name]
-        seats = license_free(be["feature"], be["server"])
+        # Report the SCARCEST feature this backend consumes, not the first one. Questa needs
+        # msimhdlsim (400) and mtiverification (200); reading only the former said "158 free"
+        # while the latter was 200/200 and nobody else could start Questa.
+        feats = be.get("features") or (be["feature"],)
+        tight, tightname = None, be["feature"]
+        for f in feats:
+            r = license_free(f, be["server"])
+            if r is None:
+                continue
+            if tight is None or (r[0] - r[1]) < (tight[0] - tight[1]):
+                tight, tightname = r, f
+        seats = tight
         if not seats:
-            warn("could not read %s from %s" % (be["feature"], be["server"]))
+            warn("could not read %s from %s" % ("/".join(feats), be["server"]))
             continue
         issued, in_use, mine = seats
-        print("%-8s %-22s %3d/%3d in use, %3d free (%d ours)"
-              % (role, be["feature"], in_use, issued, issued - in_use, mine))
+        extra = "" if len(feats) == 1 else "  [tightest of %s]" % ", ".join(feats)
+        print("%-8s %-22s %3d/%3d in use, %3d free (%d ours)%s"
+              % (role, tightname, in_use, issued, issued - in_use, mine, extra))
         if role == "primary" and issued - in_use <= 0 and not args.fallback:
             warn("that pool is FULL and no --fallback is set. Arms will queue or die "
                  "rather than run. Consider --fallback questa.")
