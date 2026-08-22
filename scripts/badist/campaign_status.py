@@ -136,7 +136,7 @@ def probe_live(nodes):
     return out
 
 def ledger_states():
-    """arm -> (state, node, batch, ts) across EVERY batch, newest ledger wins.
+    """arm -> (state, node, batch, ts, rank) across EVERY batch; the BEST state wins.
     ts is the time of the last state transition, so for a running arm it is its start time."""
     out = {}
     for d in sorted(glob.glob(os.path.join(STATE, "*")), reverse=True):
@@ -161,14 +161,25 @@ def ledger_states():
             arm = (j.get("meta") or {}).get("arm")
             if not arm:
                 continue
-            st, node, ts = term.get(j["job_id"], (j.get("state"), j.get("node"), None))
-            # Keep the LATEST record, by ts. Batch dirs were sorted by NAME, and the campaign
-            # prefix comes first ("s8auto" < "s8q" < "teranoc"), so name order is not time order:
-            # a resubmitted arm kept reporting the OLD batch's `failed` while the new batch had
-            # it running. Never infer recency from a sort of names that begin with a label.
+            if j["job_id"] in term:
+                st, node, ts = term[j["job_id"]]
+                st = st or "?"
+            else:
+                # No jsonl = the job has never started. That is QUEUED, not unknown: after a heal
+                # the arm's only other record is the cancelled copy it replaced, and ranking an
+                # unstarted job below that made 15 freshly-requeued arms report as failures.
+                st, node, ts = "queued", j.get("node"), None
+            # An arm can have SEVERAL copies across batches (a resubmit, a heal, a duplicate that
+            # was killed). Latest-timestamp is the wrong rule: killing a duplicate writes a NEWER
+            # cancelled record than the surviving copy's `running`, so a perfectly healthy arm
+            # reported as failed -- 22 of them at once, every poll, which trains you to ignore the
+            # alarm. An arm with ANY live copy is running. Rank by what the arm actually IS, and
+            # use ts only to break ties within a rank.
+            rank = {"running": 3, "done": 4, "succeeded": 4, "completed": 4,
+                    "submitted": 2, "dispatched": 2, "pending": 2, "queued": 2}.get(st, 1)
             prev = out.get(arm)
-            if prev is None or (ts or 0) >= (prev[3] or 0):
-                out[arm] = (st or "?", node or "-", os.path.basename(d), ts)
+            if prev is None or rank > prev[4] or (rank == prev[4] and (ts or 0) >= (prev[3] or 0)):
+                out[arm] = (st, node or "-", os.path.basename(d), ts, rank)
     return out
 
 NUM = re.compile(rb"execution took (\d+)")
@@ -264,7 +275,7 @@ def main():
     led  = ledger_states()
     buckets = dict(done=[], running=[], pending=[], failed=[], notdispatched=[], wedged=[], noprobe=[])
     for a in arms:
-        st, node, batch, ts = led.get(a, (None, "-", "-", None))
+        st, node, batch, ts, _rank = led.get(a, (None, "-", "-", None, 0))
         res = disk_result(a)
         if res and res["cycles"]:
             # a completed arm with no probe output is a MEASUREMENT failure, not a quiet run
@@ -278,7 +289,7 @@ def main():
                 buckets["wedged"].append((a, res, node))
             else:
                 buckets["running"].append((a, ts, node))
-        elif st in ("submitted", "dispatched", "pending"):
+        elif st in ("submitted", "dispatched", "pending", "queued"):
             buckets["pending"].append((a, st, node))
         else:
             buckets["notdispatched"].append((a, "-", "-"))
