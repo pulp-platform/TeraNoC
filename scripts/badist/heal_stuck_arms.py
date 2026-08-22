@@ -15,7 +15,7 @@ what filled badile13's /scratch and cost 3 arms.
 
   usage: heal_stuck_arms.py [--min-idle 45] [--max-kill 40] [--dry-run]
 """
-import glob, json, os, re, subprocess, sys
+import glob, json, os, re, shutil, subprocess, sys
 
 ROOT   = "/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC"
 STATE  = os.path.expanduser("~/badist/state")
@@ -139,6 +139,17 @@ def main():
         return
 
     for arm, node, batch, jid, d in victims:
+        # Same hazard as the dedup path: killing a job makes badist gather and deliver whatever
+        # is in its run dir, and a stuck arm's run dir holds only a partial design-load
+        # transcript. If this arm already has a real result on disk, protect it.
+        t = os.path.join(ROOT, "hardware", "s8_" + arm, "transcript")
+        keep = None
+        try:
+            if os.path.exists(t) and b"execution took" in open(t, "rb").read():
+                keep = t + ".keep"
+                shutil.copy2(t, keep)
+        except OSError:
+            keep = None
         subprocess.run([BADIST, "cancel", batch, "--job", jid],
                        capture_output=True, timeout=60)
         # badist cancel kills the WRAPPER; the simulator survives it. Kill by cwd match.
@@ -148,6 +159,14 @@ def main():
                  'vsimk|vish|vsim|mempool_simvopt) kill -9 $p 2>/dev/null;; esac; done' % d)
         # a killed job orphans its node-local scratch; that is what filled badile13
         sh(node, 'rm -rf "%s" 2>/dev/null' % d)
+        if keep:
+            try:
+                if not os.path.exists(t) or b"execution took" not in open(t, "rb").read():
+                    shutil.copy2(keep, t)
+                    print("    RESTORED %s -- a partial delivery had clobbered its result" % arm)
+                os.remove(keep)
+            except OSError:
+                pass
         led[arm] = led.get(arm, 0) + 1
     json.dump(led, open(LEDGER, "w"), indent=1)
 
