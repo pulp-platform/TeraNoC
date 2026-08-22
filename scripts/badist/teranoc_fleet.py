@@ -59,7 +59,16 @@ VCS_LICENSE_SERVER = "8169@lic-synopsys.ethz.ch"
 # validated bit-identical between the two (91,859 both), so results pool with VCS arms.
 QUESTA_LICENSE_FEATURE = "msimhdlsim"
 QUESTA_LICENSE_SERVER = "8161@lic-mentor.ethz.ch"
-QUESTA_CMD = "questa-2023.4-zr"
+# ABSOLUTE path, not a bare name. badist runs the job in a NON-LOGIN shell whose PATH is
+# /usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbin -- /usr/sepp/bin is not on it, so a bare
+# name fails with rc=127 on EVERY node (verified badile/larain/fenga 2026-08-22). VCS never hit
+# this because its spec runs the elaborated simv binary by absolute path and needs nothing on
+# PATH. Worse, the wrapper's retry loop reports any early exit as "no licence seat?", so the
+# failure looked like licence pressure and burned 12 x 300 s of a held slot.
+QUESTA_CMD = "/usr/sepp/bin/questa-2023.4-zr"
+# Pre-elaborated design in the shared work library (see questa_launch). Falls back to the
+# module name only if you rebuild the library without running the vopt step.
+QUESTA_OPT = "s8_opt"
 DRAMSYS = "deps/dram_rtl_sim/dramsys_lib/DRAMSys"
 
 BACKENDS = {
@@ -122,16 +131,29 @@ def questa_launch(build_dir, elf):
         'ln -sfn "%s/work" work' % build_dir,
         'ln -sfn "%s/work-dpi" work-dpi' % build_dir,
         'cp -f "%s/modelsim.ini" .' % build_dir,
-        # -voptargs=+acc is NOT tuning. Every TB probe we scrape ([FPU], [FPUG], [MSHRG],
-        # [STALLG] ...) reaches into the design hierarchically, and vopt is entitled to
-        # optimise those nets away without it -- which turns a good run into a silent
-        # no-data run rather than an error.
-        '%s vsim -c -voptargs=+acc -suppress vsim-12070 '
+        # +acc REMOVED 2026-08-22 (user direction): it suppresses most optimisation, so the
+        # simulation runs markedly slower, and hardware/Makefile records that at 1024 cores
+        # "vopt alone did not finish in 60 minutes" with it.
+        #
+        # THE RISK IT TRADES AGAINST, kept here because the failure is SILENT: TB probes that
+        # reach into the design hierarchically ([FPU], [FPUG], [MSHRG], [STALLG]) can have their
+        # nets optimised away, and the run then completes normally while reporting NO DATA --
+        # not an error. Do not read an empty-probe transcript as "the feature is off"; check
+        # first that the probe emitted anything at all. Gate every questa arm on:
+        #     grep -c '^\[FPU\]' transcript      # 0 => probes optimised away, rerun with +acc
+        '%s vsim -c -suppress vsim-12070 '
         '+DRAMSYS_RES=%s/configs '
         '-sv_lib %s/build/lib/libsystemc -sv_lib %s/build/lib/libDRAMSys_Simulator '
         '-sv_lib work-dpi/mempool_dpi -work work '
-        '+PRELOAD="%s" work.mempool_tb -do "run -a" -l transcript'
-        % (QUESTA_CMD, dram, dram, dram, elf),
+        # work.s8_opt, NOT work.mempool_tb. Naming the module makes vsim run an IMPLICIT vopt that
+        # WRITES a fresh optimised design into the SHARED work/ library -- measured: three runs made
+        # three designs (_opt/_opt1/_opt2) at ~2.6 GB each, and two arms deadlocked on work/_lock
+        # while a killed arm left the lock behind naming a dead pid. Naming the PRE-ELABORATED
+        # design instead means no vopt, no lock, no growth, and no ~10 min per-arm elaboration.
+        # Rebuild it after any RTL change:
+        #   cd hardware/build_q_8x8 && questa-2023.4-zr vopt -work work work.mempool_tb -o s8_opt
+        '+PRELOAD="%s" work.%s -do "run -a" -l transcript'
+        % (QUESTA_CMD, dram, dram, dram, elf, QUESTA_OPT),
     ]
 
 
@@ -604,6 +626,44 @@ def _cycles(transcript):
     return None
 
 
+def cmd_gc(args):
+    """Free a batch's node-local scratch -- but only once it is genuinely finished.
+
+    badist's own `gc` issues `rm -rf <scratch>/run/<batch> <scratch>/out/<batch>` on every
+    host that holds ANY job of the batch, with no regard for job state. On a
+    part-finished batch that deletes the working directory out from under arms that are
+    still simulating. It also runs before checking that the results were ever gathered,
+    so a bad push plus a gc loses the run outright.
+
+    Nothing is deleted here until every job is terminal AND every result is on disk.
+    """
+    badist = _badist()
+    batch = _resolve_batch(badist, args.batch)
+    rows = badist.status(batch)
+    running = [r for r in rows if r["state"] not in ("done", "failed", "cancelled")]
+    if running and not args.force:
+        for r in running[:8]:
+            sys.stderr.write("  still %s: %s\n"
+                             % (r["state"], (r.get("meta") or {}).get("arm", r["job"])))
+        die("%d job(s) of %s are not finished; gc would delete their working "
+            "directories mid-run. Wait, or --force if you know better."
+            % (len(running), batch))
+
+    missing = []
+    for r in rows:
+        rd = (r.get("meta") or {}).get("run_dir")
+        if r["state"] == "done" and rd and not os.path.exists(os.path.join(rd, "transcript")):
+            missing.append((r.get("meta") or {}).get("arm", r["job"]))
+    if missing and not args.force:
+        die("%d done job(s) have no transcript locally (%s...). Run `fetch` first -- the "
+            "node copy is the only remaining one." % (len(missing), ", ".join(missing[:4])))
+
+    out = badist.gc(batch)
+    print("cleaned %d node(s): %s" % (out.get("freed_nodes", 0),
+                                      " ".join(out.get("hosts", []))))
+    return 0
+
+
 def cmd_status(args):
     badist = _badist()
     batch = _resolve_batch(badist, args.batch)
@@ -740,6 +800,12 @@ def main():
     sg.add_argument("--warm", action="store_true",
                     help="just warm each node's page cache; no node-local copy")
     sg.set_defaults(func=cmd_stage)
+
+    gcp = sub.add_parser("gc", help="free a finished batch's node-local scratch")
+    gcp.add_argument("batch", nargs="?")
+    gcp.add_argument("--force", action="store_true",
+                     help="clean even if jobs are still running or results are not fetched")
+    gcp.set_defaults(func=cmd_gc)
 
     lc = sub.add_parser("license", help="VCS runtime-seat headroom")
     lc.add_argument("--feature", default=VCS_LICENSE_FEATURE)
