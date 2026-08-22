@@ -148,6 +148,46 @@ th.grp{text-align:center;color:var(--ink);font-size:12px;letter-spacing:.14em;pa
 .pairs th.gs,.pairs td.gs{border-left:1px solid var(--line);padding-left:12px}
 .pairs th,.pairs td{padding-right:14px}
 table tr:first-child th{border-bottom:none}
+/* --- per-group mesh view --- */
+.mesh-ctl{display:flex;flex-wrap:wrap;gap:14px 20px;align-items:center;margin-bottom:16px}
+.mesh-ctl label{font:400 10.5px/1 "IBM Plex Mono",monospace;color:var(--dim);
+letter-spacing:.08em;text-transform:uppercase;display:block;margin-bottom:5px}
+.mesh-ctl select{font:600 13px/1 "IBM Plex Mono",monospace;background:var(--surf);
+color:var(--ink);border:1px solid var(--line);border-radius:3px;padding:7px 9px;min-width:210px}
+.mesh-ctl select.narrow{min-width:96px}
+.mesh-ctl .none{font:400 12px/1.4 "IBM Plex Sans",sans-serif;color:var(--bad)}
+.mesh-ctl input[type=range]{width:min(420px,52vw);accent-color:var(--acc);vertical-align:middle}
+.meshwrap{display:grid;grid-template-columns:auto 1fr;gap:22px;align-items:start}
+@media(max-width:720px){.meshwrap{grid-template-columns:1fr}}
+.mesh{display:grid;grid-template-columns:repeat(8,1fr);gap:3px;width:min(360px,84vw)}
+.cell{aspect-ratio:1;border-radius:2px;display:flex;align-items:center;justify-content:center;
+font:600 9px/1 "IBM Plex Mono",monospace;color:#fff;background:var(--line)}
+.cell.lo{color:var(--dim)}
+.mesh-meta dl{display:grid;grid-template-columns:repeat(2,minmax(96px,1fr));gap:12px 18px;margin:0}
+.mesh-meta dt{font:400 10px/1.4 "IBM Plex Mono",monospace;color:var(--dim);
+letter-spacing:.07em;text-transform:uppercase}
+.mesh-meta dd{margin:2px 0 0;font:600 17px/1.2 "IBM Plex Mono",monospace;
+font-variant-numeric:tabular-nums}
+.scale{display:flex;align-items:center;gap:8px;margin-top:16px;
+font:400 10.5px/1 "IBM Plex Mono",monospace;color:var(--dim)}
+/* --- per-group progress bars --- */
+/* All 64 groups visible at once -- columns, never a scrollbar. Comparing progress means
+   seeing the whole set in one glance; a scroll region hides exactly the outliers you are
+   looking for. Column count adapts to width; rows-per-column falls to 16 at 4 columns. */
+.prog{display:grid;grid-template-columns:repeat(auto-fit,minmax(184px,1fr));
+gap:2px 18px;margin-top:6px;align-content:start}
+.prow{display:grid;grid-template-columns:26px 1fr 34px;gap:7px;align-items:center}
+.prow .g{font:400 9px/1 "IBM Plex Mono",monospace;color:var(--dim);text-align:right}
+.prow .track{height:8px;background:var(--line);border-radius:2px;overflow:hidden}
+.prow .fill{height:100%;background:var(--run);border-radius:2px;transition:width .09s linear}
+.prow .fill.lead{background:var(--ok)}
+.prow .fill.lag{background:var(--bad)}
+.prow .pct{font:600 9px/1 "IBM Plex Mono",monospace;font-variant-numeric:tabular-nums;
+text-align:right}
+.scale i{display:block;height:9px;flex:1;border-radius:2px;
+background:linear-gradient(90deg,#e8eef1,#9fc7d4,#4e94ab,#1f6f8b,#0d3f52)}
+:root:not([data-theme="light"]) .scale i{background:linear-gradient(90deg,#1b2b33,#255d72,#2f88a4,#4fa3c4,#9fd8ea)}
+:root[data-theme="dark"] .scale i{background:linear-gradient(90deg,#1b2b33,#255d72,#2f88a4,#4fa3c4,#9fd8ea)}
 """
 
 def main():
@@ -270,6 +310,155 @@ def main():
                   '<code>resp_buf</code> writes that fp32 never generates.']
         h += [' The benchmark completes <i>before</i> the assertion, so cycle counts survive; the '
               'spotcheck does not.</p></section>']
+
+    # ---- per-group mesh over time ----
+    try:
+        gu = json.load(open("/tmp/claude-620771/group_util.json"))
+    except Exception:
+        gu = {}
+    if gu:
+        h += ['<section><h2>Per-group FPU utilisation over the benchmark</h2>',
+              '<p class="sub" style="margin-bottom:18px">Each cell is one of the 64 groups, laid '
+              'out as the physical 8&times;8 mesh (row = mesh Y, column = mesh X). Colour is that '
+              'group\'s FPU utilisation in one 1000-cycle window of the benchmark. Drag the slider '
+              'to move through time. Whole-run utilisation averages this over every group and '
+              'every window, so it hides exactly what this shows: <b>how unevenly the work is '
+              'spread across the mesh</b>.</p>',
+              '<div class="mesh-ctl">',
+              '<div><label for="mprec">precision</label>'
+              '<select id="mprec" class="narrow"></select></div>',
+              '<div><label for="mM">M</label><select id="mM" class="narrow"></select></div>',
+              '<div><label for="mN">N</label><select id="mN" class="narrow"></select></div>',
+              '<div><label for="mP">P</label><select id="mP" class="narrow"></select></div>',
+              '<select id="marm" hidden>'] + \
+             ['<option value="' + esc(a) + '">' + esc(a) + '</option>'
+              for a in sorted(gu)] + ['</select>',
+              '<div style="flex:1"><label for="mper">benchmark window</label>'
+              '<input type="range" id="mper" min="0" max="0" value="0" step="1">'
+              ' <span id="mcyc" style="font:600 12px/1 \'IBM Plex Mono\',monospace"></span></div>',
+              '</div>',
+              '<div class="meshwrap"><div><div class="mesh" id="mgrid"></div>',
+              '<div class="scale"><span>0%</span><i></i><span>100%</span></div></div>',
+              '<div class="mesh-meta"><dl>',
+              '<dt>window mean</dt><dd id="mmean">-</dd>',
+              '<dt>spread (max-min)</dt><dd id="mspread">-</dd>',
+              '<dt>busiest group</dt><dd id="mmax">-</dd>',
+              '<dt>idlest group</dt><dd id="mmin">-</dd>',
+              '</dl><p class="sub" style="margin-top:14px;font-size:12.5px">A wide spread means '
+              'some groups are starved while others saturate &mdash; the alignment problem the '
+              'group-MSHR design is meant to address. A single number cannot show it.</p></div></div>',
+              '<h3 style="font:600 13px/1 \'IBM Plex Mono\',monospace;letter-spacing:.06em;'
+              'text-transform:uppercase;color:var(--dim);margin:34px 0 6px">'
+              'Per-group progress &mdash; are the groups advancing together?</h3>',
+              '<p class="sub" style="margin-bottom:14px">The kernel hands every group an equal '
+              'share of the work, so a group\'s <b>cumulative</b> busy lane-cycles measure how far '
+              'through that share it has got. One bar per group, driven by the same slider. If the '
+              'groups were aligned the bars would move as a single block &mdash; the spread between '
+              'them is wasted machine, because the kernel does not end until the <b>last</b> group '
+              'finishes.</p>',
+              '<div class="mesh-meta" style="margin-bottom:12px"><dl>',
+              '<dt>leader</dt><dd id="plead">-</dd>',
+              '<dt>laggard</dt><dd id="plag">-</dd>',
+              '<dt>gap (leader-laggard)</dt><dd id="pgap">-</dd>',
+              '<dt>laggard / leader</dt><dd id="pratio">-</dd>',
+              '</dl></div>',
+              '<div class="prog" id="pgrid"></div>',
+              '<script>',
+              'const GU=' + json.dumps(gu, separators=(",", ":")) + ';',
+              """
+const $=i=>document.getElementById(i), grid=$("mgrid"), sel=$("marm"), rng=$("mper");
+// Four cascading pickers instead of one long list: with 248 shapes a single dropdown is a
+// haystack. Each level only offers values that EXIST at the levels above it, so every
+// combination the UI lets you build has data behind it -- no empty states to hit.
+const SHAPES=Object.keys(GU).map(a=>{const m=/^fp(\d+)_(\d+)x(\d+)x(\d+)$/.exec(a);
+  return m?{arm:a,prec:m[1],M:+m[2],N:+m[3],P:+m[4]}:null}).filter(Boolean);
+const eP=$("mprec"), eM=$("mM"), eN=$("mN"), ePp=$("mP");
+function fill(el,vals,keep){
+  const prev=keep&&vals.includes(keep)?keep:vals[0];
+  el.innerHTML="";
+  for(const v of vals){const o=document.createElement("option");o.value=String(v);o.textContent=String(v);
+    if(String(v)===String(prev))o.selected=true;el.appendChild(o);}
+  return prev;
+}
+const uniq=a=>[...new Set(a)];
+function cascade(changed){
+  const precs=uniq(SHAPES.map(s=>s.prec)).sort();
+  const pv=fill(eP,precs.map(p=>"fp"+p).length?precs:precs,eP.value);
+  // relabel precision options as fp16/fp32 while keeping numeric values
+  [...eP.options].forEach(o=>o.textContent="fp"+o.value);
+  let pool=SHAPES.filter(s=>s.prec===eP.value);
+  const mv=fill(eM,uniq(pool.map(s=>s.M)).sort((a,b)=>a-b), changed==="M"?eM.value:eM.value);
+  pool=pool.filter(s=>String(s.M)===eM.value);
+  fill(eN,uniq(pool.map(s=>s.N)).sort((a,b)=>a-b), eN.value);
+  pool=pool.filter(s=>String(s.N)===eN.value);
+  fill(ePp,uniq(pool.map(s=>s.P)).sort((a,b)=>a-b), ePp.value);
+  const hit=SHAPES.find(s=>s.prec===eP.value&&String(s.M)===eM.value&&
+                           String(s.N)===eN.value&&String(s.P)===ePp.value);
+  if(hit){sel.value=hit.arm;}
+  return !!hit;
+}
+for(let i=0;i<64;i++){const c=document.createElement("div");c.className="cell";grid.appendChild(c);}
+// one hue, light->dark: magnitude is a sequential encoding, never a rainbow
+const STOPS=[[232,238,241],[159,199,212],[78,148,171],[31,111,139],[13,63,82]];
+function col(u){const t=Math.max(0,Math.min(100,u))/100*(STOPS.length-1);
+  const i=Math.min(STOPS.length-2,Math.floor(t)),f=t-i,a=STOPS[i],b=STOPS[i+1];
+  return `rgb(${Math.round(a[0]+(b[0]-a[0])*f)},${Math.round(a[1]+(b[1]-a[1])*f)},${Math.round(a[2]+(b[2]-a[2])*f)})`;}
+function draw(){
+  const d=GU[sel.value]; if(!d||!d.length) return;
+  const k=Math.min(d.length-1,+rng.value), p=d[k], u=p.u;
+  const cells=grid.children;
+  for(let g=0;g<64;g++){const c=cells[g];c.style.background=col(u[g]);
+    c.className="cell"+(u[g]<45?" lo":"");c.textContent=Math.round(u[g]);
+    c.title=`group ${g} (x=${g%8}, y=${Math.floor(g/8)}) — ${u[g].toFixed(1)}%`;}
+  const mx=Math.max(...u), mn=Math.min(...u), me=u.reduce((a,b)=>a+b,0)/64;
+  $("mcyc").textContent=`cyc ${p.cyc.toLocaleString()}  (${k+1}/${d.length})`;
+  $("mmean").textContent=me.toFixed(1)+"%";
+  $("mspread").textContent=(mx-mn).toFixed(1)+" pp";
+  $("mmax").textContent=`g${u.indexOf(mx)} — ${mx.toFixed(1)}%`;
+  $("mmin").textContent=`g${u.indexOf(mn)} — ${mn.toFixed(1)}%`;
+}
+// --- cumulative per-group progress -------------------------------------------------
+// busy lane-cycles accumulate; denom is constant per window, so summing the per-window
+// utilisation is proportional to cumulative busy and needs no extra data.
+const pg=$("pgrid"); const rows=[];
+for(let g=0;g<64;g++){
+  const row=document.createElement("div"); row.className="prow";
+  const lab=document.createElement("div"); lab.className="g"; lab.textContent="g"+g;
+  const tr=document.createElement("div"); tr.className="track";
+  const fi=document.createElement("div"); fi.className="fill"; fi.style.width="0%";
+  tr.appendChild(fi);
+  const pc=document.createElement("div"); pc.className="pct"; pc.textContent="0";
+  row.appendChild(lab); row.appendChild(tr); row.appendChild(pc);
+  row.title="group "+g+" (x="+(g%8)+", y="+Math.floor(g/8)+")";
+  pg.appendChild(row); rows.push({fi,pc});
+}
+let CUM=null;
+function buildCum(){
+  const d=GU[sel.value]||[]; CUM=[];
+  const run=new Array(64).fill(0);
+  for(const p of d){ for(let g=0;g<64;g++) run[g]+=p.u[g]; CUM.push(run.slice()); }
+}
+function drawProg(){
+  if(!CUM||!CUM.length) return;
+  const k=Math.min(CUM.length-1,+rng.value), c=CUM[k];
+  const mx=Math.max(...c), mn=Math.min(...c);
+  const li=c.indexOf(mx), gi=c.indexOf(mn);
+  for(let g=0;g<64;g++){
+    const w=mx>0?(c[g]/mx*100):0;
+    rows[g].fi.style.width=w.toFixed(1)+"%";
+    rows[g].fi.className="fill"+(g===li?" lead":(g===gi?" lag":""));
+    rows[g].pc.textContent=w.toFixed(0)+"%";
+  }
+  $("plead").textContent="g"+li;
+  $("plag").textContent="g"+gi;
+  $("pgap").textContent=(mx>0?((mx-mn)/mx*100).toFixed(1):"0")+"%";
+  $("pratio").textContent=(mx>0?(mn/mx*100).toFixed(1):"0")+"%";
+}
+function reset(){const d=GU[sel.value]||[];rng.max=Math.max(0,d.length-1);rng.value=0;buildCum();draw();drawProg();}
+for(const el of [eP,eM,eN,ePp]) el.addEventListener("change",()=>{cascade();reset();});
+cascade(); reset();
+""",
+              '</script></section>']
 
     # ---- results ----
     h += ['<section><h2>Results</h2>']
