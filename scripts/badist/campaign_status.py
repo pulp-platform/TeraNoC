@@ -135,6 +135,15 @@ def probe_live(nodes):
             out[n] = c
     return out
 
+def _has_result(arm):
+    """True if this arm has a delivered transcript with a cycle count."""
+    t = os.path.join(ROOT, "hardware", "s8_" + arm, "transcript")
+    try:
+        return os.path.exists(t) and b"execution took" in open(t, "rb").read()
+    except OSError:
+        return False
+
+
 def ledger_states():
     """arm -> (state, node, batch, ts, rank) across EVERY batch; the BEST state wins.
     ts is the time of the last state transition, so for a running arm it is its start time."""
@@ -175,8 +184,15 @@ def ledger_states():
             # reported as failed -- 22 of them at once, every poll, which trains you to ignore the
             # alarm. An arm with ANY live copy is running. Rank by what the arm actually IS, and
             # use ts only to break ties within a rank.
+            # `done` outranks `running` ONLY when the arm has a real result. badist marks a job
+            # done after delivering a partial (a killed job's half-written run dir), so a
+            # done-without-result copy would otherwise beat a healthy running copy of the same
+            # arm -- and then fail the result test and land in the catch-all bucket, reporting 7
+            # perfectly live arms as "NOT dispatched".
             rank = {"running": 3, "done": 4, "succeeded": 4, "completed": 4,
                     "submitted": 2, "dispatched": 2, "pending": 2, "queued": 2}.get(st, 1)
+            if rank == 4 and not _has_result(arm):
+                rank = 1
             prev = out.get(arm)
             if prev is None or rank > prev[4] or (rank == prev[4] and (ts or 0) >= (prev[3] or 0)):
                 out[arm] = (st, node or "-", os.path.basename(d), ts, rank)
@@ -292,7 +308,8 @@ def main():
         elif st in ("submitted", "dispatched", "pending", "queued"):
             buckets["pending"].append((a, st, node))
         else:
-            buckets["notdispatched"].append((a, "-", "-"))
+            # reached only when every copy is terminal with nothing delivered
+            buckets["notdispatched"].append((a, st or "-", node))
 
     print("8x8 CAMPAIGN  %d arms in manifest, %d batch(es): %s"
           % (len(arms), len(batches), " ".join(b[-9:] for b in batches)))
@@ -302,7 +319,8 @@ def main():
              len(buckets["wedged"]), len(buckets["noprobe"])))
     for k, label in (("wedged", "WEDGED (util~0, huge CMS -- cycles still advance, looks healthy)"),
                      ("noprobe", "NO PROBE DATA (completed but zero [FPU] -- measurement failed)"),
-                     ("failed", "FAILED")):
+                     ("failed", "FAILED"),
+                     ("notdispatched", "NO LIVE COPY AND NO RESULT (needs a rerun)")):
         if buckets[k]:
             print("\n  %s" % label)
             for a, r, node in buckets[k]:
