@@ -10848,3 +10848,257 @@ whose derived value exceeds 8 -- the same failure the bit-width fix removed, by 
 **Status.** Config committed to the working tree, not yet exercised: no 8x8 image exists, and two
 other blockers remain (missing `config/floo_noc_terapool_spatz4_fpu_8x8.yml`; `hardware/generated/`
 currently holds a 4x4 mesh). See `docs/8x8_sweep_plan.md` §4b.
+
+---
+
+## 2026-08-22 04:05 — DECISION: prioritise the main-repo MSHR line over fp16 packed-A
+
+**Decision.** Focus effort on the main tree (idea-2 + bank-full backpressure + the
+`cache_reuse_target` bit-width fix). Pause fp16 packed-A development on
+`worktree-fp16-packed-a`. Let the runs already in flight finish and record their numbers.
+
+**Why — the two lines attack the SAME problem from opposite sides.** At fp16, `A[m][n]` and
+`A[m][n+1]` are the two halves of one 32-bit word, and the old kernel fetched that word TWICE.
+Packed-A removes the second fetch in **software** (one `lw` + shift). The reuse target keeps the
+CACHED line resident in **hardware** so the second cohort hits it instead of allocating a fresh
+entry that waits out `serve_timeout`.
+
+Measured on the same night, same fleet:
+
+| line | result | mechanism confirmed? |
+|---|---|---|
+| reuse target (HW) | **10.7-21.0x** on all four `128x*x512` shapes | yes -- `RH STUCK` 963-14981 -> **exactly 0** in every r32 arm |
+| bank-full backpressure (HW) | up to **32.6x** on the M=512 family | yes -- `bankfull_bypass` 0 in every bp arm |
+| packed-A + load hoist (SW) | **no measured win yet** | GUI arm collapsing: util 48% -> 8.3%, RH 12 -> 110 and climbing |
+
+The hardware-side fix wins by more than an order of magnitude and needs no kernel restructuring.
+
+**Honest limits of this comparison.** The `pa2` controlled pair (barrier-off, hoist vs no-hoist,
+single variable) had NOT landed when this was written, so "packed-A is inefficient" is NOT
+established. The defensible claim is that it has not demonstrated a win while the MSHR-side fixes
+demonstrably have. Record the pa2 numbers when they arrive rather than leaving it ambiguous.
+
+**What carries forward — the diagnostics, not the kernel.**
+- `stall_raw` at an `fmv.h.x` PC is a scalar-load wait, NOT an FP-unit cost. `stall_acc` at a
+  `vfmacc.vf` PC is the accelerator. Splitting on those two is what found the real bottleneck.
+- **`RH` is the gate on whether backpressure can help a shape at all.** Where the bp arm ends with
+  `RH = 0` the improvement tracks `bankfull_bypass` cleanly; where `RH > 0` a second bottleneck
+  survives backpressure and dominates. Three M=128 arms break the naive one-variable rule
+  (`128x1024x512`: 19,384 bypasses predicted ~-90%, delivered **-4%**, RH_bp 7,971).
+- Audit an ELF's barrier state from the binary, not the filename: count `sfence.vma` in
+  `matmul_8xVL` -- **2 = GBAR_PLOOP only = barrier off, 6 = per-step barrier on**.
+
+**Status.** Nothing to migrate: the main tree already carries the `MSHR_CFG_BANKFULL_BP` hook.
+The 8x8 scale-up sweep (`docs/8x8_sweep_plan.md`) already targets main-tree apps, so this decision
+does not change the work in progress.
+
+---
+
+## 2026-08-22 04:15 — reuse-target campaign COMPLETE: the bit-width fix validated 4/4
+
+**Purpose.** Validate the committed `MshrCfgSubsW` widening (16f9cf54). The CSR field was 5 bits
+and `reuse_ok` capped at `MergeReqs`, so the shipped `cache_reuse_target = 32` for the four
+`128x*x512` shapes was REFUSED and software fell back to 0 -- those shapes had been running with
+the reuse mechanism OFF.
+
+**Result.** Nine arms on the badile fleet, `build_vcs_reuse32`, target 32 vs target 0 with the
+CSR as the only variable:
+
+| shape | target 32 | target 0 | speed-up | RH@32 | RH@0 |
+|---|---|---|---|---|---|
+| `128x128x512`  |  6,355 | 132,519 | **20.9x** | **0** |    963 |
+| `128x256x512`  | 12,158 | 255,644 | **21.0x** | **0** |  3,921 |
+| `128x512x512`  | 21,250 | 226,378 | **10.7x** | **0** |  2,247 |
+| `128x1024x512` | 41,830 | 563,433 | **13.5x** | **0** | 12,170 |
+
+**`RH STUCK` is EXACTLY ZERO in all four target-32 arms** and 963-12,170 in every target-0 arm.
+The mechanism and the effect line up with no exceptions: the reuse target stops a CACHED line
+self-invalidating before the second cohort (the other half of the same 32-bit word at fp16)
+arrives, so no core strands on `serve_timeout`.
+
+**Falsifier.** `rej_128x256x512` -- the target-32 ELF on the OLD image, where the write of 32 is
+out of range -- came in at 272,599 cyc / RH 3,815, i.e. the target-0 family, not the target-32
+family. The speed-up genuinely requires the widened field.
+
+**Caveat, unchanged.** The refusal was never *observed*: 0 `cfg REJECTED` lines in every arm and
+neither image echoes `CacheReuseTarget`, so which value took effect is inferred from behaviour.
+Adding `CacheReuseTarget` to the RTL cfg `$display` would make this self-evidencing.
+
+**Cross-check.** The `32_` family of the bp sweep shows the same signature on the same shapes --
+RH=0 and 3.8-14.3x faster than the matching `16_` arms. Whether that is the same mechanism or a
+second one landing in the same place is NOT yet established; the `i2_16_*` vs `i2_32_*` define
+sets would settle it.
+
+---
+
+## 2026-08-22 05:20 — packed-A + bank-full backpressure: a pathological interaction (OPEN)
+
+**Observation.** Every packed-A run that actually PROGRAMS `MSHR_CFG_BANKFULL_BP=1` degrades or
+wedges. The one that did not, completed normally.
+
+| run | bankfull_bp | outcome |
+|---|---|---|
+| `pa_v_on` (16:55 build) | not programmed -- no CSR hook existed yet | **completed, 171,143 cyc** |
+| `pa_hoist_v_bp` (GUI, build_2) | **=1** | util 48% -> 8.3%, `mshr_timeout` 5,300+ and climbing |
+| `pa2_base` (badile07) | **=1** | **WEDGED** |
+| `pa2_hoist` (badile13) | **=1** | **WEDGED** |
+
+**The wedge is not slowness.** At cycle 602,000 (this shape completes in 171,143 as `pa_v_on`):
+```
+cycles advancing 600,000 -> 602,000 in 25 s   (simulator healthy, 80 cyc/s, 99.7% CPU)
+util             0.05% 0.07% 0.02% 0.05% 0.04%
+reqs_by_class    merged_single=0 merged_burst=0 alloc_single=0 alloc_burst=0
+RH STUCK         4,373
+CMS WARN         308,898        <- core-mem scoreboard: requests that never complete
+```
+Cores sit on memory requests that never retire, the MSHR sees no requests of any class, the FPUs
+idle, and the simulator will burn cycles indefinitely.
+
+**Control that narrows it to the KERNEL, not backpressure itself.** The `build_3` GUI arm runs the
+**idea-2** kernel on a backpressure image: `mshr_timeout=0`, `bankfull_bypass=0` at cycle 64,000,
+perfectly clean -- as were all 54 bp sweep arms. So bp + main-repo kernel is fine; bp + packed-A
+is not.
+
+**Why this appeared only now.** The packed-A branch had NO `MSHR_CFG_BANKFULL_BP` hook until
+2026-08-22 00:55 (see that entry). Before it, packed-A ELFs inherited whatever the image
+elaborated and never actively programmed backpressure on. `pa2_*` and `pa_hoist_v_bp` are the
+first packed-A binaries that do.
+
+**Status: OPEN, correlation not causation.** All four runs are the same kernel and shape, so this
+is one data point repeated, not four independent ones. The direct test is a packed-A arm with
+`MSHR_CFG_BANKFULL_BP=0` on the same image -- if it completes, the interaction is real.
+
+**Cost note.** The two wedged arms consumed ~5 h of two badiles producing nothing. A wedge of this
+kind is only visible from `util` + `reqs_by_class` + `CMS WARN`; the cycle counter keeps advancing
+and `badist status` shows a healthy 99.7% CPU throughout.
+
+---
+
+## 2026-08-22 05:45 — 8x8 pilots: measured resourcing, gate NOT yet met
+
+Two pilots, same ELF (`s8_fp16_512x256x512`, M=512 / 16-way A-share, the ladder's first rung at
+1/16 the work), both on badiles through badist under fleet conditions.
+
+**Measured -- three of my six projections were wrong:**
+
+| quantity | estimated | MEASURED | verdict |
+|---|---|---|---|
+| VCS peak RSS | ~7-9 GiB | **7.80 GiB** | good |
+| Questa peak RSS | ~60 GiB, big servers only | **16.4 GiB** | **WRONG -- badiles fine** |
+| Questa `vopt`/arm | "hours" | **~10 min** | **WRONG** |
+| VCS throughput | ~13 cyc/s | **19.4 cyc/s** | 1.5x better |
+| Questa throughput | -- | **12.2 cyc/s** sim-only | VCS ~1.6x faster |
+| FPU efficiency | 45% of peak | **~15%** | **WRONG -- 3x optimistic** |
+
+Net: arms are ~1.5x LONGER than planned (~12-13 h/arm, ~110 h for nine), because the efficiency
+shortfall outweighs the throughput gain.
+
+**`+acc` removed (user direction) and the probes SURVIVE.** `[FPU] [FPUG] [STALLG] [MSHRG]
+[MEMOG] [INSNG] [CMS] [BYP]` all emit with correctly-scaled 8x8 denominators
+(`busy=0/4096000` = 1024 cores x 4 lanes x 1000 cyc). The client's warning does not hold here;
+keep the `grep -c '^\[FPU\]'` gate anyway since the failure would be silent.
+
+**VCS and Questa agree EXACTLY at 8x8** -- `util=14.92%`, `RH=0`, `CMS=4037` on the same ELF,
+extending the validated-identical result from 4x4.
+
+**Why utilisation is 15%.** All 4,037 `[CMS WARN]` are `STUCK_REQ` with `bl=1` (single-word scalar
+loads, the `serve_timeout=2047` class) and `age~1240`. Adjacent tiles of one group stuck on the
+SAME address -- a cohort that failed to form. `grp_max=41.4%` vs `grp_min=0.0%`. Same
+cohort-dissolution mechanism as 4x4, now on the MAIN-REPO kernel at 8x8, `RH=0` so it is the
+response-side wait.
+
+**GATE 6c IS NOT MET.** No `execution took` from either pilot after ~45 min, so **no spotcheck
+verdict and no completion cycle count**; utilisation rests on a SINGLE bench period. Do not
+dispatch the 9-arm ladder on this basis.
+
+**Trap recorded:** grepping a transcript for "spotcheck" matches `Mismatch in route selection!`
+from `floo_route_select.sv:236` -- a benign once-at-startup warning present in the 4x4 transcripts
+too (line 644 of several `run5_*`). It is not a correctness result.
+
+---
+
+## 2026-08-22 06:10 — QuestaSim on the fleet: made it work, wrote it down
+
+**Purpose.** VCS has 100 runtime seats and the 248-arm set-B sweep saturates them; Questa has 400.
+Getting a Questa arm running end to end took four fixes, none of them obvious, all now in
+`docs/questa_on_the_fleet.md`.
+
+1. **`questa-2023.4-zr` not on the fleet PATH -> rc=127 on EVERY node.** badist runs a non-login
+   shell without `/usr/sepp/bin`. VCS was immune because its spec invokes the elaborated simv by
+   absolute path. Fixed: `QUESTA_CMD` is now absolute in `scripts/badist/teranoc_fleet.py`.
+2. **The retry loop reports any early exit as "no licence seat?"** -- an hour of a held slot spent
+   retrying a `command not found`.
+3. **The shared `work/` library serialises every arm**: `questa_launch` symlinks one library, but
+   `vopt` writes to it. Three runs produced three optimised designs (~2.6 GB each, library 7.9 GB)
+   and two arms deadlocked on `work/_lock`. Fix: pre-elaborate once as `s8_opt`, arms read-only.
+4. **A killed Questa leaves a stale `work/_lock`** naming the dead pid (twice in one session), and
+   `badist cancel` kills only the wrapper -- `vsimk`/`voptk2` survive holding the lock.
+
+**`+acc` removed on user direction, and the probes SURVIVE** -- contradicting the client's own
+comment. Elaboration fell to ~10 min (Makefile: with `+acc` at 1024 cores vopt "did not finish in
+60 minutes"), and `[FPU] [FPUG] [STALLG] [MSHRG] [MEMOG] [INSNG] [CMS] [BYP]` all emit with
+correctly-scaled 8x8 denominators. The `grep -c '^\[FPU\]'` gate stays, since that failure is silent.
+
+**Measured, same ELF on badiles:** VCS 7.80 GiB / 19.4 cyc/s vs Questa 16.4 GiB / 12.2 cyc/s, and
+the two agree EXACTLY (`util=14.92%`, `RH=0`, `CMS=4037`). **My ~60 GiB Questa projection was
+wrong by 4x** -- VCS memory scales with core count (2.02 -> 7.80 GiB), Questa's does not. Badiles
+host Questa fine; the earlier "larain/fenga3 only" constraint is withdrawn.
+
+**Status.** Pre-vopt running. Once it lands, `questa_launch` points at `work.s8_opt` and Questa
+becomes a real parallel path for the small shapes of set B.
+
+## 2026-08-22 07:05 — 8x8 campaign fully dispatched; monitoring rebuilt around what is actually true
+
+**Purpose.** Get all 248 feasible shapes running at 8x8, and make the monitoring able to answer
+"is this alive" without lying.
+
+**Implementation.**
+- **Dispatched the whole grid.** 47 already running + 35 largest on VCS (`s8vcs`) + 213 on Questa
+  (`s8q`, `s8q2`). Split by `M*N*P` at 5.37e8: VCS is 1.6x faster (19.4 cyc/s) and needs half the
+  memory, so it takes the long poles. Licences cover both outright — VCS 35 against 41 free,
+  Questa 213 against 312 free — so no arm waits on a seat.
+- **`--max-parallel 60` was a guess and it was wrong.** Sized from an unmeasured memory estimate;
+  actual fleet free memory is **7879 GB across 63 nodes** (4370 GB on unsaturated nodes = room for
+  266 Questa arms). Raised to 120 by killing the controller, cancelling the 105 never-started jobs
+  individually, and resubmitting. Running went 142 -> 228.
+- **New tooling** (all batch-agnostic, keyed on `hardware/s8_<arm>/` on disk):
+  `scripts/badist/campaign_status.py` (+`--fetch/--verbose/--by-node/--probe`),
+  `scripts/collect_8x8_results.py`, `scripts/gen_8x8_dashboard.py`,
+  `scripts/badist/auto_resubmit.py`.
+- Killed the two pa2 arms after confirming them wedged.
+
+**Result.** 228 running, 20 queued, 0 failed, 0 complete. Dashboard artifact live and regenerated
+on each completion. All 248 ELFs built and verified 8x8.
+
+**Five things that were false and cost time — each is now asserted against, not remembered.**
+1. **`badist status`/`fetch` are single-batch.** No-arg resolves the *newest*; `status` showed 38
+   of 47 live arms and a bare `fetch` strands earlier waves. Pinning a batch id is not the fix —
+   ids multiply per wave and coverage lapses silently. Key on the run-prefix on disk.
+2. **A missing input printed a plausible number.** `campaign_status.py` read its manifest from a
+   session scratchpad under `/tmp` (mode 0700, node-local) and `except: pass`-ed the failure, so
+   every other shell saw `running 0` with 47 arms live. Manifest is now in-repo and an unreadable
+   one exits 1.
+3. **The ledger's `starved_cpu_frac` is STICKY.** Written on detection, never retracted on
+   recovery. It showed ~20 arms "at 0% CPU"; a live ssh probe found them at **83-99%** — they had
+   been I/O-bound loading the 17 GB Questa library over NFS at startup. **I was one step from
+   cancelling and requeueing 20 healthy arms.** Hence `--by-node --probe`.
+4. **`badist cancel` reports success while the simulator keeps running.** It killed the wrapper;
+   both pa2 `mempool_simvopt` processes were still at 99.7% twenty seconds later. Kill by PID,
+   identified via `/proc/<pid>/cwd` (which names batch+job) — not by elapsed time, since the same
+   nodes carried live campaign arms.
+5. **A wedge burns 100% CPU**, so CPU share cannot detect one. pa2 was confirmed wedged only from
+   the transcript: `reqs_by_class` all-zero **and** `busy=0/1024000`. The looser test (low `util`)
+   false-positived on the packed-A GUI run, whose healthy twin sat at the same 0.4-1%.
+
+**Build trap re-confirmed.** `gen_gemm_shape_app.sh` defaults to `config=terapool_spatz4_fpu`, so
+calling it without `CONFIG` exported silently produces **256-core 4x4** binaries under 8x8 shape
+names. My first rebuild of the 12 lost ELFs did exactly that; deleted and rebuilt. All 248 are now
+verified — every build log shows `-DNUM_CORES=1024 -DNUM_GROUPS=64`, and one arm's deployed ELF was
+byte-compared against a fresh explicit-CONFIG build (identical, 179,544 bytes). Also: the shared
+`software/runtime/*.o` races at **any** parallelism above 1, not just 9 — that lost 12 of 248 arms
+while the builder exited 0.
+
+**Status.** OPEN — awaiting completions. The idea-2 `512x256x512` arm's "+1564% regression"
+(630,316 vs 37,867) is **suspected MSHR desync, not a regression**: 622 periods with sustained
+`mshr_timeout` against **zero** in the baseline, and desync makes large shapes bimodal on identical
+config. Re-run before quoting it.
