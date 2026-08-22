@@ -55,6 +55,33 @@ def failed_and_live():
                 live.add(arm)
     return failed, live
 
+
+def already_requeued():
+    """Arms that already have a never-started job in some batch.
+
+    The healer and auto-resubmit both react to an arm that is dead: the healer kills it (so it
+    reads cancelled) and auto-resubmit sees a failure. Run 70 seconds apart, they each requeued
+    the SAME five arms, and the dedup loop then had to kill one copy of each. Neither is wrong on
+    its own -- they just have to see each other's work. A never-started job IS the other loop's
+    requeue, so treat it as covered.
+    """
+    import glob as _g, json as _j, os as _o
+    out = set()
+    for d in _g.glob(_o.path.join(STATE, "*")):
+        jf = _o.path.join(d, "jobs.json")
+        if not _o.path.exists(jf):
+            continue
+        try:
+            jobs = _j.load(open(jf))
+        except Exception:
+            continue
+        started = {_o.path.basename(f)[:-6] for f in _g.glob(_o.path.join(d, "jobs", "*.jsonl"))}
+        for j in jobs:
+            a = (j.get("meta") or {}).get("arm", "")
+            if a.startswith(("fp16_", "fp32_")) and j["job_id"] not in started:
+                out.add(a)
+    return out
+
 def main():
     global MAXA
     if "--max-attempts" in sys.argv:
@@ -62,6 +89,7 @@ def main():
     dry = "--dry-run" in sys.argv
     led = load_ledger()
     failed, live = failed_and_live()
+    live |= already_requeued()          # the healer may have requeued it seconds ago
     todo = []
     for arm, node in sorted(failed.items()):
         if arm in live:

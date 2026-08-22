@@ -75,6 +75,33 @@ done
 echo "STUCK $age"
 '''
 
+
+def already_requeued():
+    """Arms that already have a never-started job in some batch.
+
+    The healer and auto-resubmit both react to an arm that is dead: the healer kills it (so it
+    reads cancelled) and auto-resubmit sees a failure. Run 70 seconds apart, they each requeued
+    the SAME five arms, and the dedup loop then had to kill one copy of each. Neither is wrong on
+    its own -- they just have to see each other's work. A never-started job IS the other loop's
+    requeue, so treat it as covered.
+    """
+    import glob as _g, json as _j, os as _o
+    out = set()
+    for d in _g.glob(_o.path.join(STATE, "*")):
+        jf = _o.path.join(d, "jobs.json")
+        if not _o.path.exists(jf):
+            continue
+        try:
+            jobs = _j.load(open(jf))
+        except Exception:
+            continue
+        started = {_o.path.basename(f)[:-6] for f in _g.glob(_o.path.join(d, "jobs", "*.jsonl"))}
+        for j in jobs:
+            a = (j.get("meta") or {}).get("arm", "")
+            if a.startswith(("fp16_", "fp32_")) and j["job_id"] not in started:
+                out.add(a)
+    return out
+
 def main():
     global MIN_IDLE, MAX_KILL
     if "--min-idle" in sys.argv: MIN_IDLE = int(sys.argv[sys.argv.index("--min-idle") + 1])
@@ -85,8 +112,11 @@ def main():
     except Exception:
         led = {}
 
+    pending = already_requeued()        # auto-resubmit may have requeued it seconds ago
     victims = []
     for arm, (node, batch, jid) in sorted(running_arms().items()):
+        if arm in pending:
+            continue
         d = "/scratch/zexifu_cache/badist/run/%s/%s" % (batch, jid)
         if "STUCK" not in sh(node, PROBE % (d, MIN_IDLE)):
             continue
