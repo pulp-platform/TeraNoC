@@ -74,6 +74,17 @@ def results():
         pass
     return rows
 
+def data_mib(shape, prec):
+    """A + B + C working set in MiB. This is the number that had to fit the 14.50 MiB L1 budget,
+    and it explains an arm's behaviour better than M/N/P read separately."""
+    try:
+        M, N, P = (int(x) for x in shape.split("x"))
+    except Exception:
+        return None
+    b = 2 if prec == "fp16" else 4
+    return (M * N + N * P + M * P) * b / float(1 << 20)
+
+
 def esc(s):
     return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
 
@@ -320,8 +331,20 @@ def main():
 
     # ---- what the data says so far (computed, so it cannot go stale) ----
     if len(res) >= 4:
-        def f(r, i): return float(r[i])
-        best = max(res, key=lambda r: f(r, 4)); worst = min(res, key=lambda r: f(r, 4))
+        def f(r, i):
+            # A salvaged arm has cycles but no end-of-run util: the program finished, but the
+            # sim was parked at the vsim prompt and never reached the $finish that prints
+            # [FPU FINAL]. Aggregating its [FPUG] windows does NOT reproduce that number
+            # (the windows include warm-up, and the dilution differs per arm), so the value
+            # stays absent rather than being filled with an incomparable one.
+            try:
+                return float(r[i])
+            except (TypeError, ValueError):
+                return float("nan")
+        withutil = [r for r in res if f(r, 4) == f(r, 4)]
+        if not withutil:
+            withutil = res
+        best = max(withutil, key=lambda r: f(r, 4)); worst = min(withutil, key=lambda r: f(r, 4))
         pairs = {}
         for r in res:
             pairs.setdefault(r[0], {})[r[1]] = r
@@ -337,9 +360,18 @@ def main():
               '<div class="tile"><span class="n">%s%%</span><span class="l">worst util &mdash; %s %s</span></div>'
               % (worst[4], esc(worst[1]), esc(worst[0]))]
         if ratios:
+            # MEDIAN, not mean: with a handful of pairs a single anomalous arm moves the mean a
+            # long way. 512x64x1024 sits at 3.11x while the rest cluster at 1.50-1.52x, which
+            # dragged the mean to 1.91x -- a number matching no pair in the set.
+            rs = sorted(ratios); n = len(rs)
+            med = rs[n // 2] if n % 2 else (rs[n // 2 - 1] + rs[n // 2]) / 2.0
             h += ['<div class="tile"><span class="n">%.2f&times;</span>'
-                  '<span class="l">fp32 / fp16, %d matched pair%s</span></div>'
-                  % (sum(ratios) / len(ratios), len(ratios), "" if len(ratios) == 1 else "s")]
+                  '<span class="l">fp32 / fp16 &mdash; median of %d pair%s</span></div>'
+                  % (med, n, "" if n == 1 else "s")]
+            if n >= 3 and rs[-1] > 1.5 * med:
+                h += ['<div class="tile"><span class="n">%.2f&ndash;%.2f</span>'
+                      '<span class="l">ratio range &mdash; one arm is an outlier</span></div>'
+                      % (rs[0], rs[-1])]
         h += ['<div class="tile bad"><span class="n">%d/%d</span>'
               '<span class="l">fp16 hit the assertion</span></div>' % (a16, n16),
               '<div class="tile done"><span class="n">%d/%d</span>'
@@ -385,18 +417,26 @@ def main():
               '<dt>idlest group</dt><dd id="mmin">-</dd>',
               '<dt>whole-run util</dt><dd id="mrun">-</dd>',
               '<dt>cycles</dt><dd id="mcycles">-</dd>',
+              '<dt>working set</dt><dd id="mdata">-</dd>',
               '</dl><p class="sub" style="margin-top:14px;font-size:12.5px">A wide spread means '
               'some groups are starved while others saturate &mdash; the alignment problem the '
               'group-MSHR design is meant to address. A single number cannot show it.</p></div></div>',
               '<h3 style="font:600 13px/1 \'IBM Plex Mono\',monospace;letter-spacing:.06em;'
               'text-transform:uppercase;color:var(--dim);margin:34px 0 6px">'
               'Per-group progress &mdash; are the groups advancing together?</h3>',
-              '<p class="sub" style="margin-bottom:14px">The kernel hands every group an equal '
-              'share of the work, so a group\'s <b>cumulative</b> busy lane-cycles measure how far '
-              'through that share it has got. One bar per group, driven by the same slider. If the '
-              'groups were aligned the bars would move as a single block &mdash; the spread between '
-              'them is wasted machine, because the kernel does not end until the <b>last</b> group '
-              'finishes.</p>',
+              '<p class="sub" style="margin-bottom:14px">Each bar is a group\'s progress against its '
+              '<b>own theoretical share</b> of the work &mdash; MACs completed divided by '
+              '<code>M&middot;N&middot;P / 64</code>, since the kernel splits M equally across the 64 '
+              'groups. MACs are taken from the probe as '
+              '<code>&Sigma;(util &times; 64000 lane-cycles) &times; MAC/lane-cycle</code>, with 2 for '
+              'fp16 (two values packed per word) and 1 for fp32. Driven by the same slider. If the '
+              'groups were aligned the bars would move as one block; the spread is wasted machine, '
+              'because the kernel does not end until the <b>last</b> group finishes.</p>',
+              '<p class="sub" style="margin-bottom:14px;font-size:12.5px">A finished group reads a '
+              'little <b>over 100%</b>. That is expected: the probe counts lane <b>occupancy</b>, not '
+              'retired MACs, and across the completed arms the excess is a consistent ~15%. The bar '
+              'clamps at 100%; the number does not, so the overhead stays visible rather than being '
+              'quietly hidden.</p>',
               '<div class="mesh-meta" style="margin-bottom:12px"><dl>',
               '<dt>leader</dt><dd id="plead">-</dd>',
               '<dt>laggard</dt><dd id="plag">-</dd>',
@@ -470,6 +510,11 @@ function draw(){
   const r=RES[sel.value];
   $("mrun").textContent = r ? r.util+"%" : "-";
   $("mcycles").textContent = r ? Number(r.cyc).toLocaleString() : "-";
+  // A+B+C in MiB -- the number that had to fit the 14.50 MiB L1 budget
+  const sm=/^fp(\d+)_(\d+)x(\d+)x(\d+)$/.exec(sel.value);
+  if(sm){ const b=sm[1]==="16"?2:4, M=+sm[2], N=+sm[3], P=+sm[4];
+    $("mdata").textContent=((M*N+N*P+M*P)*b/1048576).toFixed(2)+" MiB"; }
+  else $("mdata").textContent="-";
 }
 // --- cumulative per-group progress -------------------------------------------------
 // busy lane-cycles accumulate; denom is constant per window, so summing the per-window
@@ -486,26 +531,40 @@ for(let g=0;g<64;g++){
   row.title="group "+g+" (x="+(g%8)+", y="+Math.floor(g/8)+")";
   pg.appendChild(row); rows.push({fi,pc});
 }
-let CUM=null;
+let CUM=null, SHARE=0;
+// Absolute progress against the theoretical work, not against the leading group.
+//   MACs done by a group = sum over windows of (util/100 * 64000 lane-cycles) * MAC_PER_LC
+//   MACs the group owes  = M*N*P / 64            (the kernel splits M equally across 64 groups)
+// MAC_PER_LC is 2 for fp16 (two values packed per 32-bit word) and 1 for fp32. Derived from the
+// data, not assumed: across 27 completed arms the implied factor clusters at 1.60-1.90 for fp16
+// and 0.72-0.90 for fp32, i.e. 2 and 1 with a consistent ~15% occupancy overhead -- the probe
+// counts lane OCCUPANCY, not retired MACs, so a finished group reads a little over 100%.
+const DENOM_LC=64000;
 function buildCum(){
   const d=GU[sel.value]||[]; CUM=[];
+  const m=/^fp(\d+)_(\d+)x(\d+)x(\d+)$/.exec(sel.value);
+  const macPerLc = m && m[1]==="16" ? 2 : 1;
+  SHARE = m ? (+m[2])*(+m[3])*(+m[4])/64 : 0;      // MACs this group owes
   const run=new Array(64).fill(0);
-  for(const p of d){ for(let g=0;g<64;g++) run[g]+=p.u[g]; CUM.push(run.slice()); }
+  for(const p of d){
+    for(let g=0;g<64;g++) run[g]+=p.u[g]/100*DENOM_LC*macPerLc;
+    CUM.push(run.slice());
+  }
 }
 function drawProg(){
-  if(!CUM||!CUM.length) return;
+  if(!CUM||!CUM.length||!SHARE) return;
   const k=Math.min(CUM.length-1,+rng.value), c=CUM[k];
-  const mx=Math.max(...c), mn=Math.min(...c);
-  const li=c.indexOf(mx), gi=c.indexOf(mn);
+  const pct=c.map(v=>v/SHARE*100);                 // % of this group's OWN theoretical share
+  const mx=Math.max(...pct), mn=Math.min(...pct);
+  const li=pct.indexOf(mx), gi=pct.indexOf(mn);
   for(let g=0;g<64;g++){
-    const w=mx>0?(c[g]/mx*100):0;
-    rows[g].fi.style.width=w.toFixed(1)+"%";
+    rows[g].fi.style.width=Math.min(100,pct[g]).toFixed(1)+"%";   // bar clamps, number does not
     rows[g].fi.className="fill"+(g===li?" lead":(g===gi?" lag":""));
-    rows[g].pc.textContent=w.toFixed(0)+"%";
+    rows[g].pc.textContent=pct[g].toFixed(0)+"%";
   }
-  $("plead").textContent="g"+li;
-  $("plag").textContent="g"+gi;
-  $("pgap").textContent=(mx>0?((mx-mn)/mx*100).toFixed(1):"0")+"%";
+  $("plead").textContent=`g${li} — ${mx.toFixed(0)}%`;
+  $("plag").textContent=`g${gi} — ${mn.toFixed(0)}%`;
+  $("pgap").textContent=(mx-mn).toFixed(1)+" pp";
   $("pratio").textContent=(mx>0?(mn/mx*100).toFixed(1):"0")+"%";
 }
 function reset(){
@@ -538,16 +597,27 @@ cascade(); reset();
             by.setdefault(r[0], {})[r[1]] = r
         def cyc(d, pr):
             return int(d[pr][3]) if pr in d else None
-        # paired shapes first (that is the point of the table), each group by fp16 cycles
-        order = sorted(by, key=lambda sh: (len(by[sh]) < 2,
-                                           cyc(by[sh], "fp16") or cyc(by[sh], "fp32") or 0))
-        h += ['<div class="tw"><table class="pairs"><tr><th></th><th></th>'
+        # Default order: paired shapes first (the side-by-side comparison is the point), then by
+        # PROBLEM SIZE. Size is a property of the shape, so the order does not reshuffle as arms
+        # land -- sorting by fp16 cycles moved a row every time its other half finished, which is
+        # disorienting on a page you re-read. Any column can be clicked to re-sort.
+        def mnp(sh):
+            try:
+                M, N, P = (int(x) for x in sh.split("x")); return M * N * P
+            except Exception:
+                return 0
+        order = sorted(by, key=lambda sh: (len(by[sh]) < 2, mnp(sh)))
+        h += ['<div class="tw"><table class="pairs">'
+              '<tr><th></th><th></th><th colspan="2" class="grp">working set</th>'
               '<th colspan="5" class="grp">fp16</th>'
               '<th colspan="5" class="grp">fp32</th><th></th></tr>'
-              '<tr><th>shape</th><th>A&#8209;share</th>'
-              '<th class="gs">cycles</th><th>util</th><th>RH</th><th>timeout</th><th>bypass</th>'
-              '<th class="gs">cycles</th><th>util</th><th>RH</th><th>timeout</th><th>bypass</th>'
-              '<th class="gs">fp32/fp16</th></tr>']
+              '<tr id="sorthdr"><th data-c="0">shape</th><th data-c="1">A&#8209;share</th>'
+              '<th class="gs" data-c="2">fp16&nbsp;MiB</th><th data-c="3">fp32&nbsp;MiB</th>'
+              '<th class="gs" data-c="4">cycles</th><th data-c="5">util</th><th data-c="6">RH</th>'
+              '<th data-c="7">timeout</th><th data-c="8">bypass</th>'
+              '<th class="gs" data-c="9">cycles</th><th data-c="10">util</th><th data-c="11">RH</th>'
+              '<th data-c="12">timeout</th><th data-c="13">bypass</th>'
+              '<th class="gs" data-c="14">fp32/fp16</th></tr>']
         for sh in order:
             d = by[sh]
             paired = len(d) == 2
@@ -572,10 +642,49 @@ cascade(); reset();
                 ratio = ('<td class="num ratio gs">%.2f&times;</td>' % (b / float(a))) if a else '<td class="gs"></td>'
             else:
                 ratio = '<td class="num dim gs">&mdash;</td>'
-            h += ['<tr' + ('' if paired else ' class="unpaired"') + '><td><code>' + esc(sh) +
+            d16 = data_mib(sh, "fp16"); d32 = data_mib(sh, "fp32")
+            def k(pr, i):
+                try: return str(float(d[pr][i]))
+                except Exception: return ""
+            keys = [str(mnp(sh)), str(ash), "%.4f" % (d16 or 0), "%.4f" % (d32 or 0),
+                    k("fp16", 3), k("fp16", 4), k("fp16", 5), k("fp16", 6), k("fp16", 7),
+                    k("fp32", 3), k("fp32", 4), k("fp32", 5), k("fp32", 6), k("fp32", 7),
+                    ("%.4f" % (int(d["fp32"][3]) / float(d["fp16"][3]))) if paired and int(d["fp16"][3]) else ""]
+            h += ['<tr' + ('' if paired else ' class="unpaired"') +
+                  ' data-k="' + esc("|".join(keys)) + '"><td><code>' + esc(sh) +
                   '</code></td><td class="num">' + esc(ash) + '</td>' +
+                  '<td class="num gs">' + ("%.2f" % d16 if d16 else "&mdash;") + '</td>' +
+                  '<td class="num">' + ("%.2f" % d32 if d32 else "&mdash;") + '</td>' +
                   cell("fp16") + cell("fp32") + ratio + '</tr>']
         h += ['</table></div>',
+              '<script>(function(){',
+              '''
+const hdr=document.getElementById("sorthdr"); if(!hdr) return;
+const tb=hdr.parentNode, body=[...tb.querySelectorAll("tr")].filter(r=>r.dataset.k!==undefined);
+let col=-1, dir=1;
+hdr.querySelectorAll("th[data-c]").forEach(th=>{
+  th.style.cursor="pointer"; th.title="sort by this column";
+  th.addEventListener("click",()=>{
+    const c=+th.dataset.c;
+    dir = (c===col) ? -dir : 1;         // same column toggles direction, a new column starts ascending
+    col = c;
+    hdr.querySelectorAll("th[data-c]").forEach(x=>x.textContent=x.textContent.replace(/[ \u25b2\u25bc]+$/,""));
+    th.textContent = th.textContent + (dir>0?" \u25b2":" \u25bc");
+    const rows=body.slice().sort((a,b)=>{
+      const A=a.dataset.k.split("|")[c], B=b.dataset.k.split("|")[c];
+      // a missing value (an unfinished half) always sorts last, whichever way the column runs
+      if(A===""&&B==="") return 0;
+      if(A==="") return 1;
+      if(B==="") return -1;
+      const na=parseFloat(A), nb=parseFloat(B);
+      if(!isNaN(na)&&!isNaN(nb)) return (na-nb)*dir;
+      return A.localeCompare(B)*dir;
+    });
+    rows.forEach(r=>tb.appendChild(r));
+  });
+});
+''',
+              '})();</script>',
               '<p class="sub" style="margin-top:10px"><span class="dot">&#9679;</span> killed by '
               '<code>$fatal</code> at <code>mempool_group_mshr.sv:2258</code> after the benchmark '
               '&mdash; the cycle count and utilisation are valid, the spotcheck is not. '

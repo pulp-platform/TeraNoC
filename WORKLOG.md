@@ -11102,3 +11102,38 @@ while the builder exited 0.
 (630,316 vs 37,867) is **suspected MSHR desync, not a regression**: 622 periods with sustained
 `mshr_timeout` against **zero** in the baseline, and desync makes large shapes bimodal on identical
 config. Re-run before quoting it.
+
+## 2026-08-22 22:1x -- reclaim Questa seats held by untracked sims; salvage their results
+
+**Purpose.** mtiverification sat at 199/200 (1 free) against a standing rule to leave 10 free for
+other people. We held 127 of the 200 seats.
+
+**Finding.** Only 88 Questa arms were actually running: a 39-seat gap. The gap was NOT leakage --
+`badist cancel` rewrites the ledger but never kills the simv/vsim. Those sims kept running under a
+`cancelled` record, finished into node-local /scratch2, and then parked at the vsim prompt holding a
+seat forever. badist never fetches a cancelled job, so the work was invisible: hours of simulation
+and a scarce licence spent on results nobody collected.
+
+**Implementation.**
+- Killed 11 zombies that duplicated an arm with a live running copy (no data lost -- the live copy
+  still delivers through the normal path).
+- The pre-kill guard caught 2 that had already FINISHED; salvaged both instead of killing blind.
+- Killed 3 fenga1 corpses with deleted working directories (one was 32 days old), returning ~30 GB.
+- The 2 finished GUI runs of 512x64x256 (7,491 and 255,644 cycles) were parked, not working; killed.
+- Added `scripts/badist/salvage_zombies.py`: finds sims badist no longer tracks, copies any FINISHED
+  transcript to the canonical hardware/s8_<arm>/transcript, and only then releases the seat.
+  Host list comes from the licence server, so the scan is self-limiting.
+
+**Result.** mtiverification 199/200 -> 181/200 (19 free, ours 127 -> 109). **5 completed results
+recovered** that were otherwise unreachable: fp16_4096x64x256, fp16_4096x32x512, fp16_4096x32x128,
+fp16_2048x64x256, fp16_2048x32x512. Campaign 33 -> 39 done. No live simulation was killed.
+
+**Two rules this established.**
+- An unfinished zombie is often FURTHER ALONG than the live copy that replaced it, so it is never
+  killed to reclaim a seat -- only finished ones are, and only after the copy is verified.
+- A salvaged arm has cycles but no `[FPU FINAL]` util: the program finished but the sim never
+  reached `$finish`. Aggregating its `[FPUG]` windows does NOT reproduce that number (they include
+  warm-up, and the dilution differs per arm), so the column stays empty rather than being filled
+  with an incomparable value.
+
+**Status.** Done. 10 zombies still simulating are left alone; the salvage loop will collect them.
