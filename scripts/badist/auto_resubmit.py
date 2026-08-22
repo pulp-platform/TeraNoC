@@ -108,7 +108,18 @@ def main():
     todo = []
     for arm, node in sorted(failed.items()):
         if arm in live:
-            continue                      # already recovered by a later batch
+            continue
+        # A DELIVERED RESULT ENDS IT, whatever the ledger says. An arm can complete via one copy
+        # and still carry a `failed` record from another (a duplicate we killed, a node that died
+        # under a second copy). Resubmitting it burns ~10 h of simulation for an answer already on
+        # disk. fp16_2048x512x128 was resubmitted with `execution took 33959` sitting in its
+        # transcript. The filesystem is the authority here, not the job state.
+        t = os.path.join(ROOT, "hardware", "s8_" + arm, "transcript")
+        try:
+            if os.path.exists(t) and b"execution took" in open(t, "rb").read():
+                continue
+        except OSError:
+            pass                      # already recovered by a later batch
         n = led.get(arm, 0)
         if n >= MAXA:
             print("  SKIP %-26s %d attempts already -- needs a human" % (arm, n))
