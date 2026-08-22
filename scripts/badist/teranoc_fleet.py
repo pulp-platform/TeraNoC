@@ -108,6 +108,7 @@ BACKENDS = {
         "licensed": True,
         "feature": QUESTA_LICENSE_FEATURE,
         "features": QUESTA_LICENSE_FEATURES,   # msimhdlsim AND mtiverification
+        "reserve_default": 10,                 # always leave 10 mtiverification seats for others
         "server": QUESTA_LICENSE_SERVER,
         "dir_image": True,
     },
@@ -500,11 +501,28 @@ def build_spec(args, arms):
         # the whole point is to use the fallback the moment the primary is full, and a
         # governor that held jobs back would reintroduce the waiting we are removing.
         # `max` still caps our total concurrency.
+        # Govern on the SCARCEST feature this backend consumes. Questa needs msimhdlsim (400)
+        # and mtiverification (200); governing on msimhdlsim let us take 150 of the 200
+        # mtiverification seats while the tool reported 158 free and colleagues were locked out.
+        gov_feature = backend["feature"]
+        feats = backend.get("features") or (backend["feature"],)
+        if len(feats) > 1:
+            tight = None
+            for f in feats:
+                r = license_free(f, backend["server"])
+                if r is None:
+                    continue
+                if tight is None or (r[0] - r[1]) < tight[0]:
+                    tight, gov_feature = (r[0] - r[1], f), f
         spec["license"] = {
-            "feature": backend["feature"],
+            "feature": gov_feature,
             "server": backend["server"],
             "max": args.max_parallel,
-            "reserve_for_others": args.reserve_licenses,
+            # Default per backend rather than one number for both: mtiverification has only
+            # 200 seats against VCS's 100-issued/dept-wide pool, and a Questa sweep that does
+            # not hold seats back starves every other Questa user on the site.
+            "reserve_for_others": (args.reserve_licenses if args.reserve_licenses is not None
+                                   else backend.get("reserve_default", 20)),
             # The governor holds its lmstat reading between polls and does NOT decrement it
             # for seats it hands out in between, so a long poll lets a burst overshoot the
             # real headroom. Poll often; the command's own retry loop covers what slips past.
@@ -796,8 +814,9 @@ def main():
                      help="1000 keeps trace-heavy arms off the 100 Mb nodes")
     res.add_argument("--max-parallel", type=int, default=24,
                      help="our own concurrent-arm cap (VCS: also the seat cap)")
-    res.add_argument("--reserve-licenses", type=int, default=20,
-                     help="VCS seats to leave free for the rest of the department")
+    res.add_argument("--reserve-licenses", type=int, default=None,
+                     help="seats to leave free for the rest of the department "
+                          "(default: 20 for VCS, 10 for Questa's 200-seat mtiverification pool)")
     res.add_argument("--env", action="append", default=None,
                      help="shell line to run before the simulator (repeatable)")
     res.add_argument("--license-retries", type=int, default=12,
