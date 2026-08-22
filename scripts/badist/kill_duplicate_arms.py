@@ -55,10 +55,36 @@ def main():
                 run[arm].append((first.get("ts", 0) if first else 0,
                                  os.path.basename(d), jid, last.get("node")))
     killed = 0
+    reachable = {}
+    def node_ok(n):
+        """Is this node answering? Cached per run, one retry -- a single timeout is not evidence.
+        Probed sequentially: a burst of ssh connections trips a rate limit and reports healthy
+        hosts as dead, which here would mean killing the good copy of a pair."""
+        if n in reachable:
+            return reachable[n]
+        ok = False
+        for _ in range(2):
+            try:
+                if subprocess.run(["ssh", "-n", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+                                   "-o", "StrictHostKeyChecking=no", n, "true"],
+                                  capture_output=True, timeout=25).returncode == 0:
+                    ok = True
+                    break
+            except Exception:
+                pass
+        reachable[n] = ok
+        return ok
+
     for arm, v in sorted(run.items()):
         if len(v) < 2:
             continue
         v.sort()
+        # Keep the OLDEST copy -- it has the most progress -- but only if its node is actually
+        # up. fp16_8192x32x256 lost its live copy on badile06 because the "older" copy it was
+        # killed for sat on badile48, which was down: the rule preserved the dead one.
+        while len(v) > 1 and not node_ok(v[0][3]):
+            print("  NODE DOWN %-12s -- not keeping %s's copy there" % (v[0][3], arm))
+            v = v[1:]
         keep = v[0]
         for ts, batch, jid, node in v[1:]:
             key = "%s/%s" % (batch, jid)
