@@ -51,7 +51,7 @@ def main():
         print("  pool is at the reserve line; nothing to add")
         return
 
-    running, queued = set(), []
+    running, queued, on_vcs = set(), [], set()
     for d in sorted(glob.glob(os.path.join(STATE, "*"))):
         jf = os.path.join(d, "jobs.json")
         if not os.path.exists(jf):
@@ -62,11 +62,18 @@ def main():
             continue
         started = {os.path.basename(f)[:-6] for f in glob.glob(os.path.join(d, "jobs", "*.jsonl"))}
         for j in jobs:
-            a = (j.get("meta") or {}).get("arm", "")
+            m = j.get("meta") or {}
+            a = m.get("arm", "")
             if not a.startswith(("fp16_", "fp32_")):
                 continue
             if j["job_id"] not in started:
                 queued.append(a)
+                # ALREADY waiting on VCS -- moving it again just adds another queued copy. Without
+                # this the top-up re-picked the same arms every cycle: 9 arms were submitted twice
+                # before it was caught, because "not running" was true of an arm this very script
+                # had queued 20 minutes earlier.
+                if m.get("backend") == "vcs":
+                    on_vcs.add(a)
                 continue
             last = None
             for ln in open(os.path.join(d, "jobs", j["job_id"] + ".jsonl")):
@@ -80,7 +87,7 @@ def main():
     pick, seen = [], set()
     for a in queued:
         # never move an arm that is already executing, and never one already finished
-        if a in running or a in seen:
+        if a in running or a in seen or a in on_vcs:
             continue
         t = os.path.join(ROOT, "hardware", "s8_" + a, "transcript")
         try:
@@ -92,7 +99,7 @@ def main():
         if len(pick) >= want:
             break
     if not pick:
-        print("  no queued arm is free to move")
+        print("  no queued arm is free to move (%d already waiting on VCS)" % len(on_vcs))
         return
     print("  moving %d queued arm(s) to VCS: %s%s"
           % (len(pick), ", ".join(pick[:4]), " ..." if len(pick) > 4 else ""))
