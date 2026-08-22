@@ -16,17 +16,28 @@ import glob, json, os, re, subprocess, sys
 ROOT = "/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC"
 HW   = os.path.join(ROOT, "hardware")
 STATE = os.path.expanduser("~/badist/state")
-MANIFEST = "/tmp/claude-620771/setB_shapes.txt"
+# In-REPO, deliberately. This lived in a session scratchpad under /tmp and reported "running 0"
+# from any other shell: that dir is mode 0700, session-scoped, and /tmp is node-local, so it is
+# unreadable to the fleet and gone once the session ends. Override with --manifest or S8_MANIFEST.
+MANIFEST = os.environ.get(
+    "S8_MANIFEST", os.path.join(ROOT, "docs/benchmarks/8x8_scaleup/manifest.txt"))
 
 def manifest(path):
-    arms = []
+    """An unreadable manifest is a HARD error. Returning [] made every bucket print 0 -- including
+    "running 0" while 47 arms were live -- which reads as a finished campaign rather than a broken
+    tool. Never let a missing input degrade into a plausible number."""
     try:
-        for ln in open(path):
-            p = ln.split()
-            if len(p) == 4:
-                arms.append("fp%s_%sx%sx%s" % (p[3], p[0], p[1], p[2]))
-    except Exception:
-        pass
+        raw = open(path).read()
+    except OSError as e:
+        sys.exit("campaign_status: cannot read manifest %s (%s)\n"
+                 "  pass --manifest FILE or set S8_MANIFEST" % (path, e.strerror))
+    arms = []
+    for ln in raw.splitlines():
+        p = ln.split()
+        if len(p) == 4:
+            arms.append("fp%s_%sx%sx%s" % (p[3], p[0], p[1], p[2]))
+    if not arms:
+        sys.exit("campaign_status: manifest %s has 0 usable rows (want '<M> <N> <P> <prec>')" % path)
     return arms
 
 def ledger_states():
@@ -109,7 +120,10 @@ def main():
     batches = our_batches()
     if "--fetch" in sys.argv:
         fetch_all(batches)
-    arms = manifest(MANIFEST)
+    mpath = MANIFEST
+    if "--manifest" in sys.argv:
+        mpath = sys.argv[sys.argv.index("--manifest") + 1]
+    arms = manifest(mpath)
     led  = ledger_states()
     buckets = dict(done=[], running=[], pending=[], failed=[], notdispatched=[], wedged=[], noprobe=[])
     for a in arms:
