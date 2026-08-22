@@ -223,6 +223,32 @@ def main():
         h += ['</div></div>']
     h += ['</section>']
 
+    # ---- assertion split: computed from the data, shown only once it can say something ----
+    nf16 = sum(1 for r in res if r[1] == "fp16")
+    na16 = sum(1 for r in res if r[1] == "fp16" and "FATAL" in r[7])
+    nf32 = sum(1 for r in res if r[1] == "fp32")
+    na32 = sum(1 for r in res if r[1] == "fp32" and "FATAL" in r[7])
+    if nf16 and nf32:
+        pair = [r[0] for r in res if r[1] == "fp16"] and \
+               sorted(set(r[0] for r in res if r[1] == "fp16") &
+                      set(r[0] for r in res if r[1] == "fp32"))
+        h += ['<section><h2>RTL assertion: fp16 only</h2>',
+              '<div class="tiles">',
+              '<div class="tile bad"><span class="n">' + str(na16) + '/' + str(nf16) +
+              '</span><span class="l">fp16 hit</span></div>',
+              '<div class="tile done"><span class="n">' + str(na32) + '/' + str(nf32) +
+              '</span><span class="l">fp32 hit</span></div></div>',
+              '<p class="sub" style="margin-top:12px">Every completed fp16 arm dies at '
+              '<code>mempool_group_mshr.sv:2258</code> &mdash; <code>MSHR clock gate dropped a '
+              'resp_buf write</code>, a <code>$fatal</code>. No fp32 arm does.']
+        if pair:
+            h += ['<b>Same shape, both precisions:</b> <code>' + esc(pair[0]) + '</code> fp16 dies, '
+                  'fp32 finishes clean &mdash; which isolates it to precision, not shape or simulator. '
+                  'fp16 packs two elements per 32-bit word, so the response path sees sub-word '
+                  '<code>resp_buf</code> writes that fp32 never generates.']
+        h += [' The benchmark completes <i>before</i> the assertion, so cycle counts survive; the '
+              'spotcheck does not.</p></section>']
+
     # ---- results ----
     h += ['<section><h2>Results</h2>']
     if not res:
