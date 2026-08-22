@@ -41,7 +41,8 @@ def manifest(path):
     return arms
 
 def ledger_states():
-    """arm -> (state, node, batch) across EVERY batch, newest ledger wins."""
+    """arm -> (state, node, batch, ts) across EVERY batch, newest ledger wins.
+    ts is the time of the last state transition, so for a running arm it is its start time."""
     out = {}
     for d in sorted(glob.glob(os.path.join(STATE, "*")), reverse=True):
         jf = os.path.join(d, "jobs.json")
@@ -59,13 +60,14 @@ def ledger_states():
                 try: last = json.loads(ln)
                 except Exception: pass
             if last:
-                term[os.path.basename(f)[:-6]] = (last.get("state"), last.get("node"))
+                term[os.path.basename(f)[:-6]] = (last.get("state"), last.get("node"),
+                                                  last.get("ts"))
         for j in jobs:
             arm = (j.get("meta") or {}).get("arm")
             if not arm or arm in out:
                 continue
-            st, node = term.get(j["job_id"], (j.get("state"), j.get("node")))
-            out[arm] = (st or "?", node or "-", os.path.basename(d))
+            st, node, ts = term.get(j["job_id"], (j.get("state"), j.get("node"), None))
+            out[arm] = (st or "?", node or "-", os.path.basename(d), ts)
     return out
 
 NUM = re.compile(rb"execution took (\d+)")
@@ -106,14 +108,25 @@ def fetch_all(batches):
     NEWEST. A campaign spanning waves therefore needs a loop -- a bare `fetch` silently delivers
     only the last wave, leaving earlier arms' transcripts on the workers."""
     cl = os.path.join(ROOT, "scripts/badist/teranoc_fleet.py")
+    tot = [0, 0]
     for b in batches:
         try:
             r = subprocess.run(["timeout", "300", cl, "fetch", b, "--quiet"],
                                capture_output=True, text=True, cwd=ROOT)
-            got = len([l for l in r.stdout.splitlines() if "->" in l or "extracted" in l])
-            print("  fetched %-34s rc=%d %s" % (b, r.returncode, ("(%d)" % got) if got else ""))
+            # The client prints "extracted N, missing M". Counting MATCHING LINES instead (the
+            # old bug) always yielded 1 and printed "(1)" -- which read as "fetched 1 result"
+            # while the truth was "extracted 0, missing 38".
+            m = re.search(r"extracted (\d+), missing (\d+)", r.stdout)
+            if m:
+                ex, ms = int(m.group(1)), int(m.group(2))
+                tot[0] += ex; tot[1] += ms
+                print("  fetch %-34s rc=%d  extracted %d, missing %d" % (b, r.returncode, ex, ms))
+            else:
+                print("  fetch %-34s rc=%d  (no counters in output)" % (b, r.returncode))
         except Exception as e:
             print("  fetch FAILED %s: %s" % (b, e))
+    print("  fetch total: extracted %d, missing %d  (missing = still running, not an error)"
+          % (tot[0], tot[1]))
 
 def main():
     verbose = "--verbose" in sys.argv
@@ -127,7 +140,7 @@ def main():
     led  = ledger_states()
     buckets = dict(done=[], running=[], pending=[], failed=[], notdispatched=[], wedged=[], noprobe=[])
     for a in arms:
-        st, node, batch = led.get(a, (None, "-", "-"))
+        st, node, batch, ts = led.get(a, (None, "-", "-", None))
         res = disk_result(a)
         if res and res["cycles"]:
             # a completed arm with no probe output is a MEASUREMENT failure, not a quiet run
@@ -140,7 +153,7 @@ def main():
             if res and res["util"] is not None and res["util"] < 0.5 and res["cms"] > 50000:
                 buckets["wedged"].append((a, res, node))
             else:
-                buckets["running"].append((a, res, node))
+                buckets["running"].append((a, ts, node))
         elif st in ("submitted", "dispatched", "pending"):
             buckets["pending"].append((a, st, node))
         else:
@@ -159,10 +172,29 @@ def main():
             print("\n  %s" % label)
             for a, r, node in buckets[k]:
                 print("    %-26s %s" % (a, node))
-    if verbose and buckets["done"]:
-        print("\n  completed:")
-        for a, r, node in sorted(buckets["done"], key=lambda x: x[1]["cycles"]):
-            print("    %-26s %10s cyc  RH=%-6d util=%-6s %s"
-                  % (a, "{:,}".format(r["cycles"]), r["rh"], r["util"], node))
+    if verbose:
+        # --verbose used to print the completed table ONLY, so with nothing finished it added
+        # nothing at all and looked broken. Show every populated bucket instead.
+        if buckets["done"]:
+            print("\n  completed (fastest first):")
+            for a, r, node in sorted(buckets["done"], key=lambda x: x[1]["cycles"]):
+                print("    %-26s %10s cyc  RH=%-6d util=%-6s %s"
+                      % (a, "{:,}".format(r["cycles"]), r["rh"], r["util"], node))
+        if buckets["running"]:
+            now = int(subprocess.run(["date", "+%s"], capture_output=True,
+                                     text=True).stdout.strip() or 0)
+            print("\n  running (longest first) -- cycles are unavailable until an arm finishes:")
+            print("    badist delivers a transcript on completion, so `fetch` reports these as")
+            print("    'missing' while they run. That is expected, not a failure.")
+            for a, ts, node in sorted(buckets["running"], key=lambda x: (x[1] or 0)):
+                el = "%5.1fh" % ((now - ts) / 3600.0) if ts else "    ?"
+                print("    %-26s %s  %s" % (a, el, node))
+        if buckets["pending"]:
+            print("\n  pending (queued, awaiting a licence/slot): %d" % len(buckets["pending"]))
+            for a, st, node in buckets["pending"][:10]:
+                print("    %-26s %s" % (a, st))
+        if buckets["notdispatched"]:
+            nd = [a for a, _, _ in buckets["notdispatched"]]
+            print("\n  NOT dispatched: %d  (first 8: %s)" % (len(nd), ", ".join(nd[:8])))
 
 main()
