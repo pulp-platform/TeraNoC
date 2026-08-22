@@ -16,6 +16,7 @@ cheaper than an arm silently never running.
 
   usage: rescue_orphans.py [--min-idle-min 90] [--dry-run]
 """
+import concurrent.futures as cf
 import glob, json, os, subprocess, sys, time
 
 ROOT   = "/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC"
@@ -34,7 +35,7 @@ def main():
     except Exception:
         led = {}
 
-    running, queued_at = set(), {}
+    running, queued_at, run_node = set(), {}, {}
     for d in sorted(glob.glob(os.path.join(STATE, "*"))):
         jf = os.path.join(d, "jobs.json")
         if not os.path.exists(jf):
@@ -62,6 +63,36 @@ def main():
                     pass
             if last and last.get("state") == "running":
                 running.add(a)
+                if last.get("node"):
+                    run_node.setdefault(last["node"], []).append(a)
+
+    # An arm "running" on an unreachable node is the worst case: the healer needs a live-process
+    # check it cannot make, auto-resubmit only looks at failures, and the queued-arm path below
+    # never sees it. badile48 went down holding one arm and nothing would have noticed.
+    dead = set()
+    if run_node:
+        def alive(n):
+            for _ in range(2):                     # one retry: a single timeout is not evidence
+                try:
+                    if subprocess.run(["ssh", "-n", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+                                       "-o", "StrictHostKeyChecking=no", n, "true"],
+                                      capture_output=True, timeout=25).returncode == 0:
+                        return n, True
+                except Exception:
+                    pass
+                time.sleep(3)
+            return n, False
+        # LIMITED concurrency: 47 simultaneous ssh connections tripped a rate limit and 36 healthy
+        # nodes reported unreachable -- a probe that lies is worse than no probe.
+        with cf.ThreadPoolExecutor(max_workers=8) as ex:
+            for n, ok in ex.map(alive, sorted(run_node)):
+                if not ok:
+                    dead.add(n)
+    for n in sorted(dead):
+        for a in run_node[n]:
+            print("  DEAD NODE %-12s holds %s (marked running)" % (n, a))
+            running.discard(a)
+            queued_at.setdefault(a, 0)             # 0 => older than any threshold, rescue now
 
     now = time.time()
     victims = []
