@@ -96,7 +96,34 @@ compile a probe into the fp32 apps. Both need a rebuild + re-run, which is why t
 
 ---
 
-## 3. The idea-2 `512x256x512` 16.6x figure is OBSOLETE — no action
+## 3. badist: cancelling a never-started job can DISPATCH it — do not "clean up" a dead batch
+
+Observed 2026-08-22 on batch `s8q`. Its controller was killed and its 105 queued jobs cancelled at
+06:55 so the arms could be resubmitted as `s8q2` with a higher parallelism. The cancels reported
+success but wrote **no ledger record** — the jobs still read as "never-started", so there is no way
+to confirm from the ledger that a cancel stuck.
+
+Then jobs from that cancelled set began *starting*, hours later, each one a second copy of an arm
+`s8q2` was already running. **Both copies deliver to the same `hardware/s8_<arm>/` run dir**, so
+this is a data-integrity problem, not just a wasted licence.
+
+The trigger was our own cleanup. Dispatch records `0065`-`0069` are all `attempt=1` and were
+written **13:30:08-13:31:46**, exactly while a second cancel loop was running over the same batch.
+Killing a duplicate then produced a retry (job `0061` reached `attempt=3`), so the cycle was:
+cancel -> dispatch -> duplicate -> kill -> retry -> duplicate.
+
+**What to do instead:** leave a superseded batch alone. It is bounded — `dispatch/` held a stable
+70 records and stopped growing once we stopped touching it. Detect duplicates by outcome
+(`scripts/badist/find_duplicate_arms.py`, `kill_duplicate_arms.py`) rather than trying to prevent
+them at the source, and accept the few that appear.
+
+**Reporting consequence:** killing a duplicate writes a *newer* cancelled record than the surviving
+copy's `running` record, so an arm reads as failed while a healthy copy runs. `campaign_status`
+resolves by latest timestamp and is therefore pessimistic. The truthful test is "does this arm have
+ANY running copy, or a delivered result" — by that measure the campaign stayed intact throughout
+(218 running + 15 delivered + 15 staggering in = 248).
+
+## 4. The idea-2 `512x256x512` 16.6x figure is OBSOLETE — no action
 
 Reported 630,316 cycles against a 37,867 baseline (+1564%). It is **not** evidence about the
 current design: that arm predates the backpressure work, and the issue it exposed is already fixed
