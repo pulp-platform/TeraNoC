@@ -19,6 +19,14 @@ BADIST = os.path.expanduser("~/badist/bin/badist")
 
 def main():
     dry = "--dry-run" in sys.argv
+    # Killing a duplicate does NOT change badist's ledger -- the job still reads "running" with no
+    # process behind it, so the next pass re-detects the same dead copy and reports it again,
+    # forever. Remember what we have already killed and skip it.
+    SEEN = "/tmp/claude-620771/dedup_killed.json"
+    try:
+        seen = set(json.load(open(SEEN)))
+    except Exception:
+        seen = set()
     run = collections.defaultdict(list)
     for d in sorted(glob.glob(os.path.join(STATE, "*"))):
         jf = os.path.join(d, "jobs.json")
@@ -53,10 +61,14 @@ def main():
         v.sort()
         keep = v[0]
         for ts, batch, jid, node in v[1:]:
+            key = "%s/%s" % (batch, jid)
+            if key in seen:
+                continue                      # already killed; the ledger just has not caught up
             print("  DUP %-22s kill %s/%s on %-10s (keeping %s, started earlier)"
                   % (arm, batch[:24], jid, node, keep[1][:24]))
             if dry:
                 continue
+            seen.add(key)
             # DO NOT `badist cancel` here. Measured: this batch's dispatch records grew 70 -> 73
             # at 13:46:57 and 14:18:10, exactly when this loop ran. Cancelling a job in a
             # superseded batch nudges the scheduler into dispatching another of its pending jobs,
@@ -93,6 +105,10 @@ def main():
                 except OSError:
                     pass
             killed += 1
+    try:
+        json.dump(sorted(seen), open(SEEN, "w"))
+    except OSError:
+        pass
     print("  killed %d duplicate cop%s" % (killed, "y" if killed == 1 else "ies") if killed
           else "  no duplicates" if not any(len(v) > 1 for v in run.values()) else "  (dry run)")
 
