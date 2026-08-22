@@ -103,9 +103,12 @@ def main():
         print("  KILLED BY $fatal (cycle count may be real, everything after it is not):")
         for a, w, m in fatals:
             print("    %-26s %s  %s" % (a, w, m))
-    bad = [r for r in rows if "ok(" not in r and "n/a(" not in r]
+    # grp0-only is the probe's NORMAL (broken) behaviour, so it must not land in the
+    # "do not quote" list -- that would flag every fp16 arm forever, the exact blanket the
+    # previous commit removed from the gate. Only a genuinely absent probe belongs here.
+    bad = [r for r in rows if "MISSING" in r.split("\t")[7]]
     if bad:
-        print("  fp16 arms WITHOUT a full spotcheck (do not quote these):")
+        print("  fp16 arms with NO [SPOT] output at all (probe absent or run died before it):")
         for r in bad:
             print("    " + "\t".join(r.split("\t")[:2] + [r.split("\t")[7]]))
     if partial:
