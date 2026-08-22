@@ -34,12 +34,23 @@ def scrape(arm):
         return dict(state="running")
     def tot(tag):
         return sum(int(x) for x in re.findall(tag.encode() + rb"=\+?(\d+)", txt))
-    spot = len(re.findall(rb"^\[SPOT\] g=", txt, re.M))
+    # The kernel's printf reaches the transcript through the UART model, which prefixes it:
+    # the line is "[UART] [SPOT] g= 0 ...", so an anchored ^\[SPOT\] matches ZERO and every arm
+    # reads as MISSING. Same class as the QuestaSim "# " prefix -- a prefix I guarded against and
+    # a second one I did not know about. Do not anchor on a payload tag; allow the carrier.
+    spot = len(re.findall(rb"^(?:\[UART\] )?\[SPOT\] g=", txt, re.M))
+    # A run killed by $fatal still prints "execution took N" if the benchmark finished first, so
+    # the cycle count can be real while everything after it (the spotcheck) is missing. That must
+    # never be recorded as a clean completion.
+    fat = re.search(rb'\$finish called from file [^\n]*?([A-Za-z0-9_]+\.sv)", line (\d+)', txt)
+    fmsg = re.search(rb"(MSHR clock gate dropped[^\n]*|Fatal: [^\n]{0,120})", txt)
     return dict(state="done", cycles=int(cyc[-1]), rh=txt.count(b"RH STUCK"),
-                tmo=tot("mshr_timeout"), bf=tot("bankfull_bypass"), spot=spot)
+                tmo=tot("mshr_timeout"), bf=tot("bankfull_bypass"), spot=spot,
+                fatal=(fat.group(1).decode() + ":" + fat.group(2).decode()) if fat else "",
+                fmsg=fmsg.group(1).decode()[:90] if fmsg else "")
 
 def main():
-    rows, ndone = [], 0
+    rows, ndone, fatals = [], 0, []
     for ln in open(MANI):
         p = ln.split()
         if len(p) != 4:
@@ -52,6 +63,9 @@ def main():
         ndone += 1
         # 64 groups at 8x8: fewer [SPOT] lines than groups means the probe did not complete
         sc = "ok(%d)" % r["spot"] if r["spot"] >= 64 else ("PARTIAL(%d)" % r["spot"] if r["spot"] else "MISSING")
+        if r.get("fatal"):
+            sc += "+FATAL@" + r["fatal"]
+            fatals.append((arm, r["fatal"], r.get("fmsg", "")))
         rows.append("%dx%dx%d\tfp%s\t%d\t%d\t%d\t%d\t%d\t%s\tdone"
                     % (M, N, P, PR, a_share(M), r["cycles"], r["rh"], r["tmo"], r["bf"], sc))
     rows.sort(key=lambda s: int(s.split("\t")[3]))
@@ -60,6 +74,10 @@ def main():
         for r in rows:
             f.write(r + "\n")
     print("  results.tsv: %d completed arm(s)" % ndone)
+    if fatals:
+        print("  KILLED BY $fatal (cycle count may be real, everything after it is not):")
+        for a, w, m in fatals:
+            print("    %-26s %s  %s" % (a, w, m))
     bad = [r for r in rows if "ok(" not in r]
     if bad:
         print("  WITHOUT a full spotcheck (do not quote these):")
