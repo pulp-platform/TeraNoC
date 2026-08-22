@@ -120,6 +120,18 @@ A watcher must emit on every terminal state, not just completion; silence is ind
 "still running".
 
 
+## fp32 arms have NO correctness signal
+
+**All 150 fp16 apps carry the `[SPOT]` probe; 0 of 122 fp32 apps do.** fp32's only other check is
+`MATMUL_VERIFY`, which is off by default because `verify_matrix()` sums each row of C on the scalar
+FP path and wedges core 0. So roughly half the campaign yields **performance data only**, with
+nothing verifying the arithmetic.
+
+`collect_8x8_results.py` records these as `n/a(fp32:no-probe)` rather than `MISSING` — flagging
+them as missing would mark half the grid "do not quote" for a probe that was never compiled in,
+and would bury the actual point, which is that those numbers are unverified. Treat an fp32 cycle
+count as provisional unless an fp16 arm of comparable shape spotchecks clean.
+
 ## The tooling
 
 Four scripts, all batch-agnostic — they key on the run-prefix on disk (`hardware/s8_<arm>/`),
@@ -167,6 +179,14 @@ Every one of these produced a wrong answer here before it was fixed:
 - **A completed arm is not a result.** `collect_8x8_results.py` records the `[SPOT]` group count
   (64 expected at 64 groups) and flags anything less as `PARTIAL`/`MISSING`. A kernel that computes
   garbage faster still wins a sweep.
+- **The `[SPOT]` line is carried by the UART model**, so it reads `[UART] [SPOT] g= 0 ...`. An
+  anchored `^\[SPOT\]` matches zero and every arm reads as MISSING.
+- **`$fatal` is worded per simulator.** VCS: `$finish called from file "<f>.sv", line N.` Questa:
+  `** Fatal: <msg>` then `** Note: $finish : <f>.sv(N)`. A VCS-only pattern reports every Questa
+  arm as a clean completion — and 213 of 248 arms are on Questa. A grep for the VCS wording across
+  203 completed 4x4 runs returned 0, which read as "never fires"; it fires on 7.
+- **A `$fatal`-killed run still prints `execution took N`** if the benchmark finished first, so the
+  cycle count can be real while everything after it — the spotcheck — is silently absent.
 - **`badist logs` takes positional args** — `badist logs <job> <batch>`, not `--job`.
 
 ### Building an ELF for this campaign

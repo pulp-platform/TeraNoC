@@ -55,7 +55,7 @@ def scrape(arm):
                 fmsg=fmsg.group(1).decode()[:90] if fmsg else "")
 
 def main():
-    rows, ndone, fatals = [], 0, []
+    rows, ndone, fatals, unverified = [], 0, [], []
     for ln in open(MANI):
         p = ln.split()
         if len(p) != 4:
@@ -67,7 +67,18 @@ def main():
             continue
         ndone += 1
         # 64 groups at 8x8: fewer [SPOT] lines than groups means the probe did not complete
-        sc = "ok(%d)" % r["spot"] if r["spot"] >= 64 else ("PARTIAL(%d)" % r["spot"] if r["spot"] else "MISSING")
+        # fp32 has NO spotcheck by construction: all 150 fp16 apps carry the [SPOT] probe and
+        # 0 of 122 fp32 apps do, and fp32's only other check (MATMUL_VERIFY) is off by default
+        # because it wedges core 0. Flagging those as MISSING would mark half the campaign
+        # "do not quote" for a probe that was never compiled in -- and, worse, would hide the
+        # real point: fp32 arms carry NO correctness signal at all.
+        if PR == "32":
+            sc = "n/a(fp32:no-probe)"
+            unverified.append(arm)
+        elif r["spot"] >= 64:
+            sc = "ok(%d)" % r["spot"]
+        else:
+            sc = "PARTIAL(%d)" % r["spot"] if r["spot"] else "MISSING"
         if r.get("fatal"):
             sc += "+FATAL@" + r["fatal"]
             fatals.append((arm, r["fatal"], r.get("fmsg", "")))
@@ -83,10 +94,14 @@ def main():
         print("  KILLED BY $fatal (cycle count may be real, everything after it is not):")
         for a, w, m in fatals:
             print("    %-26s %s  %s" % (a, w, m))
-    bad = [r for r in rows if "ok(" not in r]
+    bad = [r for r in rows if "ok(" not in r and "n/a(" not in r]
     if bad:
-        print("  WITHOUT a full spotcheck (do not quote these):")
+        print("  fp16 arms WITHOUT a full spotcheck (do not quote these):")
         for r in bad:
             print("    " + "\t".join(r.split("\t")[:2] + [r.split("\t")[7]]))
+    if unverified:
+        print("  %d fp32 arm(s) have NO correctness signal at all (no [SPOT] probe in any fp32"
+              " app; MATMUL_VERIFY is off because it wedges core 0). Perf data only."
+              % len(unverified))
 
 main()
