@@ -11137,3 +11137,41 @@ fp16_2048x64x256, fp16_2048x32x512. Campaign 33 -> 39 done. No live simulation w
   with an incomparable value.
 
 **Status.** Done. 10 zombies still simulating are left alone; the salvage loop will collect them.
+
+## 2026-08-23 00:2x -- a full node-local disk was silently destroying finished simulations
+
+**Symptom.** `packaging failed` was the campaign's single largest failure mode: 24 occurrences,
+against 14 `exit status 12`, 7 timeouts and 6 `exit status 218`.
+
+**What it is.** badist's worker packages results with `tar -cf - | zstd -o $OUTDIR/$JOB.tar.zst`
+onto node-local scratch (`~/badist/share/worker.sh:139`). Packaging is the LAST step, so on a full
+disk the simulation runs to completion and is then thrown away: wall times on the lost jobs run to
+9,434 / 19,552 / 22,200 / 24,344 s.
+
+**The misread, recorded because it was convincing.** 18 of the 24 failures were on shapes with a
+>=2048 dimension, which reads as a size limit on big results. It is confounded: long arms are
+simply likelier to be resident when a node fills up. Grouping by NODE instead showed 16 of 24 on
+**larain2 alone**, whose 7 TB /scratch2 had **224 KB free**. Group by machine before believing a
+shape story.
+
+**Fix.** Reclaimed our 83 GB of spent run dirs on larain2 (1 GB -> 83 GB free; the other 6.9 TB is
+other users' data). Added `scripts/badist/scratch_guard.py`, which checks every node we have work
+on and, when one is low, reclaims OUR spent directories behind three guards: no live process owns
+the dir, the owning job is terminal in the ledger, and a FINISHED-but-undelivered transcript is
+salvaged first. It also rescues finished results straight off an at-risk disk, which converts a
+guaranteed loss into a delivered result.
+
+**Two bugs found while testing it, both of the same kind -- a check that silently covers nothing.**
+- The scratch path DIFFERS BY MACHINE: larain/fenga mount `/scratch2`, the badile fleet mounts
+  `/scratch`. The first version hardcoded `/scratch2` and so skipped all 42 badile nodes, including
+  badile13 with four packaging failures. It reported "checked 47 nodes" while examining 5.
+- The same scratch dir holds OTHER campaigns (`bp-revive`, `reuse32`, `teranoc/qpilot`). Their arm
+  names look mangled (`32_512x64x512`, `qpilot`) but are real; salvaging them would have filed them
+  under `hardware/s8_<arm>/` and reclaiming their dirs would have destroyed another sweep's work.
+  Now restricted to `^fp(16|32)_`.
+
+**Result.** Caught badile44 at 21 GB free with one arm exposed (`fp32_2048x32x512`). Its disk is
+held by other users, so the guard cannot free it -- it now says so explicitly and names the arms
+that will lose results, instead of reporting a clean sweep.
+
+**Status.** Done, on a 20-minute loop.
