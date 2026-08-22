@@ -88,7 +88,11 @@ def main():
         print("  --dry-run: not submitting")
         return
     cmd = [CLIENT, "submit", "--arms", lst, "--backend", "questa", "--run-prefix", "s8",
-           "--name", "s8auto", "--max-parallel", "20", "--mem-gb", "18",
+           # STAGGER, same reason as heal_stuck_arms.py: arms that start together contend on
+           # the shared 17 GB Questa library over NFS and hang in design load. The s8auto batch
+           # submitted at 20 and the healer then had to clear 11 of its arms. 6 at a time lets
+           # each finish loading before the next begins.
+           "--name", "s8auto", "--max-parallel", "6", "--mem-gb", "18",
            "--est-runtime-s", "90000", "--force"]
     p = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                          text=True, start_new_session=True)
