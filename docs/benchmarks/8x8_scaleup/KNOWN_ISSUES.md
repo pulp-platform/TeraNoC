@@ -112,10 +112,27 @@ written **13:30:08-13:31:46**, exactly while a second cancel loop was running ov
 Killing a duplicate then produced a retry (job `0061` reached `attempt=3`), so the cycle was:
 cancel -> dispatch -> duplicate -> kill -> retry -> duplicate.
 
-**What to do instead:** leave a superseded batch alone. It is bounded — `dispatch/` held a stable
-70 records and stopped growing once we stopped touching it. Detect duplicates by outcome
-(`scripts/badist/find_duplicate_arms.py`, `kill_duplicate_arms.py`) rather than trying to prevent
-them at the source, and accept the few that appear.
+**The mechanism, measured (an earlier guess here was wrong).** It is not the cancel: dispatch
+records appeared at 14:33:25 and 14:48:22, exactly 15 minutes apart — the dedup loop's interval,
+after the cancel had already been removed from it. **Removing a running job frees a slot and badist
+immediately dispatches the next pending job of that batch into it.** Any removal refills the queue,
+so the batch cannot be drained by killing its jobs faster.
+
+**What to do instead: leave a superseded batch alone and let it drain.** It is self-limiting —
+88 undispatched jobs at ~2 per dedup cycle is ~11 h, after which s8q is exhausted and quiet. The
+cost is ~2 slots of ~230 held for up to 15 minutes each, under 1% of capacity.
+
+**Why not cancel the whole batch:** its 60 originally-running arms are NOT in `s8q2` (that was
+built only from the never-started set), so a batch-level cancel would kill 60 unique arms to save
+a 1% overhead.
+
+**Collision risk is low but not zero.** Both copies write `hardware/s8_<arm>/`, so a duplicate that
+*completed* before the next dedup pass could overwrite a good result. The fastest arm measured is
+5,315 cycles ≈ hours of wall-clock at 12-19 cyc/s, against a 15-minute dedup interval — so a
+duplicate is killed long before it can deliver. Shorten the dedup interval if faster arms appear.
+
+Detect duplicates by outcome (`scripts/badist/find_duplicate_arms.py`,
+`kill_duplicate_arms.py`) rather than trying to prevent them at the source.
 
 **Reporting consequence:** killing a duplicate writes a *newer* cancelled record than the surviving
 copy's `running` record, so an arm reads as failed while a healthy copy runs. `campaign_status`
