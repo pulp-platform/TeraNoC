@@ -120,6 +120,21 @@ A watcher must emit on every terminal state, not just completion; silence is ind
 "still running".
 
 
+## Correctness coverage is far thinner than the probe suggests
+
+Two independent gaps, both found on the first three completions:
+
+**fp16: the `[SPOT]` loop checks GROUP 0 ONLY.** It is written to loop
+`g = 0 .. active_groups-1` (64 at 8x8, 16 at 4x4), but every observed arm emits exactly one line.
+Core 0 wedges on the second iteration, reading group 1's remote C address, and never returns —
+proven on an assertion-free 4x4 run that then idled **840,000 further cycles** (113k -> 953k) with
+every counter at zero and no second line. So one group of 64 is checked, and the failure mode the
+probe was written to catch (a single desynchronised group) is exactly what it cannot see.
+
+Do not gate on 64. A threshold the probe cannot reach is not a correctness signal — it marks every
+fp16 arm PARTIAL forever, which reads as "the campaign is broken" instead of "the test is".
+`collect_8x8_results.py` records `grp0-only(N)`.
+
 ## fp32 arms have NO correctness signal
 
 **All 150 fp16 apps carry the `[SPOT]` probe; 0 of 122 fp32 apps do.** fp32's only other check is

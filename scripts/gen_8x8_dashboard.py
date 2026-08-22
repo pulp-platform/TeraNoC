@@ -171,9 +171,11 @@ def main():
           'and fp32\'s only other check <code>MATMUL_VERIFY</code> is off because it wedges core 0. '
           'Roughly half this grid is <b>performance data only</b> &mdash; treat an fp32 cycle count '
           'as provisional unless an fp16 arm of comparable shape spotchecks clean.</li>',
-          '<li>For fp16, an arm without a full 64-group spotcheck is not a result. A run killed by '
-          '<code>$fatal</code> still prints its cycle count, so the number can be real while '
-          'everything after it &mdash; the spotcheck &mdash; is absent.</li>',
+          '<li><b>fp16 is verified on group 0 only.</b> The <code>[SPOT]</code> loop is written to '
+          'cover all 64 groups but always emits one line &mdash; core 0 wedges on the second '
+          'iteration reading group 1\'s remote C address. So the failure it was written to catch '
+          '(one desynchronised group) is the one it cannot see. A run killed by <code>$fatal</code> '
+          'still prints its cycle count, so the number can be real while everything after it is absent.</li>',
           '<li><b>L2 bandwidth per group halves at 8&times;8</b> (64 groups / 32 channels, against '
           '16/16 at 4&times;4), so a cross-mesh loss mixes mesh scaling with that halving.</li>',
           '<li>Record <b>RH per arm</b>: it gates whether backpressure can help a shape at all.</li>',

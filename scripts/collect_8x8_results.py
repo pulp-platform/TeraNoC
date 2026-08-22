@@ -55,7 +55,7 @@ def scrape(arm):
                 fmsg=fmsg.group(1).decode()[:90] if fmsg else "")
 
 def main():
-    rows, ndone, fatals, unverified = [], 0, [], []
+    rows, ndone, fatals, unverified, partial = [], 0, [], [], []
     for ln in open(MANI):
         p = ln.split()
         if len(p) != 4:
@@ -76,9 +76,18 @@ def main():
             sc = "n/a(fp32:no-probe)"
             unverified.append(arm)
         elif r["spot"] >= 64:
-            sc = "ok(%d)" % r["spot"]
+            sc = "ok(%d)" % r["spot"]           # never yet observed -- see below
+        elif r["spot"] >= 1:
+            # The probe loops g=0..active_groups-1 (64 at 8x8, 16 at 4x4) but ALWAYS emits exactly
+            # one line: core 0 wedges reading group 1's remote C address and never returns. Proven
+            # on an assertion-free 4x4 run, which idled 840k further cycles (113k->953k) with every
+            # counter at zero and no second line. So real coverage is GROUP 0 ONLY.
+            # Gating on 64 would mark every fp16 arm PARTIAL forever -- a threshold the probe
+            # cannot reach is not a correctness signal, it is a broken test reported as data.
+            sc = "grp0-only(%d)" % r["spot"]
+            partial.append(arm)
         else:
-            sc = "PARTIAL(%d)" % r["spot"] if r["spot"] else "MISSING"
+            sc = "MISSING"
         if r.get("fatal"):
             sc += "+FATAL@" + r["fatal"]
             fatals.append((arm, r["fatal"], r.get("fmsg", "")))
@@ -99,6 +108,9 @@ def main():
         print("  fp16 arms WITHOUT a full spotcheck (do not quote these):")
         for r in bad:
             print("    " + "\t".join(r.split("\t")[:2] + [r.split("\t")[7]]))
+    if partial:
+        print("  %d fp16 arm(s) verified on GROUP 0 ONLY: the [SPOT] loop hangs core 0 after the"
+              " first group, so 1 of %s groups is checked, not all of them." % (len(partial), 64))
     if unverified:
         print("  %d fp32 arm(s) have NO correctness signal at all (no [SPOT] probe in any fp32"
               " app; MATMUL_VERIFY is off because it wedges core 0). Perf data only."
