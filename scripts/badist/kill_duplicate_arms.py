@@ -56,8 +56,11 @@ def main():
                   % (arm, batch[:24], jid, node, keep[1][:24]))
             if dry:
                 continue
-            subprocess.run([BADIST, "cancel", batch, "--job", jid],
-                           capture_output=True, timeout=60)
+            # DO NOT `badist cancel` here. Measured: this batch's dispatch records grew 70 -> 73
+            # at 13:46:57 and 14:18:10, exactly when this loop ran. Cancelling a job in a
+            # superseded batch nudges the scheduler into dispatching another of its pending jobs,
+            # which becomes the next duplicate -- so the cleanup fed the problem it removes.
+            # Killing the process alone ends this copy without touching the batch's queue.
             d = "/scratch/zexifu_cache/badist/run/%s/%s" % (batch, jid)
             # cancel kills the wrapper only; the simulator survives it
             subprocess.run(["ssh", "-n", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
