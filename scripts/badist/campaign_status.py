@@ -40,6 +40,101 @@ def manifest(path):
         sys.exit("campaign_status: manifest %s has 0 usable rows (want '<M> <N> <P> <prec>')" % path)
     return arms
 
+def by_node():
+    """Per-MACHINE view: which arms sit on which node, and whether they are actually getting CPU.
+
+    Needed because "running" is not "progressing": badist reports a starved job (CPU share below
+    min_efficiency) but does NOT move it unless migrate_when_starved is set, so an arm can hold a
+    licence and 16 GiB at 0% of a core indefinitely while every count calls it healthy.
+    """
+    arms = {}
+    for d in sorted(glob.glob(os.path.join(STATE, "*"))):
+        jf = os.path.join(d, "jobs.json")
+        if not os.path.exists(jf):
+            continue
+        try:
+            jobs = json.load(open(jf))
+        except Exception:
+            continue
+        ids = {j["job_id"]: (j.get("meta") or {}).get("arm", "") for j in jobs}
+        for f in glob.glob(os.path.join(d, "jobs", "*.jsonl")):
+            jid = os.path.basename(f)[:-6]
+            arm = ids.get(jid, "")
+            if not arm.startswith(("fp16_", "fp32_")):
+                continue
+            last, frac, note = None, None, ""
+            for ln in f and open(f):
+                try:
+                    r = json.loads(ln)
+                except Exception:
+                    continue
+                last = r
+                if r.get("starved_cpu_frac") is not None:
+                    frac = r["starved_cpu_frac"]; note = r.get("note", "")
+            if not last:
+                continue
+            if last.get("state") == "running":
+                arms[arm] = (last.get("node", "?"), frac, note, jid,
+                             os.path.basename(d), last.get("ts"))
+    return arms
+
+def print_by_node():
+    arms = by_node()
+    loads = {}
+    try:
+        out = subprocess.run(["timeout", "90", os.path.expanduser("~/badist/bin/badist"), "nodes"],
+                             capture_output=True, text=True).stdout
+        for ln in out.splitlines()[2:]:
+            f = ln.split()
+            if len(f) >= 4 and not f[0].startswith("-"):
+                loads.setdefault(f[0], (f[1], f[2], f[3]))
+    except Exception:
+        pass
+    per = {}
+    for arm, (node, frac, note, jid, batch, ts) in arms.items():
+        per.setdefault(node, []).append((arm, frac))
+    print("\n  RUNNING ARMS BY MACHINE (%d arms on %d nodes)" % (len(arms), len(per)))
+    print("    %-12s %5s %8s %5s  %s" % ("NODE", "CORES", "LOAD", "ARMS", "STARVED (cpu share)"))
+    nstarved = 0
+    for node in sorted(per, key=lambda n: -len(per[n])):
+        c, l, m = loads.get(node, ("?", "?", "?"))
+        st = [(a, f) for a, f in per[node] if f is not None]
+        nstarved += len(st)
+        lab = ", ".join("%s %.0f%%" % (a, f * 100) for a, f in st[:2]) if st else ""
+        if len(st) > 2:
+            lab += " +%d more" % (len(st) - 2)
+        print("    %-12s %5s %8s %5d  %s" % (node, c, l, len(per[node]), lab))
+    print("    -- %d arm(s) carry a starvation record. That flag is STICKY and HISTORICAL:" % nstarved)
+    print("       badist writes it when it detects a low CPU share but writes nothing when the job")
+    print("       recovers, so it does not mean the arm is starved NOW. A Questa arm reads a 17 GB")
+    print("       shared library over NFS at startup and is legitimately ~0%% CPU for many minutes.")
+    print("       Use --by-node --probe for LIVE CPU before acting on any of these.")
+
+def probe_live(nodes):
+    """Ask the nodes themselves what our simulators are actually doing right now.
+
+    The ledger cannot answer this: its starvation record is written once, at detection, and never
+    retracted. Acting on it would have cancelled ~20 arms that were running at 83-99%.
+    """
+    import concurrent.futures as cf
+    def one(n):
+        cmd = ("ps -u $(whoami) -o stat=,pcpu=,etime=,comm= 2>/dev/null "
+               "| grep -E 'vsimk|mempool_simvopt|simv' || true")
+        try:
+            r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
+                                "-o", "StrictHostKeyChecking=no", n, cmd],
+                               capture_output=True, text=True, timeout=30)
+            rows = [l.split(None, 3) for l in r.stdout.strip().splitlines() if l.strip()]
+            cpus = [float(x[1]) for x in rows if len(x) >= 2]
+            return n, cpus
+        except Exception:
+            return n, None
+    out = {}
+    with cf.ThreadPoolExecutor(max_workers=12) as ex:
+        for n, c in ex.map(one, nodes):
+            out[n] = c
+    return out
+
 def ledger_states():
     """arm -> (state, node, batch, ts) across EVERY batch, newest ledger wins.
     ts is the time of the last state transition, so for a running arm it is its start time."""
@@ -130,6 +225,29 @@ def fetch_all(batches):
 
 def main():
     verbose = "--verbose" in sys.argv
+    if "--by-node" in sys.argv:
+        print_by_node()
+        if "--probe" in sys.argv:
+            arms = by_node()
+            nodes = sorted({v[0] for v in arms.values()})
+            print("\n  LIVE CPU probe (%d nodes, ssh):" % len(nodes))
+            live = probe_live(nodes)
+            hot = cold = dead = 0
+            for n in nodes:
+                c = live.get(n)
+                if c is None:
+                    dead += 1; print("    %-12s unreachable" % n); continue
+                if not c:
+                    dead += 1; print("    %-12s NO SIM PROCESS (%d arms claimed)"
+                                     % (n, sum(1 for v in arms.values() if v[0] == n))); continue
+                low = [x for x in c if x < 20.0]
+                hot += len(c) - len(low); cold += len(low)
+                flag = "  <-- %d below 20%%" % len(low) if low else ""
+                print("    %-12s %2d proc  cpu%% %s%s"
+                      % (n, len(c), " ".join("%.0f" % x for x in sorted(c, reverse=True)[:8]), flag))
+            print("    -- %d process(es) >=20%% CPU, %d below, %d node(s) with none/unreachable"
+                  % (hot, cold, dead))
+        return
     batches = our_batches()
     if "--fetch" in sys.argv:
         fetch_all(batches)

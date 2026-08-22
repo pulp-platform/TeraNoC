@@ -1,6 +1,13 @@
-# 8x8 scale-up sweep — iso-work A-share ladder
+# 8x8 scale-up sweep — all 248 feasible shapes
 
-**Dispatched** 2026-08-22 ~06:00 · **batch** see `batch.txt` · **status** running
+**Dispatched** 2026-08-22 ~06:00 · **batches** see `batch.txt` · **status** running
+
+Started as a 9-arm iso-work A-share ladder and was extended to the **full 248-shape grid**; the
+ladder is now a subset (see `docs/8x8_sweep_plan.md` §6a). Split across two simulators because
+neither licence pool alone covers the grid: the **35 largest shapes on VCS** (1.6x faster at
+19.4 cyc/s, and half the memory) and the remaining **213 on Questa** (312 of 400 seats free
+against VCS's 41). VCS and Questa are validated to produce identical cycle counts, so the two
+pools' arms merge into one dataset.
 
 ## What this measures
 
@@ -68,9 +75,12 @@ fleet      badist, backend=vcs, --mem-gb 12   (measured peak 7.80 GiB)
 
 ## Files
 
+- `manifest.txt` — the 248 shapes, `<M> <N> <P> <prec>`. **In-repo on purpose**: it used to live
+  in a session scratchpad under `/tmp`, which is mode 0700, session-scoped and node-local, so
+  every other shell read 0 arms and the status tool printed a plausible all-zero campaign.
 - `results.tsv` — one row per arm: shape, precision, A-share, cycles, RH, timeouts, spotcheck
 - `raw/<arm>.transcript.gz` — fetched transcripts
-- `batch.txt` — badist batch id
+- `batch.txt` — badist batch ids
 
 Full design rationale, feasibility derivation and the 166 runnable shapes: `docs/8x8_sweep_plan.md`.
 
@@ -108,3 +118,73 @@ last two exist because both failure modes **look like success**:
 
 A watcher must emit on every terminal state, not just completion; silence is indistinguishable from
 "still running".
+
+
+## The tooling
+
+Four scripts, all batch-agnostic — they key on the run-prefix on disk (`hardware/s8_<arm>/`),
+which every wave writes to regardless of which batch launched it.
+
+| script | does |
+|---|---|
+| `scripts/badist/campaign_status.py` | campaign state across every batch |
+| `scripts/collect_8x8_results.py` | delivered transcripts → `results.tsv` |
+| `scripts/gen_8x8_dashboard.py` | `results.tsv` + live state → the published dashboard HTML |
+| `scripts/badist/auto_resubmit.py` | resubmits failed arms, capped at 3 attempts each |
+
+```sh
+scripts/badist/campaign_status.py                    # done/running/queued/failed/WEDGED
+scripts/badist/campaign_status.py --fetch            # fetch EVERY batch first, then summarise
+scripts/badist/campaign_status.py --verbose          # per-arm detail for every populated bucket
+scripts/badist/campaign_status.py --by-node          # arms per machine, with node load
+scripts/badist/campaign_status.py --by-node --probe  # + LIVE CPU per process over ssh (~30 s)
+scripts/collect_8x8_results.py                       # rebuild results.tsv
+scripts/gen_8x8_dashboard.py                         # regenerate the artifact HTML
+scripts/badist/auto_resubmit.py --dry-run            # what it would resubmit
+```
+
+### Things that read as data but are not
+
+Every one of these produced a wrong answer here before it was fixed:
+
+- **`badist status` and `fetch` are single-batch.** `status` with no argument reports the *newest*
+  batch (it showed 38 of 47 live arms); `fetch` likewise resolves one, so a bare `fetch` delivers
+  the last wave and strands earlier waves' transcripts on the workers. Pinning a batch id in a
+  watcher is not a fix either — ids multiply per wave, so coverage lapses silently on the next
+  dispatch. `campaign_status.py --fetch` loops all batches.
+- **`starved_cpu_frac` in the ledger is STICKY.** badist writes it when it *detects* a low CPU
+  share and never retracts it when the job recovers. Reading it as current state showed ~20 arms
+  "at 0% CPU"; a live probe found them at 83-99%. They had been I/O-bound loading the 17 GB Questa
+  library over NFS at startup. **Use `--by-node --probe` before acting on any starvation claim** —
+  and note `migrate_when_starved` is deliberately off, since migrating restarts an arm from zero.
+- **A wedge burns 100% CPU.** CPU share cannot distinguish a wedged arm from a healthy one. The
+  strict signature is `reqs_by_class` **all-zero** plus `busy=0/…` lane-cycles; low `util` alone
+  false-positives on small shapes, whose healthy twin sits at the same 0.4-1%.
+- **QuestaSim prefixes every transcript line with `# `.** With 213 of 248 arms on Questa, an
+  anchored pattern like `^\[FPU\]` matches zero lines on each of them, and those arms read as
+  "no data" rather than "wrong filter". `collect_8x8_results.py` strips the prefix once at read
+  time; do the same in anything new.
+- **A completed arm is not a result.** `collect_8x8_results.py` records the `[SPOT]` group count
+  (64 expected at 64 groups) and flags anything less as `PARTIAL`/`MISSING`. A kernel that computes
+  garbage faster still wins a sweep.
+- **`badist logs` takes positional args** — `badist logs <job> <batch>`, not `--job`.
+
+### Building an ELF for this campaign
+
+Always through the set builders, or with their env exported. `scripts/gen_gemm_shape_app.sh`
+defaults to `config=terapool_spatz4_fpu` — a **256-core 4x4** build — so omitting `CONFIG` yields
+a wrong-mesh binary carrying an 8x8 shape name, with no error:
+
+```sh
+export CONFIG=terapool_spatz4_fpu_8x8 OUT_PREFIX=s8_ MERGE_REQS=16
+export EXTRA_DEFINES="-DMATMUL_SPOTCHECK=1"
+```
+
+Build **serially**. `software/runtime/*.o` is a shared path the Makefile deletes after each link,
+so concurrent links steal each other's objects (`no such file or directory: crt0.S.o`). It is not
+safe at parallelism 2 either — that lost 12 of 248 arms while reporting exit 0.
+
+To verify a deployed ELF is really 8x8, rebuild its shape with `CONFIG` set explicitly and
+`cmp` the two files; the compile log's `-DNUM_CORES=1024 -DNUM_GROUPS=64` is the other check.
+(The `config=minpool_spatz4_fpu` line in those logs is a nested `update_opcodes` sub-make and
+means nothing.)

@@ -195,6 +195,39 @@ arm dispatched to the fleet is reported as `on-fleet` rather than mistaken for a
 local run — and a genuinely dead arm (4 KB transcript, no process, untouched for
 15 minutes) is called out in red rather than reported as "still loading".
 
+For a campaign spanning several batches, `workload.sh` is per-arm; the campaign-level view is
+`scripts/badist/campaign_status.py` (see `docs/benchmarks/8x8_scaleup/README.md`). Both exist
+because **`badist status` and `badist fetch` are single-batch** — with no argument they resolve
+the *newest* batch, so a bare `status` under-reports a multi-wave campaign and a bare `fetch`
+strands earlier waves' results on the workers.
+
+### "running" is not "progressing"
+
+Three separate ways a job can look healthy while doing nothing, all of which have bitten here:
+
+- **The ledger's `starved_cpu_frac` is sticky.** badist writes it when it detects a low CPU share
+  and never retracts it when the job recovers. Reading it as current state showed ~20 arms "at 0%
+  CPU" that a live probe found at 83-99% — they had been I/O-bound loading a 17 GB Questa library
+  over NFS at startup. Probe the node before believing it:
+  ```sh
+  scripts/badist/campaign_status.py --by-node --probe     # live CPU per process, over ssh
+  ```
+  Note `migrate_when_starved` is off by default *deliberately*: migrating restarts the job from
+  zero, which for a long arm costs more than the starvation. badist reports and leaves it.
+- **A wedged simulator burns 100% CPU.** CPU share cannot tell a wedge from healthy work. Read the
+  transcript: `reqs_by_class` all-zero with `busy=0/…` lane-cycles is the signature. Low `util`
+  alone is not — small shapes sit at 0.4-1% when perfectly healthy.
+- **A node draining is normal.** `draining <node> (user X logged in); running job continues` means
+  the node stopped accepting *new* work, not that anything failed. Combined with
+  `max_occupied_load_frac`, this is usually why arms sit queued — it is the fleet protecting
+  colleagues' desktops, not a stall to fix.
+
+To read a running job's output without waiting for delivery — note the **positional** args:
+
+```sh
+badist logs <job-id> <batch-id> -n 4000     # NOT --job; that is an error
+```
+
 ## Being a good guest
 
 These are colleagues' interactive desktops. badist already runs everything at
