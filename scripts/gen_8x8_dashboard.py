@@ -213,7 +213,7 @@ def main():
          '(idea-2 + backpressure + bit-width fix) on the 1024-core, 64-group mesh. '
          'Measures whether the group-MSHR design holds as the mesh scales 4&times;.</p>',
          '<div class="meta"><span>1024 cores &middot; 64 groups</span>'
-         '<span>VCS (35 largest) + Questa (213)</span>'
+         '<span>VCS + Questa, licence-governed</span>'
          '<span>' + str(done) + '/' + str(tot) + ' complete</span>'
          '<span>updated ' + stamp + '</span></div></header>']
 
@@ -245,10 +245,17 @@ def main():
           '<li><b>L2 bandwidth per group halves at 8&times;8</b> (64 groups / 32 channels, against '
           '16/16 at 4&times;4), so a cross-mesh loss mixes mesh scaling with that halving.</li>',
           '<li>Record <b>RH per arm</b>: it gates whether backpressure can help a shape at all.</li>',
-          '<li>The <b>M=128 family cannot run here</b> (<code>M % 512 == 0</code>), so the largest '
-          '4&times;4 results are not portable without changing <code>KERNEL_SIZE</code>.</li>',
-          '<li>213 concurrent sims share the fleet, so wall-clock per arm is contended; '
-          'cycle counts are unaffected.</li></ol></div>']
+          '<li><b><code>M % 512 == 0</code> comes from the build, not the mesh.</b> It follows from '
+          '<code>#define KERNEL_SIZE 8</code>; the kernel also supports 4 and 2, and the real rule is '
+          '<code>(M/64) % kernel_size == 0</code>. Building with <code>-DKERNEL_SIZE=4</code> would '
+          'admit the M=256 family and <code>=2</code> the M=128 family &mdash; at a different LMUL and '
+          'burst regime, so such arms are a different operating point rather than the same '
+          'measurement at a new shape.</li>',
+          '<li>Concurrency was <b>deliberately reduced</b> partway through: a Questa run holds an '
+          '<code>mtiverification</code> seat, that pool has only 200, and we were holding 150 of '
+          'them. Submits now reserve 10 seats for other users, so arms queue behind the licence '
+          'rather than starving the department. Wall-clock per arm is contended; <b>cycle counts '
+          'are unaffected</b>.</li></ol></div>']
 
     # ---- ladder ----
     h += ['<section><h2>A-share ladder</h2><p class="sub" style="margin-bottom:16px">'
@@ -311,6 +318,38 @@ def main():
         h += [' The benchmark completes <i>before</i> the assertion, so cycle counts survive; the '
               'spotcheck does not.</p></section>']
 
+    # ---- what the data says so far (computed, so it cannot go stale) ----
+    if len(res) >= 4:
+        def f(r, i): return float(r[i])
+        best = max(res, key=lambda r: f(r, 4)); worst = min(res, key=lambda r: f(r, 4))
+        pairs = {}
+        for r in res:
+            pairs.setdefault(r[0], {})[r[1]] = r
+        both = [(k, v) for k, v in pairs.items() if len(v) == 2]
+        ratios = [int(v["fp32"][3]) / float(v["fp16"][3]) for _, v in both if int(v["fp16"][3])]
+        n16 = sum(1 for r in res if r[1] == "fp16")
+        a16 = sum(1 for r in res if r[1] == "fp16" and "FATAL" in r[8])
+        n32 = sum(1 for r in res if r[1] == "fp32")
+        a32 = sum(1 for r in res if r[1] == "fp32" and "FATAL" in r[8])
+        h += ['<section><h2>What the data says so far</h2><div class="tiles">',
+              '<div class="tile"><span class="n">%s%%</span><span class="l">best util &mdash; %s %s</span></div>'
+              % (best[4], esc(best[1]), esc(best[0])),
+              '<div class="tile"><span class="n">%s%%</span><span class="l">worst util &mdash; %s %s</span></div>'
+              % (worst[4], esc(worst[1]), esc(worst[0]))]
+        if ratios:
+            h += ['<div class="tile"><span class="n">%.2f&times;</span>'
+                  '<span class="l">fp32 / fp16, %d matched pair%s</span></div>'
+                  % (sum(ratios) / len(ratios), len(ratios), "" if len(ratios) == 1 else "s")]
+        h += ['<div class="tile bad"><span class="n">%d/%d</span>'
+              '<span class="l">fp16 hit the assertion</span></div>' % (a16, n16),
+              '<div class="tile done"><span class="n">%d/%d</span>'
+              '<span class="l">fp32 hit it</span></div>' % (a32, n32),
+              '</div><p class="sub" style="margin-top:14px">Utilisation spans a <b>%.1f&times;</b> range '
+              'across shapes. Read that with care: the earlier 8&times;8 campaign recorded 94.1%% when '
+              'correctly provisioned against 20.8&ndash;28.2%% under-provisioned, so a low number is not '
+              'automatically a shape effect &mdash; check the arm\'s MSHR settings before concluding.</p>'
+              '</section>' % (f(best, 4) / f(worst, 4) if f(worst, 4) else 0)]
+
     # ---- per-group mesh over time ----
     try:
         gu = json.load(open("/tmp/claude-620771/group_util.json"))
@@ -344,6 +383,8 @@ def main():
               '<dt>spread (max-min)</dt><dd id="mspread">-</dd>',
               '<dt>busiest group</dt><dd id="mmax">-</dd>',
               '<dt>idlest group</dt><dd id="mmin">-</dd>',
+              '<dt>whole-run util</dt><dd id="mrun">-</dd>',
+              '<dt>cycles</dt><dd id="mcycles">-</dd>',
               '</dl><p class="sub" style="margin-top:14px;font-size:12.5px">A wide spread means '
               'some groups are starved while others saturate &mdash; the alignment problem the '
               'group-MSHR design is meant to address. A single number cannot show it.</p></div></div>',
@@ -365,6 +406,10 @@ def main():
               '<div class="prog" id="pgrid"></div>',
               '<script>',
               'const GU=' + json.dumps(gu, separators=(",", ":")) + ';',
+              'const RES=' + json.dumps(
+                  {r[1] + "_" + r[0]: {"cyc": r[3], "util": r[4], "rh": r[5],
+                                       "fatal": ("FATAL" in r[8])}
+                   for r in res}, separators=(",", ":")) + ';',
               """
 const $=i=>document.getElementById(i), grid=$("mgrid"), sel=$("marm"), rng=$("mper");
 // Four cascading pickers instead of one long list: with 248 shapes a single dropdown is a
@@ -374,20 +419,24 @@ const SHAPES=Object.keys(GU).map(a=>{const m=/^fp(\d+)_(\d+)x(\d+)x(\d+)$/.exec(
   return m?{arm:a,prec:m[1],M:+m[2],N:+m[3],P:+m[4]}:null}).filter(Boolean);
 const eP=$("mprec"), eM=$("mM"), eN=$("mN"), ePp=$("mP");
 function fill(el,vals,keep){
-  const prev=keep&&vals.includes(keep)?keep:vals[0];
+  // Compare as STRINGS. vals are numbers (512, 1024) while el.value is always a string, so
+  // vals.includes(keep) was ALWAYS false and every picker snapped back to vals[0] -- you could
+  // never select anything but the smallest M/N/P. Classic JS type mismatch, silent by nature.
+  const sv=vals.map(String);
+  const prev=(keep!=null && sv.includes(String(keep))) ? keep : vals[0];
   el.innerHTML="";
   for(const v of vals){const o=document.createElement("option");o.value=String(v);o.textContent=String(v);
     if(String(v)===String(prev))o.selected=true;el.appendChild(o);}
   return prev;
 }
 const uniq=a=>[...new Set(a)];
-function cascade(changed){
+function cascade(){
   const precs=uniq(SHAPES.map(s=>s.prec)).sort();
-  const pv=fill(eP,precs.map(p=>"fp"+p).length?precs:precs,eP.value);
+  fill(eP,precs,eP.value);
   // relabel precision options as fp16/fp32 while keeping numeric values
   [...eP.options].forEach(o=>o.textContent="fp"+o.value);
   let pool=SHAPES.filter(s=>s.prec===eP.value);
-  const mv=fill(eM,uniq(pool.map(s=>s.M)).sort((a,b)=>a-b), changed==="M"?eM.value:eM.value);
+  fill(eM,uniq(pool.map(s=>s.M)).sort((a,b)=>a-b), eM.value);
   pool=pool.filter(s=>String(s.M)===eM.value);
   fill(eN,uniq(pool.map(s=>s.N)).sort((a,b)=>a-b), eN.value);
   pool=pool.filter(s=>String(s.N)===eN.value);
@@ -416,6 +465,11 @@ function draw(){
   $("mspread").textContent=(mx-mn).toFixed(1)+" pp";
   $("mmax").textContent=`g${u.indexOf(mx)} — ${mx.toFixed(1)}%`;
   $("mmin").textContent=`g${u.indexOf(mn)} — ${mn.toFixed(1)}%`;
+  // The headline number for this arm, beside the per-window detail: the point is that a
+  // whole-run average of ~40% and a group peaking at 100% describe the SAME run.
+  const r=RES[sel.value];
+  $("mrun").textContent = r ? r.util+"%" : "-";
+  $("mcycles").textContent = r ? Number(r.cyc).toLocaleString() : "-";
 }
 // --- cumulative per-group progress -------------------------------------------------
 // busy lane-cycles accumulate; denom is constant per window, so summing the per-window
@@ -454,8 +508,16 @@ function drawProg(){
   $("pgap").textContent=(mx>0?((mx-mn)/mx*100).toFixed(1):"0")+"%";
   $("pratio").textContent=(mx>0?(mn/mx*100).toFixed(1):"0")+"%";
 }
-function reset(){const d=GU[sel.value]||[];rng.max=Math.max(0,d.length-1);rng.value=0;buildCum();draw();drawProg();}
+function reset(){
+  const d=GU[sel.value]||[];
+  rng.max=Math.max(0,d.length-1); rng.value=0;
+  rng.disabled=(d.length<2);            // nothing to scrub through
+  buildCum(); draw(); drawProg();
+}
 for(const el of [eP,eM,eN,ePp]) el.addEventListener("change",()=>{cascade();reset();});
+// The slider needs its OWN handler. Rewiring the pickers once replaced this line and the
+// scrubber silently stopped responding -- no error, it just never redrew.
+rng.addEventListener("input",()=>{draw();drawProg();});
 cascade(); reset();
 """,
               '</script></section>']
