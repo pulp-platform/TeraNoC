@@ -126,7 +126,13 @@ def main():
         for arm, _, _, _, _ in victims:
             f.write("%s s8_%s.elf build_q_8x8\n" % (arm, arm))
     p = subprocess.Popen([CLIENT, "submit", "--arms", lst, "--backend", "questa",
-                          "--run-prefix", "s8", "--name", "s8heal", "--max-parallel", "40",
+                          # STAGGER the requeue. Evidence: all 29 arms of the s8requeue batch
+                          # started at 11:07 and all 29 hung. The hang is triggered by many arms
+                          # reading the shared 17 GB Questa library over NFS at once, so requeuing
+                          # the whole set at max-parallel 40 recreates the exact condition that
+                          # killed them and the healer loops forever. 6 at a time lets each finish
+                          # design-load before the next begins.
+                          "--run-prefix", "s8", "--name", "s8heal", "--max-parallel", "6",
                           "--mem-gb", "18", "--est-runtime-s", "90000", "--force"],
                          cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                          text=True, start_new_session=True)
