@@ -147,6 +147,35 @@ them as missing would mark half the grid "do not quote" for a probe that was nev
 and would bury the actual point, which is that those numbers are unverified. Treat an fp32 cycle
 count as provisional unless an fp16 arm of comparable shape spotchecks clean.
 
+## Comparing against the earlier 8x8 utilisation campaign
+
+The prior 8x8 reference run is **`2048x512x512` fp32**, `sp-fmatmul-opt-burst-merge`, 1024 cores /
+4096 FPU lanes — confirmed from the campaign's own artifact masthead
+(`claude.ai/code/artifact/52f28943-...`), NOT from `software/.../data_gemm.h`, which has been
+regenerated since and today reads `256x32x512`. Two separate attempts to infer that shape from the
+working tree gave the wrong answer; the artifact is the source of truth and the run dirs
+(`build_e511`, `build_h511`, `build_vcs6`, …) are deleted.
+
+**Its numbers are not comparable to this campaign's, on three counts:**
+
+1. **Different metric.** That campaign reported *matched-offset per-period* utilisation — 70.5%
+   mean for the rw-demux-fixed arm, 82.8% at a single window peak. This campaign reports
+   `[FPU FINAL]`, whole-run utilisation over the entire benchmark. A windowed peak always beats a
+   whole-run mean because it excludes ramp-up and tail.
+2. **Different scale.** `2048x512x512` is far larger than anything here; the 14.5 MiB L1 budget
+   excludes it from the 248-shape manifest entirely.
+3. **Provisioning dominates.** That artifact records **94.1% as the retuned reference**, against
+   **20.8–28.2% for under-provisioned arms** (`merge_reqs` left at 4), with the M=256 family flat
+   at 22.7–26.1%. So utilisation on this design spans ~21–94% by MSHR provisioning alone.
+   **Do not read this campaign's 21.8–67.0% spread as a pure shape effect** without checking the
+   arm was correctly provisioned.
+
+**`KERNEL_SIZE` is a build default, not a mesh property.** `M % 512 == 0` follows from
+`#define KERNEL_SIZE 8`; the kernel supports 2, 4 and 8, and the real constraint is
+`dim_group % kernel_size == 0` with `dim_group = M / 64`. `-DKERNEL_SIZE=4` would admit the M=256
+family and `=2` the M=128 family — at the cost of a different LMUL and burst regime, so such arms
+are a different operating point rather than the same measurement at a new shape.
+
 ## The tooling
 
 Four scripts, all batch-agnostic — they key on the run-prefix on disk (`hardware/s8_<arm>/`),
