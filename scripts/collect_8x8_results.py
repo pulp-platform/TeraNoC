@@ -16,7 +16,8 @@ import os, re, sys
 ROOT = "/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC"
 OUT  = os.path.join(ROOT, "docs/benchmarks/8x8_scaleup/results.tsv")
 MANI = os.path.join(ROOT, "docs/benchmarks/8x8_scaleup/manifest.txt")
-HDR  = "shape\tprec\tA_share\tcycles\tRH\tmshr_timeout\tbankfull\tspotcheck\tstate"
+HDR  = ("shape\tprec\tA_share\tcycles\tfpu_util\tRH\tmshr_timeout\tbankfull"
+        "\tspotcheck\tstate")
 
 def a_share(M):
     # at 8x8 the A-row sharing degree is set by M alone
@@ -49,8 +50,15 @@ def scrape(arm):
     fat = (re.search(rb'\$finish called from file [^\n]*?([A-Za-z0-9_]+\.sv)", line (\d+)', txt)
            or re.search(rb'\$finish[^\n]*?([A-Za-z0-9_]+\.sv)\((\d+)\)', txt))
     fmsg = re.search(rb"(MSHR clock gate dropped[^\n]*|\*\* Fatal: [^\n]{0,110}|Fatal: [^\n]{0,110})", txt)
+    # Whole-run FPU utilisation, from the TB's end-of-benchmark summary:
+    #   [FPU FINAL] busy=<n> of <d> lane-cycles over <c> benchmark cycles -> util=25.89%
+    # This is the summary line, NOT the per-period [FPU] samples -- those oscillate and their
+    # cumulative value is a running average that keeps moving. Printed before a $fatal kill, so
+    # it survives on the arms the assertion terminates.
+    u = re.search(rb"\[FPU FINAL\][^\n]*?util=([0-9.]+)%", txt)
     return dict(state="done", cycles=int(cyc[-1]), rh=txt.count(b"RH STUCK"),
                 tmo=tot("mshr_timeout"), bf=tot("bankfull_bypass"), spot=spot,
+                util=float(u.group(1)) if u else None,
                 fatal=(fat.group(1).decode() + ":" + fat.group(2).decode()) if fat else "",
                 fmsg=fmsg.group(1).decode()[:90] if fmsg else "")
 
@@ -91,8 +99,10 @@ def main():
         if r.get("fatal"):
             sc += "+FATAL@" + r["fatal"]
             fatals.append((arm, r["fatal"], r.get("fmsg", "")))
-        rows.append("%dx%dx%d\tfp%s\t%d\t%d\t%d\t%d\t%d\t%s\tdone"
-                    % (M, N, P, PR, a_share(M), r["cycles"], r["rh"], r["tmo"], r["bf"], sc))
+        rows.append("%dx%dx%d\tfp%s\t%d\t%d\t%s\t%d\t%d\t%d\t%s\tdone"
+                    % (M, N, P, PR, a_share(M), r["cycles"],
+                       ("%.2f" % r["util"]) if r["util"] is not None else "-",
+                       r["rh"], r["tmo"], r["bf"], sc))
     rows.sort(key=lambda s: int(s.split("\t")[3]))
     with open(OUT, "w") as f:
         f.write(HDR + "\n")
@@ -106,11 +116,11 @@ def main():
     # grp0-only is the probe's NORMAL (broken) behaviour, so it must not land in the
     # "do not quote" list -- that would flag every fp16 arm forever, the exact blanket the
     # previous commit removed from the gate. Only a genuinely absent probe belongs here.
-    bad = [r for r in rows if "MISSING" in r.split("\t")[7]]
+    bad = [r for r in rows if "MISSING" in r.split("\t")[8]]
     if bad:
         print("  fp16 arms with NO [SPOT] output at all (probe absent or run died before it):")
         for r in bad:
-            print("    " + "\t".join(r.split("\t")[:2] + [r.split("\t")[7]]))
+            print("    " + "\t".join(r.split("\t")[:2] + [r.split("\t")[8]]))
     if partial:
         print("  %d fp16 arm(s) verified on GROUP 0 ONLY: the [SPOT] loop hangs core 0 after the"
               " first group, so 1 of %s groups is checked, not all of them." % (len(partial), 64))

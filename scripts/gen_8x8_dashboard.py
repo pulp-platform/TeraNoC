@@ -58,7 +58,7 @@ def results():
         for i, ln in enumerate(open(p)):
             if i == 0: continue
             f = ln.rstrip("\n").split("\t")
-            if len(f) >= 9: rows.append(f)
+            if len(f) >= 10: rows.append(f)   # fpu_util added at index 4
     except Exception:
         pass
     return rows
@@ -208,8 +208,8 @@ def main():
             key = shape + "|" + prec
             r = byarm.get(key)
             if r:
-                cls, lab, why = "ok", "done", (r[3] + " cyc &middot; RH " + r[4] +
-                                               " &middot; spot " + esc(r[7]))
+                cls, lab, why = "ok", "done", (r[3] + " cyc &middot; util " + r[4] +
+                                               "% &middot; RH " + r[5])
             elif s == "running":
                 cls, lab, why = "run", "running", "on " + esc(node)
             elif s in ("failed", "lost", "cancelled"):
@@ -225,9 +225,9 @@ def main():
 
     # ---- assertion split: computed from the data, shown only once it can say something ----
     nf16 = sum(1 for r in res if r[1] == "fp16")
-    na16 = sum(1 for r in res if r[1] == "fp16" and "FATAL" in r[7])
+    na16 = sum(1 for r in res if r[1] == "fp16" and "FATAL" in r[8])
     nf32 = sum(1 for r in res if r[1] == "fp32")
-    na32 = sum(1 for r in res if r[1] == "fp32" and "FATAL" in r[7])
+    na32 = sum(1 for r in res if r[1] == "fp32" and "FATAL" in r[8])
     if nf16 and nf32:
         pair = [r[0] for r in res if r[1] == "fp16"] and \
                sorted(set(r[0] for r in res if r[1] == "fp16") &
@@ -257,16 +257,17 @@ def main():
               'This table fills automatically as transcripts are delivered.</div>']
     else:
         h += ['<div class="tw"><table><tr><th>shape</th><th>prec</th><th>A-share</th>'
-              '<th>cycles</th><th>RH</th><th>mshr&nbsp;timeout</th><th>bankfull</th>'
-              '<th>spotcheck</th></tr>']
+              '<th>cycles</th><th>FPU util</th><th>RH</th><th>mshr&nbsp;timeout</th>'
+              '<th>bankfull</th><th>spotcheck</th></tr>']
         for r in res:
-            bad = "ok(" not in r[7]
+            bad = "ok(" not in r[8] and "n/a(" not in r[8]
             h += ['<tr><td><code>' + esc(r[0]) + '</code></td><td>' + esc(r[1]) +
                   '</td><td class="num">' + esc(r[2]) + '</td><td class="num">' +
-                  "{:,}".format(int(r[3])) + '</td><td class="num">' + esc(r[4]) +
-                  '</td><td class="num">' + esc(r[5]) + '</td><td class="num">' + esc(r[6]) +
-                  '</td><td>' + ('<span class="pill bad">' + esc(r[7]) + '</span>'
-                                 if bad else esc(r[7])) + '</td></tr>']
+                  "{:,}".format(int(r[3])) + '</td><td class="num"><b>' + esc(r[4]) +
+                  '%</b></td><td class="num">' + esc(r[5]) +
+                  '</td><td class="num">' + esc(r[6]) + '</td><td class="num">' + esc(r[7]) +
+                  '</td><td>' + ('<span class="pill bad">' + esc(r[8]) + '</span>'
+                                 if bad else esc(r[8])) + '</td></tr>']
         h += ['</table></div>']
     h += ['</section>']
 
