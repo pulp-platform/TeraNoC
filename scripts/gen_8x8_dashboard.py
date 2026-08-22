@@ -17,7 +17,7 @@ LADDER = [(16, "fp16_512x2048x1024", "fp32_512x1024x1024"),
           (1,  "fp16_8192x256x512",  None)]
 
 def states():
-    out = {}
+    out, ts_seen = {}, {}
     for d in sorted(glob.glob(os.path.join(STATE, "*"))):
         jf = os.path.join(d, "jobs.json")
         if not os.path.exists(jf):
@@ -39,8 +39,12 @@ def states():
                 try: last = json.loads(ln)
                 except Exception: pass
             if last:
-                # a later batch supersedes an earlier verdict for the same arm
-                if arm not in out or last.get("state") in ("running", "done"):
+                # a later batch supersedes an earlier verdict for the same arm -- decided by the
+                # record's ts, NOT by batch-name order (campaign prefixes make name order != time
+                # order, which left resubmitted arms showing their old `failed`)
+                prev = ts_seen.get(arm)
+                if prev is None or (last.get("ts") or 0) >= prev:
+                    ts_seen[arm] = last.get("ts") or 0
                     out[arm] = (last.get("state"), last.get("node", "-"))
         for jid, arm in ids.items():
             if arm.startswith(("fp16_", "fp32_")) and jid not in seen and arm not in out:

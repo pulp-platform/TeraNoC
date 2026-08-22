@@ -159,10 +159,16 @@ def ledger_states():
                                                   last.get("ts"))
         for j in jobs:
             arm = (j.get("meta") or {}).get("arm")
-            if not arm or arm in out:
+            if not arm:
                 continue
             st, node, ts = term.get(j["job_id"], (j.get("state"), j.get("node"), None))
-            out[arm] = (st or "?", node or "-", os.path.basename(d), ts)
+            # Keep the LATEST record, by ts. Batch dirs were sorted by NAME, and the campaign
+            # prefix comes first ("s8auto" < "s8q" < "teranoc"), so name order is not time order:
+            # a resubmitted arm kept reporting the OLD batch's `failed` while the new batch had
+            # it running. Never infer recency from a sort of names that begin with a label.
+            prev = out.get(arm)
+            if prev is None or (ts or 0) >= (prev[3] or 0):
+                out[arm] = (st or "?", node or "-", os.path.basename(d), ts)
     return out
 
 NUM = re.compile(rb"execution took (\d+)")
