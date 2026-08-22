@@ -154,6 +154,7 @@ td.dim,tr.unpaired td{color:var(--dim)}
 .dot{color:var(--bad);font-size:9px;vertical-align:super;margin-left:3px}
 td.ratio{font-weight:600;color:var(--acc)}
 td.zero{color:var(--line)}
+td.recon{color:var(--muted);font-style:italic}
 td.hot{font-weight:600;color:var(--bad)}
 th.grp{text-align:center;color:var(--ink);font-size:12px;letter-spacing:.14em;padding-bottom:2px}
 .pairs th.gs,.pairs td.gs{border-left:1px solid var(--line);padding-left:12px}
@@ -634,8 +635,20 @@ cascade(); reset();
                 def z(v):
                     return ('<td class="num zero">0</td>' if v.strip() in ("0", "")
                             else '<td class="num hot">' + esc(v) + '</td>')
+                # A leading "~" marks a util rebuilt from the [FPUG] windows because this arm was
+                # salvaged and never printed [FPU FINAL]. Render it visibly different so it can
+                # never be quoted as a measured value.
+                u = r[4]
+                if u.startswith("~"):
+                    ucell = ('<td class="num recon" title="Reconstructed from the per-period '
+                             '[FPUG] windows: this arm was salvaged from a parked sim and never '
+                             'reached the $finish that prints [FPU FINAL]. Validated on 35 arms '
+                             'that have both -- mean error 1.1 pp, from window quantisation, '
+                             'scaling as 1/windows.">' + esc(u) + '%</td>')
+                else:
+                    ucell = '<td class="num">' + esc(u) + '%</td>'
                 return ('<td class="num gs">' + "{:,}".format(int(r[3])) + mark +
-                        '</td><td class="num">' + esc(r[4]) + '%</td>' +
+                        '</td>' + ucell +
                         z(r[5]) + z(r[6]) + z(r[7]))
             if paired:
                 a, b = int(d["fp16"][3]), int(d["fp32"][3])
@@ -644,7 +657,10 @@ cascade(); reset();
                 ratio = '<td class="num dim gs">&mdash;</td>'
             d16 = data_mib(sh, "fp16"); d32 = data_mib(sh, "fp32")
             def k(pr, i):
-                try: return str(float(d[pr][i]))
+                # lstrip('~'): a reconstructed util still sorts as the number it is; leaving the
+                # tilde in made float() raise, which parked every salvaged arm at the bottom of
+                # a util sort regardless of direction.
+                try: return str(float(str(d[pr][i]).lstrip('~')))
                 except Exception: return ""
             keys = [str(mnp(sh)), str(ash), "%.4f" % (d16 or 0), "%.4f" % (d32 or 0),
                     k("fp16", 3), k("fp16", 4), k("fp16", 5), k("fp16", 6), k("fp16", 7),

@@ -151,3 +151,30 @@ It also carries the MSHR-desync signature independent of that — **622 periods*
 config, so a single slow run indicates which mode it landed in, not a design property.
 
 **Do not quote this number.** No re-run needed.
+
+## A salvaged arm's FPU util is reconstructed, and marked `~`
+
+`[FPU FINAL]` is printed from a SystemVerilog `final` block, so it only appears when the simulation
+reaches `$finish`. An arm salvaged from a parked sim finished its *program* (`execution took N
+cycles`) but was killed at the vsim prompt before `final` ran, so that line never existed -- the
+cycle count is real, the util was simply never printed.
+
+It is rebuilt from the per-period `[FPUG]` lines, which carry a `bench`/`pre` tag and their own
+denominator, so the same quantity can be summed over the benchmark windows only. Counting the `pre`
+windows too is what made a first attempt disagree with `FINAL`; the tag is not optional.
+
+Validated against the 35 arms that have both: **mean error 1.10 pp**. The error is pure window
+quantisation -- the benchmark region does not begin and end on window boundaries -- and scales as
+1/windows:
+
+| bench windows | n | mean err | max err |
+|---|---|---|---|
+| < 20 | 20 | 1.61 pp | 6.12 pp |
+| 20-40 | 9 | 0.51 pp | 1.27 pp |
+| 40-80 | 4 | 0.39 pp | 0.43 pp |
+| 80+ | 2 | 0.15 pp | 0.16 pp |
+
+So a long run reconstructs to better than half a point, and a short one only to a few points. These
+values are written to `results.tsv` with a leading `~` and rendered in the dashboard in italic with
+a hover note, so a reconstructed number can never be quoted as a measured one. They are also
+excluded from the computed best/worst-util headline for the same reason.

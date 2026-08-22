@@ -56,9 +56,30 @@ def scrape(arm):
     # cumulative value is a running average that keeps moving. Printed before a $fatal kill, so
     # it survives on the arms the assertion terminates.
     u = re.search(rb"\[FPU FINAL\][^\n]*?util=([0-9.]+)%", txt)
+    util = float(u.group(1)) if u else None
+    recon_w = 0
+    if util is None:
+        # A SALVAGED arm has no [FPU FINAL]: the program finished, but the sim was parked at the
+        # vsim prompt and never reached the $finish that prints it. Rebuild the same quantity from
+        # the per-period [FPUG] lines, which carry both a bench/pre tag and their own denominator:
+        #   FINAL = busy_cum / (active_cyc * lanes);  each bench window contributes
+        #   sum_g(busy[g]) over denom*NumGroups lane-cycles.
+        # Only "bench" windows count -- including the "pre" ones was what made an earlier attempt
+        # disagree with FINAL. Validated on the 35 arms that have both: mean error 1.10 pp, and the
+        # error is pure window quantisation, scaling as 1/windows (1.61 pp mean below 20 windows,
+        # 0.15 pp above 80) because the benchmark region does not land on window boundaries.
+        # Reported with a leading "~" so a reconstructed value can never be read as a measured one.
+        num = den = 0
+        for m in re.finditer(rb"\[FPUG\]\s+(\S+)\s+cyc=\d+\s+denom=(\d+)\s+busy=\s*([0-9, ]+)", txt):
+            if m.group(1) != b"bench":
+                continue
+            v = [int(x) for x in m.group(3).split(b",") if x.strip()]
+            num += sum(v); den += int(m.group(2)) * len(v); recon_w += 1
+        if den:
+            util = 100.0 * num / den
     return dict(state="done", cycles=int(cyc[-1]), rh=txt.count(b"RH STUCK"),
                 tmo=tot("mshr_timeout"), bf=tot("bankfull_bypass"), spot=spot,
-                util=float(u.group(1)) if u else None,
+                util=util, util_recon=(u is None and util is not None), recon_w=recon_w,
                 fatal=(fat.group(1).decode() + ":" + fat.group(2).decode()) if fat else "",
                 fmsg=fmsg.group(1).decode()[:90] if fmsg else "")
 
@@ -101,7 +122,8 @@ def main():
             fatals.append((arm, r["fatal"], r.get("fmsg", "")))
         rows.append("%dx%dx%d\tfp%s\t%d\t%d\t%s\t%d\t%d\t%d\t%s\tdone"
                     % (M, N, P, PR, a_share(M), r["cycles"],
-                       ("%.2f" % r["util"]) if r["util"] is not None else "-",
+                       (("~%.2f" if r.get("util_recon") else "%.2f") % r["util"])
+                       if r["util"] is not None else "-",
                        r["rh"], r["tmo"], r["bf"], sc))
     rows.sort(key=lambda s: int(s.split("\t")[3]))
     with open(OUT, "w") as f:
