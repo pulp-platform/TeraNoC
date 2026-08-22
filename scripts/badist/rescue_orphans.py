@@ -6,10 +6,17 @@ deliberately, or as collateral (a licence-crisis sweep took out the healer's and
 controllers along with the intended ones) -- and its queued jobs become invisible: badist still
 lists them, every status view counts them as "pending", and they will never run.
 
-Detection is deliberately NOT by controller lookup. Controllers share names (several batches are
-called s8auto), so a name match reported a live controller for a batch that had none and the arm
-stayed lost. Instead use the outcome: an arm with no result, no running copy, and no start for a
-long time is not being dispatched by anything, whatever the process table says.
+Detection is deliberately NOT by controller lookup: controllers share names (several batches are
+called s8auto), so a name match reported a live controller for a batch that had none.
+
+Nor is it by queue age alone. That was the first attempt and it was wrong: with a licence reserve
+in force, waiting hours IS the normal state of the queue, so "queued 90 minutes" describes a
+healthy batch. It fired on 47 perfectly good arms of a batch whose controller was alive.
+
+The signal that actually separates the two is whether the BATCH is still making progress. A live
+controller keeps starting jobs; a dead one cannot start any. So a batch counts as dispatching if
+any of its jobs entered `running` recently, and only the queued jobs of a batch with no recent
+start are orphans.
 
 Duplicates are the acceptable risk here -- kill_duplicate_arms.py clears those, and it is far
 cheaper than an arm silently never running.
@@ -36,6 +43,7 @@ def main():
         led = {}
 
     running, queued_at, run_node = set(), {}, {}
+    batch_last_start, batch_queued = {}, {}
     for d in sorted(glob.glob(os.path.join(STATE, "*"))):
         jf = os.path.join(d, "jobs.json")
         if not os.path.exists(jf):
@@ -54,6 +62,7 @@ def main():
             jid = j["job_id"]
             if jid not in started:
                 queued_at[a] = max(queued_at.get(a, 0), bmt)
+                batch_queued.setdefault(os.path.basename(d), []).append(a)
                 continue
             last = None
             for ln in open(os.path.join(d, "jobs", jid + ".jsonl")):
@@ -65,6 +74,12 @@ def main():
                 running.add(a)
                 if last.get("node"):
                     run_node.setdefault(last["node"], []).append(a)
+            # when did THIS batch last put a job into `running`? a live controller keeps doing it
+            for r in (json.loads(x) for x in open(os.path.join(d, "jobs", jid + ".jsonl"))
+                      if x.strip()):
+                if r.get("state") == "running":
+                    b = os.path.basename(d)
+                    batch_last_start[b] = max(batch_last_start.get(b, 0), r.get("ts") or 0)
 
     # An arm "running" on an unreachable node is the worst case: the healer needs a live-process
     # check it cannot make, auto-resubmit only looks at failures, and the queued-arm path below
@@ -95,9 +110,21 @@ def main():
             queued_at.setdefault(a, 0)             # 0 => older than any threshold, rescue now
 
     now = time.time()
+    # a batch that started a job within STALE_MIN is still being dispatched; its queue is fine
+    STALE_MIN = 60
+    live_batches = {b for b, ts in batch_last_start.items()
+                    if (now - ts) / 60.0 < STALE_MIN}
+    protected = set()
+    for b, arms_ in batch_queued.items():
+        if b in live_batches:
+            protected.update(arms_)
+    if protected:
+        print("  %d queued arm(s) are in batches that started a job in the last %d min -- "
+              "held by the governor, not orphaned" % (len(protected), STALE_MIN))
+
     victims = []
     for a, when in sorted(queued_at.items()):
-        if a in running:
+        if a in running or a in protected:
             continue
         t = os.path.join(ROOT, "hardware", "s8_" + a, "transcript")
         try:
