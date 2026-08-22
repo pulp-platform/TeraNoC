@@ -154,8 +154,10 @@ def main():
     st = states()
     res = results()
     tot = 248
-    done = sum(1 for a, (s, n) in st.items() if s in ("done", "succeeded", "completed"))
-    done = max(done, len(res))
+    # COMPLETE means a usable result, not a ledger verdict: an arm whose partial was delivered
+    # over its result is "done" in the ledger with nothing to show, and counting those inflated
+    # this tile to 25 while the results table held 19.
+    done = len(res)
     run  = sum(1 for a, (s, n) in st.items() if s == "running")
     fail = sum(1 for a, (s, n) in st.items() if s in ("failed", "lost", "cancelled"))
     q    = tot - done - run - fail

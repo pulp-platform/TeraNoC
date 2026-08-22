@@ -50,7 +50,22 @@ def failed_and_live():
             st = last.get("state")
             if st == "failed":
                 failed[arm] = last.get("node", "?")
-            elif st in ("running", "done", "succeeded", "completed"):
+            elif st in ("done", "succeeded", "completed"):
+                # "done" does NOT mean a result exists. A killed job's partial delivery lands on
+                # hardware/s8_<arm>/ and badist still marks the job done, so the arm is complete
+                # in the ledger, has no cycle count on disk, and is invisible to this loop (which
+                # only looks at failures) AND to the healer (which only looks at running arms).
+                # Six arms sat in that hole. Treat a done-with-no-result as needing a rerun.
+                t = os.path.join(ROOT, "hardware", "s8_" + arm, "transcript")
+                try:
+                    ok = os.path.exists(t) and b"execution took" in open(t, "rb").read()
+                except OSError:
+                    ok = False
+                if ok:
+                    live.add(arm)
+                else:
+                    failed.setdefault(arm, last.get("node", "?"))
+            elif st == "running":
                 # a later batch already re-ran it; do not resubmit again
                 live.add(arm)
     return failed, live
