@@ -40,6 +40,35 @@ Ruled out so far: only two sites write `resp_buf` (store byte-merge `:3349`, res
 
 **Cheap reproducer:** `512x64x512` fp16 vs fp32 — same shape, one variable, ~10 min each.
 
+### Proposed SW workaround: disable the group MSHR after the benchmark — NOT YET IMPLEMENTED
+
+The assertion fires in the **epilogue**, after the measured region. Nothing after the benchmark
+needs the MSHR: the spotcheck reads a handful of words and the merge/cache machinery only exists to
+help the kernel. Turning the MSHR off once the timed region closes makes the epilogue bypass it
+entirely, so the store-snoop / `resp_buf` path is never exercised there.
+
+Feasibility checked against the RTL — it works, with two constraints:
+
+* **The CSR exists and is writable at runtime.** `MSHR_CSR_ENABLE` is index 0
+  (`software/runtime/mshr_cfg.h:27`), and `group_mshr_cfg_runtime = 1` in
+  `config/terapool_spatz4_fpu_8x8.mk:557` — confirmed present in the built image as
+  `GROUP_MSHR_CFG_RUNTIME=1`. Without that define `cfg_mshr_enable` is hardwired to 1
+  (`mempool_group_mshr.sv:521`) and the write does nothing.
+* **Clearing it is ONE-WAY.** `mempool_group_mshr_cfg.sv:152` is
+  `if (!wr_data_i[0]) cfg_d.enable = 1'b0;` — the CSR can only ever be cleared, never set back to
+  1. Fine for a post-benchmark disable (nothing needs it again), but it cannot be used to bracket a
+  region, and a multi-iteration harness would run every later iteration un-merged.
+* **There is NO busy-guard on this CSR.** `mshr_busy_i` refuses a `BANK_SHIFT*` write while the
+  MSHR is non-empty, but ENABLE has no such check, so the write is accepted with entries still in
+  flight. Disabling sets `cfg_bypass_single`/`cfg_bypass_burst` (`:547-548`), which steers *new*
+  requests around the MSHR; already-allocated entries still have to drain. **Drain first** — a
+  fence after the last timed access, before the CSR write — and verify that in-flight entries
+  complete rather than being stranded.
+
+Caveat: this hides the symptom, it does not fix the RTL. The dropped `resp_buf` write is a real
+bug and could bite a kernel that byte-merges inside the timed region. Do both: the workaround to
+get clean full-length runs and a working spotcheck, and the RTL fix for the underlying path.
+
 ---
 
 ## 2. SW: correctness coverage is far thinner than the probe implies — FIX LATER
