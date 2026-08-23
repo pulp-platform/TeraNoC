@@ -11,7 +11,7 @@ mentions one of our arms, and reads results from disk.
 
   usage: campaign_status.py [--manifest FILE] [--verbose]
 """
-import glob, json, os, re, subprocess, sys
+import glob, json, os, re, subprocess, sys, time
 
 ROOT = "/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC"
 HW   = os.path.join(ROOT, "hardware")
@@ -342,8 +342,18 @@ def main():
             buckets["failed"].append((a, st, node))
         elif st == "running":
             # a wedge advances cycles at full CPU while doing nothing: util ~0 with a huge
-            # CMS stuck-request count is the tell, since the cycle counter keeps climbing
-            if res and res["util"] is not None and res["util"] < 0.5 and res["cms"] > 50000:
+            # CMS stuck-request count is the tell, since the cycle counter keeps climbing.
+            #
+            # MIN_WEDGE_S: a freshly-started arm looks EXACTLY like a wedge and is not one. The FPU
+            # probe reads zero until the benchmark region opens -- boot, DMA and several 1024-core
+            # barriers come first -- and cold-start CMS stuck-request warnings are normal (every
+            # completed arm in this campaign carries some). Three arms six minutes into their run
+            # were reported WEDGED on 2026-08-23; acting on that would have killed healthy work.
+            # The healer, which tests for lack of progress instead, correctly said nothing stuck.
+            MIN_WEDGE_S = 3600
+            age_s = (time.time() - ts) if ts else 0
+            if (age_s > MIN_WEDGE_S and res and res["util"] is not None
+                    and res["util"] < 0.5 and res["cms"] > 50000):
                 buckets["wedged"].append((a, res, node))
             else:
                 buckets["running"].append((a, ts, node))
