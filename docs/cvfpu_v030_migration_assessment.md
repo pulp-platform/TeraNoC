@@ -2,7 +2,25 @@
 
 **Question:** a colleague reports v0.3.0 has "much better PPA". Can we swap it into the Spatz VFU?
 
-**Verdict: do NOT upgrade for PPA. The likely win is available on the version we already build.**
+**Verdict (ORIGINAL, 2026-08-19 morning): do NOT upgrade for PPA — the likely win is available on
+the version we already build.**
+
+> **SUPERSEDED the same day. The upgrade was directed and has landed** (`5245676e` here,
+> `37c8c33` in spatz). Shipping config is **v0.3.0 + `PipeConfig: INSIDE` + bf16 (FP16ALT) enabled,
+> with fp32 and fp16 as the default working formats.** The analysis below stands on its own terms —
+> the PPA *claim* was indeed unsupported for our Width=32 configuration — but the decision went the
+> other way, and the migration was validated cycle-identical on all four acceptance fields
+> (4188 cycles, busy=2156908 of 3938304 over 3846, retval=0, 67210.00 ns).
+>
+> Note the doc's own §1 reasoning explains why **bf16 is nearly free while FP8 is not**: bf16 is
+> 16-bit, so `min_fp_width` over the enabled formats stays 16 and `max_num_lanes = Width/min_fp_width`
+> is unchanged; FP8 would drop it to 8 and double the merged ADDMUL/CONV lanes. Same formula,
+> opposite verdicts.
+>
+> ⚠️ **Still open:** the migration is proven cycle-identical on the **scalar** path only. The gate ran
+> fp32, and at ELEN=32 fp32 sets `fpu_vectorial_op = 0` while fp16 sets it to **1** — so the
+> vectorial slice, which is the only path fp16 uses, is unvalidated. A PRE/POST fp16 pair at one
+> shape must land before any fp16 sweep number is quoted.
 
 Current: `Bender.yml:19` pins `rev: pulp-v0.1.3` (commit `a8e0cba6`). Target tag `pulp-v0.3.0` =
 `841b19b9`.

@@ -125,12 +125,19 @@ def main():
                     shutil.copy2(t, keep)
             except OSError:
                 keep = None
-            d = "/scratch/zexifu_cache/badist/run/%s/%s" % (batch, jid)
+            # GLOB the scratch root, never hardcode it: the node-local path DIFFERS BY MACHINE
+            # (larain1/larain7 mount /scratch2; badile and larain13 mount /scratch). This
+            # compared an exact cwd against a hardcoded /scratch, so on every /scratch2 host
+            # the match failed and the kill silently did nothing -- dedup reported the same
+            # duplicate cycle after cycle while both copies kept running and held a seat.
+            d = "/scratch*/zexifu_cache/badist/run/%s/%s" % (batch, jid)
             # cancel kills the wrapper only; the simulator survives it
             subprocess.run(["ssh", "-n", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
                             "-o", "StrictHostKeyChecking=no", node,
                             'for p in $(ls /proc 2>/dev/null | grep -E "^[0-9]+$"); do '
-                            '[ "$(readlink /proc/$p/cwd 2>/dev/null)" = "%s" ] || continue; '
+                            'c=$(readlink /proc/$p/cwd 2>/dev/null); m=0; '
+                            'for cand in %s; do [ "$c" = "$cand" ] && m=1; done; '
+                            '[ "$m" = 1 ] || continue; '
                             'case "$(cat /proc/$p/comm 2>/dev/null)" in '
                             'vsimk|vish|vsim|mempool_simvopt) kill -9 $p 2>/dev/null;; esac; done' % d],
                            capture_output=True, timeout=60)

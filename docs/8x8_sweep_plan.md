@@ -539,6 +539,75 @@ To confirm an ELF's barrier state after the fact, count `sfence.vma` inside
 
 ## 6. Sweep plan
 
+### 6-PILOT. MEASURED pilot results (2026-08-22) — supersede the estimates above
+
+Both pilots ran `s8_fp16_512x256x512.elf` (M=512, 16-way A-share — the ladder's first rung at
+1/16 the work) on badiles, through badist, under fleet conditions.
+
+| quantity | ESTIMATED in this plan | **MEASURED** | verdict |
+|---|---|---|---|
+| VCS peak RSS | ~7-9 GiB | **7.98 GiB** | estimate good |
+| Questa peak RSS | ~60 GiB (larain/fenga3 only) | **16.4 GiB** | **WRONG — badiles are fine** |
+| Questa `vopt` per arm | "hours" | **~10 min** (without `+acc`) | **WRONG** |
+| VCS throughput | ~13 cyc/s | **19.4 cyc/s** | 1.5x better |
+| Questa throughput | — | **12.2 cyc/s** sim-only | VCS ~1.6x faster |
+| FPU efficiency | 45% of peak assumed | **~15%** | **WRONG — 3x optimistic** |
+
+**Net effect on the ladder: arms are ~1.5x LONGER than planned, not shorter.** The throughput gain
+is more than cancelled by the efficiency shortfall: at 15% rather than 45%, a 291k-cycle rung is
+really ~875k cycles, and at 19.4 cyc/s that is **~12-13 h/arm**, against the ~8 h stated in 1c.
+A 9-arm ladder is therefore ~110 h of fleet time, ~13 h wall-clock in parallel.
+
+**`+acc` REMOVED and the probes survive.** The client's warning that hierarchical probes would be
+optimised away does not hold in this configuration: `[FPU]`, `[FPUG]`, `[STALLG]`, `[MSHRG]`,
+`[MEMOG]`, `[INSNG]`, `[CMS]`, `[BYP]` all emit, with correctly-scaled 8x8 denominators
+(`busy=0/4096000` = 1024 cores x 4 lanes x 1000 cyc). Keep the gate anyway:
+`grep -c '^\[FPU\]' transcript` — 0 means the measurement failed, not that the run was quiet.
+
+**VCS and Questa agree exactly** at 8x8 — same `util=14.92%`, `RH=0`, `CMS=4037` on the same ELF,
+matching the validated-identical result from 4x4. Either simulator is trustworthy; VCS is simply
+faster, smaller, and elaborates once instead of per arm.
+
+**The 15% utilisation is itself a result.** On a 16-way A-share shape at 8x8, this is the scale-up
+loss the sweep exists to quantify — visible already in the pilot, before the ladder runs.
+
+**WHY it is 15%, from the pilot's own counters.** All 4,037 `[CMS WARN]` lines are one kind:
+`STUCK_REQ`, a core memory request outstanding beyond the scoreboard's 1,000-cycle threshold.
+
+```
+[CMS WARN] cyc=24000 STUCK_REQ g=63 t=13 c=0 p=0 hart=0x3fd id=0 age=1240 addr=0x00181000 R bl=1
+[CMS WARN] cyc=24000 STUCK_REQ g=63 t=14 c=0 p=0 hart=0x3fe id=0 age=1240 addr=0x00181000 R bl=1
+```
+
+`bl=1` = SINGLE-word scalar loads, the class `serve_timeout` (2047) governs. `age=1240` = parked
+waiting for merge partners. Adjacent tiles (t=13, t=14) of the same group stuck on the SAME address
+`0x00181000` -- cores that should form one cohort, each waiting alone. The group spread shows the
+consequence: `grp_max=41.4%(g3)` vs `grp_min=0.0%(g39)`, a few groups working and most idle.
+
+Same cohort-dissolution mechanism as the 4x4 campaigns, now on the **main-repo** kernel at 8x8 in a
+shape whose 4x4 equivalent runs clean. `RH=0`, so it is the RESPONSE-side wait, not request-hold.
+
+### 6-PILOT-STATUS. What the pilot HAS and HAS NOT established
+
+**Established (safe to plan on):**
+- VCS peak RSS **7.80 GiB**, stable over 44 min; Questa **16.4 GiB**. Both fit a badile.
+- VCS **19.4 cyc/s** vs Questa **12.2 cyc/s** sim-only; Questa also pays ~10 min `vopt` PER ARM
+  where VCS elaborates once at build time.
+- The two simulators agree EXACTLY at 8x8 (`util=14.92%`, `RH=0`, `CMS=4037` on one ELF).
+- TB probes survive without `+acc`.
+
+**NOT established -- the plan's own gate (6c) is UNMET:**
+- **No completion.** Neither pilot has printed `execution took` after ~45 min.
+- **No spotcheck verdict** -- correctness of the 8x8 ELFs is UNVERIFIED. Beware: grepping for
+  "spotcheck" matches `Mismatch in route selection!` from `floo_route_select.sv:236`, a
+  pre-existing benign startup warning that also appears in the 4x4 transcripts. Not a result.
+- **Utilisation rests on ONE sample** -- exactly one `[FPU] bench` period (`cyc=26000`). The ~15%
+  efficiency, and hence the ~12-13 h/arm and ~110 h ladder figures, is a single data point.
+
+**Recommendation: do not dispatch the ladder until the spotcheck lands.** The resourcing numbers
+are solid enough to place arms; the correctness and runtime numbers are not solid enough to commit
+~110 h of fleet time.
+
 ### 6a. Recommended: the iso-work A-share ladder
 
 Total work `M*N*P` held **constant** so the only variable is the A-share degree — which
@@ -575,9 +644,18 @@ the same regime. That is ~21 arms x 8 h to re-learn "no change".
 ### 6c. Gating before dispatch
 
 1. 8x8 image builds, and both gate greps in 4c pass.
-2. **One pilot arm** (`512x2048x1024` fp16) completes and its spotcheck passes.
-   Confirms the toolchain, the mesh, the derived MSHR config, and the runtime estimate
-   before committing 9 arms x 8 h.
+2. **One pilot arm completes and its spotcheck passes.** Confirms the toolchain, the mesh, the
+   derived MSHR config, and the runtime estimate before committing 9 arms.
+
+   **Shape actually used: `512x256x512` fp16, not `512x2048x1024`.** Everything the pilot measures
+   is DESIGN-dominated (RSS, elaboration cost, cycles/second scale with the 1024-core design, not
+   with M*N*P), so a 16x smaller shape answers the same questions 16x sooner. M=512 is kept so
+   `split_p=16` matches the ladder's first rung -- same A-share structure, less work. The one thing
+   it does NOT exercise is L1 near capacity (1.00 MiB vs the ladder's 7-13 MiB of 14.50); revisit
+   only if a ladder arm behaves differently at 13 MiB.
+
+   Status 2026-08-22 05:45: step 1 MET; step 2 **NOT met** -- no `execution took` from either
+   pilot after ~45 min, so no spotcheck verdict and no completion cycle count. See 6-PILOT-STATUS.
 3. Only then dispatch the rest.
 
 ### 6d. Comparison arms
@@ -659,6 +737,20 @@ validity**, a writable node-local `/scratch`, and executability of the shared si
 | `fenga4` | 12 | 256 G | Xeon E5-2643 v4, 3.4 GHz | usable — small |
 | `fenga7,8,9` | 32 | 384 G | Xeon Gold 6226R, 2.9 GHz | usable |
 
+**`larain13` is EXCLUDED — our backend flow lives there.** Measured 2026-08-22: our own
+`dgcom_exec` at **358-376 GB RSS, 3 d 11 h elapsed**, on a 1007 G node with 444 G available.
+badist would have admitted **9** concurrent 8x8 arms (~72-90 GB) there, and backend memory grows
+through place -> CTS -> route, so the pair could OOM a multi-day job. Losing 1 host of 67 costs
+nothing; the kill is unrecoverable. Every other larain/fenga was scanned on the same date and
+carries nothing of ours above 1 GB. Re-check before ever re-including it:
+
+```sh
+ssh larain13 'ps -u $USER -o rss=,etime=,comm= --sort=-rss | head -1'
+```
+
+Note larain13 hosts other people's backend runs too (`dishen` 65 G, `aoshen` 49+32 G), so it is a
+backend machine generally — a poor choice for simulation arms regardless of who is on it.
+
 **The `fenga2` failure mode is a trap.** SSH *succeeds* and the rejection arrives as a
 text banner (`This account (zexifu/620771) is not valid on fenga2.ee.ethz.ch`), so a
 "can I ssh there" check based on the exit code passes it. Assert on a token instead:
@@ -706,6 +798,20 @@ on `/scratch` (spec asks `disk_gb: 5`) and `larain6` **0 G**; `larain8` sits at 
 on 128 cores and reports "busy, no free cores".
 
 ## 7. Open items
+
+- **L2 bandwidth per group HALVES at 8x8 — a confound the ladder cannot separate.** Surfaced by
+  `gen_perimeter_map.py` while generating the floo yml (2026-08-22):
+
+  ```
+  mesh 8x8: 64 groups / 32 channels = 2 per channel
+  mesh 4x4: 16 groups / 16 channels = 1 per channel
+  ```
+
+  So an 8x8 arm has half the per-group L2 bandwidth of its 4x4 counterpart, **independent of the
+  NoC or the MSHR**. Any cross-mesh degradation this sweep measures is a mixture of mesh scaling
+  and this halving, and the iso-work A-share ladder does not separate them. Do not report a
+  scale-up loss as "the NoC does not scale" without addressing it. Separating it needs either a
+  64-channel 8x8 yml (if the L2 supports it) or an intra-8x8 comparison only.
 
 - **The M >= 512 rule excludes the entire 128-family from 8x8.** Tonight's headline
   results — the 21x reuse-target wins and the +1168% idea-2 regression — are all
