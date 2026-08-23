@@ -212,9 +212,35 @@ def livelocked(arm):
     return (t == 16 and P <= 256) or (pr == "fp16" and t == 8 and P == 128)
 
 
+def _observed_util(arm):
+    """Utilisation this arm actually achieved, from the durable results row (None if never run)."""
+    try:
+        with open(_TSV) as fh:
+            for r in list(_csv.reader(fh, delimiter="\t"))[1:]:
+                if len(r) > 4 and (r[1] + "_" + r[0]) == arm:
+                    v = r[4].lstrip("~")
+                    return float(v) if v not in ("-", "") else None
+    except (OSError, ValueError):
+        pass
+    return None
+
+
 # kept as the public name the submitters already call
 def stalling(arm):
-    return livelocked(arm)
+    """Hold an arm back only on EVIDENCE, never on the predicate alone.
+
+    The predicate identifies shapes that CAN livelock, and it was validated on a 49-arm sample.
+    Applied to the whole manifest it over-reaches: 29 delivered arms match it and ran perfectly
+    well (24-45% utilisation, e.g. fp32_512x32x256 at 24.07%). Blocking those would suppress good
+    data to avoid a stall that does not happen for them.
+
+    So: block only an arm that BOTH matches the predicate AND has already demonstrated the stall
+    (delivered utilisation under 1%). An arm with no history is always allowed to try.
+    """
+    if not livelocked(arm):
+        return False
+    u = _observed_util(arm)
+    return u is not None and u < 1.0
 
 
 KNOWN_STALL = {}   # superseded by the predicate above
