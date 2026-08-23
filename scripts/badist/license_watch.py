@@ -16,6 +16,12 @@ with no available action just teaches the reader to ignore the loop. That case p
 "draining". The previous per-pool sample lives in ~/.badist_licwatch.json.
 """
 import glob, json, os, re, subprocess, sys, time
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from feasibility import stalling
+except Exception:                       # feasibility.py is edited by another session; never
+    def stalling(_a):                   # let an import error take the watchdog down with it.
+        return False
 
 ROOT = "/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC"
 STATE = os.path.expanduser("~/badist/state")
@@ -96,7 +102,11 @@ def waiting():
                     pass
             if st == "running":
                 run.add(a)
-    return len(pend - run - res), len(run)
+    # A KNOWN-STALL arm is not "waiting for a seat" -- sim_topup deliberately refuses to place it
+    # (feasibility.stalling), so counting it here reports a permanent, unactionable idle-seat
+    # alarm every cycle. Use the dispatcher's own predicate so the two can never disagree.
+    placeable = {a for a in (pend - run - res) if not stalling(a)}
+    return len(placeable), len(run)
 
 
 def main():
