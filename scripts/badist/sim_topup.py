@@ -24,7 +24,8 @@ KNOWN_ISSUES).
 """
 import argparse, glob, json, os, re, subprocess, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from feasibility import stalling, KNOWN_STALL, fits, projected_hours, delivered
+from feasibility import (stalling, KNOWN_STALL, fits, projected_hours, delivered,
+                         announce_once, save_announced)
 
 ROOT   = "/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC"
 STATE  = os.path.expanduser("~/badist/state")
@@ -226,6 +227,7 @@ def main():
     for ln in (out or "").splitlines():
         if "batch" in ln or "rror" in ln:
             print("  %s" % ln)
+    save_announced()
     return 0
 
 
