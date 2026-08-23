@@ -32,6 +32,26 @@ def scrape(arm):
     txt = b"\n".join(l[2:] if l.startswith(b"# ") else l for l in raw.split(b"\n"))
     cyc = re.findall(rb"execution took (\d+)", txt)
     if not cyc:
+        # An arm in the RH livelock NEVER prints "execution took": it rides out serve_timeout on
+        # every scalar remote load and is killed by the 24-48 h wall clock. With no row here it
+        # stays "pending" forever and the retry loops re-dispatch it indefinitely, so the failure
+        # is invisible AND self-perpetuating. Record it as its own terminal state instead.
+        # Detector: RH-STUCK episode count. Healthy arms are in single digits (2048x128x128 -> 4
+        # at 41% util); livelocked arms are 10^5. See rh_livelock_root_cause.md.
+        rh = txt.count(b"RH STUCK")
+        if rh > 1000:
+            last = re.findall(rb"\[FPU\] bench cyc=(\d+)", txt)
+            if last:
+                num = den = 0
+                for m in re.finditer(rb"\[FPUG\]\s+(\S+)\s+cyc=\d+\s+denom=(\d+)\s+busy=\s*([0-9, ]+)", txt):
+                    if m.group(1) != b"bench":
+                        continue
+                    v = [int(x) for x in m.group(3).split(b",") if x.strip()]
+                    num += sum(v); den += int(m.group(2)) * len(v)
+                return dict(state="livelock", cycles=int(last[-1]), rh=rh,
+                            tmo=0, bf=0, spot=0,
+                            util=(100.0 * num / den) if den else None,
+                            util_recon=True, recon_w=0, fatal="", fmsg="")
         return dict(state="running")
     def tot(tag):
         return sum(int(x) for x in re.findall(tag.encode() + rb"=\+?(\d+)", txt))
@@ -85,6 +105,7 @@ def scrape(arm):
 
 def main():
     rows, ndone, fatals, unverified, partial = [], 0, [], [], []
+    livelocked = []
     for ln in open(MANI):
         p = ln.split()
         if len(p) != 4:
@@ -92,7 +113,15 @@ def main():
         M, N, P, PR = int(p[0]), int(p[1]), int(p[2]), p[3]
         arm = "fp%s_%dx%dx%d" % (PR, M, N, P)
         r = scrape(arm)
-        if not r or r["state"] != "done":
+        if not r or r["state"] not in ("done", "livelock"):
+            continue
+        if r["state"] == "livelock":
+            # Not a result -- a recorded failure. state != "done" keeps it out of every
+            # consumer that filters on done, while its presence stops the retry loops.
+            livelocked.append(arm)
+            rows.append("%dx%dx%d\tfp%s\t%d\t%d\t%s\t%d\t0\t0\tLIVELOCK\tlivelock"
+                        % (M, N, P, PR, a_share(M), r["cycles"],
+                           ("~%.2f" % r["util"]) if r["util"] is not None else "-", r["rh"]))
             continue
         ndone += 1
         # 64 groups at 8x8: fewer [SPOT] lines than groups means the probe did not complete
@@ -150,6 +179,10 @@ def main():
         print("  kept %d earlier row(s) whose transcript is no longer on disk: %s"
               % (len(kept), ", ".join("%s_%s" % (k[1], k[0]) for k in prev if k not in have)))
         rows.extend(kept)
+    if livelocked:
+        print("  %d arm(s) recorded LIVELOCK (RH>1000, no completion) -- these measure the "
+              "mshr_cfg.h cohort-target bug, not the architecture: %s"
+              % (len(livelocked), ", ".join(sorted(livelocked))))
     rows.sort(key=lambda s: int(s.split("\t")[3]))
     with open(OUT, "w") as f:
         f.write(HDR + "\n")
