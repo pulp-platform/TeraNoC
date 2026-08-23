@@ -23,6 +23,8 @@ would be worse: it nudges the scheduler into dispatching another job from that b
 KNOWN_ISSUES).
 """
 import argparse, glob, json, os, re, subprocess, sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from feasibility import fits, projected_hours
 
 ROOT   = "/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC"
 STATE  = os.path.expanduser("~/badist/state")
@@ -129,6 +131,11 @@ def main():
     pick, seen = [], set()
     for arm in queued:
         if arm in running or arm in seen or (arm in on_backend and not a.allow_requeue):
+            continue
+        if not fits(arm):
+            # Do not hand a seat to a shape the deadline cannot hold: it runs the full 48h and
+            # then fails. The top-up moved fp16_2048x1024x1024 (~200 h projected) to VCS before
+            # this guard existed.
             continue
         t = os.path.join(ROOT, "hardware", "s8_" + arm, "transcript")
         try:
