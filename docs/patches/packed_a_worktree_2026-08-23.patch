@@ -1,0 +1,420 @@
+diff --git a/config/terapool_spatz4_fpu.mk b/config/terapool_spatz4_fpu.mk
+index c1ae2137..65d72d47 100644
+--- a/config/terapool_spatz4_fpu.mk
++++ b/config/terapool_spatz4_fpu.mk
+@@ -435,6 +435,18 @@ group_mshr_cache_self_inval ?= 1
+ # Response cache (MSHR_CACHED): 1 = keep responded entries as a small read-response cache;
+ # 0 = MSHR_DRAIN_RESP -> MSHR_IDLE directly, no same-address reuse. Set 0 to remove the
+ # cohort-splitting path described in mempool_group_mshr.sv (EnableRespCache).
++# 1, INCLUDING on the packed-A branch. The obvious argument for 0 here is that packed-A deletes
++# the case the cache was built for: at fp16 A[m][n] and A[m][n+1] are the two halves of one 32-bit
++# word, the old kernel fetched that word TWICE (two flh), and the second round arriving after the
++# line had self-invalidated is what split the cohort. Packed-A does one lw and shifts for the high
++# half, so that second round is gone.
++#
++# But the cache has a SECOND consumer that packed-A does not touch: a LATE-ARRIVING core in the
++# same group asking for an A word already fetched. With group_mshr_cache_self_inval=1 and
++# group_mshr_hold_subs_single=4 a CACHED line still serves up to 4 such requesters. Turning the
++# cache off sends them to a fresh entry that rides out group_mshr_serve_timeout (2047) -- the
++# straggler pathology measured 2026-08-22 (harts 0xac/0xad/0xec/0xed/0xee, EVERY load ~2046 cyc).
++# Decision: keep it on. Revisit only with an A/B, same ELF and two images differing in this knob.
+ group_mshr_resp_cache ?= 1
+ # Cache reuse target (fp16 half-word aliasing): 0 = legacy self-invalidate at hold_subs_*.
+ # Non-zero keeps a CACHED line resident until served_cnt reaches it, so the second of the two
+@@ -449,6 +461,16 @@ group_mshr_cache_timeout ?= 0
+ # high-way lines stay pinned. 1 = per-bank round-robin victim start pointer, advanced past
+ # the evicted way only when a reclaim actually fires (invalid-first pass 1 unchanged, hit
+ # path untouched). HW: clog2(ways) flops/bank (16x3 = 48 here) + a rotated scan input.
++# Bank-full policy for a MERGEABLE miss. 0 = bypass the MSHR (legacy), 1 = backpressure until a
++# way frees. A bypass splits a cohort: the peers that bypass are served without ever subscribing,
++# so a later member's fresh entry counts subscribers who no longer exist and waits out
++# serve_timeout. Measured over 22 matched sweep pairs: every arm whose baseline had a non-zero
++# bankfull_bypass improved 54-97% under backpressure, and every zero-bypass arm was
++# cycle-identical -- the count is an exact predictor.
++#
++# Reset value AND, on this branch, the value in effect: software owns CSR 11 only where
++# runtime.mk emits MSHR_CFG_BANKFULL_BP.
++group_mshr_bankfull_backpressure ?= 1
+ # Bit-identical when 0. Policy change -> A/B measure before flipping the default.
+ group_mshr_cache_victim_rr ?= 1
+ # CACHED replacement policy. 0 = an idle CACHED entry is not an allocation victim and remains
+diff --git a/software/apps/spatz_apps/sp-fmatmul-opt-burst-merge-fp16/kernel/sp-fmatmul.c b/software/apps/spatz_apps/sp-fmatmul-opt-burst-merge-fp16/kernel/sp-fmatmul.c
+index 3d8e03b5..5d65accc 100644
+--- a/software/apps/spatz_apps/sp-fmatmul-opt-burst-merge-fp16/kernel/sp-fmatmul.c
++++ b/software/apps/spatz_apps/sp-fmatmul-opt-burst-merge-fp16/kernel/sp-fmatmul.c
+@@ -29,6 +29,34 @@
+ 
+ #include "sp-fmatmul.h"
+ 
++// ---------------------------------------------------------------------------------------
++// PACKED-A LOAD (docs/fp16_packed_A_load_plan.md)
++//
++// At fp16, A[m][n] and A[m][n+1] are the two halves of ONE 32-bit word, and the kernel used to
++// fetch that word TWICE (two `flh`). That wasted half the TCDM/interconnect bandwidth, and it
++// created the cohort split behind the fp16 collapse: the second round of requests arrives after
++// the MSHR line that served the first has self-invalidated, so some cores hit it while the rest
++// strand on a 2047-cycle serve_timeout waiting for peers that already hold the data.
++//
++// Each even-n site now loads the word once into wN and uses its LOW half; the next odd-n site
++// takes the HIGH half of that same word and issues NO memory access. There is no second round
++// left to split, so the pathology cannot occur even with the response cache enabled.
++//
++// Parity is fixed per site, never tested at runtime: a__ is re-anchored (a__ = a_ + n) at every
++// site, so a site's parity is exactly n's -- preamble n=0 EVEN, then n=1 ODD, n=2 EVEN, and the
++// steady loop advances n twice per iteration, preserving the pairing across the back-edge.
++//
++// The lw is written out rather than left to the compiler: memcpy from a _Float16* compiles to
++// FOUR lbu + slli + or, because the declared alignment is 2 and the 4-byte alignment this loop
++// guarantees is invisible to it. The "m" operand also states the memory dependency that a bare
++// pointer-in-register operand would not. Precondition: N even, enforced at main.c:253 -- which
++// the n+=2 unroll already required, so the two constraints coincide.
++//
++// fmv.h.x is verified on this core: it extracts both halves, NaN-boxes them correctly, and both
++// vfmul.vf and vfmacc.vf consume the result (3.0 exact on every element). It dispatches to the
++// FPU, as did the `flh` it replaces, so the swap is issue-neutral.
++// ---------------------------------------------------------------------------------------
++
+ #define MIN(a, b) ((a) < (b) ? (a) : (b))
+ 
+ // ---- Group barrier (memory-mapped, general-purpose structs) ----------------
+@@ -191,6 +219,18 @@ static inline void gbar_sync(uint32_t a) {
+ // Scalar fp16: t0..t7 = A[m+0..7][n] elements (scalar flh -> vfmacc.vf broadcast)
+ //==========================================================
+ 
++// Packed-A word load.
++//
++// asm VOLATILE, deliberately. A plain asm may be scheduled, and the scheduler's instinct is to
++// sink a load onto its consumer -- exactly the shape that cost us the run: `lw` one instruction
++// ahead of its `fmv.h.x` gives memory-level parallelism of 1, so eight A-loads that could
++// overlap instead serialize, each paying its own latency. When the MSHR entry finds no merge
++// partners that latency is a whole group_mshr_serve_timeout (2047 cyc) -- measured as ~2046 cyc
++// load-to-use on every straggler core, against ~25 when it merges. volatile pins the load where
++// it is written, ahead of the volatile vfmacc block.
++#define PA_LW(dst, p) \
++  asm volatile("lw %0, %1" : "=r"(dst) : "m"(*(const uint32_t *)(const void *)(p)))
++
+ KERNEL_ATTR
+ void matmul_8xVL(elem_t *c, const elem_t *a, const elem_t *b,
+                  const unsigned int m_start, const unsigned int m_end,
+@@ -237,16 +277,27 @@ void matmul_8xVL(elem_t *c, const elem_t *a, const elem_t *b,
+       elem_t *c__ = c_ + m * P;
+ 
+       elem_t t0, t1, t2, t3, t4, t5, t6, t7;
++      // Packed A words, live across BOTH halves of the unrolled n-loop: an even-n site loads
++      // one and uses its LOW half; the next odd-n site reuses the HIGH half of that same word.
++      uint32_t w0 = 0, w1 = 0, w2 = 0, w3 = 0, w4 = 0, w5 = 0, w6 = 0, w7 = 0;
+ 
+       // Pre-load A[m+0..7][0] — column 0 from 8 consecutive rows
+-      t0 = *a__;  a__ += N;  // A[m][0]
+-      t1 = *a__;  a__ += N;  // A[m+1][0]
+-      t2 = *a__;  a__ += N;  // A[m+2][0]
+-      t3 = *a__;  a__ += N;  // A[m+3][0]
+-      t4 = *a__;  a__ += N;  // A[m+4][0]
+-      t5 = *a__;  a__ += N;  // A[m+5][0]
+-      t6 = *a__;  a__ += N;  // A[m+6][0]
+-      t7 = *a__;             // A[m+7][0]
++      PA_LW(w0, a__);  a__ += N;  // A[m][0]
++      PA_LW(w1, a__);  a__ += N;  // A[m+1][0]
++      PA_LW(w2, a__);  a__ += N;  // A[m+2][0]
++      PA_LW(w3, a__);  a__ += N;  // A[m+3][0]
++      PA_LW(w4, a__);  a__ += N;  // A[m+4][0]
++      PA_LW(w5, a__);  a__ += N;  // A[m+5][0]
++      PA_LW(w6, a__);  a__ += N;  // A[m+6][0]
++      PA_LW(w7, a__);             // A[m+7][0]
++      asm("fmv.h.x %0, %1" : "=f"(t0) : "r"(w0));
++      asm("fmv.h.x %0, %1" : "=f"(t1) : "r"(w1));
++      asm("fmv.h.x %0, %1" : "=f"(t2) : "r"(w2));
++      asm("fmv.h.x %0, %1" : "=f"(t3) : "r"(w3));
++      asm("fmv.h.x %0, %1" : "=f"(t4) : "r"(w4));
++      asm("fmv.h.x %0, %1" : "=f"(t5) : "r"(w5));
++      asm("fmv.h.x %0, %1" : "=f"(t6) : "r"(w6));
++      asm("fmv.h.x %0, %1" : "=f"(t7) : "r"(w7));
+ 
+       unsigned int n = 0;
+ 
+@@ -264,21 +315,21 @@ void matmul_8xVL(elem_t *c, const elem_t *a, const elem_t *b,
+       asm volatile("vle16.v v20, (%0);" ::"r"(b__));
+       b__ += P;
+       asm volatile("vfmul.vf v0, v18, %0" ::"f"(t0));
+-      t0 = *a__;  a__ += N;
++      asm("fmv.h.x %0, %1" : "=f"(t0) : "r"(w0 >> 16));
+       asm volatile("vfmul.vf v2, v18, %0" ::"f"(t1));
+-      t1 = *a__;  a__ += N;
++      asm("fmv.h.x %0, %1" : "=f"(t1) : "r"(w1 >> 16));
+       asm volatile("vfmul.vf v4, v18, %0" ::"f"(t2));
+-      t2 = *a__;  a__ += N;
++      asm("fmv.h.x %0, %1" : "=f"(t2) : "r"(w2 >> 16));
+       asm volatile("vfmul.vf v6, v18, %0" ::"f"(t3));
+-      t3 = *a__;  a__ += N;
++      asm("fmv.h.x %0, %1" : "=f"(t3) : "r"(w3 >> 16));
+       asm volatile("vfmul.vf v8, v18, %0" ::"f"(t4));
+-      t4 = *a__;  a__ += N;
++      asm("fmv.h.x %0, %1" : "=f"(t4) : "r"(w4 >> 16));
+       asm volatile("vfmul.vf v10, v18, %0" ::"f"(t5));
+-      t5 = *a__;  a__ += N;
++      asm("fmv.h.x %0, %1" : "=f"(t5) : "r"(w5 >> 16));
+       asm volatile("vfmul.vf v12, v18, %0" ::"f"(t6));
+-      t6 = *a__;  a__ += N;
++      asm("fmv.h.x %0, %1" : "=f"(t6) : "r"(w6 >> 16));
+       asm volatile("vfmul.vf v14, v18, %0" ::"f"(t7));
+-      t7 = *a__;
++      asm("fmv.h.x %0, %1" : "=f"(t7) : "r"(w7 >> 16));
+ 
+       // Second half: accumulate column 1 (v20 = B[1]); prefetch B[2]->v18 and
+       // load A[..][2]. Skipped when N == 2 so column 1 falls to the epilogue
+@@ -289,22 +340,35 @@ void matmul_8xVL(elem_t *c, const elem_t *a, const elem_t *b,
+         GBAR_SYNC(gbar);  // arrive + wait: rendezvous the pair; next vle issues aligned
+         asm volatile("vle16.v v18, (%0);" ::"r"(b__));
+         b__ += P;
++        // LOADS FIRST. Every w is dead on entry -- its high half was consumed by the
++        // previous half-iteration's fmv.h.x -- so overwriting it early is safe, and the
++        // 8 loads now issue back-to-back and overlap in the MSHR instead of serializing
++        // one full serve_timeout each. The fmv.h.x cannot float back up onto its load:
++        // each redefines the t that the vfmacc above it still reads.
++        PA_LW(w0, a__);  a__ += N;
++        PA_LW(w1, a__);  a__ += N;
++        PA_LW(w2, a__);  a__ += N;
++        PA_LW(w3, a__);  a__ += N;
++        PA_LW(w4, a__);  a__ += N;
++        PA_LW(w5, a__);  a__ += N;
++        PA_LW(w6, a__);  a__ += N;
++        PA_LW(w7, a__);
+         asm volatile("vfmacc.vf v0, %0, v20" ::"f"(t0));
+-        t0 = *a__;  a__ += N;
+         asm volatile("vfmacc.vf v2, %0, v20" ::"f"(t1));
+-        t1 = *a__;  a__ += N;
+         asm volatile("vfmacc.vf v4, %0, v20" ::"f"(t2));
+-        t2 = *a__;  a__ += N;
+         asm volatile("vfmacc.vf v6, %0, v20" ::"f"(t3));
+-        t3 = *a__;  a__ += N;
+         asm volatile("vfmacc.vf v8, %0, v20" ::"f"(t4));
+-        t4 = *a__;  a__ += N;
+         asm volatile("vfmacc.vf v10, %0, v20" ::"f"(t5));
+-        t5 = *a__;  a__ += N;
+         asm volatile("vfmacc.vf v12, %0, v20" ::"f"(t6));
+-        t6 = *a__;  a__ += N;
+         asm volatile("vfmacc.vf v14, %0, v20" ::"f"(t7));
+-        t7 = *a__;
++        asm("fmv.h.x %0, %1" : "=f"(t0) : "r"(w0));
++        asm("fmv.h.x %0, %1" : "=f"(t1) : "r"(w1));
++        asm("fmv.h.x %0, %1" : "=f"(t2) : "r"(w2));
++        asm("fmv.h.x %0, %1" : "=f"(t3) : "r"(w3));
++        asm("fmv.h.x %0, %1" : "=f"(t4) : "r"(w4));
++        asm("fmv.h.x %0, %1" : "=f"(t5) : "r"(w5));
++        asm("fmv.h.x %0, %1" : "=f"(t6) : "r"(w6));
++        asm("fmv.h.x %0, %1" : "=f"(t7) : "r"(w7));
+       }
+ 
+       // ---- Steady state: vfmacc only, no (n == 1) test --------------------
+@@ -317,21 +381,21 @@ void matmul_8xVL(elem_t *c, const elem_t *a, const elem_t *b,
+         asm volatile("vle16.v v20, (%0);" ::"r"(b__));
+         b__ += P;
+         asm volatile("vfmacc.vf v0, %0, v18" ::"f"(t0));
+-        t0 = *a__;  a__ += N;
++        asm("fmv.h.x %0, %1" : "=f"(t0) : "r"(w0 >> 16));
+         asm volatile("vfmacc.vf v2, %0, v18" ::"f"(t1));
+-        t1 = *a__;  a__ += N;
++        asm("fmv.h.x %0, %1" : "=f"(t1) : "r"(w1 >> 16));
+         asm volatile("vfmacc.vf v4, %0, v18" ::"f"(t2));
+-        t2 = *a__;  a__ += N;
++        asm("fmv.h.x %0, %1" : "=f"(t2) : "r"(w2 >> 16));
+         asm volatile("vfmacc.vf v6, %0, v18" ::"f"(t3));
+-        t3 = *a__;  a__ += N;
++        asm("fmv.h.x %0, %1" : "=f"(t3) : "r"(w3 >> 16));
+         asm volatile("vfmacc.vf v8, %0, v18" ::"f"(t4));
+-        t4 = *a__;  a__ += N;
++        asm("fmv.h.x %0, %1" : "=f"(t4) : "r"(w4 >> 16));
+         asm volatile("vfmacc.vf v10, %0, v18" ::"f"(t5));
+-        t5 = *a__;  a__ += N;
++        asm("fmv.h.x %0, %1" : "=f"(t5) : "r"(w5 >> 16));
+         asm volatile("vfmacc.vf v12, %0, v18" ::"f"(t6));
+-        t6 = *a__;  a__ += N;
++        asm("fmv.h.x %0, %1" : "=f"(t6) : "r"(w6 >> 16));
+         asm volatile("vfmacc.vf v14, %0, v18" ::"f"(t7));
+-        t7 = *a__;
++        asm("fmv.h.x %0, %1" : "=f"(t7) : "r"(w7 >> 16));
+ 
+         // Second half: accumulate with v20 (B[odd]); prefetch B[even] -> v18.
+         ++n;
+@@ -341,22 +405,35 @@ void matmul_8xVL(elem_t *c, const elem_t *a, const elem_t *b,
+         GBAR_SYNC_STEADY(gbar);  // per-step rendezvous (compiled out when GBAR_STEADY=0)
+         asm volatile("vle16.v v18, (%0);" ::"r"(b__));
+         b__ += P;
++        // LOADS FIRST. Every w is dead on entry -- its high half was consumed by the
++        // previous half-iteration's fmv.h.x -- so overwriting it early is safe, and the
++        // 8 loads now issue back-to-back and overlap in the MSHR instead of serializing
++        // one full serve_timeout each. The fmv.h.x cannot float back up onto its load:
++        // each redefines the t that the vfmacc above it still reads.
++        PA_LW(w0, a__);  a__ += N;
++        PA_LW(w1, a__);  a__ += N;
++        PA_LW(w2, a__);  a__ += N;
++        PA_LW(w3, a__);  a__ += N;
++        PA_LW(w4, a__);  a__ += N;
++        PA_LW(w5, a__);  a__ += N;
++        PA_LW(w6, a__);  a__ += N;
++        PA_LW(w7, a__);
+         asm volatile("vfmacc.vf v0, %0, v20" ::"f"(t0));
+-        t0 = *a__;  a__ += N;
+         asm volatile("vfmacc.vf v2, %0, v20" ::"f"(t1));
+-        t1 = *a__;  a__ += N;
+         asm volatile("vfmacc.vf v4, %0, v20" ::"f"(t2));
+-        t2 = *a__;  a__ += N;
+         asm volatile("vfmacc.vf v6, %0, v20" ::"f"(t3));
+-        t3 = *a__;  a__ += N;
+         asm volatile("vfmacc.vf v8, %0, v20" ::"f"(t4));
+-        t4 = *a__;  a__ += N;
+         asm volatile("vfmacc.vf v10, %0, v20" ::"f"(t5));
+-        t5 = *a__;  a__ += N;
+         asm volatile("vfmacc.vf v12, %0, v20" ::"f"(t6));
+-        t6 = *a__;  a__ += N;
+         asm volatile("vfmacc.vf v14, %0, v20" ::"f"(t7));
+-        t7 = *a__;
++        asm("fmv.h.x %0, %1" : "=f"(t0) : "r"(w0));
++        asm("fmv.h.x %0, %1" : "=f"(t1) : "r"(w1));
++        asm("fmv.h.x %0, %1" : "=f"(t2) : "r"(w2));
++        asm("fmv.h.x %0, %1" : "=f"(t3) : "r"(w3));
++        asm("fmv.h.x %0, %1" : "=f"(t4) : "r"(w4));
++        asm("fmv.h.x %0, %1" : "=f"(t5) : "r"(w5));
++        asm("fmv.h.x %0, %1" : "=f"(t6) : "r"(w6));
++        asm("fmv.h.x %0, %1" : "=f"(t7) : "r"(w7));
+       }
+ 
+       // Final accumulate + store
+diff --git a/software/apps/spatz_apps/sp-fmatmul-opt-burst-merge-fp16/main.c b/software/apps/spatz_apps/sp-fmatmul-opt-burst-merge-fp16/main.c
+index 4a53df8e..73547fe3 100644
+--- a/software/apps/spatz_apps/sp-fmatmul-opt-burst-merge-fp16/main.c
++++ b/software/apps/spatz_apps/sp-fmatmul-opt-burst-merge-fp16/main.c
+@@ -250,7 +250,11 @@ int main() {
+   // near the end of main. Without these guards, non-conforming dimensions
+   // silently produce wrong results or out-of-bounds accesses (e.g. an odd N
+   // makes the n+=2 unrolled inner loop read one B row past the matrix).
+-  if ((gemm_l.N % 2u) != 0u)            return -3;  // inner loop unrolls n by 2
++  // Odd N is rejected because the inner loop unrolls n by 2. PACKED_A=1 DEPENDS on this
++  // same condition for a second reason: it fetches A[m][n] and A[m][n+1] as one 32-bit word,
++  // which needs n even AND a row stride (N elems = 2N bytes) that is a multiple of 4.
++  // If the unroll is ever relaxed, packed-A must grow its own guard here.
++  if ((gemm_l.N % 2u) != 0u)            return -3;  // inner loop unrolls n by 2; see above
+   if ((gemm_l.M % active_groups) != 0u) return -4;  // M rows split across groups
+ 
+   const uint32_t measure_iterations = 1;  // Run matmul once
+@@ -455,6 +459,9 @@ int main() {
+         .bank_shift_single  = MSHR_CFG_BANK_SHIFT_SINGLE,
+         .bank_shift_burst   = MSHR_CFG_BANK_SHIFT_BURST,
+         .bank_burst_bits    = MSHR_CFG_BANK_BURST_BITS,
++        // cache_reuse_target / cache_timeout stay 0: both exist to hold a CACHED line for the
++        // SECOND of the two fp16 loads that alias one word, which packed-A does not issue.
++        .bankfull_backpressure = MSHR_CFG_BANKFULL_BP,
+     };
+     uint32_t mshr_st = 0;
+     if (mshr_cfg_is_group_writer()) mshr_st = mshr_cfg_apply_group(&mshr_cfg);
+@@ -593,6 +600,48 @@ int main() {
+   // One sample per GROUP, taken at the first row that group owns, so a single bad group is
+   // identified rather than merely detected -- the failure mode that actually happens here
+   // (a group desynchronising, or a bank-hash mistake concentrating one group's traffic).
++  // QUIESCE THE MSHR BEFORE THE FINGERPRINT.
++  //
++  // The fingerprint below walks C with a prime stride, which is a scattered remote-read pattern
++  // with almost no locality -- nothing like the kernel's traffic. On 2026-08-21 that pattern trod
++  // on an RTL assertion in the group MSHR and killed the run BEFORE the fingerprint printed:
++  //   ** Fatal: MSHR clock gate dropped a resp_buf write: entry=8 slot=0
++  // (mempool_group_mshr.sv:2247 -- the resp_buf clock-gate enable does not cover every condition
++  // that updates the register, so in synthesised hardware that write would be silently LOST.)
++  // Both completed arms died there at cyc=122000, well after their benchmark, which is why the
++  // correctness gate kept coming back empty.
++  //
++  // Disabling the MSHR first sidesteps it AND makes this a cleaner check: C is then read with no
++  // MSHR in the path at all, so the fingerprint reflects what the kernel actually stored.
++  // Timing is irrelevant here -- this is after the measured region.
++  if (mshr_cfg_is_group_writer()) {
++    mshr_cfg_write(mshr_cfg_my_group(), mshr_cfg_peer_tile(), MSHR_CSR_ENABLE, 0);
++  }
++  __asm__ volatile("fence" ::: "memory");
++  mempool_barrier(active_cores);
++
++  // COMPACT FINGERPRINT, printed BEFORE the per-group samples.
++  // The [SPOT] loop below emits one line per group, and in practice the simulation ends before
++  // all of them reach the UART -- one run printed a single line, another printed none, leaving
++  // a perf number with no correctness signal. This is ONE line, so it survives, and it covers
++  // the whole matrix by striding rather than by traversing 65k words (which would itself cost
++  // ~200k cycles and distort the run).
++  //
++  // Integer only: C is read as raw 32-bit words with ordinary loads, so this cannot touch the
++  // scalar-FP path that wedges core 0 (see the MATMUL_VERIFY note).
++  if (cid == 0) {
++    const uint32_t nwords = (gemm_l.M * gemm_l.P) / 2u;  // two packed fp16 per word
++    const volatile uint32_t *cw = (const volatile uint32_t *)c;
++    uint32_t h = 2166136261u;                            // FNV-ish, integer ops only
++    uint32_t taken = 0;
++    for (uint32_t i = 0; i < nwords; i += 251u) {        // prime stride: hits all regions
++      h = (h ^ cw[i]) * 16777619u;
++      ++taken;
++    }
++    printf("[CKSUM] h=%08x samples=%u of %u words\n", h, taken, nwords);
++  }
++  mempool_barrier(active_cores);
++
+   if (cid == 0) {
+     const uint32_t rows_per_group = gemm_l.M / active_groups;
+     for (uint32_t g = 0; g < active_groups; ++g) {
+diff --git a/software/apps/spatz_apps/sp-fmatmul-opt-burst-merge-fp16/script/matmul.json b/software/apps/spatz_apps/sp-fmatmul-opt-burst-merge-fp16/script/matmul.json
+index f3cf0ec2..6c43b969 100644
+--- a/software/apps/spatz_apps/sp-fmatmul-opt-burst-merge-fp16/script/matmul.json
++++ b/software/apps/spatz_apps/sp-fmatmul-opt-burst-merge-fp16/script/matmul.json
+@@ -7,8 +7,8 @@
+ {
+     kernel: "GEMM"
+     M: 512,
+-    N: 512,
+-    P: 512,
++    N: 64,
++    P: 256,
+     alpha: 0,
+     transpose_A: false,
+     transpose_B: false,
+diff --git a/software/runtime/mshr_cfg.h b/software/runtime/mshr_cfg.h
+index ec77e4c7..580e0b22 100644
+--- a/software/runtime/mshr_cfg.h
++++ b/software/runtime/mshr_cfg.h
+@@ -35,6 +35,7 @@
+ #define MSHR_CSR_SERVE_TIMEOUT      8   // response-side, SINGLE-only; NOT the hold window
+ #define MSHR_CSR_CACHE_REUSE_TARGET 9   // 0 = legacy: self-invalidate at hold_subs_*
+ #define MSHR_CSR_CACHE_TIMEOUT     10   // 0 = legacy: cache phase re-arms from serve_timeout
++#define MSHR_CSR_BANKFULL_BP       11   // 0 = legacy: bank-full mergeable miss BYPASSES the MSHR
+ #define MSHR_CSR_STATUS            15   // read: sticky errors; write: clear
+ 
+ // ---- CFG_STATUS sticky bits. Non-zero means the config in effect is NOT the one requested. -----
+@@ -72,6 +73,11 @@ typedef struct {
+   uint32_t cache_reuse_target;
+   /// CACHED-phase residency countdown. 0 = LEGACY (re-arm from serve_timeout).
+   uint32_t cache_timeout;
++  /// Bank-full policy for a mergeable miss. 0 = bypass the MSHR (legacy), 1 = backpressure until a
++  /// way frees. A bypass splits the cohort: the peers that bypass are served without ever
++  /// subscribing, so a later member's fresh entry waits out serve_timeout for requesters that no
++  /// longer exist.
++  uint32_t bankfull_backpressure;
+ } mshr_cfg_t;
+ 
+ /// The group this core belongs to.
+@@ -141,6 +147,7 @@ static inline uint32_t mshr_cfg_apply_group(const mshr_cfg_t *c) {
+   mshr_cfg_write(g, tile, MSHR_CSR_SERVE_TIMEOUT,     c->serve_timeout);
+   mshr_cfg_write(g, tile, MSHR_CSR_CACHE_REUSE_TARGET,c->cache_reuse_target);
+   mshr_cfg_write(g, tile, MSHR_CSR_CACHE_TIMEOUT,     c->cache_timeout);
++  mshr_cfg_write(g, tile, MSHR_CSR_BANKFULL_BP,       c->bankfull_backpressure);
+ 
+   mshr_cfg_write(g, tile, MSHR_CSR_ENABLE, 1);          // arm last
+   __asm__ volatile("fence" ::: "memory");
+diff --git a/software/runtime/runtime.mk b/software/runtime/runtime.mk
+index e75020f1..644c6046 100644
+--- a/software/runtime/runtime.mk
++++ b/software/runtime/runtime.mk
+@@ -151,6 +151,10 @@ DEFINES += -DMSHR_CFG_BANK_BURST_BITS=$(if $(group_mshr_bank_burst_bits),$(group
+ # 0 = legacy. fp16 kernels override cache_reuse_target locally; fp32 keeps the legacy path.
+ DEFINES += -DMSHR_CFG_CACHE_REUSE_TARGET=$(if $(group_mshr_cache_reuse_target),$(group_mshr_cache_reuse_target),0)
+ DEFINES += -DMSHR_CFG_CACHE_TIMEOUT=$(if $(group_mshr_cache_timeout),$(group_mshr_cache_timeout),0)
++# Bank-full policy for a mergeable miss. 0 = bypass the MSHR (legacy), 1 = backpressure until a way
++# frees. Without this line the ELF never writes CSR 11 and the field keeps its elaboration reset
++# value, so the make-line knob and the binary can silently disagree.
++DEFINES += -DMSHR_CFG_BANKFULL_BP=$(if $(group_mshr_bankfull_backpressure),$(group_mshr_bankfull_backpressure),0)
+ DEFINES += -DNUM_GROUP_BARRIERS=$(shell awk 'BEGIN{print $(num_cores)/$(num_groups)}')
+ # Per-build extra defines (app/kernel A/B knobs), e.g.
+ #   make <app> config=<cfg> EXTRA_DEFINES="-DGBAR_PLOOP=1 -DKERNEL_SIZE=4"

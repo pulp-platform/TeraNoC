@@ -1,0 +1,8 @@
+ M config/terapool_spatz4_fpu.mk
+ M software/apps/spatz_apps/sp-fmatmul-opt-burst-merge-fp16/kernel/sp-fmatmul.c
+ M software/apps/spatz_apps/sp-fmatmul-opt-burst-merge-fp16/main.c
+ M software/apps/spatz_apps/sp-fmatmul-opt-burst-merge-fp16/script/matmul.json
+ M software/runtime/mshr_cfg.h
+ M software/runtime/runtime.mk
+?? software/apps/baremetal/fmv_h_x_bench/
+?? software/apps/baremetal/fmv_h_x_test/
