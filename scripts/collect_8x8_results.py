@@ -155,7 +155,13 @@ def main():
         f.write(HDR + "\n")
         for r in rows:
             f.write(r + "\n")
-    print("  results.tsv: %d completed arm(s)" % ndone)
+    # Report the FILE's total, not just what this pass scraped. Since the merge was added, a row
+    # can be carried forward from an earlier pass whose transcript has since been destroyed, so
+    # `ndone` understates the campaign and the results loop -- which greps this line -- reported
+    # 52 complete against a 54-row file, reading as a regression.
+    print("  results.tsv: %d completed arm(s)%s"
+          % (len(rows), ("  (%d scraped now, %d carried forward)" % (ndone, len(rows) - ndone))
+             if len(rows) != ndone else ""))
     if fatals:
         print("  KILLED BY $fatal (cycle count may be real, everything after it is not):")
         for a, w, m in fatals:
