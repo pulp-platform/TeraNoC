@@ -135,13 +135,46 @@ def probe_live(nodes):
             out[n] = c
     return out
 
+_DELIVERED = None
+
+
+def _recorded_arms():
+    """Arms with a row in results.tsv -- i.e. a measurement we HAVE, whatever is on disk now.
+
+    A delivered transcript can be destroyed after the fact: badist writes
+    hardware/s8_<arm>/transcript unconditionally, so a re-run or duplicate overwrites a finished
+    result with its own partial one. results.tsv is merge-only and keeps the row, so it outlives
+    the evidence. Without this, an arm that HAS been measured reverts to "not done" the moment it
+    is re-run -- which is exactly when the count is least trustworthy, and made this tool disagree
+    with the dashboard (51 vs 53)."""
+    global _DELIVERED
+    if _DELIVERED is None:
+        _DELIVERED = {}
+        try:
+            with open(os.path.join(ROOT, "docs/benchmarks/8x8_scaleup/results.tsv")) as fh:
+                for ln in fh.read().splitlines()[1:]:
+                    p_ = ln.split("\t")
+                    if len(p_) > 4:
+                        try:
+                            cyc = int(p_[3])
+                        except ValueError:
+                            continue
+                        _DELIVERED[p_[1] + "_" + p_[0]] = dict(
+                            cycles=cyc, util=None, rh=0, cms=0, fpu=1, recorded=True)
+        except OSError:
+            pass
+    return _DELIVERED
+
+
 def _has_result(arm):
-    """True if this arm has a delivered transcript with a cycle count."""
+    """True if this arm has been measured: a finished transcript now, or a recorded row."""
     t = os.path.join(ROOT, "hardware", "s8_" + arm, "transcript")
     try:
-        return os.path.exists(t) and b"execution took" in open(t, "rb").read()
+        if os.path.exists(t) and b"execution took" in open(t, "rb").read():
+            return True
     except OSError:
-        return False
+        pass
+    return arm in _recorded_arms()
 
 
 def ledger_states():
@@ -293,6 +326,15 @@ def main():
     for a in arms:
         st, node, batch, ts, _rank = led.get(a, (None, "-", "-", None, 0))
         res = disk_result(a)
+        if not (res and res["cycles"]):
+            # The transcript can be MISSING or MID-REWRITE: badist overwrites it unconditionally,
+            # so a re-run replaces a finished result with a partial one. Reading during that window
+            # made this tool report delivered arms as "needs a rerun" and bounced the done count
+            # 51 -> 46 -> 48 -> 51 between consecutive runs. results.tsv is merge-only and keeps the
+            # measurement, so fall back to it rather than un-completing an arm we have measured.
+            rec = _recorded_arms().get(a)
+            if rec:
+                res = dict(rec)
         if res and res["cycles"]:
             # a completed arm with no probe output is a MEASUREMENT failure, not a quiet run
             (buckets["noprobe"] if res["fpu"] == 0 else buckets["done"]).append((a, res, node))
