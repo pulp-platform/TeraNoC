@@ -13,7 +13,10 @@ Only the BENCHMARK phase is kept; pre/post periods are idle and would flatten th
 import glob, json, os, re, sys
 
 ROOT = "/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC"
-OUT  = "/tmp/claude-620771/group_util.json"
+# In the repo, not a session scratchpad: this is derived campaign data that must outlive the
+# session that produced it, and at ~0.4 MB there is no reason to keep it anywhere else.
+OUT  = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                    "docs/benchmarks/8x8_scaleup/group_util.json")
 LINE = re.compile(rb"^\[FPUG\]\s+(\w+)\s+cyc=(\d+)\s+denom=(\d+)\s+busy=\s*([0-9,\s]+)")
 
 def scrape(arm):
@@ -42,11 +45,24 @@ def main():
         p = ln.split()
         if len(p) == 4:
             arms.append("fp%s_%sx%sx%s" % (p[3], p[0], p[1], p[2]))
+    # Merge, never regenerate blind -- same hazard as results.tsv: badist overwrites
+    # hardware/s8_<arm>/transcript unconditionally, so a later duplicate can replace a finished
+    # transcript with a partial one and this arm's per-group data would silently disappear.
+    # fp16_2048x64x256 was lost that way before this was added.
     out = {}
+    try:
+        out = json.load(open(OUT))
+    except Exception:
+        pass
+    kept0 = set(out)
     for a in arms:
         d = scrape(a)
         if d:
             out[a] = d
+    carried = sorted(kept0 - {a for a in arms if scrape(a)})
+    if carried:
+        print("  carried %d arm(s) forward whose transcript is gone: %s"
+              % (len(carried), ", ".join(carried[:4])))
     json.dump(out, open(OUT, "w"), separators=(",", ":"))
     tot = sum(len(v) for v in out.values())
     print("  %d arm(s), %d benchmark periods, %.0f KB"

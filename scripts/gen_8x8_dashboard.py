@@ -385,7 +385,7 @@ def main():
 
     # ---- per-group mesh over time ----
     try:
-        gu = json.load(open("/tmp/claude-620771/group_util.json"))
+        gu = json.load(open(os.path.join(ROOT, "docs/benchmarks/8x8_scaleup/group_util.json")))
     except Exception:
         gu = {}
     if gu:
