@@ -93,7 +93,13 @@ BACKENDS = {
         "cmd": '"{image}" {licwait}+PRELOAD="{elf}" -l transcript',
         "mem_gb": 4,          # measured 2.0 GB across every running terapool arm
         "licensed": True,
-        "reserve_default": 5,      # leave 5 VCS seats for the rest of the department
+        # SINGLE SOURCE OF TRUTH for the VCS courtesy line. 2 is the user's current figure
+        # (5 -> 3 -> 2 over 2026-08-23). It lives here because only sim_topup passed
+        # --reserve-licenses; auto_resubmit, rescue_orphans, heal_stuck_arms and vcs_topup all
+        # fell through to this default, so they were stopping at 5 free while the top-up filled
+        # to 2 -- the submitters disagreed about where the line was, which showed up as seats
+        # sitting idle AND the pool hovering at the line at the same time.
+        "reserve_default": 2,
         "feature": VCS_LICENSE_FEATURE,
         "server": VCS_LICENSE_SERVER,
     },
@@ -809,7 +815,15 @@ def main():
     res.add_argument("--est-runtime-s", type=int, default=5400,
                      help="sets the liveness window; over-declaring is the cheap "
                           "mistake, under-declaring kills healthy long arms")
-    res.add_argument("--timeout-s", type=int, default=86400)
+    # DEFAULT 30 DAYS, effectively no wall-clock deadline (user decision 2026-08-23:
+    # "don't set a deadline as long as the run is alive -- I don't want to kill runs halfway").
+    # A fixed wall cannot tell a healthy long run from a sick one: at ~1 s per simulated cycle
+    # the largest shapes need 66-136 h, so the old 24 h killed 83 arms mid-flight after a full
+    # day each, and a 48 h line still amputated 24% of the manifest. Pathology is caught by
+    # LIVENESS instead -- CPU starvation, the heartbeat, and wedge detection (util~0 with the
+    # cycle counter still advancing) -- which also catches a small wedged arm in minutes, where
+    # a wall-clock deadline would let it squat for days.
+    res.add_argument("--timeout-s", type=int, default=2592000)
     res.add_argument("--max-retries", type=int, default=2)
     res.add_argument("--min-link-mbps", type=int, default=0,
                      help="1000 keeps trace-heavy arms off the 100 Mb nodes")
