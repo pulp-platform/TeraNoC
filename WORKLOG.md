@@ -11303,3 +11303,15 @@ floor costs **1,522 Mcyc at BOTH meshes** — the floor scales 4× (128→512) e
 nothing for a padded decode.* That is the argument for T3. After T3 the floor moves from M to P
 (`Nout ≥ cores`); every Qwen decode op clears it except a/b (`Nout=128`, 0.13% of decode MACs), so
 the P-split is a complete answer for this model.
+
+**Coverage audit of the tile plan (same day).** Asked whether every planned size is actually tested.
+All 7 chosen tiles have a delivered **fp16** arm at their own mesh — the §5 numbers are measured.
+Five gaps, recorded as §5.5: **(a) correctness is essentially unvalidated at both meshes** — the
+`[SPOT]` probe reaches group 0 only (core 0 wedges on group 1's remote C address), 38 of 55 fp16
+arms were killed by the MSHR clock-gate assertion *after* the benchmark completed (cycles and
+`[FPU FINAL]` are real, spotcheck lost), and all 41 fp32 arms have no probe compiled in;
+**(b)** no fp32 at 8×8 for any chosen tile; **(c)** the 8×8 PV arm is dirty (RH=80, timeout=320) —
+read 53.7% as a floor, since bank-full backpressure has not been applied at 8×8; **(d)** a/b is
+P=96 padded to 128 and PV's 2048 contraction is tiled to 512, neither split tested; **(e)** decode
+untested by construction. The arms closing (b), (c) and part of §5.4 are **running now**:
+`fp32 2048×256×512`, `fp32 2048×512×256`, `fp32 2048×512×128`, and `2048×512×512` both precisions.
