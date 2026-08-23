@@ -441,6 +441,55 @@ def main():
         a16 = sum(1 for r in res if r[1] == "fp16" and "FATAL" in r[8])
         n32 = sum(1 for r in res if r[1] == "fp32")
         a32 = sum(1 for r in res if r[1] == "fp32" and "FATAL" in r[8])
+    # ---- how to read these numbers (provenance) ----------------------------------------------
+    # The table mixes three kinds of number and nothing on the page said so. A reader cannot tell a
+    # MEASURED utilisation from one REBUILT after the sim was killed before $finish, nor spot a row
+    # whose transcript no longer exists. Both are legitimate; silently blending them is not.
+    n_all = len(res)
+    n_rec = sum(1 for r in res if str(r[4]).startswith("~"))
+    n_fat = sum(1 for r in res if "FATAL" in r[8])
+    # "carried forward" = the ROW survives but its transcript no longer does. Test the transcript
+    # directly; absence from group_util.json is a DIFFERENT thing (mesh extraction can lag or an arm
+    # can lack [FPUG] entirely), and using it as a proxy under-counted 13 as 2.
+    def _no_evidence(arm):
+        try:
+            with open(os.path.join(ROOT, "hardware", "s8_" + arm, "transcript"), "rb") as fh:
+                return b"execution took" not in fh.read()
+        except OSError:
+            return True
+    n_carried = sum(1 for r in res if _no_evidence(r[1] + "_" + r[0]))
+    if n_all:
+        h += ['<section><h2>How to read these numbers</h2>',
+              '<div class="tiles">',
+              '<div class="tile done"><span class="n">%d</span><span class="l">delivered &mdash; '
+              'cycle counts all measured</span></div>' % n_all,
+              '<div class="tile"><span class="n">%d</span><span class="l">util reconstructed '
+              '(shown <i>~</i>)</span></div>' % n_rec,
+              '<div class="tile wait"><span class="n">%d</span><span class="l">row kept, transcript '
+              'overwritten</span></div>' % n_carried,
+              '<div class="tile bad"><span class="n">%d</span><span class="l">lost their spotcheck '
+              'to the assertion</span></div>' % n_fat,
+              '</div>',
+              '<p class="sub" style="margin-top:12px"><b>Cycle counts are always measured.</b> A '
+              'cycle count only exists if the benchmark ran to completion, so every row in the '
+              'table is a finished run.</p>',
+              '<p class="sub"><b>A <i>~</i> utilisation was rebuilt, not measured.</b> '
+              '<code>[FPU FINAL]</code> is printed from a SystemVerilog <code>final</code> block, so '
+              'it only appears if the simulation reaches <code>$finish</code>. An arm salvaged from a '
+              'parked sim, or killed because its result already existed, finished its program but '
+              'never got there. Those are rebuilt by summing the per-period <code>[FPUG]</code> '
+              'windows tagged <code>bench</code> &mdash; validated against the arms that have both '
+              'numbers at <b>1.1 pp mean error</b>, the error being window quantisation (1.6 pp under '
+              '20 windows, 0.15 pp over 80). They are excluded from the best/worst-util headline so a '
+              'rebuilt figure can never be quoted as a measured one.</p>',
+              '<p class="sub"><b>Utilisation is benchmark-region only.</b> The counter is gated on '
+              '<code>csr_trace_any_global</code>, so boot, DMA, I-cache warm-up and the pre-kernel '
+              'barriers are excluded from both the numerator and the denominator.</p>',
+              '<p class="sub"><b>A kept row means its evidence was overwritten.</b> badist writes '
+              '<code>hardware/s8_&lt;arm&gt;/transcript</code> unconditionally, so a re-run replaces a '
+              'delivered transcript with its own. <code>results.tsv</code> is merge-only and keeps the '
+              'measurement, but that arm\'s per-group mesh data is gone until the re-run completes.</p>',
+              '</section>']
         h += ['<section><h2>What the data says so far</h2><div class="tiles">',
               '<div class="tile"><span class="n">%s%%</span><span class="l">best util &mdash; %s %s</span></div>'
               % (best[4], esc(best[1]), esc(best[0])),
