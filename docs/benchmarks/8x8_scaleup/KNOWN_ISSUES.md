@@ -224,3 +224,31 @@ delivered, whatever batch it is in.
 
 Currently affected: `fp32_1024x64x2048`, running in both `s8nodl` (Questa, badile45) and `s8vtop`
 (VCS, badile34).
+
+## `fp16_512x256x128` is a reproducible wedge — and NOT the MSHR desync trap
+
+Four attempts, two nodes (badile34 ×2, badile35 ×2), zero results. Every one burned its full
+wall-clock allowance and was killed: `rc=137` "timed out after 172800s" three times, `rc=124` after
+86400s once. No OOM, no wrong image.
+
+The transcript is unambiguous. Ideal for this shape is `512·256·128/8192` = **2,048 cycles**; the
+run reached **495,000** — ~240× — with the FPU idle throughout:
+
+```
+[FPU] bench cyc=495000 util=0.07% cum=0.08% busy=2972/4096000 lane-cyc
+      grp_max=0.3%(g12) grp_min=0.0%(g0)  mshr_timeout=+0 bankfull_bypass=+0
+```
+
+**`mshr_timeout=+0` is the important part.** The known desync trap
+(`project_mshr_desync_timeout_trap`) announces itself with a sustained `mshr_timeout=+N` as a
+desynchronised group loses its merge partners and every remote load times out. This wedge has
+*zero* timeouts and zero bankfull bypasses — the machine is simply not issuing work. It is a
+**different mechanism** and worth root-causing rather than skipping.
+
+**Do not keep retrying it.** Each attempt costs a full timeout (up to 48 h of one licence seat) and
+delivers nothing. Its `resubmit_ledger.json` count was raised 1 → 3 (== `MAXA`) on 2026-08-23 so
+`auto_resubmit.py` reports it as "needs a human" and stops. There is no blacklist mechanism in that
+script; the ledger cap is the existing lever and it is reversible — set the count back to 0 when the
+cause is fixed.
+
+Related: `fp16_512x64x256` showed the same 4-attempts / 0-results pattern earlier in the campaign.
