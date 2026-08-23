@@ -12,6 +12,8 @@ mentions one of our arms, and reads results from disk.
   usage: campaign_status.py [--manifest FILE] [--verbose]
 """
 import glob, json, os, re, subprocess, sys, time
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from feasibility import projected_hours
 
 ROOT = "/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC"
 HW   = os.path.join(ROOT, "hardware")
@@ -350,9 +352,15 @@ def main():
             # completed arm in this campaign carries some). Three arms six minutes into their run
             # were reported WEDGED on 2026-08-23; acting on that would have killed healthy work.
             # The healer, which tests for lack of progress instead, correctly said nothing stuck.
-            MIN_WEDGE_S = 3600
+            # The threshold must be SHAPE-AWARE. A fixed hour is both too tight and too loose:
+            # a 0.8 h arm trips it while still healthy (three arms were flagged at 1.04 h, all
+            # inside their projected runtimes), and a 40 h arm would be called healthy for a day
+            # of genuine wedging. Require twice the projected wall time, floored at an hour so a
+            # tiny shape still gets a grace period.
+            proj_h = projected_hours(a) or 0.5
+            min_wedge_s = max(3600, 2 * proj_h * 3600)
             age_s = (time.time() - ts) if ts else 0
-            if (age_s > MIN_WEDGE_S and res and res["util"] is not None
+            if (age_s > min_wedge_s and res and res["util"] is not None
                     and res["util"] < 0.5 and res["cms"] > 50000):
                 buckets["wedged"].append((a, res, node))
             else:
