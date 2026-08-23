@@ -53,8 +53,25 @@ add wave -noupdate -group core[$1][$2][$3] /mempool_tb/dut/i_mempool_cluster/gen
 add wave -noupdate -group core[$1][$2][$3] /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr  ${1}/${4}]\]/gen_groups_y\[[expr  ${1}%${4}]\]/gen_rtl_group/i_group/i_mempool_group/gen_tiles[$2]/i_tile/gen_cores[$3]/gen_mempool_cc/riscv_core/i_snitch/acc_pvalid_i
 add wave -noupdate -group core[$1][$2][$3] /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr  ${1}/${4}]\]/gen_groups_y\[[expr  ${1}%${4}]\]/gen_rtl_group/i_group/i_mempool_group/gen_tiles[$2]/i_tile/gen_cores[$3]/gen_mempool_cc/riscv_core/i_snitch/acc_pready_o
 
+# The Spatz sub-group. Two bugs lived here and both were fatal to the REST of this script,
+# because `do` aborts the whole macro on error -- so a Spatz miss also cost you the Internal
+# group added below.
+#   1. the file is wave_spatz_core.tcl; wave_spatz.tcl has never existed in this repo (checked
+#      against the full git history, not just the worktree) -- an upstream name that was never
+#      renamed here.
+#   2. it passed $1 $2 $3 only, but wave_spatz_core.tcl needs NumY as $4 in 140 of its lines;
+#      without it every path expands with an empty divisor.
+# Guarded on [file exists] and wrapped in catch so a missing or failing Spatz script degrades to
+# "no Spatz group" instead of truncating the core waves.
 if {![catch {examine -radix dec /mempool_tb/spatz_issue_utilization}]} {
-    do ../scripts/questa/wave_spatz.tcl $1 $2 $3
+    set _ws [file join [file dirname [info script]] wave_spatz_core.tcl]
+    if {[file exists $_ws]} {
+        if {[catch {do $_ws $1 $2 $3 $4} _e]} {
+            puts "wave_core: Spatz group skipped ($_e)"
+        }
+    } else {
+        puts "wave_core: $_ws not found -- Spatz group skipped"
+    }
 }
 
 add wave -noupdate -group core[$1][$2][$3] -group Internal /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr  ${1}/${4}]\]/gen_groups_y\[[expr  ${1}%${4}]\]/gen_rtl_group/i_group/i_mempool_group/gen_tiles[$2]/i_tile/gen_cores[$3]/gen_mempool_cc/riscv_core/i_snitch/illegal_inst
