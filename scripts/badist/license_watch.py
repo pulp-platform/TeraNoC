@@ -93,9 +93,14 @@ def main():
     # (which only touches batches idle >90 min) can place them. Alerting on that fired every cycle
     # and taught the reader to ignore the loop -- which is how a real stall gets missed. Three or
     # more idle seats is beyond normal churn and means dispatch is genuinely stuck.
-    if idle_total >= IDLE_ALERT_MIN and wait_n > 0:
-        alerts.append("IDLE SEATS: %d usable seat(s) while %d arm(s) wait -- dispatch is not keeping up"
-                      % (idle_total, wait_n))
+    # What matters is how many arms could ACTUALLY be placed -- min(idle seats, waiting arms) --
+    # not the seat count alone. At the end of a campaign the queue runs dry and plenty of seats sit
+    # free with nothing to put in them: that is success, not a stall. Alerting on 5 idle seats while
+    # 1 arm waited was reporting a full fleet as a failure.
+    placeable = min(idle_total, wait_n)
+    if placeable >= IDLE_ALERT_MIN:
+        alerts.append("IDLE SEATS: %d arm(s) could start now (%d seats free, %d waiting) -- "
+                      "dispatch is not keeping up" % (placeable, idle_total, wait_n))
     for a in alerts:
         print("LICWATCH %s" % a)
     if "-v" in sys.argv and not alerts:
