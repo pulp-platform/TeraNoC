@@ -11243,3 +11243,33 @@ under the Qwen shapes.
 `experiments/qwen38-projection-anchors` and `decisions/qwen38-deployment-storyline` written.
 Open: fp16 M=128 wedge blocks 4×4 prefill quoting at that tile; `P<128` sweep gap; `M=32`
 decode needs the kernel change, not more shapes.
+
+---
+
+### 2026-08-23 (late) · Reclaimed 8 seats from arms reproducing delivered results
+
+**Purpose.** The licence watchdog kept reporting Questa and VCS past their courtesy lines with
+nothing pending, so the excess had to be coming from somewhere other than dispatch.
+
+**Implementation.**
+- Audited the running set against `results.tsv`: 160 distinct arms running, of which **8 already
+  had a delivered result** — burning a seat to reproduce data we hold. (Separately, only 2 arms had
+  a genuine duplicate running copy, so duplication was not the driver.)
+- `kill_redundant_arms.py` (mesh-data safeguard intact) killed all 8: 7 Questa + 1 VCS,
+  ~11 seat-hours. Two had their result transcript disturbed by the kill and were **restored from
+  backup by the tool** — the guard that exists for exactly that.
+- **`license_watch.py`**: over-reserve is now an ALERT only while our own seat count is still
+  *growing* (something is dispatching, so there is an action); flat-or-falling prints as
+  `draining` under `-v`. At 8×8 arms run for hours, so re-alerting every cycle on a state with no
+  available action is how a reader learns to ignore the loop. Previous per-pool sample in
+  `~/.badist_licwatch.json`. The user-field match is anchored to column 0 rather than a substring.
+- Committed 11 delivered result rows and their mesh data (`results.tsv` 85 → 96 done,
+  `group_util.json` 83 → 96) — they were on disk but never committed. Dashboard artifact refreshed.
+
+**Result.** Questa back **inside** the reserve (no longer alerting). VCS at 99 ours; the freed seat
+was taken by another user, so it still reads 0 free and is correctly reported as draining rather
+than as a fault. Campaign unchanged at **96 done / 152 running / 0 pending / 0 failed / 0 wedged**.
+
+**Status.** No dispatch action outstanding. Verified the 8×8 anchors quoted in
+`docs/qwen38_kernel_mapping.md` are unchanged by the newly-committed rows (fp16 median 38.4%, best
+73.5%, `512×512×512` 47.4%, paired median 1.51×).
