@@ -134,7 +134,10 @@ same shared L1. The consequences are specific:
 
 Two things follow.
 
-**First, 21 of their 28 "now" apps are operations we already have a kernel for.** Their first
+**First, 24 of their 28 "now" apps are operations we already have a kernel for.** Counting from
+their inventory: 3 FFN prefill + 3 FFN decode + 6 attention prefill + 6 attention decode + 5 GDN
+prefill + 5 GDN decode = 28, of which only the four GDN a/b control projections (`P = 96`, prefill
+and decode) fall outside a shape our GEMM already tiles onto. Their first
 tranche is the half of the layer we have measured for months; the half they defer to "later" is the
 half nobody has measured on a shared-L1 manycore. Those are complementary, not competing, and the
 overlap is small enough that neither campaign is redundant.
