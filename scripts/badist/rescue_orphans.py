@@ -27,7 +27,7 @@ import concurrent.futures as cf
 import glob, json, os, re, subprocess, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import time
-from feasibility import delivered, fits, projected_hours, announce_once, save_announced
+from feasibility import stalling, KNOWN_STALL, delivered, fits, projected_hours, announce_once, save_announced
 
 ROOT   = "/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC"
 STATE  = os.path.expanduser("~/badist/state")
@@ -157,6 +157,11 @@ def main():
     for a, when in sorted(queued_at.items()):
         if a in running or a in protected:
             continue
+        if stalling(a):
+            announce_once("stall:" + a,
+                          "  KNOWN-STALL %-22s %s -- held back, needs the hold-window experiment"
+                          % (a, KNOWN_STALL[a]))
+            continue
         if not fits(a):
             # A shape the deadline cannot hold burns a seat for the full 48h and then fails. The
             # rescuer lacked this guard while auto_resubmit and sim_topup had it, and dispatched
@@ -193,7 +198,7 @@ def main():
                           "--mem-gb", "18", "--est-runtime-s", "90000",
                           # deadline must EXCEED the predicted runtime: the default 86400 killed
                           # eight of the largest arms at exactly 24 h after a full day of work.
-                          "--timeout-s", "172800", "--force"],
+                          "--timeout-s", "2592000", "--force"],
                          cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                          text=True, start_new_session=True)
     try:

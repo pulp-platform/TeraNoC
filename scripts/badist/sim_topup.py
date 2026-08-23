@@ -24,7 +24,7 @@ KNOWN_ISSUES).
 """
 import argparse, glob, json, os, re, subprocess, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from feasibility import fits, projected_hours, delivered
+from feasibility import stalling, KNOWN_STALL, fits, projected_hours, delivered
 
 ROOT   = "/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC"
 STATE  = os.path.expanduser("~/badist/state")
@@ -181,6 +181,11 @@ def main():
     pick, seen = [], set()
     for arm in queued:
         if arm in running or arm in seen or (arm in on_backend and not a.allow_requeue):
+            continue
+        if stalling(arm):
+            announce_once("stall:" + arm,
+                          "  KNOWN-STALL %-22s %s -- held back, needs the hold-window experiment"
+                          % (arm, KNOWN_STALL[arm]))
             continue
         if not fits(arm):
             # Do not hand a seat to a shape the deadline cannot hold: it runs the full 48h and

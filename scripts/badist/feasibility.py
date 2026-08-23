@@ -93,11 +93,18 @@ def projected_hours(arm, sec_per_cycle=SEC_PER_CYCLE):
     return cycles * sec_per_cycle / 3600.0
 
 
-def fits(arm, deadline_s=172800, margin=0.85):
-    """True if the arm is projected to finish inside the deadline with margin to spare.
+def fits(arm, deadline_s=2592000, margin=0.85):
+    """True if the arm is projected to finish inside the deadline.
 
-    margin < 1 because the projection uses medians: an arm at the slow end of the spread needs
-    headroom, and a run killed at the deadline delivers NOTHING, so the asymmetry favours caution.
+    DEADLINES WERE REMOVED 2026-08-23 (user decision): a healthy run is never killed on wall-clock,
+    so `deadline_s` defaults to 30 days and this returns True for every real shape. Nothing is
+    "infeasible" any more -- that category only existed because a FIXED wall was compared against
+    variable runtimes, and it was cutting 24% of the manifest (48 arms projected 42-136 h against a
+    48 h line) purely because of where the line happened to sit.
+
+    `projected_hours` is still the useful half of this module: it says how long an arm should take,
+    which is what liveness checks compare against to spot a wedge (~75x its projection at ~1% FPU
+    utilisation). Keep the projection; drop the guillotine.
     """
     h = projected_hours(arm)
     if h is None:
@@ -167,3 +174,25 @@ def save_announced():
         _json.dump(sorted(_seen), open(_SEEN_PATH, "w"))
     except OSError:
         pass
+
+
+# --- known-stalling shapes ------------------------------------------------------------------
+# These do not fail, they STALL: ~0.1% FPU utilisation, mshr_timeout 0, [GroupMerge] 0, and
+# request ages pinned just under the 2047-cycle MSHR burst hold window. fp16_512x64x256 reached
+# 565,122 cycles against ~2,442 expected -- ~80x its own fp32 twin (7,138). Each has been killed
+# and requeued 3+ times; every attempt stalls the same way, so retrying only holds a licence seat
+# for hours and produces nothing.
+#
+# They are NOT dropped from the campaign -- they are held back from AUTOMATIC dispatch until the
+# one-knob experiment runs (burst hold window 0; see the KB note
+# `experiments/fp16-m512-smallP-stall`). Submit one by hand at any time to test.
+KNOWN_STALL = {
+    "fp16_512x64x256":  "~0.1% util, 231x expected cycles, no merge partners",
+    "fp16_512x256x128": "~0.1% util, stalls identically across 4 nodes",
+    "fp16_512x512x128": "~0.1% util, stalls identically across 4 nodes",
+}
+
+
+def stalling(arm):
+    """True if this arm is known to stall rather than run; reason available in KNOWN_STALL."""
+    return arm in KNOWN_STALL

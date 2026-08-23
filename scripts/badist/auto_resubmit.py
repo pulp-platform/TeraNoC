@@ -10,7 +10,7 @@ bad shape eats a fleet.
 """
 import glob, json, os, subprocess, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from feasibility import fits, projected_hours, delivered, announce_once, save_announced
+from feasibility import stalling, KNOWN_STALL, fits, projected_hours, delivered, announce_once, save_announced
 
 # Arms whose skip reason has already been announced. Persisted so a loop that re-invokes this
 # script every few minutes does not repeat an unchanged line forever.
@@ -137,6 +137,11 @@ def main():
         # burned its attempts before this guard existed is not a fault needing investigation --
         # fp16_2048x512x2048 is a ~200 h shape against a 48 h deadline, and "needs a human" sent
         # the reader looking for a bug instead of a scope decision.
+        if stalling(arm):
+            announce_once("stall:" + arm,
+                          "  KNOWN-STALL %-22s %s -- held back, needs the hold-window experiment"
+                          % (arm, KNOWN_STALL[arm]))
+            continue
         if not fits(arm):
             announce_once("infeasible:" + arm,
                           "  INFEASIBLE %-24s ~%.0f h projected, exceeds the deadline -- not retried"
@@ -172,7 +177,7 @@ def main():
            # submitted at 20 and the healer then had to clear 11 of its arms. 6 at a time lets
            # each finish loading before the next begins.
            "--name", "s8auto", "--max-parallel", "6", "--mem-gb", "18",
-           "--est-runtime-s", "90000", "--timeout-s", "172800", "--force"]
+           "--est-runtime-s", "90000", "--timeout-s", "2592000", "--force"]
     p = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                          text=True, start_new_session=True)
     try:
