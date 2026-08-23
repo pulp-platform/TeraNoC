@@ -359,10 +359,11 @@ the 4 (4×4) and 8 (8×8) thresholds, so a correctly-expressed decode should be 
 | shape | mesh | why |
 |---|---|---|
 | ~~`256×1024×512` fp16~~ | 4×4 | **Withdrawn as a tile candidate** — 3.50 of 3.61 MiB fully double-buffered (§5.0). Worth running only as evidence on how efficiency scales with N. |
-| `4096×256×512` fp16 | 8×8 | 12.50 MiB strict, 2.36 spare — the *more rows* direction, unexplored, and it clears the row floor comfortably. |
+| `4096×256×512` fp16 | 8×8 | 12.50 MiB strict, 2.36 spare — the *more rows* direction, unexplored, and it clears the row floor comfortably. **Queued 2026-08-23.** |
 | `2048×512×512` fp16 | 8×8 | 9.0 of 14.86 MiB fully double-buffered instead of 6.50; in the manifest, not yet delivered. |
-| `512×512×96` and `512×512×64` fp16 | 4×4 | the real GDN a/b output width, `P < 128` — untested at either mesh. Measure, do not tune. |
-| `512×2048×256` fp16 | 4×4 | PV's true contraction is 2048 keys; we tile it to 512 without evidence that is the right split. |
+| `512×512×96` and `512×512×64` fp16 | 4×4 | the real GDN a/b output width, `P < 128` — untested at either mesh. 1.38 / 1.25 MiB strict. Measure, do not tune. **Queued 2026-08-23.** |
+| ~~`512×2048×256` fp16~~ | 4×4 | **Withdrawn** — 6.50 MiB fully double-buffered against a 3.61 MiB L1. Proposed before §5.0 existed; it fails the rule this document sets. |
+| `1024×2048×256` fp16 | 8×8 | replaces the line above and asks the same question — is tiling PV's 2,048-key contraction down to 512 the right split? 11.00 MiB strict, 3.86 spare. `2048×2048×256`, which would test it at the *chosen* row tile, needs 20 MiB and does not fit. **Queued 2026-08-23.** |
 
 ### 5.5 What has and has not actually been tested
 
