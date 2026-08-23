@@ -25,7 +25,7 @@
   // a stuck all-high constant, useless as an activity gate or occupancy metric.)
   // ===========================================================================
 
-  `define RM_TOP(gg,tt) dut.i_mempool_cluster.gen_groups_x[(gg)/NumY].gen_groups_y[(gg)%NumY].gen_rtl_group.i_group.i_mempool_group.gen_tiles[tt].i_tile.gen_redmule.i_redmule_top
+  `define RM_TOP(gg,tt) dut.i_mempool_cluster.gen_groups_x[(gg)/NumY].gen_groups_y[(gg)%NumY].gen_rtl_group.i_group.i_mempool_group.gen_tiles[tt].i_tile.gen_cores[0].gen_snitch_redmule_cc.i_snitch_redmule_cc.i_redmule_top
 
   if (NumRMTilesPerGroup > 0) begin : gen_rm_eng_prof
     int f_rmeng [NumGroups][NumRMTilesPerGroup];

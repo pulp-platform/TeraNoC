@@ -298,6 +298,64 @@ $(buildpath):
 $(bender):
 	make -C $(MEMPOOL_DIR) bender
 
+########################################
+# Standalone Snitch-RedMulE CC Target  #
+########################################
+
+cc_buildpath ?= build_snitch_redmule_cc
+cc_top       ?= snitch_redmule_cc
+cc_flist     := $(cc_buildpath)/snitch_redmule_cc.f
+cc_compile_tcl := $(cc_buildpath)/compile_snitch_redmule_cc.tcl
+cc_bender_defs := \
+	-DXPULPIMG=$(xpulpimg) \
+	-DZFINX=$(zfinx) \
+	-DZQUARTERINX=$(zquarterinx) \
+	-DXDIVSQRT=$(xDivSqrt) \
+	-DSNITCH_TRACE=$(snitch_trace) \
+	-DBOOT_ADDR=32\'d$(boot_addr) \
+	-DARRAY_HEIGHT=$(redmule_height) \
+	-DARRAY_WIDTH=$(redmule_width) \
+	-DPIPE_REGS=$(redmule_regs) \
+	-DROB_DEPTH=$(rob_depth)
+cc_vlog_defs := $(patsubst -D%,+define+%,$(cc_bender_defs))
+cc_local_sources := \
+	$(MEMPOOL_DIR)/hardware/src/mempool_cc.sv \
+	$(MEMPOOL_DIR)/hardware/src/snitch_hwpe_cfg_adapter.sv \
+	$(MEMPOOL_DIR)/hardware/src/transactions_table.sv \
+	$(MEMPOOL_DIR)/hardware/src/snitch_redmule_cc.sv
+
+$(cc_buildpath):
+	mkdir -p $(cc_buildpath)
+
+.PHONY: cc-filelist
+cc-filelist: $(cc_flist)
+
+$(cc_flist): $(bender) $(config_mk) Makefile $(MEMPOOL_DIR)/Bender.yml $(cc_local_sources) | $(cc_buildpath)
+	$(bender) script flist-plus --no-default-target -t rtl -t synthesis $(cc_bender_defs) \
+		-p redmule -p snitch > $@
+	printf "%s\n" $(cc_local_sources) >> $@
+
+$(cc_buildpath)/$(library): | $(cc_buildpath)
+	cd $(cc_buildpath) && $(questa_cmd) vlib $(library)
+	cd $(cc_buildpath) && $(questa_cmd) vmap $(library) $(library)
+
+$(cc_compile_tcl): $(bender) $(config_mk) Makefile $(MEMPOOL_DIR)/Bender.yml $(cc_local_sources) | $(cc_buildpath)
+	$(bender) script vsim --no-default-target -t rtl -t synthesis \
+		--vlog-arg="$(vlog_args)" $(cc_bender_defs) -p redmule -p snitch > $@
+	echo "vlog -sv $(vlog_args) $(cc_vlog_defs) \
+		+incdir+$(MEMPOOL_DIR)/hardware/deps/hci/rtl/common $(cc_local_sources)" >> $@
+	echo "exit" >> $@
+
+.PHONY: cc-compile
+cc-compile: $(cc_buildpath)/$(library) $(cc_compile_tcl) update_opcodes
+	cd $(cc_buildpath) && $(questa_cmd) vsim -work $(library) -c \
+		-do $(notdir $(cc_compile_tcl))
+
+.PHONY: cc-elab
+cc-elab: cc-compile
+	cd $(cc_buildpath) && $(questa_cmd) vsim -c -suppress 3009 \
+		$(library).$(cc_top) -do "quit -f"
+
 ################
 # Modelsim     #
 ################

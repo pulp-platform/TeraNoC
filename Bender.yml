@@ -44,6 +44,7 @@ sources:
   - hardware/src/selector.sv
   - hardware/src/mempool_tile_remote_req_router.sv
   - hardware/src/transactions_table.sv
+  - hardware/src/snitch_redmule_cc.sv
   - hardware/src/control_registers/control_registers_reg_pkg.sv
   - hardware/src/control_registers/control_registers_reg_top.sv
   # Level 1

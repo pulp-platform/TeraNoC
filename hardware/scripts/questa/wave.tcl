@@ -31,6 +31,7 @@ add wave /mempool_tb/wfi
 # Add the spm bank util of one tile
 set NumX [examine -radix dec mempool_pkg::NumX]
 set NumY [examine -radix dec mempool_pkg::NumY]
+set NumRMTilesPerGroup [examine -radix dec mempool_pkg::NumRMTilesPerGroup]
 for {set group 0} {$group < [examine -radix dec /mempool_pkg::NumGroups]} {incr group} {
     for {set tile 0} {$tile < [examine -radix dec /mempool_pkg::NumTilesPerGroup]} {incr tile} {
         add wave -Group super_bank_req_valid -position insertpoint sim:/mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr ${group}/${NumX}]\]/gen_groups_y\[[expr ${group}%${NumY}]\]/gen_rtl_group/i_group/i_mempool_group/gen_tiles\[${tile}\]/i_tile/superbank_req_valid
@@ -39,11 +40,19 @@ for {set group 0} {$group < [examine -radix dec /mempool_pkg::NumGroups]} {incr 
 
 # Add all cores from group 0 tile 0
 for {set core 0}  {$core < [examine -radix dec mempool_pkg::NumCoresPerTile]} {incr core} {
-    do ../scripts/questa/wave_core.tcl 0 0 $core $NumY
+    if {$core == 0 && $NumRMTilesPerGroup > 0} {
+        do ../scripts/questa/wave_snitch_redmule_cc.tcl 0 0 $NumY
+    } else {
+        do ../scripts/questa/wave_core.tcl 0 0 $core $NumY
+    }
 }
 
 # Add specific cores from different tiles
-do ../scripts/questa/wave_core.tcl 1 0 0 $NumY
+if {$NumRMTilesPerGroup > 0} {
+    do ../scripts/questa/wave_snitch_redmule_cc.tcl 1 0 $NumY
+} else {
+    do ../scripts/questa/wave_core.tcl 1 0 0 $NumY
+}
 do ../scripts/questa/wave_core.tcl 1 1 1 $NumY
 do ../scripts/questa/wave_core.tcl [expr [examine -radix dec mempool_pkg::NumGroups]-1] [expr [examine -radix dec mempool_pkg::NumTilesPerGroup]-1] [expr [examine -radix dec mempool_pkg::NumCoresPerTile]-1] $NumY
 
