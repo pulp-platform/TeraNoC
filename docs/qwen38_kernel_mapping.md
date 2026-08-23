@@ -412,7 +412,94 @@ measured.
 
 ---
 
-## 6. Coverage gaps Qwen exposes
+## 6. Two flavours, one config each
+
+4×4 and 8×8 are **not** a partition of one machine: the DMA has no support for carving an 8×8
+cluster into 4×4 sub-clusters, so each is a separate flavour running the **whole** Qwen inference
+end to end, under a **single hardware configuration held across every inference stage**. That
+constraint is stronger than §5 assumed, and it has one real consequence plus one that turns out to
+be free.
+
+### 6.1 The consequence that is real: one MSHR tuning, not eleven
+
+Every efficiency in §5 comes from a build whose MSHR tuning was **derived at compile time from that
+shape's own `GEMM_M/N/P`** (`software/runtime/mshr_cfg.h`). In simulation that is fine — the base
+configs ship `group_mshr_cfg_runtime := 1`, so software owns the tuning through CSR 11 and can
+retune per operation at runtime.
+
+**The tape-out configs pin it back to 0.** `config/terapool_spatz4_fpu_backend_{4x4,8x8}.mk`:
+
+> at `CfgRuntime=1` `mempool_group_mshr_cfg` stops const-folding and becomes real CSR flops per
+> group, which is area this design does not need to tape out.
+
+So in silicon there is **one elaborated MSHR tuning for all eleven operations**, and ten of them run
+with tuning matched to something else. The §5 numbers are therefore optimistic for the taped-out
+part, though not for the simulator.
+
+**Which is cheap, because the work is not spread evenly.** Tuning for the dominant tile costs
+degradation only on the special tiles, and those are almost nothing:
+
+| flavour | dominant tile | share of prefill cycles | special tiles | share |
+|---|---|---:|---|---:|
+| 4×4 | `256×512×512` | **98.1%** | QK, PV, a+b | 1.9% |
+| 8×8 | `2048×256×512` | **98.7%** | PV, a+b | 1.3% |
+
+**Tune the single config for the dominant tile.** Whatever the special tiles lose, it lands on under
+2% of the work. The one-config constraint is essentially free — but it must be *measured* that way:
+an arm built with per-shape tuning is not evidence for the taped-out part, so the QK/PV/a+b arms
+need re-running under the dominant tile's tuning before their §5 numbers can be quoted for silicon.
+
+### 6.2 The one that is free: off-chip bandwidth does not bind in prefill
+
+The intuition that a smaller L1 forces smaller tiles and therefore more off-chip traffic is correct
+in its first half and inverts in its second. Traffic for a tiled GEMM is
+`A·⌈Nout/P⌉ + B·⌈S/M⌉ + C` — **the row tile M sets how many times every weight matrix is re-read.**
+
+| flavour | tile | weight (B) traffic | total off-chip | compute | required BW | vs L2 BW |
+|---|---|---:|---:|---:|---:|---|
+| 4×4 | `256×512×512` | 396 GB | **616 GB** | 26,119 Mcyc | 23.6 B/cyc | 1,024 → **43× headroom** |
+| 8×8 | `2048×256×512` | 178 GB | **270 GB** | 8,453 Mcyc | 31.9 B/cyc | 2,048 → **64× headroom** |
+
+So 4×4 moves **2.3× more bytes** — `M = 256` makes eight passes over every weight matrix where
+8×8's `M = 2048` covers the whole `S = 2048` sequence in one — but it also takes 3.1× longer, so its
+required *rate* is **lower**, not higher. Arithmetic intensity is 83 MAC/byte at 4×4 and 188 at 8×8.
+
+**Both are compute-bound by more than an order of magnitude.** At 1 GHz the requirement is ~24 GB/s
+and ~32 GB/s, which any DRAM interface supplies — and it must be DRAM, not L2: one FFN matrix is
+170 MiB against a 16/32 MB L2, so no layer's weights are ever L2-resident.
+
+**This settles a trade in §5.1.** At 4×4, `M = 512` would halve weight traffic — four passes instead
+of eight, 616 → 418 GB, 23.6 → 15.4 B/cyc — for 3.5 pp of efficiency (91.3% against 94.8%, +3.8%
+cycles). With 43× bandwidth headroom that trade is not worth taking: **`M = 256` is right, and now
+for a stated reason rather than because it measured highest.** Revisit only if a real memory system
+turns out to be far weaker than L2, or at decode.
+
+⚠️ **Decode is where this could invert and it is unmeasured.** At `B = 32` each weight is reused 32
+times — 16 MAC/byte at fp16, against thresholds of 2 (4×4) and 4 (8×8) MAC/byte — so a correctly
+expressed decode is also compute-bound. But nothing here is measured (§5.3), and at `B = 1` the
+reuse collapses to 0.5 MAC/byte and both flavours become firmly memory-bound.
+
+### 6.3 The two flavours, side by side
+
+| | **4×4** | **8×8** |
+|---|---|---|
+| dominant tile | `256×512×512` | `2048×256×512` |
+| efficiency on it | **94.8%** | 73.5% |
+| whole prefill pass | 26,170 Mcyc | **8,453 Mcyc** |
+| off-chip traffic | 616 GB | **270 GB** |
+| required bandwidth | **23.6 B/cyc** | 31.9 B/cyc |
+| GDN state, fp16, per sequence per layer | 1.50 MiB = **42% of L1** | **10% of L1** |
+| batch that fits alongside the state | 1–2 | **8** |
+
+The efficiency gap is real and it is the price of the mesh. What buys it back is not throughput on
+the GEMM — it is that **only 8×8 can hold the Gated DeltaNet recurrent state at a useful batch**
+(§8), and 48 of 64 layers are DeltaNet. A flavour that runs the projections 21 pp more efficiently
+but cannot hold the state of three quarters of the model's layers is not the better machine for
+*this* workload.
+
+---
+
+## 7. Coverage gaps Qwen exposes
 
 | regime | needed for | 4×4 | 8×8 |
 |---|---|---|---|
@@ -432,7 +519,7 @@ GEMM work this model requires.
 
 ---
 
-## 7. Tranche plan
+## 8. Tranche plan
 
 **T0 — shape mapping, no new kernel (days).**
 Wrap the existing GEMM as `qwen_<workload>_<operation>` apps with the runtime
@@ -474,7 +561,7 @@ layer-integration cost, which is the number an architecture paper is actually as
 
 ---
 
-## 8. Storyline
+## 9. Storyline
 
 Three claims, in the order the evidence supports them.
 
