@@ -27,7 +27,7 @@ import concurrent.futures as cf
 import glob, json, os, re, subprocess, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import time
-from feasibility import delivered, fits, projected_hours
+from feasibility import delivered, fits, projected_hours, announce_once, save_announced
 
 ROOT   = "/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC"
 STATE  = os.path.expanduser("~/badist/state")
@@ -161,8 +161,9 @@ def main():
             # A shape the deadline cannot hold burns a seat for the full 48h and then fails. The
             # rescuer lacked this guard while auto_resubmit and sim_topup had it, and dispatched
             # 38 infeasible arms in one pass -- 4,255 projected hours, every one of them doomed.
-            print("  INFEASIBLE %-24s ~%.0f h projected -- not rescued"
-                  % (a, projected_hours(a) or 0))
+            announce_once("infeasible:" + a,
+                          "  INFEASIBLE %-24s ~%.0f h projected -- not rescued"
+                          % (a, projected_hours(a) or 0))
             continue
         if delivered(a):
             # durable record, not the overwritable transcript: delivered() handles its own
@@ -208,3 +209,4 @@ def main():
     print("  rescued %d arm(s)" % len(victims))
 
 main()
+save_announced()

@@ -83,3 +83,32 @@ def delivered(arm):
         return b"execution took" in open(t, "rb").read()
     except OSError:
         return False
+
+
+# --- announce-once -------------------------------------------------------------------------
+# These scripts are re-invoked by a loop every few minutes. A skip reason that has not changed is
+# noise, and a channel that repeats itself trains the reader to ignore it -- which is how a real
+# event gets missed. Callers announce through here so the state is shared and survives cycles.
+import json as _json
+
+_SEEN_PATH = "/tmp/claude-620771/badist_announced.json"
+try:
+    _seen = set(_json.load(open(_SEEN_PATH)))
+except Exception:
+    _seen = set()
+
+
+def announce_once(key, message):
+    """Print message the first time this key is seen; stay silent afterwards. Returns True if printed."""
+    if key in _seen:
+        return False
+    _seen.add(key)
+    print(message)
+    return True
+
+
+def save_announced():
+    try:
+        _json.dump(sorted(_seen), open(_SEEN_PATH, "w"))
+    except OSError:
+        pass

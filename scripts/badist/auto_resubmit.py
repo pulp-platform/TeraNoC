@@ -10,7 +10,7 @@ bad shape eats a fleet.
 """
 import glob, json, os, subprocess, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from feasibility import fits, projected_hours, delivered
+from feasibility import fits, projected_hours, delivered, announce_once, save_announced
 
 # Arms whose skip reason has already been announced. Persisted so a loop that re-invokes this
 # script every few minutes does not repeat an unchanged line forever.
@@ -138,18 +138,16 @@ def main():
         # fp16_2048x512x2048 is a ~200 h shape against a 48 h deadline, and "needs a human" sent
         # the reader looking for a bug instead of a scope decision.
         if not fits(arm):
-            if arm not in _reported:
-                print("  INFEASIBLE %-24s ~%.0f h projected, exceeds the deadline -- not retried"
-                      % (arm, projected_hours(arm) or 0))
-                _reported.add(arm)
+            announce_once("infeasible:" + arm,
+                          "  INFEASIBLE %-24s ~%.0f h projected, exceeds the deadline -- not retried"
+                          % (arm, projected_hours(arm) or 0))
             continue
         n = led.get(arm, 0)
         if n >= MAXA:
             # Report once, not on every cycle: this loop runs every few minutes and an unchanged
             # skip is noise that trains the reader to ignore it.
-            if arm not in _reported:
-                print("  SKIP %-26s %d attempts already -- needs a human" % (arm, n))
-                _reported.add(arm)
+            announce_once("capped:" + arm,
+                          "  SKIP %-26s %d attempts already -- needs a human" % (arm, n))
             continue
         elf = os.path.join(ROOT, "hardware", "s8_%s.elf" % arm)
         if not os.path.exists(elf):
@@ -200,4 +198,4 @@ def _save_reported():
 
 
 main()
-_save_reported()
+save_announced()
