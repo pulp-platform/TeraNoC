@@ -225,7 +225,7 @@ delivered, whatever batch it is in.
 Currently affected: `fp32_1024x64x2048`, running in both `s8nodl` (Questa, badile45) and `s8vtop`
 (VCS, badile34).
 
-## `fp16_512x256x128` is a reproducible wedge — and NOT the MSHR desync trap
+## The zero-timeout wedge — `fp16_512x256x128`, `fp16_512x512x128` — and NOT the MSHR desync trap
 
 Four attempts, two nodes (badile34 ×2, badile35 ×2), zero results. Every one burned its full
 wall-clock allowance and was killed: `rc=137` "timed out after 172800s" three times, `rc=124` after
@@ -260,4 +260,26 @@ Note also that the per-arm counts under-report: this arm had failed **four** tim
 ledgers read 1, because the other three attempts came from `sim_topup` / manual paths that feed
 neither ledger. The cap bounds a script's own retries, not the arm's real attempt count.
 
-Related: `fp16_512x64x256` showed the same 4-attempts / 0-results pattern earlier in the campaign.
+**A second arm with the identical signature: `fp16_512x512x128`.** Ideal 4,096 cycles; reached
+485,000 (~118×) at util 0.07%, again with `mshr_timeout=+0 bankfull_bypass=+0`. Both ledgers capped
+on 2026-08-23. `fp16_512x64x256` showed the same 4-attempts / 0-results pattern earlier.
+
+### It is NOT (yet) a shape class — the obvious pattern does not survive the split
+
+All three wedges are fp16 with `M = 512`, and a first look at the fp16 `P = 128` column supports a
+story: only 1 of 7 `M = 512` shapes delivered against 5 of 7 at `M = 2048`. **That reading is
+wrong**, because "not delivered" in a live campaign is mostly "still running". Splitting it:
+
+| M | manifest shapes | done | running | FAILED |
+|---:|---:|---:|---:|---:|
+| 512 | 35 | 13 | 21 | **1** |
+| 1024 | 34 | 15 | 19 | 0 |
+| 2048 | 32 | 16 | 16 | 0 |
+| 4096 | 23 | 11 | 12 | 0 |
+| 8192 | 14 | 7 | 7 | 0 |
+
+Completion is 37–50% at *every* M — that is campaign progress, not a failure gradient — and there is
+exactly **one** FAILED fp16 arm in the whole set. Three wedges against 35 `M = 512` shapes of which
+13 completed cleanly is a **hypothesis, not a class**. Do not act on it until the campaign is
+complete. (This is the same error as the retracted "higher util finished slower" finding, which came
+from a ranking that excluded the fastest arms.)
