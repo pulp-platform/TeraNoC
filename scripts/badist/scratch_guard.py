@@ -13,7 +13,8 @@ up. Group by node before believing a shape story.
 
 This checks the disk on every node we have work on, and when one is low it reclaims OUR spent run
 directories. Three guards, because deleting the wrong directory destroys a running simulation:
-  1. the node must have no live vsimk/simv of ours in that directory,
+  1. the node must have no live simulator of ours whose /proc/<pid>/cwd IS that directory
+     (a command-line match does NOT work -- the run dir is never in vsim's argv),
   2. the owning job must be terminal in the ledger (never queued/running),
   3. a transcript that FINISHED but was never delivered is salvaged to
      hardware/s8_<arm>/transcript before anything is removed.
@@ -152,10 +153,19 @@ def main():
             continue
         print("  %-12s %s has %d GB free -- packaging is at risk" % (h, cache, avail))
 
-        listing = sh(h, 'for d in %s/*/*/; do [ -d "$d" ] || continue; '
-                        'p=$(pgrep -u %s -f "$d" 2>/dev/null | head -1); '
+        # LIVE-PROCESS GUARD -- match on /proc/<pid>/cwd, NOT on the command line.
+        # This was `pgrep -u $USER -f "$d"`, which is a NO-OP for the simulators we run: a run
+        # directory NEVER appears in vsim's argv (badist chdir()s into it), so the guard reported
+        # "none" for every directory including live ones. On 2026-08-23 it deleted the run dir of a
+        # LIVE vsimk on badile44 (pid 3373011, 9h42m in, 14.9 GB RSS) -- the exact outcome guard 1
+        # exists to prevent. The same mistake had already been found and fixed in the kill scripts;
+        # it was never carried across to here.
+        listing = sh(h, 'live=$(for q in $(ps -u %s -o pid=); do c=$(readlink /proc/$q/cwd '
+                        '2>/dev/null); [ -n "$c" ] && echo "${c%% (deleted)}"; done | sort -u); '
+                        'for d in %s/*/*/; do [ -d "$d" ] || continue; dd=${d%%/}; '
+                        'if printf "%%s\\n" "$live" | grep -Fxq "$dd"; then p=live; else p=none; fi; '
                         'f=no; grep -aqm1 "execution took" "$d/transcript" 2>/dev/null && f=yes; '
-                        'echo "$d|${p:-none}|$f"; done' % (cache, USER), timeout=240)
+                        'echo "$dd/|$p|$f"; done' % (USER, cache), timeout=240)
         if not listing:
             print("      (nothing of ours here to reclaim)")
             continue
