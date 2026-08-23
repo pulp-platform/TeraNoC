@@ -305,6 +305,52 @@ the 4 (4×4) and 8 (8×8) thresholds, so a correctly-expressed decode should be 
 | `512×512×96` and `512×512×64` fp16 | 4×4 | the real GDN a/b output width, `P < 128` — untested at either mesh. Measure, do not tune. |
 | `512×2048×256` fp16 | 4×4 | PV's true contraction is 2048 keys; we tile it to 512 without evidence that is the right split. |
 
+### 5.5 What has and has not actually been tested
+
+Every tile named in §5.1 and §5.2 has a delivered **fp16** measurement at its own mesh — the numbers
+above are measured, not modelled. Five gaps behind them, in order of how much they matter:
+
+**(a) Correctness is essentially unvalidated, at both meshes.** This is the important one.
+
+- The `[SPOT]` probe reaches **group 0 only** on every arm that has it. Core 0 wedges reading
+  group 1's remote C address and never emits a second line — proven on an assertion-free 4×4 run
+  that idled 840k further cycles with every counter at zero. A threshold the probe cannot reach is
+  not a correctness signal.
+- **38 of 55 delivered fp16 arms were killed by `$fatal`** — the MSHR clock-gate assertion at
+  `mempool_group_mshr.sv:2258` / `:2261` ("clock gate dropped a sub-request / resp_buf write").
+  The benchmark finishes *before* the kill, so `execution took N` and `[FPU FINAL]` are real and the
+  cycle counts stand; everything after the kill, including the spotcheck, is lost.
+- **All 41 delivered fp32 arms carry no correctness probe at all** — it is not compiled into the
+  fp32 apps, and their only other check (`MATMUL_VERIFY`) is off by default because it wedges core 0.
+
+So the honest statement is: **§5 is a performance plan resting on unvalidated results.** That is
+acceptable for choosing a tile — a wrong result and a right result take the same number of cycles for
+the same shape — and unacceptable for anything downstream of it. See
+`project_matmul_verify_fp_wedge` and the open KB task `tasks/fix-resp-buf-clockgate-assertion`.
+
+**(b) No fp32 at 8×8 for any chosen tile.** 4×4 has both precisions for all four tiles
+(fp32: 89.0 / 85.2 / 87.1 / 87.3%). At 8×8 all three fp32 counterparts are **running now** and
+undelivered, so the fp16-vs-fp32 question is open exactly where the mesh matters most.
+
+**(c) The 8×8 PV arm is dirty.** `2048×512×256` reports **RH = 80, mshr_timeout = 320**. Response
+hazards are precisely what bank-full backpressure eliminates at 4×4 — 2–8% efficiency to 54–91%,
+with both counters driven to zero — and that treatment has **not** been applied at 8×8. Read 53.7%
+as a floor for this tile, not as its number. The other two 8×8 tiles are clean (RH = 0, timeout = 0)
+and the four 4×4 tiles are clean.
+
+**(d) Two planned tiles are approximations of the real operation.**
+GDN a+b is `P = 96` padded to 128, and `P < 128` has never been run at either mesh. PV's true
+contraction is 2,048 keys and we tile it to 512 with no evidence that split is right. Both are in
+the §5.4 list.
+
+**(e) Decode is untested, by construction.** `M = 32` is not expressible under the current work
+split, so there is no decode arm at either mesh. The GEMV path exists (`gemv`, `gemv-opt`) but has
+no measurement in this campaign. Everything in §5.3 is derived from the row floor and the peak, not
+measured.
+
+**Currently running and due to close (b), (c) and part of §5.4:** `fp32 2048×256×512`,
+`fp32 2048×512×256`, `fp32 2048×512×128`, and `2048×512×512` at both precisions.
+
 ---
 
 ## 6. Coverage gaps Qwen exposes
