@@ -35,9 +35,15 @@ BACKENDS = {
     # mtiverification is the binding Questa feature (200 seats); msimhdlsim has 400 and never runs
     # out first. Governing on msimhdlsim alone once let us take 150 of the 200 while the tool
     # reported plenty free and colleagues were locked out.
+    # max_parallel 4, NOT 30: every Questa arm opens the same 17 GB work library over NFS, so a
+    # burst of simultaneous starts contends at design load and some die with "Error loading design"
+    # after ~17 min of vopt (rc 12, and "Errors: 0, Warnings: 0" -- it looks like nothing is wrong).
+    # Measured: an s8qtop batch started 5 arms within a 2 s spread and lost 2 of them that way.
+    # VCS does not share anything at start-up -- each simv is a self-contained binary -- so it keeps
+    # the wide setting.
     "questa": dict(feature="mtiverification", server="8161@lic-mentor.ethz.ch",
                    reserve=10, image=None, mem_gb=17,
-                   name="s8qtop", max_parallel=30),
+                   name="s8qtop", max_parallel=4),
 }
 
 
