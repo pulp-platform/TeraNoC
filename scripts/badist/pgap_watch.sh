@@ -20,11 +20,18 @@ for _ in $(seq 1 480); do          # ~40 h at 5 min, then give up rather than li
     room=$(( iss - use - RESERVE ))
     if [ "$room" -ge 1 ]; then
       echo "PGAP $room VCS seat(s) free -- submitting the two P<128 probe arms"
-      timeout 900 scripts/badist/teranoc_fleet.py submit --arms "$ARMS" \
+      # NO `timeout` around this. The controller lives as long as its arms do, so a timeout kills
+      # it mid-run and reports rc=124 as though the submission failed. It does not: killing a
+      # submit controller stops NEW dispatch only -- arms already running keep going, keep
+      # reporting and still deliver. Observed 2026-08-23 with `timeout 900`, which fired 15 min in
+      # while both simulators were healthy and produced a misleading "returned 124".
+      scripts/badist/teranoc_fleet.py submit --arms "$ARMS" \
         --backend vcs --run-prefix run5 --name p96gap \
         --max-parallel 2 --mem-gb 12 --reserve-licenses "$RESERVE" \
         --est-runtime-s 20000 --timeout-s 2592000 --force >/tmp/claude-620771/pgap_submit.log 2>&1
-      echo "PGAP submit returned $? -- see /tmp/claude-620771/pgap_submit.log"
+      rc=$?
+      [ "$rc" = 0 ] && echo "PGAP submit finished cleanly" \
+                    || echo "PGAP submit exited rc=$rc -- arms may still be running; check badist status before resubmitting"
       exit 0
     fi
   fi
