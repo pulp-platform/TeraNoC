@@ -125,6 +125,31 @@ def main():
                        (("~%.2f" if r.get("util_recon") else "%.2f") % r["util"])
                        if r["util"] is not None else "-",
                        r["rh"], r["tmo"], r["bf"], sc))
+    # MERGE with what is already recorded, never regenerate blind.
+    #
+    # This file is rebuilt from the transcripts on disk, and a transcript can be DESTROYED after it
+    # was delivered: badist writes hardware/s8_<arm>/transcript unconditionally, so a duplicate or
+    # rescued copy that starts later overwrites a finished result with its own partial one. The row
+    # then vanishes on the next scrape and the arm silently reverts to "not done".
+    # Observed once: fp16_2048x64x256 was recorded at 14,186 cycles in two commits and then
+    # disappeared when a later copy delivered a partial transcript over the salvaged one.
+    # A delivered measurement is not re-derivable, so a row is only ever added or updated here --
+    # never dropped because the evidence behind it went missing.
+    prev = {}
+    try:
+        with open(OUT) as f:
+            for ln in f.read().splitlines()[1:]:
+                p_ = ln.split("\t")
+                if len(p_) > 3:
+                    prev[(p_[0], p_[1])] = ln
+    except OSError:
+        pass
+    have = {(r.split("\t")[0], r.split("\t")[1]) for r in rows}
+    kept = [ln for k, ln in prev.items() if k not in have]
+    if kept:
+        print("  kept %d earlier row(s) whose transcript is no longer on disk: %s"
+              % (len(kept), ", ".join("%s_%s" % (k[1], k[0]) for k in prev if k not in have)))
+        rows.extend(kept)
     rows.sort(key=lambda s: int(s.split("\t")[3]))
     with open(OUT, "w") as f:
         f.write(HDR + "\n")
