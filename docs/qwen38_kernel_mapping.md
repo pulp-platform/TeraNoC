@@ -195,10 +195,60 @@ tile in §4.1, which is why the prefill claim is nearly free.
 ## 5. Chosen tile sizes, per operation
 
 Derived from three constraints, in this order: the **work-split row floor** (M ≥ 128 at 4×4,
-M ≥ 512 at 8×8), the **L1 footprint** with A and B double-buffered
-(`2·(M·N + N·P) + M·P` elements), and then **measured efficiency** — picking the highest-efficiency
-legal tile, because with `efficiency = ideal/actual` the total cycles for a fixed amount of work are
-just `ideal_total / efficiency`, so the best tile is simply the most efficient one.
+M ≥ 512 at 8×8), the **L1 footprint** (§5.0), and then **measured efficiency** — picking the
+highest-efficiency legal tile, because with `efficiency = ideal/actual` the total cycles for a fixed
+amount of work are just `ideal_total / efficiency`, so the best tile is simply the most efficient one.
+
+### 5.0 The L1 budget, with double buffering
+
+A GEMM tile holds three panels — A (`M×N`), B (`N×P`) and C (`M×P`) — and the budget depends on how
+many of them the kernel keeps two copies of:
+
+| kernel | footprint | what it overlaps |
+|---|---|---|
+| single-buffered | `(MN + NP + MP)·b` | nothing; DMA and compute serialise |
+| A/B double-buffered | `(2(MN + NP) + MP)·b` | operand fetch for tile *i+1* under compute of *i*; C accumulates in place across the N-tiles |
+| **fully double-buffered** | **`2(MN + NP + MP)·b`** | also the C write-back, at M- and P-tile boundaries |
+
+**Plan against the fully double-buffered rule** — the single-buffer tile must fit in **half of
+usable L1** — because that is what the future kernel needs and because the difference is decisive at
+the top of the range. `b` = 2 bytes at fp16. Budget: **1.805 MiB** at 4×4, **7.43 MiB** at 8×8.
+
+| tile | single | A/B dbl | **full dbl** | 4×4 (3.61 MiB) | 8×8 (14.86 MiB) |
+|---|---:|---:|---:|---|---|
+| `256×512×512` | 1.00 | 1.75 | **2.00** | ✅ 1.61 spare | — |
+| `512×512×512` | 1.50 | 2.50 | **3.00** | ✅ 0.61 spare | — |
+| `512×256×512` | 1.00 | 1.50 | **2.00** | ✅ 1.61 spare | — |
+| `512×256×256` | 0.62 | 1.00 | **1.25** | ✅ 2.36 spare | — |
+| `512×512×128` | 0.75 | 1.38 | **1.50** | ✅ 2.11 spare | — |
+| `256×1024×512` | 1.75 | 3.25 | **3.50** | ⚠️ **0.11 spare — not viable** | — |
+| `1024×512×512` | 2.50 | 4.00 | **5.00** | ❌ over by 1.39 | — |
+| `2048×256×512` | 3.25 | 4.50 | **6.50** | — | ✅ 8.36 spare |
+| `2048×512×256` | 3.25 | 5.50 | **6.50** | — | ✅ 8.36 spare |
+| `2048×512×128` | 2.62 | 4.75 | **5.25** | — | ✅ 9.61 spare |
+| `2048×512×512` | 4.50 | 7.00 | **9.00** | — | ✅ 5.86 spare |
+| `4096×256×512` | 6.25 | 8.50 | **12.50** | — | ✅ 2.36 spare |
+| `2048×1024×512` | 7.00 | 12.00 | **14.00** | — | ⚠️ 0.86 spare — the ceiling |
+| `4096×512×512` | 8.50 | 13.00 | **17.00** | — | ❌ over by 2.14 |
+
+**Every tile chosen in §5.1 and §5.2 survives the strict rule** — 4×4 with at least 0.61 MiB spare,
+8×8 with at least 5.86 MiB. The `L1` column in those two tables is the A/B-double-buffered figure.
+
+Two consequences that do change the plan:
+
+- **`256×1024×512` at 4×4 is out.** It needs 3.50 of 3.61 MiB fully double-buffered — 0.11 MiB
+  spare, inside the error bar on "usable" and leaving nothing for stack, barriers or runtime. The
+  N=1024 idea at 4×4 (§5.4) is **capacity-blocked once double buffering lands**; keep it only as
+  evidence about how efficiency scales with N, not as a tile candidate.
+- **8×8 still has real headroom.** `2048×512×512` costs 9.00 MiB strict and leaves 5.86, so the §5.2
+  upgrade is safe under the strict rule too. The ceiling is `2048×1024×512` at 14.00 MiB, and
+  `4096×256×512` (12.50 MiB, 2.36 spare) is a second unexplored direction — more rows rather than
+  more contraction.
+
+⚠️ **The measured efficiencies come from today's kernel.** A double-buffered kernel changes the
+footprint *and* the efficiency — overlapping the operand DMA should raise it — so §5.1/§5.2 are a
+**floor** for the double-buffered version and the ranking between tiles can reorder. Re-derive both
+tables against the new kernel; do not assume the tile choice carries over.
 
 All figures fp16. `Mcyc/model` is one full 64-layer prefill pass at `S = 2048`, projected as
 `useful MAC / peak / efficiency`.
@@ -258,8 +308,8 @@ the campaign's independent scale-up figure, and it comes from efficiency, not fr
 per-tile efficiency falls from 94.8% to 73.5%.
 
 ⚠️ **We are leaving L1 on the table at 8×8.** The chosen tile uses **4.50 of 14.86 MiB**. A
-`2048×512×512` tile needs 7.0 MiB and is legal; it is in the running manifest but has not been
-delivered. Arithmetic intensity rises with N, and 8×8 is the more bandwidth-starved mesh, so this
+`2048×512×512` tile needs 7.0 MiB A/B-double-buffered and **9.0 MiB fully double-buffered** (§5.0),
+still leaving 5.86 MiB; it is in the running manifest but has not been delivered. Arithmetic intensity rises with N, and 8×8 is the more bandwidth-starved mesh, so this
 is the single most likely improvement to the table above. **Re-derive §5.2 when it lands.**
 
 ### 5.3 Decode (`B = 32`, `T_NEW = 1`) — and why it needs T3
@@ -300,8 +350,9 @@ the 4 (4×4) and 8 (8×8) thresholds, so a correctly-expressed decode should be 
 
 | shape | mesh | why |
 |---|---|---|
-| `256×1024×512` fp16 | 4×4 | N=1024 is the best fp32 regime (96.3–96.5%) but our fp16 N=1024 coverage is one point at P=256. If it beats 94.8%, §5.1 changes for nine operations. |
-| `2048×512×512` fp16 | 8×8 | uses 7.0 of 14.86 MiB instead of 4.50; in the manifest, not yet delivered. |
+| ~~`256×1024×512` fp16~~ | 4×4 | **Withdrawn as a tile candidate** — 3.50 of 3.61 MiB fully double-buffered (§5.0). Worth running only as evidence on how efficiency scales with N. |
+| `4096×256×512` fp16 | 8×8 | 12.50 MiB strict, 2.36 spare — the *more rows* direction, unexplored, and it clears the row floor comfortably. |
+| `2048×512×512` fp16 | 8×8 | 9.0 of 14.86 MiB fully double-buffered instead of 6.50; in the manifest, not yet delivered. |
 | `512×512×96` and `512×512×64` fp16 | 4×4 | the real GDN a/b output width, `P < 128` — untested at either mesh. Measure, do not tune. |
 | `512×2048×256` fp16 | 4×4 | PV's true contraction is 2048 keys; we tile it to 512 without evidence that is the right split. |
 
