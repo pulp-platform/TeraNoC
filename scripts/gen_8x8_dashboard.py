@@ -16,6 +16,25 @@ LADDER = [(16, "fp16_512x2048x1024", "fp32_512x1024x1024"),
           (2,  "fp16_4096x512x512",  "fp32_4096x256x512"),
           (1,  "fp16_8192x256x512",  None)]
 
+_DELIVERED_CACHE = None
+
+
+def _delivered(arm):
+    """True if this arm has a durable row in results.tsv (merge-only, outlives the transcript)."""
+    global _DELIVERED_CACHE
+    if _DELIVERED_CACHE is None:
+        _DELIVERED_CACHE = set()
+        try:
+            with open(os.path.join(ROOT, "docs/benchmarks/8x8_scaleup/results.tsv")) as fh:
+                for ln in fh.read().splitlines()[1:]:
+                    p_ = ln.split("\t")
+                    if len(p_) > 3 and p_[3].strip().isdigit():
+                        _DELIVERED_CACHE.add(p_[1] + "_" + p_[0])
+        except OSError:
+            pass
+    return arm in _DELIVERED_CACHE
+
+
 def states():
     out, ts_seen = {}, {}
     for d in sorted(glob.glob(os.path.join(STATE, "*"))):
@@ -46,6 +65,13 @@ def states():
                 st = last.get("state") or "?"
                 rank = {"running": 3, "done": 4, "succeeded": 4, "completed": 4,
                         "submitted": 2, "dispatched": 2, "pending": 2, "queued": 2}.get(st, 1)
+                # A `done` record with NOTHING DELIVERED is not done -- badist records the state it was
+                # told, and a job can end "done" having produced no transcript. Left at rank 4 it outranks
+                # the arm's live `running` copy, so the arm reads finished while it is still executing:
+                # 29 arms were counted that way here, which is why this page said 118 running / 45 queued
+                # against the true 147 / 16. campaign_status.py was fixed for this; the dashboard was not.
+                if rank == 4 and not _delivered(arm):
+                    rank = 1
                 ts = last.get("ts") or 0
                 prev = ts_seen.get(arm)
                 if prev is None or rank > prev[0] or (rank == prev[0] and ts >= prev[1]):
@@ -287,8 +313,16 @@ def main():
     # over its result is "done" in the ledger with nothing to show, and counting those inflated
     # this tile to 25 while the results table held 19.
     done = len(res)
-    run  = sum(1 for a, (s, n) in st.items() if s == "running")
-    fail = sum(1 for a, (s, n) in st.items() if s in ("failed", "lost", "cancelled"))
+    # A DELIVERED arm is done, whatever its ledger says. An arm that was salvaged and then killed
+    # ends with a `cancelled` record while its measurement sits safely in results.tsv, and an arm
+    # that delivered can still hold a stale `queued` copy in some retired batch. Counting the ledger
+    # alone reported 3 failed and 41 queued when the true figures were 0 and 16 -- every one of the
+    # "failed" three (fp16_4096x128x128, fp16_4096x64x256, fp16_8192x64x128) had a result.
+    # campaign_status.py was fixed for exactly this; the dashboard was not.
+    _have = {r[1] + "_" + r[0] for r in res}
+    run  = sum(1 for a, (s, n) in st.items() if s == "running" and a not in _have)
+    fail = sum(1 for a, (s, n) in st.items()
+               if s in ("failed", "lost", "cancelled") and a not in _have)
     q    = tot - done - run - fail
     stamp = subprocess.run(["date", "+%H:%M"], capture_output=True, text=True).stdout.strip()
 
