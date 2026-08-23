@@ -1,7 +1,8 @@
 # The zero-timeout wedge — evidence record
 
-2026-08-23. Three 8×8 fp16 arms have failed this way: **`fp16_512x256x128`**, **`fp16_512x512x128`**,
-and (earlier, same 4-attempts/0-results pattern) `fp16_512x64x256`. Written up for whoever debugs it,
+2026-08-23. Four 8×8 arms have failed this way: **`fp16_512x256x128`**, **`fp16_512x512x128`**,
+`fp16_512x64x256` (earlier, same 4-attempts/0-results pattern), and **`fp32_512x32x128`** — the
+last of which shows the mechanism is **not fp16-specific**. Written up for whoever debugs it,
 because the arms that produced it are transient — badist overwrites `hardware/s8_<arm>/transcript`
 unconditionally, so this file is the durable copy of what the transcripts said.
 
@@ -99,9 +100,14 @@ entry never drains, its response never returns, and every later request queues b
    so a short trace covers the whole failure.
 3. Decode `0x00141000` and `0x1040` to (group, tile, bank) and check whether the concentration on
    group 0 is a bank-hash artefact of these particular M/N/P.
-4. All three arms are fp16 with `M = 512`. **This is a hypothesis, not a shape class** — see
-   `KNOWN_ISSUES.md`: completion is 37–50% at every M and there is exactly one FAILED fp16 arm in the
-   whole set, so the apparent `M = 512` gradient is campaign progress, not a failure rate.
+4. ~~All three arms are fp16 with `M = 512`~~ — **the fp16 link is dead.** A concurrent session's
+   stall gate (`scripts/badist/feasibility.py`, `KNOWN_STALL`) records **`fp32_512x32x128` at 0.32%
+   utilisation with the same signature**, so the mechanism is **not precision-specific**. `M = 512`
+   still holds across all four, but see `KNOWN_ISSUES.md`: completion is 37–50% at every M and there
+   is exactly one FAILED fp16 arm in the whole set, so the apparent gradient is campaign progress,
+   not a failure rate. Treat `M = 512` as unexplained correlation, not a cause.
+5. `fp16_512x64x256` reached **565,122 cycles against ~2,442 expected (231×)** and is ~80× its own
+   fp32 twin (7,138) — the widest ratio recorded, and a useful extreme for whoever bisects this.
 
 ## 6. Operational handling
 
