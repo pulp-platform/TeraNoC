@@ -11273,3 +11273,16 @@ than as a fault. Campaign unchanged at **96 done / 152 running / 0 pending / 0 f
 **Status.** No dispatch action outstanding. Verified the 8×8 anchors quoted in
 `docs/qwen38_kernel_mapping.md` are unchanged by the newly-committed rows (fp16 median 38.4%, best
 73.5%, `512×512×512` 47.4%, paired median 1.51×).
+
+**Amendment (same day).** User direction: *"we focus our architecture, just refer to their plan to
+make our plan, we don't have RedMulE in our design."* `docs/qwen38_kernel_mapping.md` rewritten from
+a read-across into **our own plan**. Removed: the review/challenge section, the engine-occupancy
+correction, and the S1/S2 comparison — those are about their machine. Kept and reframed: the
+MAC-weighting (a model fact, not a critique — it says FFN is 69.1% of the work and GDN a/b is
+0.095%, so optimise by work, not by op count) and the one hazard that affects us (their `stage=gemm`
+excludes DMA; ours is whole-kernel — never one table). Added: our geometry and tile policy (the
+work-split row floor M≥128/512, and the fact that we must **tile the contraction** because A, B and
+C are all L1-resident — a full 5,120 contraction needs 5 MiB for A alone), the full app inventory
+with Spatz as the sole unit, and tranches **T0–T5**. Key structural point: **their tranche 1 is our
+T0** — the matrix half is already built and measured here, so our first tranche of new code is the
+vector half they defer. Artifact §7/§8 rewritten to match.
