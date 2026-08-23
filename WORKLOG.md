@@ -11286,3 +11286,20 @@ C are all L1-resident — a full 5,120 contraction needs 5 MiB for A alone), the
 with Spatz as the sole unit, and tranches **T0–T5**. Key structural point: **their tranche 1 is our
 T0** — the matrix half is already built and measured here, so our first tranche of new code is the
 vector half they defer. Artifact §7/§8 rewritten to match.
+
+**Tile sizes derived (same day).** `docs/qwen38_kernel_mapping.md` §5: per-operation GEMM tiles for
+prefill at both meshes, chosen by row floor → L1 footprint (A/B double-buffered) → measured
+efficiency. **4×4: `256×512×512` covers nine of eleven projections at 94.8%** (it beats
+`512×512×512` on throughput, 1,942 vs 1,870 MAC/cyc); QK takes `512×256×512` (86.5%) and PV
+`512×256×256` (86.1%) because their contraction/output is pinned to the 256-wide head — in both, the
+*larger* row tile wins. **8×8: `2048×256×512` covers ten of eleven at 73.5%.** Projected prefill
+26,170 → 8,453 Mcyc = **3.10× for 4× the hardware**, and the loss is entirely per-tile efficiency.
+Flagged: the 8×8 tile uses only **4.50 of 14.86 MiB** — `2048×512×512` (7.0 MiB) is legal and in the
+manifest but undelivered.
+
+**Decode result worth keeping.** Useful work is 779,469 M MAC per step. Padding `M=32` up to the row
+floor costs **1,522 Mcyc at BOTH meshes** — the floor scales 4× (128→512) exactly as the peak does
+(2048→8192), so the padding waste cancels the extra lanes. *Scaling the machine 4× buys literally
+nothing for a padded decode.* That is the argument for T3. After T3 the floor moves from M to P
+(`Nout ≥ cores`); every Qwen decode op clears it except a/b (`Nout=128`, 0.13% of decode MACs), so
+the P-split is a complete answer for this model.
