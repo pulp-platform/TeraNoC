@@ -11203,3 +11203,43 @@ self-correct by attrition rather than killing healthy runs.
 
 **Status.** Queue drained; no dispatch action outstanding. Knowledge captured in the KB note
 `knowledge/fleet-operations.md` §"Licence governor".
+
+---
+
+### 2026-08-23 (late) · Qwen3.8 kernel mapping — colleague's RedMulE plan reviewed, our data placed under it
+
+**Purpose.** Review `qwen3-8-primary-workload-design-plan.md` (msc26f31, RedMulE S1/S2 Stage-1
+DSE, 28 GEMM apps), work out our counterpart kernel mapping, and put the 4×4/8×8 sweep data
+under the Qwen shapes.
+
+**Implementation.**
+- **Confirmed the latest 4×4 data existed only as artifacts.** `docs/benchmarks/` had nothing
+  newer than `gemm_results_default_latest.md` (2026-08-19, fp32 only), while the idea-2 and
+  bank-full-backpressure sweeps (33 fp16 + 28 fp32 shapes, 2026-08-21/22) lived only in the
+  *Spatz fp16 Sweep* / *Idea-2* / *Backpressure* artifacts. Added
+  `scripts/gen_4x4_idea2_bp_doc.py` → `docs/benchmarks/gemm_results_4x4_idea2_bankfull.md`,
+  scraped through the same reader the dashboards use so both come from one code path.
+- **New `docs/qwen38_kernel_mapping.md`**: review, our kernel map, Qwen tiles against measured
+  anchors, coverage gaps, five-phase deployment plan, three-claim storyline.
+- **Updated the artifact** *Qwen3.8 on TeraNoC* — two new sections (§6 measured, §7 RedMulE
+  read-across), masthead and footer no longer say "analysis only".
+
+**Result.**
+- Nine of eleven Qwen prefill projections reduce to **one tile**, `512×512×512`, which runs at
+  **91.3%** of roofline at 4×4 fp16 (47.4% at 8×8, campaign still running; best 8×8 fp16 point
+  so far 73.5%). fp16 vs fp32: **1.72×** median at 4×4 (23 shapes, M≥256), **1.51×** at 8×8.
+- **Backpressure is RH-gated**: every pair whose idea-2 arm reports RH=0 is bit-identical under
+  backpressure; where RH is present at fp16 and M≥512, it takes 2–8% efficiency to 54–91% and
+  drives RH *and* mshr_timeout to exactly zero. fp32 essentially untouched.
+- Correction to send back to the RedMulE side: their engine-occupancy table reads as a cliff,
+  but MAC-weighted over `64×FFN + 48×GDN + 16×attn` the two starved classes are **0.9% of
+  prefill work** (GDN a/b is 0.095%). Prefill is ~100% occupied; the real cliff is **decode at
+  ~25%**, and it is structural — a 32-row engine minimum against a batch of 32. Our machine hits
+  the same wall from its own work-split row floor (128 at 4×4, 512 at 8×8).
+- Flagged as not-mixable: their `stage=gemm` excludes DMA and the destination clear; our cycles
+  are whole-kernel.
+
+**Status.** Docs committed; artifact republished; KB notes
+`experiments/qwen38-projection-anchors` and `decisions/qwen38-deployment-storyline` written.
+Open: fp16 M=128 wedge blocks 4×4 prefill quoting at that tile; `P<128` sweep gap; `M=32`
+decode needs the kernel change, not more shapes.
