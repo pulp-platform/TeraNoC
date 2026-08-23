@@ -186,10 +186,14 @@ def save_announced():
 # They are NOT dropped from the campaign -- they are held back from AUTOMATIC dispatch until the
 # one-knob experiment runs (burst hold window 0; see the KB note
 # `experiments/fp16-m512-smallP-stall`). Submit one by hand at any time to test.
+# NOT fp16-specific -- fp32_512x32x128 shows the identical signature (0.32% util, GroupMerge 0,
+# max request age 1999, 185 MB transcript). The common factor is M=512 with small P (128-256),
+# across both precisions and any N from 32 to 512.
 KNOWN_STALL = {
     "fp16_512x64x256":  "~0.1% util, 231x expected cycles, no merge partners",
     "fp16_512x256x128": "~0.1% util, stalls identically across 4 nodes",
     "fp16_512x512x128": "~0.1% util, stalls identically across 4 nodes",
+    "fp32_512x32x128":  "0.32% util, same signature -- shows it is not precision-specific",
 }
 
 
