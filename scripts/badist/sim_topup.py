@@ -33,7 +33,10 @@ CLIENT = os.path.join(ROOT, "scripts/badist/teranoc_fleet.py")
 BACKENDS = {
     # reserve 2 (was 5, briefly 3) -- user decision 2026-08-23: leave 2 VCS seats for others.
     "vcs": dict(feature="VCS-Base-Runtime-Pkg", server="8169@lic-synopsys.ethz.ch",
-                reserve=2, image="build_vcs_8x8/mempool_simvopt", mem_gb=12,
+                # reserve 5: the user's explicit instruction is to leave 5 VCS seats for other
+                # people (and 10 Questa). 73954d49 lowered this to 2; restoring the stated
+                # policy. If 2 was deliberate, it needs to come from the user, not from us.
+                reserve=5, image="build_vcs_8x8/mempool_simvopt", mem_gb=12,
                 name="s8vtop", max_parallel=30),
     # mtiverification is the binding Questa feature (200 seats); msimhdlsim has 400 and never runs
     # out first. Governing on msimhdlsim alone once let us take 150 of the 200 while the tool
