@@ -253,22 +253,30 @@ tables against the new kernel; do not assume the tile choice carries over.
 All figures fp16. `Mcyc/model` is one full 64-layer prefill pass at `S = 2048`, projected as
 `useful MAC / peak / efficiency`.
 
+**Two numbers per tile, and they are not the same thing.** `eff` = `ideal / actual` — the honest
+throughput measure, and what the tile choice is made on. `TB util` is the testbench `[FPU]`
+cumulative counter at the end of the benchmark window: lane **occupancy**, which counts a lane as
+busy whether or not its work was useful, is not conserved across runs of identical work, and has
+inverted a real ranking before. It runs 3–11 pp above `eff` here — that gap is the redundant and
+spill work occupancy cannot see. Quote `eff`; `TB util` is shown only because it is what the
+hardware counter reports.
+
 ### 5.1 Prefill — 4×4 (256 cores, 3.61 MiB usable L1, peak 2048 MAC/cyc)
 
-| operation | tile `M×N×P` | eff | tiles | L1 (dbl-buf) | Mcyc/model |
-|---|---|---:|---:|---:|---:|
-| FFN gate+up (fused) | `256×512×512` | 94.8% | 5,440 | 1.75 MiB | 12,034 |
-| FFN down | `256×512×512` | 94.8% | 2,720 | 1.75 MiB | 6,017 |
-| Attention Q+gate | `256×512×512` | 94.8% | 1,920 | 1.75 MiB | 1,062 |
-| Attention K+V (fused) | `256×512×512` | 94.8% | 320 | 1.75 MiB | 177 |
-| **Attention QK** (per head) | **`512×256×512`** | 86.5% | 384 | 1.50 MiB | 233 |
-| **Attention PV** (per head) | **`512×256×256`** | 86.1% | 768 | 1.00 MiB | 234 |
-| Attention O | `256×512×512` | 94.8% | 960 | 1.75 MiB | 531 |
-| GDN QKV | `256×512×512` | 94.8% | 1,600 | 1.75 MiB | 2,655 |
-| GDN Z | `256×512×512` | 94.8% | 960 | 1.75 MiB | 1,593 |
-| **GDN a+b** (`P=96`→128) | **`512×512×128`** | 74.0% | 40 | 1.38 MiB | 43 |
-| GDN O | `256×512×512` | 94.8% | 960 | 1.75 MiB | 1,593 |
-| | | | | | **26,170** |
+| operation | tile `M×N×P` | eff | TB util | tiles | L1 full-dbl | Mcyc/model |
+|---|---|---:|---:|---:|---:|---:|
+| FFN gate+up (fused) | `256x512x512` | 94.8% | 98.1% | 5,440 | 2.00 MiB | 12,034 |
+| FFN down | `256x512x512` | 94.8% | 98.1% | 2,720 | 2.00 MiB | 6,017 |
+| Attention Q+gate | `256x512x512` | 94.8% | 98.1% | 1,920 | 2.00 MiB | 1,062 |
+| Attention K+V (fused) | `256x512x512` | 94.8% | 98.1% | 320 | 2.00 MiB | 177 |
+| **Attention QK** (per head) | **`512x256x512`** | 86.5% | 91.9% | 384 | 2.00 MiB | 233 |
+| **Attention PV** (per head) | **`512x256x256`** | 86.1% | 93.0% | 768 | 1.25 MiB | 234 |
+| Attention O | `256x512x512` | 94.8% | 98.1% | 960 | 2.00 MiB | 531 |
+| GDN QKV | `256x512x512` | 94.8% | 98.1% | 1,600 | 2.00 MiB | 2,655 |
+| GDN Z | `256x512x512` | 94.8% | 98.1% | 960 | 2.00 MiB | 1,593 |
+| **GDN a+b** (`P=96`→128) | **`512x512x128`** | 74.0% | 87.9% | 40 | 1.50 MiB | 43 |
+| GDN O | `256x512x512` | 94.8% | 98.1% | 960 | 2.00 MiB | 1,593 |
+| | | | | | | **26,170** |
 
 **One tile does nine of eleven: `256×512×512`.** It is the campaign's best fp16 point (94.8%),
 and it beats `512×512×512` (91.3%) on throughput — 1,942 against 1,870 MAC/cycle — so the larger row
@@ -285,20 +293,20 @@ Two operations want a different tile because their aspect ratio is different, an
 
 ### 5.2 Prefill — 8×8 (1024 cores, 14.86 MiB usable L1, peak 8192 MAC/cyc)
 
-| operation | tile `M×N×P` | eff | tiles | L1 (dbl-buf) | Mcyc/model |
-|---|---|---:|---:|---:|---:|
-| FFN gate+up (fused) | `2048×256×512` | 73.5% | 1,360 | 4.50 MiB | 3,880 |
-| FFN down | `2048×256×512` | 73.5% | 680 | 4.50 MiB | 1,940 |
-| Attention Q+gate | `2048×256×512` | 73.5% | 480 | 4.50 MiB | 342 |
-| Attention K+V (fused) | `2048×256×512` | 73.5% | 80 | 4.50 MiB | 57 |
-| Attention QK (per head) | `2048×256×512` | 73.5% | 96 | 4.50 MiB | 68 |
-| **Attention PV** (per head) | **`2048×512×256`** | 53.7% | 96 | 5.50 MiB | 94 |
-| Attention O | `2048×256×512` | 73.5% | 240 | 4.50 MiB | 171 |
-| GDN QKV | `2048×256×512` | 73.5% | 400 | 4.50 MiB | 856 |
-| GDN Z | `2048×256×512` | 73.5% | 240 | 4.50 MiB | 514 |
-| **GDN a+b** (`P=96`→128) | **`2048×512×128`** | 48.2% | 10 | 4.75 MiB | 16 |
-| GDN O | `2048×256×512` | 73.5% | 240 | 4.50 MiB | 514 |
-| | | | | | **8,453** |
+| operation | tile `M×N×P` | eff | TB util | tiles | L1 full-dbl | Mcyc/model |
+|---|---|---:|---:|---:|---:|---:|
+| FFN gate+up (fused) | `2048x256x512` | 73.5% | 78.15% | 1,360 | 6.50 MiB | 3,880 |
+| FFN down | `2048x256x512` | 73.5% | 78.15% | 680 | 6.50 MiB | 1,940 |
+| Attention Q+gate | `2048x256x512` | 73.5% | 78.15% | 480 | 6.50 MiB | 342 |
+| Attention K+V (fused) | `2048x256x512` | 73.5% | 78.15% | 80 | 6.50 MiB | 57 |
+| **Attention QK** (per head) | `2048x256x512` | 73.5% | 78.15% | 96 | 6.50 MiB | 68 |
+| **Attention PV** (per head) | **`2048x512x256`** | 53.7% | 56.57% | 96 | 6.50 MiB | 94 |
+| Attention O | `2048x256x512` | 73.5% | 78.15% | 240 | 6.50 MiB | 171 |
+| GDN QKV | `2048x256x512` | 73.5% | 78.15% | 400 | 6.50 MiB | 856 |
+| GDN Z | `2048x256x512` | 73.5% | 78.15% | 240 | 6.50 MiB | 514 |
+| **GDN a+b** (`P=96`→128) | **`2048x512x128`** | 48.2% | 59.46% | 10 | 5.25 MiB | 16 |
+| GDN O | `2048x256x512` | 73.5% | 78.15% | 240 | 6.50 MiB | 514 |
+| | | | | | | **8,453** |
 
 **`2048×256×512` does ten of eleven at 8×8**, and QK now shares the general tile because its N=256
 contraction is exactly what the best 8×8 point already uses.
