@@ -74,6 +74,71 @@ def results():
         pass
     return rows
 
+def ratio_chart(pairs):
+    """Scatter of fp32/fp16 cycle ratio against P, with the 2x arithmetic ceiling drawn in.
+
+    The findings panel already reports a median and a range, but the open question is whether the
+    fp16 advantage tracks a shape parameter -- and ten numbers in a table do not answer that.
+
+    The ceiling is the interpretive line: fp16 does ~2 MACs per lane-cycle against fp32's ~1, so 2x
+    is the compute-bound limit. A point ABOVE it cannot be explained by arithmetic, which implies
+    fp32 is losing on traffic (it moves twice the bytes for the same shape).
+
+    Deliberately plain: one y-axis, marks carry a single encoding (filled = above the ceiling), and
+    only the extremes are labelled -- a label on every point turns ten marks into noise.
+    """
+    pts = []
+    for shape, ratio in pairs:
+        m = re.match(r"^(\d+)x(\d+)x(\d+)$", shape)
+        if not m:
+            continue
+        M, N, P = (int(x) for x in m.groups())
+        pts.append((shape, M, N, P, ratio))
+    if len(pts) < 4:
+        return ""
+    W, H, L, R, T, B = 620, 250, 46, 16, 18, 40
+    xs = sorted({p[3] for p in pts})
+    ymax = max(3.6, max(p[4] for p in pts) * 1.12)
+
+    def px(P):
+        return L + (xs.index(P) / max(len(xs) - 1, 1)) * (W - L - R)
+
+    def py(r):
+        return T + (1 - (r - 1.0) / (ymax - 1.0)) * (H - T - B)
+
+    o = ['<div class="tw"><svg viewBox="0 0 %d %d" width="100%%" height="%d" style="max-width:%dpx" '
+         'role="img" aria-label="fp32 over fp16 cycle ratio against P">' % (W, H, H, W)]
+    for gy in (1.0, 1.5, 2.0, 2.5, 3.0, 3.5):
+        if gy > ymax:
+            continue
+        y = py(gy)
+        o.append('<line x1="%d" y1="%.1f" x2="%d" y2="%.1f" stroke="var(--line)" stroke-width="1"/>'
+                 % (L, y, W - R, y))
+        o.append('<text x="%d" y="%.1f" fill="var(--dim)" font-size="10" text-anchor="end" '
+                 'font-family="IBM Plex Mono,monospace">%.1f&#215;</text>' % (L - 6, y + 3, gy))
+    yc = py(2.0)
+    o.append('<line x1="%d" y1="%.1f" x2="%d" y2="%.1f" stroke="var(--bad)" stroke-width="2" '
+             'stroke-dasharray="5 4"/>' % (L, yc, W - R, yc))
+    o.append('<text x="%d" y="%.1f" fill="var(--bad)" font-size="10.5" '
+             'font-family="IBM Plex Mono,monospace">2&#215; arithmetic ceiling &#8212; above this, '
+             'fp32 loses on traffic, not MACs</text>' % (L + 6, yc - 7))
+    for P in xs:
+        o.append('<text x="%.1f" y="%d" fill="var(--dim)" font-size="10.5" text-anchor="middle" '
+                 'font-family="IBM Plex Mono,monospace">P=%d</text>' % (px(P), H - 14, P))
+    hi = max(pts, key=lambda p: p[4])
+    lo = min(pts, key=lambda p: p[4])
+    for shape, M, N, P, r in sorted(pts, key=lambda p: p[4]):
+        x, y = px(P), py(r)
+        o.append('<circle cx="%.1f" cy="%.1f" r="5.5" fill="%s" stroke="var(--acc)" stroke-width="2">'
+                 '<title>%s   M=%d N=%d P=%d   %.2fx</title></circle>'
+                 % (x, y, "var(--acc)" if r > 2.0 else "var(--surf)", shape, M, N, P, r))
+        if shape in (hi[0], lo[0]):
+            o.append('<text x="%.1f" y="%.1f" fill="var(--ink)" font-size="10.5" text-anchor="middle" '
+                     'font-family="IBM Plex Mono,monospace">%s</text>' % (x, y - 11, shape))
+    o.append('</svg></div>')
+    return "".join(o)
+
+
 def data_mib(shape, prec):
     """A + B + C working set in MiB. This is the number that had to fit the 14.50 MiB L1 budget,
     and it explains an arm's behaviour better than M/N/P read separately."""
@@ -351,6 +416,7 @@ def main():
             pairs.setdefault(r[0], {})[r[1]] = r
         both = [(k, v) for k, v in pairs.items() if len(v) == 2]
         ratios = [int(v["fp32"][3]) / float(v["fp16"][3]) for _, v in both if int(v["fp16"][3])]
+        ratio_pairs = [(k, int(v["fp32"][3]) / float(v["fp16"][3])) for k, v in both if int(v["fp16"][3])]
         n16 = sum(1 for r in res if r[1] == "fp16")
         a16 = sum(1 for r in res if r[1] == "fp16" and "FATAL" in r[8])
         n32 = sum(1 for r in res if r[1] == "fp32")
@@ -370,9 +436,14 @@ def main():
                   '<span class="l">fp32 / fp16 &mdash; median of %d pair%s</span></div>'
                   % (med, n, "" if n == 1 else "s")]
             if n >= 3 and rs[-1] > 1.5 * med:
+                # COUNT the arms above the band instead of asserting "one". The label read
+                # "one arm is an outlier" while TWO sat at 3.11x and 3.29x -- a hardcoded claim
+                # that went stale as pairs landed, in the panel meant to be the trustworthy summary.
+                hi = sum(1 for r in rs if r > 1.5 * med)
                 h += ['<div class="tile"><span class="n">%.2f&ndash;%.2f</span>'
-                      '<span class="l">ratio range &mdash; one arm is an outlier</span></div>'
-                      % (rs[0], rs[-1])]
+                      '<span class="l">ratio range &mdash; %s</span></div>'
+                      % (rs[0], rs[-1],
+                         "one arm above the band" if hi == 1 else "%d arms above the band" % hi)]
         h += ['<div class="tile bad"><span class="n">%d/%d</span>'
               '<span class="l">fp16 hit the assertion</span></div>' % (a16, n16),
               '<div class="tile done"><span class="n">%d/%d</span>'
@@ -381,7 +452,8 @@ def main():
               'across shapes. Read that with care: the earlier 8&times;8 campaign recorded 94.1%% when '
               'correctly provisioned against 20.8&ndash;28.2%% under-provisioned, so a low number is not '
               'automatically a shape effect &mdash; check the arm\'s MSHR settings before concluding.</p>'
-              '</section>' % (f(best, 4) / f(worst, 4) if f(worst, 4) else 0)]
+              '' % (f(best, 4) / f(worst, 4) if f(worst, 4) else 0)]
+        h += [ratio_chart(ratio_pairs), '<p class="sub" style="margin-top:2px">Each point is a shape measured in both precisions; filled marks sit above the arithmetic ceiling. N is not encoded &mdash; the four M=512, P=512 shapes span N=64&ndash;512 and land within 0.02&times; of each other, so N is not what moves this.</p></section>']
 
     # ---- per-group mesh over time ----
     try:
