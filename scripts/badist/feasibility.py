@@ -176,27 +176,45 @@ def save_announced():
         pass
 
 
-# --- known-stalling shapes ------------------------------------------------------------------
-# These do not fail, they STALL: ~0.1% FPU utilisation, mshr_timeout 0, [GroupMerge] 0, and
-# request ages pinned just under the 2047-cycle MSHR burst hold window. fp16_512x64x256 reached
-# 565,122 cycles against ~2,442 expected -- ~80x its own fp32 twin (7,138). Each has been killed
-# and requeued 3+ times; every attempt stalls the same way, so retrying only holds a licence seat
-# for hours and produces nothing.
+# --- livelocked shapes (root-caused 2026-08-24) ----------------------------------------------
+# These do not fail and are not deadlocked -- they LIVELOCK, at ~0.1% FPU utilisation with
+# mshr_timeout 0 and request ages pinned just under serve_timeout=2047.
 #
-# They are NOT dropped from the campaign -- they are held back from AUTOMATIC dispatch until the
-# one-knob experiment runs (burst hold window 0; see the KB note
-# `experiments/fp16-m512-smallP-stall`). Submit one by hand at any time to test.
-# NOT fp16-specific -- fp32_512x32x128 shows the identical signature (0.32% util, GroupMerge 0,
-# max request age 1999, 185 MB transcript). The common factor is M=512 with small P (128-256),
-# across both precisions and any N from 32 to 512.
-KNOWN_STALL = {
-    "fp16_512x64x256":  "~0.1% util, 231x expected cycles, no merge partners",
-    "fp16_512x256x128": "~0.1% util, stalls identically across 4 nodes",
-    "fp16_512x512x128": "~0.1% util, stalls identically across 4 nodes",
-    "fp32_512x32x128":  "0.32% util, same signature -- shows it is not precision-specific",
-}
+# ROOT CAUSE (not mine -- see docs/benchmarks/8x8_scaleup/wedge_zero_timeout.md and the
+# project-rh-livelock-root-cause memory note): software/runtime/mshr_cfg.h derives
+# MSHR_D_HOLD_SUBS_SINGLE from M ALONE -- at 8x8/KERNEL_SIZE=8, M=512->16, 1024->8, 2048->4,
+# >=4096->1. Whether that cohort can actually form depends on P, which the formula never
+# references. With resp_wait_subs_single=1 and hold_window_single=0, serve_timeout=2047 is the only
+# escape, so every scalar remote load that cannot gather its cohort costs ~2047 cycles.
+# Controlled pair, same M/N/target: fp16_512x256x128 = 0.08% util vs fp16_512x256x1024 = 76.64%.
+# 958x from P alone.
+#
+# I first characterised this as "fp16 M=512 small-P" from the four arms that happened to stall
+# first. M is causal only THROUGH the derivation, and precision is irrelevant.
+#
+# Predicate validated 23/23 inside the livelocked set, 0/26 outside. Holding these back is a
+# stopgap: the real fix is a P term in the derivation (or hold_window_single != 0, or
+# resp_wait_subs_single = 0 for high-target shapes). DELETE THIS once the fix lands.
+def _cohort_target(M):
+    """MSHR_D_HOLD_SUBS_SINGLE as mshr_cfg.h derives it at 8x8 with KERNEL_SIZE=8."""
+    if M >= 4096:
+        return 1
+    return {512: 16, 1024: 8, 2048: 4}.get(M, 1)
 
 
+def livelocked(arm):
+    """True if this shape matches the validated RH-livelock predicate."""
+    m = re.match(r"^(fp16|fp32)_(\d+)x(\d+)x(\d+)$", arm or "")
+    if not m:
+        return False
+    pr, M, P = m.group(1), int(m.group(2)), int(m.group(4))
+    t = _cohort_target(M)
+    return (t == 16 and P <= 256) or (pr == "fp16" and t == 8 and P == 128)
+
+
+# kept as the public name the submitters already call
 def stalling(arm):
-    """True if this arm is known to stall rather than run; reason available in KNOWN_STALL."""
-    return arm in KNOWN_STALL
+    return livelocked(arm)
+
+
+KNOWN_STALL = {}   # superseded by the predicate above
