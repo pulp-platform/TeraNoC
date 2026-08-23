@@ -112,6 +112,9 @@ def main():
     ap.add_argument("--reserve", type=int)
     ap.add_argument("--batch", type=int, default=12)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--margin", type=int, default=2,
+                    help="extra seats to leave beyond the reserve, to absorb concurrent dispatch "
+                         "by our own other controllers (see the note where room is computed)")
     ap.add_argument("--allow-requeue", action="store_true",
                     help="also pick arms already queued for this backend. Use when the pool sits "
                          "above its reserve line while arms wait: an existing batch at its own "
@@ -127,9 +130,17 @@ def main():
         print("  could not read the %s pool -- doing nothing" % a.backend)
         return 0
     issued, in_use = s
-    room = issued - in_use - reserve
-    print("  %s %s %d/%d in use, reserve %d -> room for %d"
-          % (a.backend, cfg["feature"], in_use, issued, reserve, room))
+    # Margin for our OWN concurrent controllers. Every live `submit` re-checks the pool at
+    # dispatch, so several of them can each see the same free seats and each place an arm into
+    # them. Measured 2026-08-23: room computed as 4 at 186/200, we placed 4, and the pool landed
+    # at 193 -- ours went 124 -> 128 while others FELL by one, so the extra three were our own
+    # s8big controller (--max-parallel 80) draining its queue in the same window. That put us 3
+    # seats past a reserve line the user promised to colleagues.
+    # The margin costs no throughput: the seats it declines are the ones another of our
+    # controllers is about to take anyway. It only stops us claiming them twice.
+    room = issued - in_use - reserve - a.margin
+    print("  %s %s %d/%d in use, reserve %d (+%d margin) -> room for %d"
+          % (a.backend, cfg["feature"], in_use, issued, reserve, a.margin, room))
     if room <= 0:
         print("  pool is at the reserve line; nothing to add")
         return 0
