@@ -16,7 +16,7 @@ Start each with the `Monitor` tool (persistent), one per loop:
 | `s8_results_loop5.sh` | rescrape results.tsv + mesh JSON, signal republish | on change | **v5** — v4 read the mesh JSON from the old `/tmp` path |
 | `s8_campaign_watch2.sh` | campaign counts; problems immediately | periodic | |
 | `auto_resubmit_loop.sh` | requeue failed arms (cap 3/arm) | periodic | silent unless it acts |
-| `rescue_loop.sh` | rescue arms nothing is dispatching | periodic | now gated on licence headroom |
+| `rescue_loop2.sh` | rescue arms nothing is dispatching | periodic | **use v2** — fetches first and skips its cold-start pass; gated on licence headroom |
 | `dedup_loop.sh` | kill duplicate running copies | periodic | keeps the copy with more progress, skips dead nodes |
 | `heal_loop.sh` | heal stuck/wedged arms | periodic | |
 | `topup_loop.sh` | keep both pools at their reserve lines | 10 min | Questa 10 free, VCS 5 free |
@@ -32,6 +32,17 @@ Start each with the `Monitor` tool (persistent), one per loop:
 directory survives a restart because it is under `/tmp`, but the next session gets a *different*
 scratchpad path. If the old directory is gone, the rescue counts reset to zero — harmless, but the
 cap stops protecting arms that already burned their attempts.
+
+## Restart order matters
+
+Start (or let settle) the **fetch** before the rescuer. A restart leaves delivered-but-unfetched
+results on the fleet, so the rescuer's view of "which arms are done" is stale and it requeues
+completed work. On 2026-08-23 that resubmitted six already-delivered arms, four of which started
+before being killed. `rescue_loop2.sh` now fetches first and skips its own first pass.
+
+**Do not use mtime to decide whether a result is new.** `tar` preserves mtime on extraction, so a
+transcript delivered two minutes ago can show an mtime hours old. Use `ctime`, which extraction
+sets and tar cannot forge.
 
 ## Do not
 
