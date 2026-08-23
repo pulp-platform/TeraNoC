@@ -1,5 +1,15 @@
 # The zero-timeout wedge — evidence record
 
+> **SUPERSEDED 2026-08-24 — read `rh_livelock_root_cause.md` first.**
+> The root cause is now established: a **software-derived MSHR cohort target**
+> (`MSHR_D_HOLD_SUBS_SINGLE` in `software/runtime/mshr_cfg.h`) that is a function of `M` alone,
+> combined with `resp_wait_subs_single=1` + `hold_window_single=0`, so every scalar remote load
+> rides out `serve_timeout=2047` when the cohort cannot form. Whether it can form depends on **`P`**,
+> which the formula never references.
+> This file is kept for the raw observations. **Section 5's hypothesis is wrong**, and so is the
+> reading of `peers` in section 4 — `peers` counts duplicate entries, not merge partners, and is 0
+> in 100% of lines in every arm. Corrections are itemised in `rh_livelock_root_cause.md` §6.
+
 2026-08-23. Four 8×8 arms have failed this way: **`fp16_512x256x128`**, **`fp16_512x512x128`**,
 `fp16_512x64x256` (earlier, same 4-attempts/0-results pattern), and **`fp32_512x32x128`** — the
 last of which shows the mechanism is **not fp16-specific**. Written up for whoever debugs it,

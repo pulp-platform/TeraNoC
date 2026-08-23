@@ -1,0 +1,402 @@
+### fp16_512x128x256  (first 200 + last 200 RH lines)
+[RH STUCK] cyc=25817 g=11 e=0 bank=0 addr=0xa80 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25817 g=11 e=0 s=0 tile=1 core=1 meta=29
+[RH STUCK] cyc=25818 g=11 e=1 bank=0 addr=0xac0 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25818 g=11 e=1 s=0 tile=1 core=1 meta=30
+[RH STUCK] cyc=25819 g=11 e=2 bank=0 addr=0xaa0 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25819 g=11 e=2 s=0 tile=1 core=3 meta=29
+[RH STUCK] cyc=25820 g=11 e=3 bank=0 addr=0xae0 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25820 g=11 e=3 s=0 tile=1 core=3 meta=30
+[RH STUCK] cyc=25824 g=11 e=4 bank=1 addr=0xa04 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25824 g=11 e=4 s=0 tile=8 core=1 meta=29
+[RH STUCK] cyc=25825 g=11 e=5 bank=1 addr=0xa44 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25825 g=11 e=5 s=0 tile=8 core=1 meta=30
+[RH STUCK] cyc=25826 g=11 e=6 bank=1 addr=0xa24 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25826 g=11 e=6 s=0 tile=8 core=3 meta=29
+[RH STUCK] cyc=25827 g=2 e=0 bank=0 addr=0xa80 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25827 g=2 e=0 s=0 tile=1 core=1 meta=29
+[RH STUCK] cyc=25827 g=11 e=7 bank=1 addr=0xa64 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25827 g=11 e=7 s=0 tile=8 core=3 meta=30
+[RH STUCK] cyc=25828 g=2 e=1 bank=0 addr=0xac0 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25828 g=2 e=1 s=0 tile=1 core=1 meta=30
+[RH STUCK] cyc=25829 g=2 e=2 bank=0 addr=0xaa0 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25829 g=2 e=2 s=0 tile=1 core=3 meta=29
+[RH STUCK] cyc=25830 g=2 e=3 bank=0 addr=0xae0 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25830 g=2 e=3 s=0 tile=1 core=3 meta=30
+[RH STUCK] cyc=25834 g=2 e=4 bank=1 addr=0xa04 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25834 g=2 e=4 s=0 tile=8 core=1 meta=29
+[RH STUCK] cyc=25835 g=2 e=5 bank=1 addr=0xa84 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25835 g=2 e=5 s=0 tile=9 core=1 meta=29
+[RH STUCK] cyc=25836 g=2 e=6 bank=1 addr=0xa05 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25836 g=2 e=6 s=0 tile=10 core=1 meta=29
+[RH STUCK] cyc=25837 g=2 e=7 bank=1 addr=0xa45 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25837 g=2 e=7 s=0 tile=10 core=1 meta=30
+[RH STUCK] cyc=25838 g=1 e=0 bank=0 addr=0xa80 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25838 g=1 e=0 s=0 tile=1 core=1 meta=29
+[RH STUCK] cyc=25838 g=10 e=0 bank=0 addr=0xa80 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25838 g=10 e=0 s=0 tile=1 core=1 meta=29
+[RH STUCK] cyc=25839 g=1 e=1 bank=0 addr=0xac0 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25839 g=1 e=1 s=0 tile=1 core=1 meta=30
+[RH STUCK] cyc=25839 g=10 e=1 bank=0 addr=0xac0 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25839 g=10 e=1 s=0 tile=1 core=1 meta=30
+[RH STUCK] cyc=25840 g=1 e=2 bank=0 addr=0xaa0 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25840 g=1 e=2 s=0 tile=1 core=3 meta=29
+[RH STUCK] cyc=25840 g=10 e=2 bank=0 addr=0xaa0 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25840 g=10 e=2 s=0 tile=1 core=3 meta=29
+[RH STUCK] cyc=25841 g=1 e=3 bank=0 addr=0xae0 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25841 g=1 e=3 s=0 tile=1 core=3 meta=30
+[RH STUCK] cyc=25841 g=10 e=3 bank=0 addr=0xae0 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25841 g=10 e=3 s=0 tile=1 core=3 meta=30
+[RH STUCK] cyc=25845 g=1 e=4 bank=1 addr=0xa04 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25845 g=1 e=4 s=0 tile=8 core=1 meta=29
+[RH STUCK] cyc=25845 g=10 e=4 bank=1 addr=0xa04 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25845 g=10 e=4 s=0 tile=8 core=1 meta=29
+[RH STUCK] cyc=25846 g=1 e=5 bank=1 addr=0xa44 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25846 g=1 e=5 s=0 tile=8 core=1 meta=30
+[RH STUCK] cyc=25846 g=10 e=5 bank=1 addr=0xa44 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25846 g=10 e=5 s=0 tile=8 core=1 meta=30
+[RH STUCK] cyc=25847 g=1 e=6 bank=1 addr=0xa24 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25847 g=1 e=6 s=0 tile=8 core=3 meta=29
+[RH STUCK] cyc=25847 g=10 e=6 bank=1 addr=0xa24 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25847 g=10 e=6 s=0 tile=8 core=3 meta=29
+[RH STUCK] cyc=25848 g=1 e=7 bank=1 addr=0xa64 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25848 g=1 e=7 s=0 tile=8 core=3 meta=30
+[RH STUCK] cyc=25848 g=10 e=7 bank=1 addr=0xa64 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25848 g=10 e=7 s=0 tile=8 core=3 meta=30
+[RH STUCK] cyc=25850 g=4 e=0 bank=0 addr=0xa80 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25850 g=4 e=0 s=0 tile=1 core=1 meta=29
+[RH STUCK] cyc=25851 g=4 e=1 bank=0 addr=0xac0 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25851 g=4 e=1 s=0 tile=1 core=1 meta=30
+[RH STUCK] cyc=25852 g=4 e=2 bank=0 addr=0xaa0 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25852 g=4 e=2 s=0 tile=1 core=3 meta=29
+[RH STUCK] cyc=25853 g=4 e=3 bank=0 addr=0xae0 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25853 g=4 e=3 s=0 tile=1 core=3 meta=30
+[RH STUCK] cyc=25854 g=3 e=0 bank=0 addr=0xa80 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25854 g=3 e=0 s=0 tile=1 core=1 meta=29
+[RH STUCK] cyc=25856 g=3 e=2 bank=0 addr=0xaa0 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25856 g=3 e=2 s=0 tile=1 core=3 meta=29
+[RH STUCK] cyc=25856 g=3 e=3 bank=0 addr=0xa41 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25856 g=3 e=3 s=0 tile=2 core=1 meta=30
+[RH STUCK] cyc=25856 g=19 e=0 bank=0 addr=0xa80 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25856 g=19 e=0 s=0 tile=1 core=1 meta=29
+[RH STUCK] cyc=25857 g=19 e=1 bank=0 addr=0xac0 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25857 g=19 e=1 s=0 tile=1 core=1 meta=30
+[RH STUCK] cyc=25858 g=3 e=1 bank=0 addr=0xac0 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25858 g=3 e=1 s=0 tile=1 core=1 meta=30
+[RH STUCK] cyc=25858 g=4 e=5 bank=1 addr=0xa44 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25858 g=4 e=5 s=0 tile=8 core=1 meta=30
+[RH STUCK] cyc=25859 g=4 e=6 bank=1 addr=0xa24 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25859 g=4 e=6 s=0 tile=8 core=3 meta=29
+[RH STUCK] cyc=25859 g=19 e=2 bank=0 addr=0xaa0 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25859 g=19 e=2 s=0 tile=1 core=3 meta=29
+[RH STUCK] cyc=25860 g=4 e=4 bank=1 addr=0xa04 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25860 g=4 e=4 s=0 tile=8 core=1 meta=29
+[RH STUCK] cyc=25861 g=3 e=5 bank=1 addr=0xa44 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25861 g=3 e=5 s=0 tile=8 core=1 meta=30
+[RH STUCK] cyc=25861 g=4 e=7 bank=1 addr=0xa64 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25861 g=4 e=7 s=0 tile=8 core=3 meta=30
+[RH STUCK] cyc=25861 g=19 e=3 bank=0 addr=0xae0 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25861 g=19 e=3 s=0 tile=1 core=3 meta=30
+[RH STUCK] cyc=25863 g=3 e=7 bank=1 addr=0xa64 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25863 g=3 e=7 s=0 tile=8 core=3 meta=30
+[RH STUCK] cyc=25864 g=19 e=5 bank=1 addr=0xa44 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25864 g=19 e=5 s=0 tile=8 core=1 meta=30
+[RH STUCK] cyc=25866 g=3 e=4 bank=1 addr=0xa04 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25866 g=3 e=4 s=0 tile=8 core=1 meta=29
+[RH STUCK] cyc=25866 g=19 e=7 bank=1 addr=0xa64 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25866 g=19 e=7 s=0 tile=8 core=3 meta=30
+[RH STUCK] cyc=25867 g=3 e=6 bank=1 addr=0xa24 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25867 g=3 e=6 s=0 tile=8 core=3 meta=29
+[RH STUCK] cyc=25868 g=19 e=6 bank=1 addr=0xa24 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25868 g=19 e=6 s=0 tile=8 core=3 meta=29
+[RH STUCK] cyc=25869 g=19 e=4 bank=1 addr=0xa04 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25869 g=19 e=4 s=0 tile=8 core=1 meta=29
+[RH STUCK] cyc=25880 g=12 e=0 bank=0 addr=0xa80 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25880 g=12 e=0 s=0 tile=1 core=1 meta=29
+[RH STUCK] cyc=25881 g=12 e=1 bank=0 addr=0xac0 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25881 g=12 e=1 s=0 tile=1 core=1 meta=30
+[RH STUCK] cyc=25882 g=9 e=0 bank=0 addr=0xa80 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25882 g=9 e=0 s=0 tile=1 core=1 meta=29
+[RH STUCK] cyc=25882 g=12 e=2 bank=0 addr=0xaa0 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25882 g=12 e=2 s=0 tile=1 core=3 meta=29
+[RH STUCK] cyc=25883 g=9 e=1 bank=0 addr=0xac0 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25883 g=9 e=1 s=0 tile=1 core=1 meta=30
+[RH STUCK] cyc=25883 g=12 e=3 bank=0 addr=0xae0 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25883 g=12 e=3 s=0 tile=1 core=3 meta=30
+[RH STUCK] cyc=25884 g=9 e=2 bank=0 addr=0xaa0 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25884 g=9 e=2 s=0 tile=1 core=3 meta=29
+[RH STUCK] cyc=25884 g=9 e=3 bank=0 addr=0xa41 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25884 g=9 e=3 s=0 tile=2 core=1 meta=30
+[RH STUCK] cyc=25886 g=20 e=0 bank=0 addr=0xa80 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25886 g=20 e=0 s=0 tile=1 core=1 meta=29
+[RH STUCK] cyc=25887 g=12 e=4 bank=1 addr=0xa04 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25887 g=12 e=4 s=0 tile=8 core=1 meta=29
+[RH STUCK] cyc=25887 g=20 e=1 bank=0 addr=0xac0 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25887 g=20 e=1 s=0 tile=1 core=1 meta=30
+[RH STUCK] cyc=25888 g=12 e=5 bank=1 addr=0xa44 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25888 g=12 e=5 s=0 tile=8 core=1 meta=30
+[RH STUCK] cyc=25888 g=20 e=2 bank=0 addr=0xaa0 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25888 g=20 e=2 s=0 tile=1 core=3 meta=29
+[RH STUCK] cyc=25889 g=9 e=4 bank=1 addr=0xa04 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25889 g=9 e=4 s=0 tile=8 core=1 meta=29
+[RH STUCK] cyc=25889 g=12 e=6 bank=1 addr=0xa24 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25889 g=12 e=6 s=0 tile=8 core=3 meta=29
+[RH STUCK] cyc=25889 g=20 e=3 bank=0 addr=0xae0 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25889 g=20 e=3 s=0 tile=1 core=3 meta=30
+[RH STUCK] cyc=25890 g=9 e=5 bank=1 addr=0xa44 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25890 g=9 e=5 s=0 tile=8 core=1 meta=30
+[RH STUCK] cyc=25890 g=12 e=7 bank=1 addr=0xa64 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25890 g=12 e=7 s=0 tile=8 core=3 meta=30
+[RH STUCK] cyc=25891 g=9 e=7 bank=1 addr=0xa64 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25891 g=9 e=7 s=0 tile=8 core=3 meta=30
+[RH STUCK] cyc=25892 g=9 e=6 bank=1 addr=0xa24 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25892 g=9 e=6 s=0 tile=8 core=3 meta=29
+[RH STUCK] cyc=25893 g=20 e=4 bank=1 addr=0xa04 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25893 g=20 e=4 s=0 tile=8 core=1 meta=29
+[RH STUCK] cyc=25894 g=20 e=5 bank=1 addr=0xa44 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25894 g=20 e=5 s=0 tile=8 core=1 meta=30
+[RH STUCK] cyc=25895 g=20 e=6 bank=1 addr=0xa24 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25895 g=20 e=6 s=0 tile=8 core=3 meta=29
+[RH STUCK] cyc=25896 g=20 e=7 bank=1 addr=0xa64 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25896 g=20 e=7 s=0 tile=8 core=3 meta=30
+[RH STUCK] cyc=25910 g=21 e=0 bank=0 addr=0xa80 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25910 g=21 e=0 s=0 tile=1 core=1 meta=29
+[RH STUCK] cyc=25911 g=21 e=1 bank=0 addr=0xac0 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25911 g=21 e=1 s=0 tile=1 core=1 meta=30
+[RH STUCK] cyc=25912 g=21 e=2 bank=0 addr=0xaa0 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25912 g=21 e=2 s=0 tile=1 core=3 meta=29
+[RH STUCK] cyc=25913 g=21 e=3 bank=0 addr=0xae0 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25913 g=21 e=3 s=0 tile=1 core=3 meta=30
+[RH STUCK] cyc=25918 g=21 e=5 bank=1 addr=0xa44 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25918 g=21 e=5 s=0 tile=8 core=1 meta=30
+[RH STUCK] cyc=25919 g=21 e=4 bank=1 addr=0xa04 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25919 g=21 e=4 s=0 tile=8 core=1 meta=29
+[RH STUCK] cyc=25920 g=21 e=7 bank=1 addr=0xac4 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25920 g=21 e=7 s=0 tile=9 core=1 meta=30
+[RH STUCK] cyc=25921 g=21 e=6 bank=1 addr=0xa84 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25921 g=21 e=6 s=0 tile=9 core=1 meta=29
+[RH STUCK] cyc=25933 g=8 e=0 bank=0 addr=0xa80 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25933 g=8 e=0 s=0 tile=1 core=1 meta=29
+[RH STUCK] cyc=25934 g=8 e=1 bank=0 addr=0xac0 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25934 g=8 e=1 s=0 tile=1 core=1 meta=30
+[RH STUCK] cyc=25935 g=0 e=17 bank=4 addr=0xa00 tgt_g=1 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25935 g=0 e=17 s=0 tile=0 core=1 meta=33
+[RH STUCK] cyc=25935 g=0 e=21 bank=5 addr=0xa86 tgt_g=1 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25935 g=0 e=21 s=0 tile=13 core=1 meta=33
+[RH STUCK] cyc=25935 g=8 e=2 bank=0 addr=0xaa0 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25935 g=8 e=2 s=0 tile=1 core=3 meta=29
+[RH STUCK] cyc=25935 g=14 e=0 bank=0 addr=0xa80 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25935 g=14 e=0 s=0 tile=1 core=1 meta=29
+[RH STUCK] cyc=25936 g=0 e=18 bank=4 addr=0xa40 tgt_g=1 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25936 g=0 e=18 s=0 tile=0 core=1 meta=34
+[RH STUCK] cyc=25936 g=0 e=22 bank=5 addr=0xa07 tgt_g=1 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25936 g=0 e=22 s=0 tile=14 core=1 meta=33
+[RH STUCK] cyc=25936 g=8 e=3 bank=0 addr=0xae0 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25936 g=8 e=3 s=0 tile=1 core=3 meta=30
+[RH STUCK] cyc=25936 g=14 e=1 bank=0 addr=0xa81 tgt_g=0 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25936 g=14 e=1 s=0 tile=3 core=1 meta=29
+[RH STUCK] cyc=25937 g=0 e=19 bank=4 addr=0xa20 tgt_g=1 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25937 g=0 e=19 s=0 tile=0 core=3 meta=33
+[RH STUCK] cyc=25937 g=0 e=23 bank=5 addr=0xa47 tgt_g=1 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=25937 g=0 e=23 s=0 tile=14 core=1 meta=34
+...
+[RH STUCK] cyc=605860 g=21 e=61 bank=15 addr=0x81d tgt_g=43 subs=2/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=3 cached=1]
+[RH SUB  ] cyc=605860 g=21 e=61 s=0 tile=6 core=0 meta=2
+[RH SUB  ] cyc=605860 g=21 e=61 s=1 tile=10 core=0 meta=1
+[RH STUCK] cyc=605860 g=59 e=61 bank=15 addr=0x90d tgt_g=55 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=605860 g=59 e=61 s=0 tile=2 core=0 meta=4
+[RH STUCK] cyc=605864 g=21 e=45 bank=11 addr=0x8bc tgt_g=42 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=3 cached=1]
+[RH SUB  ] cyc=605864 g=21 e=45 s=0 tile=0 core=0 meta=0
+[RH STUCK] cyc=605871 g=63 e=40 bank=10 addr=0x949 tgt_g=62 subs=2/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=3 cached=1]
+[RH SUB  ] cyc=605871 g=63 e=40 s=0 tile=0 core=0 meta=2
+[RH SUB  ] cyc=605871 g=63 e=40 s=1 tile=11 core=0 meta=1
+[RH STUCK] cyc=605873 g=57 e=50 bank=12 addr=0x9b0 tgt_g=51 subs=1/16 byp=0 stl=0 peers=0 bank[inv=1 wait=0 drain=0 hold=1 cached=2]
+[RH SUB  ] cyc=605873 g=57 e=50 s=0 tile=5 core=0 meta=2
+[RH STUCK] cyc=605876 g=26 e=13 bank=3 addr=0x89c tgt_g=52 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=2 cached=2]
+[RH SUB  ] cyc=605876 g=26 e=13 s=0 tile=14 core=0 meta=1
+[RH STUCK] cyc=605876 g=54 e=9 bank=2 addr=0xa18 tgt_g=16 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=3 cached=1]
+[RH SUB  ] cyc=605876 g=54 e=9 s=0 tile=0 core=2 meta=31
+[RH STUCK] cyc=605880 g=57 e=41 bank=10 addr=0xaeb tgt_g=10 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=1 cached=3]
+[RH SUB  ] cyc=605880 g=57 e=41 s=0 tile=7 core=3 meta=8
+[RH STUCK] cyc=605883 g=6 e=12 bank=3 addr=0xa6d tgt_g=12 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=1 cached=3]
+[RH SUB  ] cyc=605883 g=6 e=12 s=0 tile=10 core=3 meta=16
+[RH STUCK] cyc=605883 g=54 e=0 bank=0 addr=0xa81 tgt_g=16 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=605883 g=54 e=0 s=0 tile=3 core=1 meta=29
+[RH STUCK] cyc=605884 g=54 e=13 bank=3 addr=0x9fc tgt_g=44 subs=3/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=605884 g=54 e=13 s=0 tile=4 core=0 meta=4
+[RH SUB  ] cyc=605884 g=54 e=13 s=1 tile=5 core=0 meta=5
+[RH SUB  ] cyc=605884 g=54 e=13 s=2 tile=12 core=0 meta=5
+[RH STUCK] cyc=605886 g=57 e=63 bank=15 addr=0x9bc tgt_g=51 subs=3/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=2 cached=2]
+[RH SUB  ] cyc=605886 g=57 e=63 s=0 tile=5 core=0 meta=3
+[RH SUB  ] cyc=605886 g=57 e=63 s=1 tile=6 core=0 meta=0
+[RH SUB  ] cyc=605886 g=57 e=63 s=2 tile=10 core=0 meta=1
+[RH STUCK] cyc=605887 g=61 e=60 bank=15 addr=0xa1d tgt_g=15 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=3 cached=1]
+[RH SUB  ] cyc=605887 g=61 e=60 s=0 tile=10 core=2 meta=27
+[RH STUCK] cyc=605888 g=21 e=37 bank=9 addr=0x815 tgt_g=42 subs=2/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=3 cached=1]
+[RH SUB  ] cyc=605888 g=21 e=37 s=0 tile=6 core=0 meta=4
+[RH SUB  ] cyc=605888 g=21 e=37 s=1 tile=10 core=0 meta=4
+[RH STUCK] cyc=605889 g=26 e=1 bank=0 addr=0x890 tgt_g=52 subs=1/16 byp=0 stl=0 peers=0 bank[inv=1 wait=0 drain=0 hold=2 cached=1]
+[RH SUB  ] cyc=605889 g=26 e=1 s=0 tile=14 core=0 meta=0
+[RH STUCK] cyc=605891 g=57 e=52 bank=13 addr=0x9f4 tgt_g=51 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=605891 g=57 e=52 s=0 tile=4 core=0 meta=1
+[RH STUCK] cyc=605893 g=59 e=62 bank=15 addr=0x9fc tgt_g=55 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=605893 g=59 e=62 s=0 tile=3 core=0 meta=2
+[RH STUCK] cyc=605895 g=63 e=20 bank=5 addr=0xa15 tgt_g=13 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=3 cached=1]
+[RH SUB  ] cyc=605895 g=63 e=20 s=0 tile=10 core=2 meta=17
+[RH STUCK] cyc=605896 g=63 e=21 bank=5 addr=0xa45 tgt_g=13 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=3 cached=1]
+[RH SUB  ] cyc=605896 g=63 e=21 s=0 tile=10 core=1 meta=18
+[RH STUCK] cyc=605897 g=54 e=57 bank=14 addr=0xa4a tgt_g=15 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=605897 g=54 e=57 s=0 tile=4 core=1 meta=28
+[RH STUCK] cyc=605897 g=63 e=22 bank=5 addr=0xa25 tgt_g=13 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=3 cached=1]
+[RH SUB  ] cyc=605897 g=63 e=22 s=0 tile=10 core=3 meta=17
+[RH STUCK] cyc=605898 g=54 e=49 bank=12 addr=0xac2 tgt_g=15 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=605898 g=54 e=49 s=0 tile=5 core=1 meta=26
+[RH STUCK] cyc=605898 g=54 e=53 bank=13 addr=0xa46 tgt_g=15 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=605898 g=54 e=53 s=0 tile=12 core=1 meta=26
+[RH STUCK] cyc=605898 g=54 e=58 bank=14 addr=0xa5a tgt_g=15 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=605898 g=54 e=58 s=0 tile=4 core=2 meta=28
+[RH STUCK] cyc=605899 g=6 e=8 bank=2 addr=0xa88 tgt_g=16 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=3 cached=1]
+[RH SUB  ] cyc=605899 g=6 e=8 s=0 tile=1 core=1 meta=31
+[RH STUCK] cyc=605899 g=54 e=50 bank=12 addr=0xa92 tgt_g=15 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=605899 g=54 e=50 s=0 tile=5 core=2 meta=25
+[RH STUCK] cyc=605899 g=54 e=54 bank=13 addr=0xa16 tgt_g=15 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=605899 g=54 e=54 s=0 tile=12 core=2 meta=25
+[RH STUCK] cyc=605899 g=54 e=59 bank=14 addr=0xa2a tgt_g=15 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=605899 g=54 e=59 s=0 tile=4 core=3 meta=27
+[RH STUCK] cyc=605900 g=54 e=51 bank=12 addr=0xad2 tgt_g=15 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=605900 g=54 e=51 s=0 tile=5 core=2 meta=26
+[RH STUCK] cyc=605900 g=54 e=55 bank=13 addr=0xa56 tgt_g=15 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=605900 g=54 e=55 s=0 tile=12 core=2 meta=26
+[RH STUCK] cyc=605902 g=63 e=10 bank=2 addr=0xa18 tgt_g=20 subs=1/16 byp=0 stl=0 peers=0 bank[inv=1 wait=0 drain=0 hold=3 cached=0]
+[RH SUB  ] cyc=605902 g=63 e=10 s=0 tile=0 core=2 meta=47
+[RH STUCK] cyc=605903 g=63 e=14 bank=3 addr=0xa9d tgt_g=20 subs=1/16 byp=0 stl=0 peers=0 bank[inv=1 wait=0 drain=0 hold=3 cached=0]
+[RH SUB  ] cyc=605903 g=63 e=14 s=0 tile=11 core=2 meta=47
+[RH STUCK] cyc=605906 g=57 e=39 bank=9 addr=0x9b4 tgt_g=50 subs=2/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=605906 g=57 e=39 s=0 tile=6 core=0 meta=3
+[RH SUB  ] cyc=605906 g=57 e=39 s=1 tile=10 core=0 meta=4
+[RH STUCK] cyc=605908 g=6 e=1 bank=0 addr=0xa11 tgt_g=16 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=1 cached=3]
+[RH SUB  ] cyc=605908 g=6 e=1 s=0 tile=2 core=2 meta=29
+[RH STUCK] cyc=605909 g=20 e=22 bank=5 addr=0xa95 tgt_g=17 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=2 cached=2]
+[RH SUB  ] cyc=605909 g=20 e=22 s=0 tile=11 core=2 meta=33
+[RH STUCK] cyc=605912 g=57 e=13 bank=3 addr=0xabe tgt_g=16 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=1 cached=3]
+[RH SUB  ] cyc=605912 g=57 e=13 s=0 tile=13 core=4 meta=31
+[RH STUCK] cyc=605915 g=63 e=24 bank=6 addr=0xa8a tgt_g=13 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=605915 g=63 e=24 s=0 tile=5 core=1 meta=19
+[RH STUCK] cyc=605916 g=63 e=25 bank=6 addr=0xaca tgt_g=13 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=605916 g=63 e=25 s=0 tile=5 core=1 meta=20
+[RH STUCK] cyc=605917 g=63 e=26 bank=6 addr=0xa9a tgt_g=13 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=605917 g=63 e=26 s=0 tile=5 core=2 meta=19
+[RH STUCK] cyc=605918 g=63 e=27 bank=6 addr=0xaaa tgt_g=13 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=605918 g=63 e=27 s=0 tile=5 core=3 meta=19
+[RH STUCK] cyc=605921 g=6 e=18 bank=4 addr=0xa30 tgt_g=17 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=2 cached=2]
+[RH SUB  ] cyc=605921 g=6 e=18 s=0 tile=0 core=4 meta=33
+[RH STUCK] cyc=605922 g=6 e=19 bank=4 addr=0xa50 tgt_g=17 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=2 cached=2]
+[RH SUB  ] cyc=605922 g=6 e=19 s=0 tile=0 core=2 meta=34
+[RH STUCK] cyc=605922 g=62 e=14 bank=3 addr=0xa4f tgt_g=8 subs=1/16 byp=0 stl=0 peers=0 bank[inv=1 wait=0 drain=0 hold=2 cached=1]
+[RH SUB  ] cyc=605922 g=62 e=14 s=0 tile=14 core=1 meta=0
+[RH STUCK] cyc=605924 g=57 e=53 bank=13 addr=0x9a4 tgt_g=51 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=605924 g=57 e=53 s=0 tile=7 core=0 meta=1
+[RH STUCK] cyc=605925 g=57 e=54 bank=13 addr=0x925 tgt_g=51 subs=3/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=605925 g=57 e=54 s=0 tile=11 core=0 meta=1
+[RH SUB  ] cyc=605925 g=57 e=54 s=1 tile=1 core=0 meta=0
+[RH SUB  ] cyc=605925 g=57 e=54 s=2 tile=2 core=0 meta=1
+[RH STUCK] cyc=605926 g=20 e=23 bank=5 addr=0xae5 tgt_g=17 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=2 cached=2]
+[RH SUB  ] cyc=605926 g=20 e=23 s=0 tile=11 core=3 meta=34
+[RH STUCK] cyc=605933 g=26 e=18 bank=4 addr=0xab0 tgt_g=17 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=2 cached=2]
+[RH SUB  ] cyc=605933 g=26 e=18 s=0 tile=1 core=4 meta=33
+[RH STUCK] cyc=605935 g=57 e=36 bank=9 addr=0xaf5 tgt_g=18 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=605935 g=57 e=36 s=0 tile=11 core=4 meta=38
+[RH STUCK] cyc=605946 g=59 e=63 bank=15 addr=0xa8d tgt_g=15 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=605946 g=59 e=63 s=0 tile=11 core=1 meta=27
+[RH STUCK] cyc=605949 g=57 e=62 bank=15 addr=0x92d tgt_g=51 subs=3/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=2 cached=2]
+[RH SUB  ] cyc=605949 g=57 e=62 s=0 tile=1 core=0 meta=3
+[RH SUB  ] cyc=605949 g=57 e=62 s=1 tile=2 core=0 meta=3
+[RH SUB  ] cyc=605949 g=57 e=62 s=2 tile=11 core=0 meta=3
+[RH STUCK] cyc=605952 g=17 e=33 bank=8 addr=0x8c0 tgt_g=34 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=605952 g=17 e=33 s=0 tile=5 core=0 meta=4
+[RH STUCK] cyc=605957 g=17 e=46 bank=11 addr=0xaec tgt_g=18 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=2 cached=2]
+[RH SUB  ] cyc=605957 g=17 e=46 s=0 tile=9 core=3 meta=40
+[RH STUCK] cyc=605959 g=17 e=8 bank=2 addr=0xa8a tgt_g=12 subs=1/16 byp=0 stl=0 peers=0 bank[inv=3 wait=0 drain=0 hold=1 cached=0]
+[RH SUB  ] cyc=605959 g=17 e=8 s=0 tile=5 core=1 meta=15
+[RH STUCK] cyc=605960 g=20 e=29 bank=7 addr=0x80d tgt_g=41 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=3 cached=1]
+[RH SUB  ] cyc=605960 g=20 e=29 s=0 tile=12 core=0 meta=3
+[RH STUCK] cyc=605962 g=17 e=43 bank=10 addr=0x8f8 tgt_g=34 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=1 cached=3]
+[RH SUB  ] cyc=605962 g=17 e=43 s=0 tile=12 core=0 meta=1
+[RH STUCK] cyc=605970 g=21 e=29 bank=7 addr=0xa4d tgt_g=17 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=605970 g=21 e=29 s=0 tile=10 core=1 meta=36
+[RH STUCK] cyc=605971 g=21 e=25 bank=6 addr=0xa4b tgt_g=17 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=605971 g=21 e=25 s=0 tile=6 core=1 meta=36
+[RH STUCK] cyc=605971 g=21 e=30 bank=7 addr=0xa1d tgt_g=17 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=605971 g=21 e=30 s=0 tile=10 core=2 meta=35
+[RH STUCK] cyc=605972 g=21 e=26 bank=6 addr=0xa1b tgt_g=17 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=605972 g=21 e=26 s=0 tile=6 core=2 meta=35
+[RH STUCK] cyc=605973 g=21 e=31 bank=7 addr=0xa2d tgt_g=17 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=605973 g=21 e=31 s=0 tile=10 core=3 meta=35
+[RH STUCK] cyc=605973 g=26 e=26 bank=6 addr=0xa78 tgt_g=17 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=2 cached=2]
+[RH SUB  ] cyc=605973 g=26 e=26 s=0 tile=0 core=4 meta=36
+[RH STUCK] cyc=605974 g=21 e=27 bank=6 addr=0xa2b tgt_g=17 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=605974 g=21 e=27 s=0 tile=6 core=3 meta=35
+[RH STUCK] cyc=605977 g=21 e=46 bank=11 addr=0x81d tgt_g=42 subs=2/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=3 cached=1]
+[RH SUB  ] cyc=605977 g=21 e=46 s=0 tile=10 core=0 meta=0
+[RH SUB  ] cyc=605977 g=21 e=46 s=1 tile=6 core=0 meta=0
+[RH STUCK] cyc=605977 g=54 e=30 bank=7 addr=0x99c tgt_g=45 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=3 cached=1]
+[RH SUB  ] cyc=605977 g=54 e=30 s=0 tile=6 core=0 meta=5
+[RH STUCK] cyc=605981 g=17 e=34 bank=8 addr=0xa33 tgt_g=10 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=605981 g=17 e=34 s=0 tile=6 core=4 meta=5
+[RH STUCK] cyc=605981 g=17 e=62 bank=15 addr=0xa1e tgt_g=15 subs=1/16 byp=0 stl=0 peers=0 bank[inv=1 wait=0 drain=0 hold=2 cached=1]
+[RH SUB  ] cyc=605981 g=17 e=62 s=0 tile=12 core=2 meta=27
+[RH STUCK] cyc=605985 g=20 e=10 bank=2 addr=0xa7b tgt_g=12 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=1 cached=3]
+[RH SUB  ] cyc=605985 g=20 e=10 s=0 tile=6 core=4 meta=16
+[RH STUCK] cyc=605989 g=21 e=62 bank=15 addr=0x82d tgt_g=43 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=3 cached=1]
+[RH SUB  ] cyc=605989 g=21 e=62 s=0 tile=9 core=0 meta=1
+[RH STUCK] cyc=605993 g=57 e=58 bank=14 addr=0x9b8 tgt_g=51 subs=3/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=2 cached=2]
+[RH SUB  ] cyc=605993 g=57 e=58 s=0 tile=6 core=0 meta=1
+[RH SUB  ] cyc=605993 g=57 e=58 s=1 tile=5 core=0 meta=1
+[RH SUB  ] cyc=605993 g=57 e=58 s=2 tile=10 core=0 meta=0
+[RH STUCK] cyc=606001 g=20 e=37 bank=9 addr=0xa44 tgt_g=18 subs=1/16 byp=0 stl=0 peers=0 bank[inv=2 wait=0 drain=0 hold=1 cached=1]
+[RH SUB  ] cyc=606001 g=20 e=37 s=0 tile=8 core=1 meta=38
+[RH STUCK] cyc=606001 g=26 e=22 bank=5 addr=0xa06 tgt_g=17 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=3 cached=1]
+[RH SUB  ] cyc=606001 g=26 e=22 s=0 tile=12 core=1 meta=33
+[RH STUCK] cyc=606006 g=20 e=17 bank=4 addr=0x8c0 tgt_g=41 subs=1/16 byp=0 stl=0 peers=0 bank[inv=2 wait=0 drain=0 hold=1 cached=1]
+[RH SUB  ] cyc=606006 g=20 e=17 s=0 tile=6 core=0 meta=0
+[RH STUCK] cyc=606006 g=54 e=33 bank=8 addr=0xa03 tgt_g=10 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=3 cached=1]
+[RH SUB  ] cyc=606006 g=54 e=33 s=0 tile=6 core=1 meta=5
+[RH STUCK] cyc=606008 g=21 e=41 bank=10 addr=0xa49 tgt_g=18 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=2 cached=2]
+[RH SUB  ] cyc=606008 g=21 e=41 s=0 tile=2 core=1 meta=40
+[RH STUCK] cyc=606008 g=54 e=34 bank=8 addr=0xa13 tgt_g=10 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=3 cached=1]
+[RH SUB  ] cyc=606008 g=54 e=34 s=0 tile=6 core=2 meta=5
+[RH STUCK] cyc=606010 g=54 e=35 bank=8 addr=0xa23 tgt_g=10 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=3 cached=1]
+[RH SUB  ] cyc=606010 g=54 e=35 s=0 tile=6 core=3 meta=5
+[RH STUCK] cyc=606011 g=17 e=32 bank=8 addr=0xa53 tgt_g=10 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=606011 g=17 e=32 s=0 tile=6 core=2 meta=6
+[RH STUCK] cyc=606012 g=20 e=32 bank=8 addr=0xa80 tgt_g=18 subs=1/16 byp=0 stl=0 peers=0 bank[inv=2 wait=0 drain=0 hold=2 cached=0]
+[RH SUB  ] cyc=606012 g=20 e=32 s=0 tile=1 core=1 meta=37
+[RH STUCK] cyc=606014 g=20 e=33 bank=8 addr=0xaa0 tgt_g=18 subs=1/16 byp=0 stl=0 peers=0 bank[inv=2 wait=0 drain=0 hold=2 cached=0]
+[RH SUB  ] cyc=606014 g=20 e=33 s=0 tile=1 core=3 meta=37
+[RH STUCK] cyc=606014 g=26 e=12 bank=3 addr=0x81d tgt_g=52 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=2 cached=2]
+[RH SUB  ] cyc=606014 g=26 e=12 s=0 tile=12 core=0 meta=2
+[RH STUCK] cyc=606014 g=26 e=19 bank=4 addr=0xa41 tgt_g=17 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=2 cached=2]
+[RH SUB  ] cyc=606014 g=26 e=19 s=0 tile=2 core=1 meta=34
+[RH STUCK] cyc=606016 g=26 e=21 bank=5 addr=0xab4 tgt_g=17 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=3 cached=1]
+[RH SUB  ] cyc=606016 g=26 e=21 s=0 tile=9 core=4 meta=33
+[RH STUCK] cyc=606017 g=20 e=2 bank=0 addr=0x821 tgt_g=40 subs=2/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=3 cached=1]
+[RH SUB  ] cyc=606017 g=20 e=2 s=0 tile=1 core=0 meta=3
+[RH SUB  ] cyc=606017 g=20 e=2 s=1 tile=8 core=0 meta=4
+[RH STUCK] cyc=606017 g=21 e=38 bank=9 addr=0x835 tgt_g=42 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=3 cached=1]
+[RH SUB  ] cyc=606017 g=21 e=38 s=0 tile=9 core=0 meta=4
+[RH STUCK] cyc=606019 g=17 e=12 bank=3 addr=0xa8d tgt_g=16 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=606019 g=17 e=12 s=0 tile=11 core=1 meta=31
+[RH STUCK] cyc=606020 g=17 e=13 bank=3 addr=0xaad tgt_g=16 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=606020 g=17 e=13 s=0 tile=11 core=3 meta=31
+[RH STUCK] cyc=606020 g=20 e=25 bank=6 addr=0x8c8 tgt_g=41 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=1 cached=3]
+[RH SUB  ] cyc=606020 g=20 e=25 s=0 tile=6 core=0 meta=2
+[RH STUCK] cyc=606022 g=17 e=51 bank=12 addr=0x8a0 tgt_g=35 subs=1/16 byp=0 stl=0 peers=0 bank[inv=1 wait=0 drain=0 hold=2 cached=1]
+[RH SUB  ] cyc=606022 g=17 e=51 s=0 tile=6 core=0 meta=2
+[RH STUCK] cyc=606025 g=17 e=14 bank=3 addr=0xaaf tgt_g=8 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=606025 g=17 e=14 s=0 tile=15 core=3 meta=63
+[RH STUCK] cyc=606025 g=54 e=14 bank=3 addr=0xa9c tgt_g=16 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=606025 g=54 e=14 s=0 tile=9 core=2 meta=31
+[RH STUCK] cyc=606026 g=17 e=15 bank=3 addr=0xabf tgt_g=8 subs=1/16 byp=0 stl=0 peers=0 bank[inv=0 wait=0 drain=0 hold=4 cached=0]
+[RH SUB  ] cyc=606026 g=17 e=15 s=0 tile=15 core=4 meta=63
+[RH STUCK] cyc=606027 g=21 e=52 bank=13 addr=0xac4 tgt_g=19 subs=1/16 byp=0 stl=0 peers=0 bank[inv=2 wait=0 drain=0 hold=1 cached=1]
+[RH SUB  ] cyc=606027 g=21 e=52 s=0 tile=9 core=1 meta=42
