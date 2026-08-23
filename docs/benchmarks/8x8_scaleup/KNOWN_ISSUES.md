@@ -246,9 +246,18 @@ desynchronised group loses its merge partners and every remote load times out. T
 **different mechanism** and worth root-causing rather than skipping.
 
 **Do not keep retrying it.** Each attempt costs a full timeout (up to 48 h of one licence seat) and
-delivers nothing. Its `resubmit_ledger.json` count was raised 1 → 3 (== `MAXA`) on 2026-08-23 so
-`auto_resubmit.py` reports it as "needs a human" and stops. There is no blacklist mechanism in that
-script; the ledger cap is the existing lever and it is reversible — set the count back to 0 when the
-cause is fixed.
+delivers nothing.
+
+⚠️ **Two independent ledgers feed an arm back onto the fleet, and capping one is a half-fix.**
+`auto_resubmit.py` uses `/tmp/claude-620771/resubmit_ledger.json` (`MAXA = 3`); `rescue_orphans.py`
+uses `/tmp/claude-620771/rescue_ledger.json` (`MAX_PER_ARM = 3`) and never consults the first. This
+arm sat at 1 in *both*, so capping only the resubmitter would have left the rescuer free to dispatch
+its queued copy on the next cycle. Both were set to 3 on 2026-08-23 and both were verified to skip
+it afterwards. Neither script has a blacklist; the ledger cap is the existing lever, and it is
+reversible — set both counts back to 0 when the cause is fixed.
+
+Note also that the per-arm counts under-report: this arm had failed **four** times while both
+ledgers read 1, because the other three attempts came from `sim_topup` / manual paths that feed
+neither ledger. The cap bounds a script's own retries, not the arm's real attempt count.
 
 Related: `fp16_512x64x256` showed the same 4-attempts / 0-results pattern earlier in the campaign.
