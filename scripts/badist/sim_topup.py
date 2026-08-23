@@ -24,7 +24,7 @@ KNOWN_ISSUES).
 """
 import argparse, glob, json, os, re, subprocess, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from feasibility import fits, projected_hours
+from feasibility import fits, projected_hours, delivered
 
 ROOT   = "/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC"
 STATE  = os.path.expanduser("~/badist/state")
@@ -140,12 +140,8 @@ def main():
             # then fails. The top-up moved fp16_2048x1024x1024 (~200 h projected) to VCS before
             # this guard existed.
             continue
-        t = os.path.join(ROOT, "hardware", "s8_" + arm, "transcript")
-        try:
-            if os.path.exists(t) and b"execution took" in open(t, "rb").read():
-                continue          # already delivered; re-running it wastes a seat
-        except OSError:
-            pass
+        if delivered(arm):
+            continue              # already recorded; re-running it wastes a seat
         seen.add(arm); pick.append(arm)
         if len(pick) >= min(a.batch, room):
             break

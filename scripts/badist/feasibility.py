@@ -51,3 +51,35 @@ if __name__ == "__main__":
         h = projected_hours(a)
         print("%-24s %s  (%s)" % (a, "%.1f h" % h if h else "?",
                                   "fits" if fits(a) else "EXCEEDS 48h deadline"))
+
+
+# --- delivery test -------------------------------------------------------------------------
+# The transcript is NOT a reliable "have we got this result" test: badist overwrites
+# hardware/s8_<arm>/transcript unconditionally, so a duplicate can destroy a delivered one, and a
+# fetch can restore it minutes later. Anything deciding whether to spend a seat on an arm sees a
+# different answer depending on when it looks -- the top-up re-picked four already-delivered arms
+# in exactly that window.
+#
+# results.tsv is merge-only: once a row exists it is never dropped, even if the evidence behind it
+# disappears. So it, not the transcript, is the durable record of "we already have this".
+import csv as _csv
+import os as _os
+
+_ROOT = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+_TSV = _os.path.join(_ROOT, "docs/benchmarks/8x8_scaleup/results.tsv")
+
+
+def delivered(arm):
+    """True if this arm has a recorded result (durable row) or a finished transcript."""
+    try:
+        with open(_TSV) as fh:
+            for r in list(_csv.reader(fh, delimiter="\t"))[1:]:
+                if len(r) > 3 and (r[1] + "_" + r[0]) == arm and r[3].strip().isdigit():
+                    return True
+    except OSError:
+        pass
+    t = _os.path.join(_ROOT, "hardware", "s8_" + arm, "transcript")
+    try:
+        return b"execution took" in open(t, "rb").read()
+    except OSError:
+        return False
