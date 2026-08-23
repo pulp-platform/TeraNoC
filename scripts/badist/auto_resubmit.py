@@ -9,6 +9,8 @@ bad shape eats a fleet.
   usage: auto_resubmit.py [--max-attempts N] [--dry-run]
 """
 import glob, json, os, subprocess, sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from feasibility import fits, projected_hours
 
 ROOT  = "/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC"
 STATE = os.path.expanduser("~/badist/state")
@@ -137,6 +139,13 @@ def main():
         for arm, _, _ in todo:
             f.write("%s s8_%s.elf build_q_8x8\n" % (arm, arm))
     for arm, node, n in todo:
+        if not fits(arm):
+            # A shape the deadline cannot hold fails identically on every retry, after holding a
+            # scarce licence for the full 48h. Report instead of paying for a guaranteed failure.
+            # This does NOT drop the arm -- it stays in the manifest and in every status view.
+            print("  INFEASIBLE %-24s ~%.0f h projected, exceeds the deadline -- not retried"
+                  % (arm, projected_hours(arm) or 0))
+            continue
         print("  RESUBMIT %-26s (failed on %s, attempt %d)" % (arm, node, n + 1))
     if dry:
         print("  --dry-run: not submitting")
