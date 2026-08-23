@@ -16,6 +16,7 @@ import glob, json, os, re, subprocess, sys, time
 
 ROOT = "/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC"
 STATE = os.path.expanduser("~/badist/state")
+IDLE_ALERT_MIN = 3
 POOLS = [("mtiverification", "8161@lic-mentor.ethz.ch", 10),
          ("VCS-Base-Runtime-Pkg", "8169@lic-synopsys.ethz.ch", 2)]
 
@@ -80,10 +81,19 @@ def main():
         usable = issued - used - reserve
         if usable > 0:
             idle_total += usable
-        if usable < 0:
+        # Likewise 2+ over, not 1. badist dispatches ALREADY-QUEUED jobs into freeing slots without
+        # consulting our governor (which only gates new submissions), so brief one-seat excursions
+        # past the line are structural and self-correct within minutes as arms finish.
+        if usable <= -2:
             alerts.append("OVER RESERVE %s: %d/%d used, only %d free but we promised %d"
                           % (feat, used, issued, issued - used, reserve))
-    if idle_total > 0 and wait_n > 0:
+    # THRESHOLD 3, not 1. A one- or two-seat gap is the normal beat of the fleet: an arm finishes,
+    # its seat is free until the next dispatch cycle, and the waiting arms are usually already queued
+    # on that same backend so neither the top-up (which moves arms BETWEEN backends) nor the rescuer
+    # (which only touches batches idle >90 min) can place them. Alerting on that fired every cycle
+    # and taught the reader to ignore the loop -- which is how a real stall gets missed. Three or
+    # more idle seats is beyond normal churn and means dispatch is genuinely stuck.
+    if idle_total >= IDLE_ALERT_MIN and wait_n > 0:
         alerts.append("IDLE SEATS: %d usable seat(s) while %d arm(s) wait -- dispatch is not keeping up"
                       % (idle_total, wait_n))
     for a in alerts:
