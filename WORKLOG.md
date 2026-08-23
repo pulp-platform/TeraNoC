@@ -11324,3 +11324,36 @@ Measured: of **40 batches holding queued 8×8 arms, 39 were stale by hours to da
 exactly one was recent; a batch that has merely *finished* dispatching has no queued jobs so never
 reaches the test. With the rule, `on_backend` drops **188 → 5** — the five being the one live batch,
 correctly still protected. No more manual requeue when the idle-seat alert fires. Commit `49b8ac2e`.
+
+## 2026-08-24 — 8×8 RH livelock root-caused
+
+**Purpose.** A monitor flagged `fp16_512x32x128` as WEDGED. Chasing it produced the root cause of
+the whole "zero-timeout wedge" class documented on 2026-08-23.
+
+**Implementation.** Read the full `[RH STUCK]` probe (`mempool_group_mshr.sv:2452-2540`) rather than
+sampling it, then cross-tabulated `[RH STUCK]` episode counts and `cum` FPU utilisation over all 249
+8×8 arm directories. Snapshot in `docs/benchmarks/8x8_scaleup/rh_livelock_evidence/summary.tsv`
+(transcripts are overwritten by retries, so the data had to be preserved mid-analysis).
+
+**Result.** Not a deadlock, not RTL. `software/runtime/mshr_cfg.h` derives
+`MSHR_D_HOLD_SUBS_SINGLE` from `M` alone — at 8×8/KERNEL_SIZE=8: M=512→16, 1024→8, 2048→4,
+≥4096→1 (bypass). The 8×8 config makes it binding with no bounded escape
+(`resp_wait_subs_single=1`, `hold_window_single=0`, `serve_timeout=2047` the only release). Whether
+the cohort can form depends on **P**, which the formula never references.
+
+- Controlled pair, same M/N/target: `fp16_512x256x128` **0.08%** vs `fp16_512x256x1024` **76.64%**
+  — 958× from `P` alone; 232,618 RH episodes vs 4.
+- `byp=0 stl=0` on **100%** of 187,020 episodes → the missing cohort members never issued.
+- 4096 distinct `(group,entry)` = every MSHR entry, ~46 episodes each → livelock, not a stuck entry.
+- Predicate `(target==16 and P<=256) or (fp16 and target==8 and P==128)` separates **23/23 inside,
+  0/26 outside**.
+- **25 of 138 running arms are inside the region** and will burn 24–48 h seats for invalid data.
+
+**Corrections to `wedge_zero_timeout.md`.** `peers` counts *duplicate entries*, not merge partners
+(0 in 100% of lines everywhere — no information); the "converging on group 0" claim was a sampling
+artefact (`fp16_512x32x128` peaks on g32–g39); `M=512` is causal only through the derivation.
+
+**Status.** Root cause documented (`docs/benchmarks/8x8_scaleup/rh_livelock_root_cause.md`, commit
+`6274302b`). Fix not yet applied — needs a `P` term in the derivation, or a non-zero
+`hold_window_single`, or `resp_wait_subs_single=0` for high-target shapes. Cheap regression
+detector: RH-STUCK episode count (healthy arms have single digits).
