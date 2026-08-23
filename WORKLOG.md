@@ -11175,3 +11175,31 @@ held by other users, so the guard cannot free it -- it now says so explicitly an
 that will lose results, instead of reporting a clean sweep.
 
 **Status.** Done, on a 20-minute loop.
+
+---
+
+### 2026-08-23 (late) · 8×8 sweep queue drained to zero; licence-governor race fixed
+
+**Purpose.** The licence watchdog reported free Questa seats with arms waiting — dispatch
+was not keeping up — while `sim_topup` refused to move anything.
+
+**Implementation.**
+- Root cause: a queued badist job moves only while *its own* `submit` controller lives.
+  Only 4 controllers were alive against ~150 batches, so the 3 genuinely-pending arms were
+  stranded in dead controllers' queues, and `sim_topup` skipped them as "already queued on
+  this backend". Re-dispatched them with `--allow-requeue` (gives them a live controller);
+  the stranded copies can never start, so no duplicate risk.
+- That exposed a second problem: every live controller re-checks the pool independently and
+  honours `--reserve-licenses` per-controller, not globally. Room-for-4 at 186/200 → we placed
+  4 → pool landed at 193, because `s8big` (`--max-parallel 80`) drained its own queue in the
+  same window (ours 124→128, others 66→65). Three seats past the promised reserve.
+  Added `sim_topup.py --margin` (default 2) on top of the reserve — commit `de6eaf5c`.
+  Costs no throughput: the declined seats are ones another of our own controllers takes anyway.
+
+**Result.** `campaign_status`: **done 96 · running 152 · pending 0 · NOT dispatched 0 ·
+failed 0 · WEDGED 0 · no-probe 0.** Every arm of the 248-shape manifest is delivered or
+executing. Questa 193/200 (ours 128), VCS 99/100 — 3 seats over the courtesy line, left to
+self-correct by attrition rather than killing healthy runs.
+
+**Status.** Queue drained; no dispatch action outstanding. Knowledge captured in the KB note
+`knowledge/fleet-operations.md` §"Licence governor".
