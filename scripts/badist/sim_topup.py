@@ -22,7 +22,7 @@ kill_duplicate_arms.py keeps the one with more progress. Cancelling the old queu
 would be worse: it nudges the scheduler into dispatching another job from that batch (measured; see
 KNOWN_ISSUES).
 """
-import argparse, glob, json, os, re, subprocess, sys
+import argparse, glob, json, os, re, subprocess, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from feasibility import fits, projected_hours, delivered
 
@@ -73,8 +73,32 @@ def seats(server, feature):
     return (int(m.group(1)), int(m.group(2))) if m else None
 
 
+# A queued job moves only while ITS OWN submit controller lives; once that process exits its
+# queue is stranded forever. Those arms still look "already queued on this backend", so the skip
+# below refused to move them and the pool sat over its idle line with arms waiting -- which needed
+# a manual --allow-requeue every time the watchdog fired.
+# The liveness signal is the batch's dispatch/ directory mtime: an active controller touches it as
+# it places jobs. Measured 2026-08-23: of 40 batches holding queued 8x8 arms, 39 were stale by
+# hours to days (up to 30 h) and exactly one was recent. A batch that is merely FINISHED dispatching
+# has no queued jobs left, so it never reaches this test.
+STALE_MIN = 45
+
+
+def _stranded(d):
+    """True if this batch still has queued jobs but no controller has touched it recently."""
+    dd = os.path.join(d, "dispatch")
+    try:
+        return (time.time() - os.path.getmtime(dd)) / 60.0 > STALE_MIN
+    except OSError:
+        return True          # no dispatch dir at all -- nothing ever placed from here
+
+
 def survey(backend):
-    """running arms, queued arms (in order), and those already queued for THIS backend."""
+    """running arms, queued arms (in order), and those already queued for THIS backend.
+
+    An arm queued in a stranded batch is NOT counted as waiting on the backend: nothing will ever
+    dispatch it, so a fresh controller must.
+    """
     running, queued, on_backend = set(), [], set()
     for d in sorted(glob.glob(os.path.join(STATE, "*"))):
         jf = os.path.join(d, "jobs.json")
@@ -84,6 +108,7 @@ def survey(backend):
             jobs = json.load(open(jf))
         except Exception:
             continue
+        stranded = _stranded(d)
         started = {os.path.basename(f)[:-6] for f in glob.glob(os.path.join(d, "jobs", "*.jsonl"))}
         for j in jobs:
             m = j.get("meta") or {}
@@ -92,7 +117,7 @@ def survey(backend):
                 continue
             if j["job_id"] not in started:
                 queued.append(a)
-                if (m.get("backend") or "questa") == backend:
+                if (m.get("backend") or "questa") == backend and not stranded:
                     on_backend.add(a)
                 continue
             last = None
