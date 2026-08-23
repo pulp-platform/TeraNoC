@@ -20,8 +20,65 @@ it as a planning filter, never as grounds for discarding a delivered measurement
 """
 import re
 
-CYC_PER_MAC = {"fp16": 2.911e-4, "fp32": 7.150e-4}
-SEC_PER_CYCLE = 1.15
+import csv as _csv
+import os as _os
+
+_ROOT = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+_TSV = _os.path.join(_ROOT, "docs/benchmarks/8x8_scaleup/results.tsv")
+
+CYC_PER_MAC = {"fp16": 2.911e-4, "fp32": 7.150e-4}   # linear fallback, used if the fit has too few points
+SEC_PER_CYCLE = 1.015   # measured median over 105 completed jobs (questa 0.906, vcs 1.125)
+
+# Cycles scale SUB-LINEARLY with M*N*P: fitting log(cycles) on log(work) over this campaign's own
+# delivered arms gives an exponent of ~0.80 (fp16, n=46) and ~0.85 (fp32, n=38), not 1.0. Bigger
+# shapes amortise better, so a linear model over-charges them -- it put 19 arms over the 48h
+# deadline at 44h that the fit puts at 38h.
+#
+# The fit is recomputed from results.tsv on each call rather than hardcoded, so it sharpens as the
+# sweep fills in instead of going stale. The linear constants above remain the fallback.
+#
+# SEC_PER_CYCLE is the MEASURED median (1.015 s/cycle over 105 completed jobs: questa 0.906, vcs
+# 1.125). It was 1.15, which is ~13% conservative -- and that silently DOUBLED the caution, since
+# `fits()` already applies a 0.85 margin. Keep the projection honest and the caution in one place.
+# (An earlier claim of 12.2 cyc/s from the dashboard's "measured" panel was wrong by ~12x; wall-time
+# per job is the trustworthy source, not that panel.)
+_FIT_CACHE = {}
+
+
+def _fit(pr):
+    """(coefficient, exponent) for cycles ~= a * work**k, from delivered arms of this precision."""
+    if pr in _FIT_CACHE:
+        return _FIT_CACHE[pr]
+    import math
+    pts = []
+    try:
+        with open(_TSV) as fh:
+            for r in list(_csv.reader(fh, delimiter="\t"))[1:]:
+                if len(r) < 4 or r[1] != pr or not r[3].strip().isdigit():
+                    continue
+                m = re.match(r"^(\d+)x(\d+)x(\d+)$", r[0])
+                if not m:
+                    continue
+                w = 1
+                for g in m.groups():
+                    w *= int(g)
+                pts.append((w, int(r[3])))
+    except OSError:
+        pts = []
+    if len(pts) < 12:                     # too few to fit; caller falls back to linear
+        _FIT_CACHE[pr] = None
+        return None
+    xs = [math.log(w) for w, _ in pts]
+    ys = [math.log(c) for _, c in pts]
+    n = len(xs)
+    mx, my = sum(xs) / n, sum(ys) / n
+    den = sum((x - mx) ** 2 for x in xs)
+    if den <= 0:
+        _FIT_CACHE[pr] = None
+        return None
+    k = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / den
+    _FIT_CACHE[pr] = (math.exp(my - k * mx), k)
+    return _FIT_CACHE[pr]
 
 
 def projected_hours(arm, sec_per_cycle=SEC_PER_CYCLE):
@@ -30,7 +87,10 @@ def projected_hours(arm, sec_per_cycle=SEC_PER_CYCLE):
     if not m:
         return None
     pr, M, N, P = m.group(1), int(m.group(2)), int(m.group(3)), int(m.group(4))
-    return M * N * P * CYC_PER_MAC[pr] * sec_per_cycle / 3600.0
+    w = M * N * P
+    f = _fit(pr)
+    cycles = (f[0] * w ** f[1]) if f else (w * CYC_PER_MAC[pr])
+    return cycles * sec_per_cycle / 3600.0
 
 
 def fits(arm, deadline_s=172800, margin=0.85):
@@ -62,11 +122,6 @@ if __name__ == "__main__":
 #
 # results.tsv is merge-only: once a row exists it is never dropped, even if the evidence behind it
 # disappears. So it, not the transcript, is the durable record of "we already have this".
-import csv as _csv
-import os as _os
-
-_ROOT = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
-_TSV = _os.path.join(_ROOT, "docs/benchmarks/8x8_scaleup/results.tsv")
 
 
 def delivered(arm):
