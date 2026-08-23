@@ -135,6 +135,17 @@ def main():
         return 0
 
     running, queued, on_backend = survey(a.backend)
+
+    # Do not deepen a queue that is already far longer than the room. This gates on FREE SEATS only,
+    # so with VCS pinned at 100/100 and 57 jobs already queued it kept moving one more arm across on
+    # every cycle: no throughput gain (every seat is busy), and each extra queued job is one more
+    # that badist will slam into the next freed seat, which is what holds the pool at zero free and
+    # keeps us over the courtesy line.
+    already = len(on_backend)
+    if already > max(room, 0) + 8:
+        print("  %s already has %d arm(s) queued against room for %d -- not deepening the queue"
+              % (a.backend, already, max(room, 0)))
+        return 0
     pick, seen = [], set()
     for arm in queued:
         if arm in running or arm in seen or (arm in on_backend and not a.allow_requeue):
