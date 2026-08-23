@@ -29,21 +29,28 @@ STATE  = os.path.expanduser("~/badist/state")
 CLIENT = os.path.join(ROOT, "scripts/badist/teranoc_fleet.py")
 
 BACKENDS = {
+    # reserve 2 (was 5, briefly 3) -- user decision 2026-08-23: leave 2 VCS seats for others.
     "vcs": dict(feature="VCS-Base-Runtime-Pkg", server="8169@lic-synopsys.ethz.ch",
-                reserve=5, image="build_vcs_8x8/mempool_simvopt", mem_gb=12,
+                reserve=2, image="build_vcs_8x8/mempool_simvopt", mem_gb=12,
                 name="s8vtop", max_parallel=30),
     # mtiverification is the binding Questa feature (200 seats); msimhdlsim has 400 and never runs
     # out first. Governing on msimhdlsim alone once let us take 150 of the 200 while the tool
     # reported plenty free and colleagues were locked out.
-    # max_parallel 4, NOT 30: every Questa arm opens the same 17 GB work library over NFS, so a
-    # burst of simultaneous starts contends at design load and some die with "Error loading design"
-    # after ~17 min of vopt (rc 12, and "Errors: 0, Warnings: 0" -- it looks like nothing is wrong).
-    # Measured: an s8qtop batch started 5 arms within a 2 s spread and lost 2 of them that way.
-    # VCS does not share anything at start-up -- each simv is a self-contained binary -- so it keeps
-    # the wide setting.
+    # image MUST be build_q_8x8, and the client default (build_bp_q) is wrong for this campaign.
+    #
+    # This was the real cause of the rc=12 / "Error loading design" failures, after two wrong
+    # diagnoses. build_q_8x8 holds a PRE-ELABORATED design (s8_opt); build_bp_q does not. Naming a
+    # build without it makes vsim run an implicit vopt that takes the shared work/ library lock, so
+    # the first arm elaborates while the rest wait and give up after exactly 16:42. Evidence: all
+    # 100 healthy Questa arms run build_q_8x8 + s8_opt; every arm submitted with the default failed.
+    #
+    # It was NOT burst contention (max_parallel was cut 30 -> 4 on that theory; 3 arms at 4 still
+    # failed 3/3) and NOT the stale locks (those were real and removed, but sat in build_q_8x8 while
+    # the failing arms blocked on a LIVE holder in build_bp_q). max_parallel returns to 30: with a
+    # pre-elaborated design there is no vopt, so nothing serialises on the lock.
     "questa": dict(feature="mtiverification", server="8161@lic-mentor.ethz.ch",
-                   reserve=10, image=None, mem_gb=17,
-                   name="s8qtop", max_parallel=4),
+                   reserve=10, image="build_q_8x8", mem_gb=17,
+                   name="s8qtop", max_parallel=30),
 }
 
 

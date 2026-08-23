@@ -88,12 +88,12 @@ def ratio_chart(pairs):
     only the extremes are labelled -- a label on every point turns ten marks into noise.
     """
     pts = []
-    for shape, ratio in pairs:
+    for shape, ratio, sick16, sick32 in pairs:
         m = re.match(r"^(\d+)x(\d+)x(\d+)$", shape)
         if not m:
             continue
         M, N, P = (int(x) for x in m.groups())
-        pts.append((shape, M, N, P, ratio))
+        pts.append((shape, M, N, P, ratio, sick16, sick32))
     if len(pts) < 4:
         return ""
     W, H, L, R, T, B = 620, 250, 46, 16, 18, 40
@@ -125,14 +125,26 @@ def ratio_chart(pairs):
     for P in xs:
         o.append('<text x="%.1f" y="%d" fill="var(--dim)" font-size="10.5" text-anchor="middle" '
                  'font-family="IBM Plex Mono,monospace">P=%d</text>' % (px(P), H - 14, P))
-    hi = max(pts, key=lambda p: p[4])
-    lo = min(pts, key=lambda p: p[4])
-    for shape, M, N, P, r in sorted(pts, key=lambda p: p[4]):
+    clean = [p for p in pts if p[5] == 0 and p[6] == 0]
+    hi = max(clean, key=lambda p: p[4]) if clean else None
+    lo = min(clean, key=lambda p: p[4]) if clean else None
+    for shape, M, N, P, r, s16, s32 in sorted(pts, key=lambda p: p[4]):
         x, y = px(P), py(r)
-        o.append('<circle cx="%.1f" cy="%.1f" r="5.5" fill="%s" stroke="var(--acc)" stroke-width="2">'
-                 '<title>%s   M=%d N=%d P=%d   %.2fx</title></circle>'
-                 % (x, y, "var(--acc)" if r > 2.0 else "var(--surf)", shape, M, N, P, r))
-        if shape in (hi[0], lo[0]):
+        ok = (s16 == 0 and s32 == 0)
+        if ok:
+            note = "clean"
+            o.append('<circle cx="%.1f" cy="%.1f" r="5.5" fill="var(--acc)" stroke="var(--acc)" '
+                     'stroke-width="2"><title>%s   M=%d N=%d P=%d   %.2fx   %s</title></circle>'
+                     % (x, y, shape, M, N, P, r, note))
+        else:
+            # hollow + muted: the arm ran sick, so this ratio measures MSHR degradation.
+            note = ("fp32 sicker (RH+timeout %d vs %d) -- ratio OVERstated" % (s32, s16)) if s32 > s16 \
+                   else ("fp16 sicker (RH+timeout %d vs %d) -- ratio UNDERstated" % (s16, s32))
+            o.append('<circle cx="%.1f" cy="%.1f" r="4.5" fill="none" stroke="var(--dim)" '
+                     'stroke-width="1.5" stroke-dasharray="2 2">'
+                     '<title>%s   M=%d N=%d P=%d   %.2fx   %s</title></circle>'
+                     % (x, y, shape, M, N, P, r, note))
+        if hi and shape in (hi[0], lo[0]):
             o.append('<text x="%.1f" y="%.1f" fill="var(--ink)" font-size="10.5" text-anchor="middle" '
                      'font-family="IBM Plex Mono,monospace">%s</text>' % (x, y - 11, shape))
     o.append('</svg></div>')
@@ -416,7 +428,15 @@ def main():
             pairs.setdefault(r[0], {})[r[1]] = r
         both = [(k, v) for k, v in pairs.items() if len(v) == 2]
         ratios = [int(v["fp32"][3]) / float(v["fp16"][3]) for _, v in both if int(v["fp16"][3])]
-        ratio_pairs = [(k, int(v["fp32"][3]) / float(v["fp16"][3])) for k, v in both if int(v["fp16"][3])]
+        # carry per-side RH + mshr_timeout: a degraded fp32 arm INFLATES the ratio and a
+        # degraded fp16 arm deflates it, so a contaminated pair measures MSHR sickness,
+        # not precision. All three ratios above the 2x ceiling were fp32-sick.
+        def _sick(r):
+            try: return int(r[5] or 0) + int(r[6] or 0)
+            except Exception: return 0
+        ratio_pairs = [(k, int(v["fp32"][3]) / float(v["fp16"][3]),
+                        _sick(v["fp16"]), _sick(v["fp32"]))
+                       for k, v in both if int(v["fp16"][3])]
         n16 = sum(1 for r in res if r[1] == "fp16")
         a16 = sum(1 for r in res if r[1] == "fp16" and "FATAL" in r[8])
         n32 = sum(1 for r in res if r[1] == "fp32")
@@ -453,7 +473,7 @@ def main():
               'correctly provisioned against 20.8&ndash;28.2%% under-provisioned, so a low number is not '
               'automatically a shape effect &mdash; check the arm\'s MSHR settings before concluding.</p>'
               '' % (f(best, 4) / f(worst, 4) if f(worst, 4) else 0)]
-        h += [ratio_chart(ratio_pairs), '<p class="sub" style="margin-top:2px">Each point is a shape measured in both precisions; filled marks sit above the arithmetic ceiling. N is not encoded &mdash; the four M=512, P=512 shapes span N=64&ndash;512 and land within 0.02&times; of each other, so N is not what moves this.</p></section>']
+        h += [ratio_chart(ratio_pairs), '<p class="sub" style="margin-top:2px">Filled marks are pairs where BOTH arms ran clean; hollow dashed marks carry RH&nbsp;&gt;&nbsp;0 or mshr_timeout&nbsp;&gt;&nbsp;0 on one side and measure MSHR degradation, not precision &mdash; a sick fp32 arm inflates the ratio, a sick fp16 arm deflates it. <b>Every point above the 2&times; ceiling is fp32-sick</b>, so the earlier reading of this chart (&ldquo;fp32 is losing on traffic&rdquo;) does not survive: on the clean pairs alone the ratio sits at or just around the arithmetic limit, which is what ~2 MACs per lane-cycle predicts and needs no traffic explanation. Hover any mark for its health counters.</p></section>']
 
     # ---- per-group mesh over time ----
     try:
