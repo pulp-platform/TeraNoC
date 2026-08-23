@@ -24,13 +24,36 @@ cheaper than an arm silently never running.
   usage: rescue_orphans.py [--min-idle-min 90] [--dry-run]
 """
 import concurrent.futures as cf
-import glob, json, os, subprocess, sys, time
+import glob, json, os, re, subprocess, sys, time
 
 ROOT   = "/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC"
 STATE  = os.path.expanduser("~/badist/state")
 CLIENT = os.path.join(ROOT, "scripts/badist/teranoc_fleet.py")
 LEDGER = "/tmp/claude-620771/rescue_ledger.json"
 MAX_PER_ARM = 3
+
+def pools_have_headroom():
+    """True if EITHER simulator pool can actually start another arm.
+
+    An arm queued behind a saturated licence pool is not orphaned -- nothing anywhere can dispatch
+    it, and queuing another copy just adds a duplicate that collides later. fp32_2048x32x512 hit
+    the per-arm rescue cap this way: ONE real failure (packaging on a full disk) and then six
+    queued copies from successive rescues, none of which could start because Questa sat at its
+    reserve line and VCS at 95/100. Memory was never the constraint -- 42 nodes could host it.
+    """
+    import subprocess as sp
+    for feat, server, reserve in (("mtiverification", "8161@lic-mentor.ethz.ch", 10),
+                                  ("VCS-Base-Runtime-Pkg", "8169@lic-synopsys.ethz.ch", 5)):
+        try:
+            out = sp.check_output(["lmutil", "lmstat", "-c", server, "-f", feat],
+                                  stderr=sp.STDOUT, text=True, timeout=120)
+        except Exception:
+            return True                      # cannot tell -> behave as before, do not suppress
+        m = re.search(r"Total of (\d+) licenses? issued;\s*Total of (\d+) licenses? in use", out)
+        if m and int(m.group(1)) - int(m.group(2)) - reserve > 0:
+            return True
+    return False
+
 
 def main():
     idle_min = 90
@@ -121,6 +144,11 @@ def main():
     if protected:
         print("  %d queued arm(s) are in batches that started a job in the last %d min -- "
               "held by the governor, not orphaned" % (len(protected), STALE_MIN))
+
+    if not pools_have_headroom():
+        print("  both licence pools are at their reserve line -- queued arms are waiting, not "
+              "orphaned; rescuing now would only add duplicates")
+        return
 
     victims = []
     for a, when in sorted(queued_at.items()):
