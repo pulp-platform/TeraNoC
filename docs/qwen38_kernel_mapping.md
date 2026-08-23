@@ -67,19 +67,17 @@ reference plan uses the complete 5,120-element contraction because its operands 
 fixed engine array. Our A, B and C panels all live in L1 simultaneously, so at `M=512, P=512` fp16
 a full 5,120 contraction would need 5 MiB for A alone — more than the whole 4×4 L1. We tile N.
 
-**Physical tile policy:**
+**Physical tile policy** is therefore chosen against three constraints in order — row floor, then
+L1 footprint with A and B double-buffered, then measured efficiency. **§5 works this through per
+operation and gives the numbers**; the two structural rules are:
 
-| | 4×4 | 8×8 |
-|---|---|---|
-| projections and output (ordinary P) | `M × 512 × 512`, M ∈ {256, 512} | `M × 512 × 512`, M ∈ {512, 2048} |
-| attention QK (short contraction) | `M × 256 × 512` | `M × 256 × 512` |
-| attention PV (long contraction) | `M × 512 × 256` | `M × 1024 × 256` |
-| GDN a/b (`P = 96`) | `M × 512 × 96` — **untested regime** | — |
-| decode (`M = 32`) | **not expressible** — see §5 | **not expressible** |
+- **rows:** `M ≥ 128` (4×4) / `M ≥ 512` (8×8). `M = 128` is legal at 4×4 but currently blocked by
+  the fp16 M=128 wedge (§4.2), and `M = 32` decode is not expressible at either mesh (§5.3).
+- **contraction:** always tiled, never full. Where an accelerator plan can use the whole 5,120
+  because operands stream past the array, we cannot: A alone would be 5 MiB.
 
-`M = 128` is legal at 4×4 by the work split but is currently blocked by the fp16 M=128 wedge (§4.2).
-At 8×8, 14.86 MiB of L1 also admits `N = 1024`, which is worth using: efficiency rises with the
-contraction because arithmetic intensity does.
+Efficiency rises with the contraction, because arithmetic intensity does — so N should be as large
+as the footprint allows, and at 8×8 the current best tile leaves 10 MiB of L1 unused (§5.2).
 
 ---
 
@@ -194,7 +192,122 @@ tile in §4.1, which is why the prefill claim is nearly free.
 
 ---
 
-## 5. Coverage gaps Qwen exposes
+## 5. Chosen tile sizes, per operation
+
+Derived from three constraints, in this order: the **work-split row floor** (M ≥ 128 at 4×4,
+M ≥ 512 at 8×8), the **L1 footprint** with A and B double-buffered
+(`2·(M·N + N·P) + M·P` elements), and then **measured efficiency** — picking the highest-efficiency
+legal tile, because with `efficiency = ideal/actual` the total cycles for a fixed amount of work are
+just `ideal_total / efficiency`, so the best tile is simply the most efficient one.
+
+All figures fp16. `Mcyc/model` is one full 64-layer prefill pass at `S = 2048`, projected as
+`useful MAC / peak / efficiency`.
+
+### 5.1 Prefill — 4×4 (256 cores, 3.61 MiB usable L1, peak 2048 MAC/cyc)
+
+| operation | tile `M×N×P` | eff | tiles | L1 (dbl-buf) | Mcyc/model |
+|---|---|---:|---:|---:|---:|
+| FFN gate+up (fused) | `256×512×512` | 94.8% | 5,440 | 1.75 MiB | 12,034 |
+| FFN down | `256×512×512` | 94.8% | 2,720 | 1.75 MiB | 6,017 |
+| Attention Q+gate | `256×512×512` | 94.8% | 1,920 | 1.75 MiB | 1,062 |
+| Attention K+V (fused) | `256×512×512` | 94.8% | 320 | 1.75 MiB | 177 |
+| **Attention QK** (per head) | **`512×256×512`** | 86.5% | 384 | 1.50 MiB | 233 |
+| **Attention PV** (per head) | **`512×256×256`** | 86.1% | 768 | 1.00 MiB | 234 |
+| Attention O | `256×512×512` | 94.8% | 960 | 1.75 MiB | 531 |
+| GDN QKV | `256×512×512` | 94.8% | 1,600 | 1.75 MiB | 2,655 |
+| GDN Z | `256×512×512` | 94.8% | 960 | 1.75 MiB | 1,593 |
+| **GDN a+b** (`P=96`→128) | **`512×512×128`** | 74.0% | 40 | 1.38 MiB | 43 |
+| GDN O | `256×512×512` | 94.8% | 960 | 1.75 MiB | 1,593 |
+| | | | | | **26,170** |
+
+**One tile does nine of eleven: `256×512×512`.** It is the campaign's best fp16 point (94.8%),
+and it beats `512×512×512` (91.3%) on throughput — 1,942 against 1,870 MAC/cycle — so the larger row
+tile is not worth taking for the sake of fewer B re-fetches.
+
+Two operations want a different tile because their aspect ratio is different, and in both cases the
+**larger** row tile wins:
+
+- **QK** has a contraction fixed at 256 (the head dimension), so N cannot be tiled up. At N=256 the
+  measured order is `512×256×512` 86.5% > `512×256×256` 86.1% > `256×256×256` 72.3% — M=512.
+- **PV** has an output fixed at 256 (the head dimension), so P cannot be tiled up. At P=256:
+  `512×256×256` 86.1% > `256×1024×256` 78.7% > `256×512×256` 76.2% — again M=512, and note it beats
+  the tile with 4× the contraction.
+
+### 5.2 Prefill — 8×8 (1024 cores, 14.86 MiB usable L1, peak 8192 MAC/cyc)
+
+| operation | tile `M×N×P` | eff | tiles | L1 (dbl-buf) | Mcyc/model |
+|---|---|---:|---:|---:|---:|
+| FFN gate+up (fused) | `2048×256×512` | 73.5% | 1,360 | 4.50 MiB | 3,880 |
+| FFN down | `2048×256×512` | 73.5% | 680 | 4.50 MiB | 1,940 |
+| Attention Q+gate | `2048×256×512` | 73.5% | 480 | 4.50 MiB | 342 |
+| Attention K+V (fused) | `2048×256×512` | 73.5% | 80 | 4.50 MiB | 57 |
+| Attention QK (per head) | `2048×256×512` | 73.5% | 96 | 4.50 MiB | 68 |
+| **Attention PV** (per head) | **`2048×512×256`** | 53.7% | 96 | 5.50 MiB | 94 |
+| Attention O | `2048×256×512` | 73.5% | 240 | 4.50 MiB | 171 |
+| GDN QKV | `2048×256×512` | 73.5% | 400 | 4.50 MiB | 856 |
+| GDN Z | `2048×256×512` | 73.5% | 240 | 4.50 MiB | 514 |
+| **GDN a+b** (`P=96`→128) | **`2048×512×128`** | 48.2% | 10 | 4.75 MiB | 16 |
+| GDN O | `2048×256×512` | 73.5% | 240 | 4.50 MiB | 514 |
+| | | | | | **8,453** |
+
+**`2048×256×512` does ten of eleven at 8×8**, and QK now shares the general tile because its N=256
+contraction is exactly what the best 8×8 point already uses.
+
+**Scale-up: 26,170 → 8,453 Mcyc = 3.10× for 4× the hardware** (77.5% of linear). Consistent with
+the campaign's independent scale-up figure, and it comes from efficiency, not from capability — the
+per-tile efficiency falls from 94.8% to 73.5%.
+
+⚠️ **We are leaving L1 on the table at 8×8.** The chosen tile uses **4.50 of 14.86 MiB**. A
+`2048×512×512` tile needs 7.0 MiB and is legal; it is in the running manifest but has not been
+delivered. Arithmetic intensity rises with N, and 8×8 is the more bandwidth-starved mesh, so this
+is the single most likely improvement to the table above. **Re-derive §5.2 when it lands.**
+
+### 5.3 Decode (`B = 32`, `T_NEW = 1`) — and why it needs T3
+
+Useful work for one decode step across the whole model: **779,469 M MAC**. Three ways to express it:
+
+| | 4×4 | 8×8 |
+|---|---:|---:|
+| ideal, if `M = 32` were expressible | 381 Mcyc | 95 Mcyc |
+| **padding M=32 up to the row floor** | ×4 → **1,522 Mcyc** | ×16 → **1,522 Mcyc** |
+| GEMV path (`gemv` / `gemv-opt`, M=1) | exists, unmeasured in this campaign | exists, unmeasured |
+
+**Padded decode costs exactly the same on both meshes — 1,522 Mcyc.** That is not a coincidence and
+it is not a rounding: the row floor scales 4× with the mesh (128 → 512) while the peak also scales
+4× (2048 → 8192), so the padding waste cancels the extra lanes exactly. **Scaling the machine 4×
+buys literally nothing for a padded decode.** This is the argument for T3, and it is stronger than
+"decode is inefficient".
+
+**After T3 the floor moves from M to P.** Splitting output columns and heads instead of rows needs
+`Nout ≥ cores` for full occupancy — 256 at 4×4, 1024 at 8×8. Against Qwen's decode operations:
+
+| operation | `Nout` | 4×4 | 8×8 |
+|---|---:|---|---|
+| FFN gate+up | 34,816 | ✓ | ✓ |
+| FFN down | 5,120 | ✓ | ✓ |
+| Attention Q+gate | 12,288 | ✓ | ✓ |
+| Attention K+V | 2,048 | ✓ | ✓ |
+| Attention O / GDN O | 5,120 | ✓ | ✓ |
+| GDN QKV | 10,240 | ✓ | ✓ |
+| GDN Z | 6,144 | ✓ | ✓ |
+| **GDN a+b** | **128** | 50% of cores | **12% of cores** |
+
+Only the a/b control projection is under-parallel, and it is 0.13% of decode MACs — so the P-split
+is a complete answer for this model. Arithmetic intensity at `B = 32` is 32 flop/byte, well above
+the 4 (4×4) and 8 (8×8) thresholds, so a correctly-expressed decode should be **compute-bound**.
+
+### 5.4 Shapes to add to the sweep before committing to these
+
+| shape | mesh | why |
+|---|---|---|
+| `256×1024×512` fp16 | 4×4 | N=1024 is the best fp32 regime (96.3–96.5%) but our fp16 N=1024 coverage is one point at P=256. If it beats 94.8%, §5.1 changes for nine operations. |
+| `2048×512×512` fp16 | 8×8 | uses 7.0 of 14.86 MiB instead of 4.50; in the manifest, not yet delivered. |
+| `512×512×96` and `512×512×64` fp16 | 4×4 | the real GDN a/b output width, `P < 128` — untested at either mesh. Measure, do not tune. |
+| `512×2048×256` fp16 | 4×4 | PV's true contraction is 2048 keys; we tile it to 512 without evidence that is the right split. |
+
+---
+
+## 6. Coverage gaps Qwen exposes
 
 | regime | needed for | 4×4 | 8×8 |
 |---|---|---|---|
@@ -214,13 +327,13 @@ GEMM work this model requires.
 
 ---
 
-## 6. Tranche plan
+## 7. Tranche plan
 
 **T0 — shape mapping, no new kernel (days).**
 Wrap the existing GEMM as `qwen_<workload>_<operation>` apps with the runtime
 `logical=… tile=…` provenance line and `SHA256SUMS`. Publish the prefill projection claim from the
 §4.1 anchors. *Blocker:* the fp16 M=128 wedge, if M=128 tiles are used at 4×4.
-*Cheap addition:* `P = 96 / 64` arms, closing the §5 gap.
+*Cheap addition:* the four sweep shapes in §5.4 — two of them can change the tile choice for nine operations.
 
 **T1 — the vector half (weeks).**
 RMSNorm, QK-norm, SiLU/SwiGLU, sigmoid, softplus, online softmax, partial MRoPE, output gates,
@@ -256,7 +369,7 @@ layer-integration cost, which is the number an architecture paper is actually as
 
 ---
 
-## 7. Storyline
+## 8. Storyline
 
 Three claims, in the order the evidence supports them.
 
