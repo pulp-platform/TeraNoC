@@ -12,6 +12,14 @@ import glob, json, os, subprocess, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from feasibility import fits, projected_hours, delivered
 
+# Arms whose skip reason has already been announced. Persisted so a loop that re-invokes this
+# script every few minutes does not repeat an unchanged line forever.
+_REPORTED_PATH = "/tmp/claude-620771/autoresub_reported.json"
+try:
+    _reported = set(json.load(open(_REPORTED_PATH)))
+except Exception:
+    _reported = set()
+
 ROOT  = "/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC"
 STATE = os.path.expanduser("~/badist/state")
 LEDGER = "/tmp/claude-620771/resubmit_ledger.json"
@@ -125,9 +133,23 @@ def main():
                 continue
         except OSError:
             pass                      # already recovered by a later batch
+        # Feasibility BEFORE the attempt cap, so the reason reported is the true one. An arm that
+        # burned its attempts before this guard existed is not a fault needing investigation --
+        # fp16_2048x512x2048 is a ~200 h shape against a 48 h deadline, and "needs a human" sent
+        # the reader looking for a bug instead of a scope decision.
+        if not fits(arm):
+            if arm not in _reported:
+                print("  INFEASIBLE %-24s ~%.0f h projected, exceeds the deadline -- not retried"
+                      % (arm, projected_hours(arm) or 0))
+                _reported.add(arm)
+            continue
         n = led.get(arm, 0)
         if n >= MAXA:
-            print("  SKIP %-26s %d attempts already -- needs a human" % (arm, n))
+            # Report once, not on every cycle: this loop runs every few minutes and an unchanged
+            # skip is noise that trains the reader to ignore it.
+            if arm not in _reported:
+                print("  SKIP %-26s %d attempts already -- needs a human" % (arm, n))
+                _reported.add(arm)
             continue
         elf = os.path.join(ROOT, "hardware", "s8_%s.elf" % arm)
         if not os.path.exists(elf):
@@ -142,13 +164,6 @@ def main():
         for arm, _, _ in todo:
             f.write("%s s8_%s.elf build_q_8x8\n" % (arm, arm))
     for arm, node, n in todo:
-        if not fits(arm):
-            # A shape the deadline cannot hold fails identically on every retry, after holding a
-            # scarce licence for the full 48h. Report instead of paying for a guaranteed failure.
-            # This does NOT drop the arm -- it stays in the manifest and in every status view.
-            print("  INFEASIBLE %-24s ~%.0f h projected, exceeds the deadline -- not retried"
-                  % (arm, projected_hours(arm) or 0))
-            continue
         print("  RESUBMIT %-26s (failed on %s, attempt %d)" % (arm, node, n + 1))
     if dry:
         print("  --dry-run: not submitting")
@@ -174,4 +189,15 @@ def main():
     json.dump(led, open(LEDGER, "w"), indent=1)
     print("  ledger updated for %d arm(s)" % len(todo))
 
+
+def _save_reported():
+    """Persist the announced-skip set so a loop re-invoking this script every few minutes does not
+    repeat an unchanged line forever."""
+    try:
+        json.dump(sorted(_reported), open(_REPORTED_PATH, "w"))
+    except OSError:
+        pass
+
+
 main()
+_save_reported()
