@@ -181,7 +181,10 @@ def main():
             f.write("%s s8_%s.elf build_q_8x8\n" % (a, a))
     p = subprocess.Popen([CLIENT, "submit", "--arms", lst, "--backend", "questa",
                           "--run-prefix", "s8", "--name", "s8rescue", "--max-parallel", "40",
-                          "--mem-gb", "18", "--est-runtime-s", "90000", "--force"],
+                          "--mem-gb", "18", "--est-runtime-s", "90000",
+                          # deadline must EXCEED the predicted runtime: the default 86400 killed
+                          # eight of the largest arms at exactly 24 h after a full day of work.
+                          "--timeout-s", "172800", "--force"],
                          cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                          text=True, start_new_session=True)
     try:

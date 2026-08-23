@@ -182,7 +182,8 @@ def main():
                           # killed them and the healer loops forever. 6 at a time lets each finish
                           # design-load before the next begins.
                           "--run-prefix", "s8", "--name", "s8heal", "--max-parallel", "6",
-                          "--mem-gb", "18", "--est-runtime-s", "90000", "--force"],
+                          "--mem-gb", "18", "--est-runtime-s", "90000",
+                          "--timeout-s", "172800", "--force"],
                          cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                          text=True, start_new_session=True)
     try:

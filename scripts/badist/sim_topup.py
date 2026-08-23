@@ -157,7 +157,8 @@ def main():
     cmd = [CLIENT, "submit", "--arms", lst, "--backend", a.backend,
            "--run-prefix", "s8", "--name", cfg["name"],
            "--max-parallel", str(cfg["max_parallel"]), "--mem-gb", str(cfg["mem_gb"]),
-           "--reserve-licenses", str(reserve), "--est-runtime-s", "60000", "--force"]
+           "--reserve-licenses", str(reserve), "--est-runtime-s", "60000",
+           "--timeout-s", "172800", "--force"]
     p = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                          text=True, start_new_session=True)
     try:

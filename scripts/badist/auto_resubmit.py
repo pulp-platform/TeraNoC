@@ -147,7 +147,7 @@ def main():
            # submitted at 20 and the healer then had to clear 11 of its arms. 6 at a time lets
            # each finish loading before the next begins.
            "--name", "s8auto", "--max-parallel", "6", "--mem-gb", "18",
-           "--est-runtime-s", "90000", "--force"]
+           "--est-runtime-s", "90000", "--timeout-s", "172800", "--force"]
     p = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                          text=True, start_new_session=True)
     try:
