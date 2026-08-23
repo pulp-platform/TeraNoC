@@ -11315,3 +11315,12 @@ read 53.7% as a floor, since bank-full backpressure has not been applied at 8×8
 P=96 padded to 128 and PV's 2048 contraction is tiled to 512, neither split tested; **(e)** decode
 untested by construction. The arms closing (b), (c) and part of §5.4 are **running now**:
 `fp32 2048×256×512`, `fp32 2048×512×256`, `fp32 2048×512×128`, and `2048×512×512` both precisions.
+
+**Stranded-queue dispatch fixed properly (same day).** The manual `--allow-requeue` from earlier was
+treating a symptom. `sim_topup.py` skipped any arm "already queued on this backend" — but a queued
+job moves only while *its own* submit controller lives, so a dead controller's queue is stranded
+forever while still counting as waiting. Liveness signal: the batch's `dispatch/` directory mtime.
+Measured: of **40 batches holding queued 8×8 arms, 39 were stale by hours to days** (up to 30 h) and
+exactly one was recent; a batch that has merely *finished* dispatching has no queued jobs so never
+reaches the test. With the rule, `on_backend` drops **188 → 5** — the five being the one live batch,
+correctly still protected. No more manual requeue when the idle-seat alert fires. Commit `49b8ac2e`.
