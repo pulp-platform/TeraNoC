@@ -203,3 +203,24 @@ a clean sweep.
 **`packaging failed` also masks the real cause.** `fp32_2048x32x512` on badile44 recorded it after
 7,879 s, but its transcript has no `execution took`: the simulation had already died for some other
 reason, and packaging merely failed afterwards. Check the transcript before believing the error.
+
+## `kill_duplicate_arms.py`'s FOREIGN allowlist is hand-maintained and goes stale
+
+The dedup tool refuses to kill a duplicate whose batch name is not in its `MINE` prefix tuple, on
+the reasoning that another agent works the same fleet (their batches `s8imgfix`, `s8imgfix2`,
+`s8lockfix`) and their copy may be testing a fix — losing one seat is far cheaper than wrecking
+someone else's investigation. That reasoning stands.
+
+But the list has not kept up with the batch names this campaign creates. As of 2026-08-23 these are
+ours and are **not** in it: `s8fill`, `s8longto`, `s8nodl`, `s8release`, `s8retry`, `s8rvcs`,
+`s8strand`, `s8tail`, `s8uncap`, `s8uncap2`. So the tool reports `FOREIGN … not ours to kill` for
+our own batches and leaves the duplicate running.
+
+**Do not "fix" this by pattern-matching `s8*`** — `s8imgfix`/`s8lockfix` match that too, and the
+guard exists precisely to protect them. Extend the tuple only with names you can positively
+attribute (WORKLOG, or the command that created the batch). The symptom is cheap: one duplicate
+holds one seat, and `kill_redundant_arms.py` still reclaims any arm whose result is already
+delivered, whatever batch it is in.
+
+Currently affected: `fp32_1024x64x2048`, running in both `s8nodl` (Questa, badile45) and `s8vtop`
+(VCS, badile34).
