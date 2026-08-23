@@ -209,20 +209,33 @@ def livelocked(arm):
         return False
     pr, M, P = m.group(1), int(m.group(2)), int(m.group(4))
     t = _cohort_target(M)
-    return (t == 16 and P <= 256) or (pr == "fp16" and t == 8 and P == 128)
+    # fp32 needs P == 128, NOT P <= 256. All five delivered fp32 target-16 arms at P=256
+    # (512x{32,64,128,256,512}x256) ran at 24-48% util with RH=0 -- the earlier "P<=256 for both
+    # precisions" reading was an extrapolation from a cell with no completed arm, and it is
+    # falsified. fp16 does fail at P=256 (6/6), so the two precisions genuinely differ: two
+    # scalar fp16 loads alias one 32-bit word, so served_cnt advances at twice the rate.
+    return ((pr == "fp16" and t == 16 and P <= 256)
+            or (pr == "fp32" and t == 16 and P == 128)
+            or (pr == "fp16" and t == 8 and P == 128))
 
 
-def _observed_util(arm):
-    """Utilisation this arm actually achieved, from the durable results row (None if never run)."""
+def _observed(arm):
+    """(util, rh, state) from the durable results row; (None, None, None) if never run."""
     try:
         with open(_TSV) as fh:
             for r in list(_csv.reader(fh, delimiter="\t"))[1:]:
-                if len(r) > 4 and (r[1] + "_" + r[0]) == arm:
+                if len(r) > 5 and (r[1] + "_" + r[0]) == arm:
                     v = r[4].lstrip("~")
-                    return float(v) if v not in ("-", "") else None
+                    u = float(v) if v not in ("-", "") else None
+                    rh = int(r[5]) if r[5].isdigit() else None
+                    return (u, rh, r[9] if len(r) > 9 else "")
     except (OSError, ValueError):
         pass
-    return None
+    return (None, None, None)
+
+
+def _observed_util(arm):                      # kept: other callers use this name
+    return _observed(arm)[0]
 
 
 # kept as the public name the submitters already call
@@ -239,7 +252,13 @@ def stalling(arm):
     """
     if not livelocked(arm):
         return False
-    u = _observed_util(arm)
+    u, rh, state = _observed(arm)
+    # Evidence is the RH-STUCK EPISODE COUNT, not utilisation. util < 1% missed 13 of the 22
+    # recorded livelocks -- they sit at 1.1-4.6%, above the threshold, while carrying 10^5 RH
+    # episodes. A healthy arm is in single digits (2048x128x128: 4 episodes at 41% util), so the
+    # count separates cleanly where the utilisation proxy does not.
+    if state == "livelock" or (rh is not None and rh > 1000):
+        return True
     return u is not None and u < 1.0
 
 

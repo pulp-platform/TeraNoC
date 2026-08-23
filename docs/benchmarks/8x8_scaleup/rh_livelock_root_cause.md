@@ -127,16 +127,34 @@ separates perfectly: **23 of 23 arms inside the region livelocked, 0 of 26 outsi
 | fp32 | 8 | 128 | 1 | 23.4% | 0/1 |
 
 ```
-livelock  <=>  (target == 16 and P <= 256) or (fp16 and target == 8 and P == 128)
+livelock  <=>  (fp16 and target == 16 and P <= 256)
+            or (fp32 and target == 16 and P == 128)
+            or (fp16 and target ==  8 and P == 128)
 ```
+
+> **Corrected 2026-08-24.** An earlier version of this line read `target == 16 and P <= 256` for
+> *both* precisions, and listed `fp32` target-16 at `P=256` as PREDICTED-livelock. **That
+> prediction is falsified.** All five delivered arms in that cell —
+> `fp32_512x{32,64,128,256,512}x256` — ran at **24.07–47.77% util with `RH=0`**. It was an
+> extrapolation from a cell that had no completed arm at the time; `fp32` needs `P == 128`.
+> `fp16` genuinely does fail at `P=256` (6/6), so the precisions differ — consistent with
+> `mshr_cfg.h`'s note that two scalar fp16 loads alias one 32-bit word, so `served_cnt` advances
+> at twice the rate and the fp16 cohort target is effectively twice as hard to satisfy.
 
 Note the fp16/fp32 asymmetry at target 8 (4/4 vs 0/1) — consistent with `mshr_cfg.h`'s own note
 that two scalar fp16 loads alias one 32-bit word, so `served_cnt` advances at twice the rate. The
 fp32 side is n=1; do not lean on it.
 
-**As of 2026-08-24 01:30, 25 of the 138 running arms are inside this region** (23 CONFIRMED,
-2 PREDICTED — `fp32` target 16 at `P=256`, the one cell with no completed arm yet). They will each
-run to a 24–48 h wall-clock kill and deliver a number that measures the config bug.
+**As of 2026-08-24 01:30, 23 of the 138 running arms are inside this region.** They will each run
+to a 24–48 h wall-clock kill and deliver a number that measures the config bug. (An earlier count
+of 25 included the two `fp32` `P=256` arms, now excluded — see the correction above.)
+
+**Detection must key on the `RH STUCK` episode count, not on utilisation.** A `util < 1%` test
+misses **13 of the 22** recorded livelocks: they sit at 1.1–4.6% while carrying 10^5 episodes.
+Healthy arms are in single digits (`2048x128x128`: 4 episodes at 41% util), so the count separates
+cleanly where the utilisation proxy does not. Note also that a livelocked arm can still *complete*
+— `fp16_1024x32x128` (0.59%, RH=123,743) and `fp16_512x64x128` (0.23%, RH=243,240) both printed
+`execution took` — so "delivered" is not evidence of health either.
 
 ## 5. Fix
 

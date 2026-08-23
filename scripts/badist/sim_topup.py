@@ -184,9 +184,14 @@ def main():
         if arm in running or arm in seen or (arm in on_backend and not a.allow_requeue):
             continue
         if stalling(arm):
+            # KNOWN_STALL is now an EMPTY dict -- the hand-maintained table was superseded by
+            # feasibility.livelocked(), and indexing it raised KeyError on the first arm the
+            # predicate matched, taking the whole top-up down. Describe the arm from the
+            # predicate itself; never index a table that no longer holds entries.
             announce_once("stall:" + arm,
-                          "  KNOWN-STALL %-22s %s -- held back, needs the hold-window experiment"
-                          % (arm, KNOWN_STALL[arm]))
+                          "  KNOWN-STALL %-22s %s -- held back (RH livelock: cohort target "
+                          "cannot form at this P; see rh_livelock_root_cause.md)"
+                          % (arm, KNOWN_STALL.get(arm, "")))
             continue
         if not fits(arm):
             # Do not hand a seat to a shape the deadline cannot hold: it runs the full 48h and
