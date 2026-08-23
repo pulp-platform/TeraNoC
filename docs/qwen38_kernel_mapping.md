@@ -427,14 +427,18 @@ shape's own `GEMM_M/N/P`** (`software/runtime/mshr_cfg.h`). In simulation that i
 configs ship `group_mshr_cfg_runtime := 1`, so software owns the tuning through CSR 11 and can
 retune per operation at runtime.
 
-**The tape-out configs pin it back to 0.** `config/terapool_spatz4_fpu_backend_{4x4,8x8}.mk`:
+**The tape-out configs used to pin it back to 0** — `config/terapool_spatz4_fpu_backend_{4x4,8x8}.mk`
+argued that at `CfgRuntime=1` `mempool_group_mshr_cfg` stops const-folding and becomes real CSR flops
+per group, "area this design does not need to tape out". That would have left silicon with **one
+elaborated MSHR tuning for all eleven operations**, ten of them mistuned, and would have made every
+per-shape number measured in simulation evidence for a part we were not building.
 
-> at `CfgRuntime=1` `mempool_group_mshr_cfg` stops const-folding and becomes real CSR flops per
-> group, which is area this design does not need to tape out.
-
-So in silicon there is **one elaborated MSHR tuning for all eleven operations**, and ten of them run
-with tuning matched to something else. The §5 numbers are therefore optimistic for the taped-out
-part, though not for the simulator.
+✅ **RESOLVED 2026-08-23 (user decision): the tape-out enables the runtime CSR config.** Both backend
+configs now ship `group_mshr_cfg_runtime := 1`. Software retunes per operation through CSR 11, so
+§5's per-shape numbers transfer to silicon and the one-config constraint stops costing anything on
+the tuning axis. The price is CSR flops per group — ×16 at 4×4, ×64 at 8×8 — to be quantified in the
+next backend run; if it proves large the fallback is to narrow the CSR fields, not to return to
+const-folding.
 
 **Which is cheap, because the work is not spread evenly.** Tuning for the dominant tile costs
 degradation only on the special tiles, and those are almost nothing:
@@ -444,10 +448,10 @@ degradation only on the special tiles, and those are almost nothing:
 | 4×4 | `256×512×512` | **98.1%** | QK, PV, a+b | 1.9% |
 | 8×8 | `2048×256×512` | **98.7%** | PV, a+b | 1.3% |
 
-**Tune the single config for the dominant tile.** Whatever the special tiles lose, it lands on under
-2% of the work. The one-config constraint is essentially free — but it must be *measured* that way:
-an arm built with per-shape tuning is not evidence for the taped-out part, so the QK/PV/a+b arms
-need re-running under the dominant tile's tuning before their §5 numbers can be quoted for silicon.
+**This mattered while the pin stood, and it is now a safety margin rather than a constraint.** Even
+if the CSR retune were unavailable, tuning the single config for the dominant tile would put the
+whole cost on under 2% of the work. With `CfgRuntime = 1` shipping, each operation gets its own
+tuning and the §5 arms are directly transferable — no re-run under a shared tuning is required.
 
 ### 6.2 The one that is free: off-chip bandwidth does not bind in prefill
 

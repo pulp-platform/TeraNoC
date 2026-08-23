@@ -46,14 +46,24 @@ group_mshr_serve_timeout     := 2047
 group_mshr_enable_stats      := 0
 
 # ---------------------------------------------------------------------------------------------
-# TAPE-OUT PIN. The base config flipped group_mshr_cfg_runtime to 1 on 2026-08-20 so that the
-# per-shape MSHR tuning written by mshr_cfg_apply_group() actually takes effect in simulation.
-# The backend must NOT inherit that: at CfgRuntime=1 mempool_group_mshr_cfg stops const-folding
-# and becomes real CSR flops per group, which is area this design does not need to tape out.
-# At 0 "every field const-folds to its default and the whole file disappears" (the module's own
-# note), leaving the build bit-identical to the pre-CSR design -- verified as gate V1 in
-# docs/mshr_runtime_csr_verification.md (34,596 == 34,596).
-# Keep this pin whenever the base default is 1.
-group_mshr_cfg_runtime := 0
+# REVERSED 2026-08-23 (user decision): the tape-out DOES enable the runtime CSR config.
+#
+# The pin below used to force this to 0, to keep mempool_group_mshr_cfg const-folding away to
+# nothing -- "every field const-folds to its default and the whole file disappears" (the module's
+# own note), bit-identical to the pre-CSR design, verified as gate V1 in
+# docs/mshr_runtime_csr_verification.md (34,596 == 34,596). At 1 it becomes real CSR flops per
+# group. That area is now bought deliberately.
+#
+# WHY. The MSHR tuning is derived per shape from GEMM_M/N/P (software/runtime/mshr_cfg.h), and a
+# single chip runs eleven differently-shaped Qwen operations back to back under ONE configuration
+# (docs/qwen38_kernel_mapping.md sec 6.1). At CfgRuntime=0 the elaborated constant serves all of
+# them and ten run mistuned; at 1, software retunes per operation through CSR 11. It also makes
+# every per-shape number measured in simulation transferable to silicon -- at 0 those arms are
+# evidence for a part we would not be building.
+#
+# COST. CSR flops per group, x16 groups at 4x4 and x64 at 8x8. Quantify it in the next backend
+# run and record it here; if it proves large, the fallback is to keep the CSRs but narrow the
+# fields, not to go back to const-folding.
+group_mshr_cfg_runtime := 1
 
 include $(MEMPOOL_DIR)/config/terapool_spatz4_fpu.mk
