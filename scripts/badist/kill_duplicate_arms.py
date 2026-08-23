@@ -23,6 +23,10 @@ def main():
     # process behind it, so the next pass re-detects the same dead copy and reports it again,
     # forever. Remember what we have already killed and skip it.
     SEEN = "/tmp/claude-620771/dedup_killed.json"
+    # Batch-name prefixes this campaign creates. Anything else belongs to another agent or
+    # an older effort and is never killed -- see the FOREIGN guard below.
+    MINE = ("s8auto", "s8heal", "s8rescue", "s8qtop", "s8vtop", "s8big", "s8rehome",
+            "s8requeue", "s8vfill", "s8orph", "s8rq", "s8vcs", "s8q-", "s8q2", "teranoc")
     try:
         seen = set(json.load(open(SEEN)))
     except Exception:
@@ -87,6 +91,15 @@ def main():
             v = v[1:]
         keep = v[0]
         for ts, batch, jid, node in v[1:]:
+            # NEVER kill a batch this campaign did not create. Another agent is working the same
+            # fleet (batches `s8lockfix`, `s8imgfix` on 2026-08-23, chasing the same arms), and
+            # dedup cannot see why their copy exists -- it may be testing a fix. Killing it would
+            # silently destroy someone else's experiment and tell them nothing. Report and skip;
+            # the duplicate costs one seat, which is far cheaper than a wrecked investigation.
+            if not batch.startswith(MINE):
+                print("  FOREIGN %-22s %s/%s on %s -- not ours to kill, leaving it"
+                      % (arm, batch[:28], jid, node))
+                continue
             key = "%s/%s" % (batch, jid)
             if key in seen:
                 continue                      # already killed; the ledger just has not caught up
