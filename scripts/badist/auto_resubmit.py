@@ -10,7 +10,7 @@ bad shape eats a fleet.
 """
 import glob, json, os, subprocess, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from feasibility import fits, projected_hours
+from feasibility import fits, projected_hours, delivered
 
 ROOT  = "/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC"
 STATE = os.path.expanduser("~/badist/state")
@@ -118,7 +118,10 @@ def main():
         # transcript. The filesystem is the authority here, not the job state.
         t = os.path.join(ROOT, "hardware", "s8_" + arm, "transcript")
         try:
-            if os.path.exists(t) and b"execution took" in open(t, "rb").read():
+            # delivered() not the transcript: badist overwrites it, so a destroyed
+            # transcript made this retry fp16_512x1024x512 to the attempt cap even
+            # though it had already completed in 19.9 h on larain11.
+            if delivered(arm):
                 continue
         except OSError:
             pass                      # already recovered by a later batch

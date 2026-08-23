@@ -24,7 +24,10 @@ cheaper than an arm silently never running.
   usage: rescue_orphans.py [--min-idle-min 90] [--dry-run]
 """
 import concurrent.futures as cf
-import glob, json, os, re, subprocess, sys, time
+import glob, json, os, re, subprocess, sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import time
+from feasibility import delivered
 
 ROOT   = "/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC"
 STATE  = os.path.expanduser("~/badist/state")
@@ -156,7 +159,7 @@ def main():
             continue
         t = os.path.join(ROOT, "hardware", "s8_" + a, "transcript")
         try:
-            if os.path.exists(t) and b"execution took" in open(t, "rb").read():
+            if delivered(a):   # durable record, not the overwritable transcript
                 continue
         except OSError:
             pass
