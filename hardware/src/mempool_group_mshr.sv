@@ -789,10 +789,21 @@ module mempool_group_mshr
   // scope instead of procedural automatics, so they are visible in a waveform. One signal
   // per (block, name) -- two blocks sharing a hoisted temporary would alias, which is a
   // silent multiple-driver bug rather than a compile error.
-  int            cache_hit_e;
-  int unsigned   alloc_victim_rw;
-  int unsigned   evict_vid;
-  int unsigned   evict_vw;
+  // logic, not int: int is 2-state, so an unassigned read returns 0 and hides exactly the X that
+  // should expose the bug. All four are assign-then-use inside one always block, so 4-state is safe.
+  // WIDTHS ARE NOT INTERCHANGEABLE -- size each to its widest INTERMEDIATE, not its final range:
+  //   cache_hit_e  = bank*MshrWaysPerBank + way        -> [0, MshrNum-1], exactly mshr_id_t.
+  //   evict_vid    = an mshr id                        -> mshr_id_t.
+  //   evict_vw     = evict_vid & (MshrWaysPerBank-1)   -> [0, MshrWaysPerBank-1] = VictimPtrW.
+  //   alloc_victim_rw needs VictimPtrW+1 BITS, not VictimPtrW: :1978 computes victim_rr_q[b] + w
+  //     BEFORE the :1979-1980 wrap, and that sum reaches 2*MshrWaysPerBank-2 (6 at 4 ways). At
+  //     VictimPtrW it would truncate 6 to 2, the wrap would never fire, and the victim round-robin
+  //     would silently pick the wrong way -- a fourth instance of the truncation bug class this
+  //     file already records for MshrCfgSubsW, HoldCntW and ServedCntMax.
+  mshr_id_t                cache_hit_e;
+  logic [VictimPtrW:0]     alloc_victim_rw;
+  mshr_id_t                evict_vid;
+  logic [VictimPtrW-1:0]   evict_vw;
   mshr_id_t      drain2_sel_e2;
   mshr_id_t      resp_tag_cand;
   mshr_id_t      rsn_tag_cand;
