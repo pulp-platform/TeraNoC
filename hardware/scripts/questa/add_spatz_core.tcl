@@ -19,7 +19,11 @@ if {[catch {set NumY [examine -radix dec mempool_pkg::NumY]}]} {
 if {[catch {expr {$NumX + 0}}] || [catch {expr {$NumY + 0}}]} { set NumX 1; set NumY 1 }
 
 proc add_spatz_core_wave {g t c NumX NumY} {
-    set gx [expr {$g / $NumX}]
+    # gx = g/NumY, gy = g%NumY -- BOTH divide by NumY. This read `g / $NumX` and was silently
+    # wrong on any mesh where NumX != NumY: at 4x8 it addressed a different group and the
+    # `catch {examine ...}` below then returned early, so the core was skipped with NO message.
+    # wave_core.tcl (:6) and add_group_cores.tcl are the ground truth: both use NumY for each.
+    set gx [expr {$g / $NumY}]
     set gy [expr {$g % $NumY}]
     set cc "sim:/mempool_tb/dut/i_mempool_cluster/gen_groups_x\[${gx}\]/gen_groups_y\[${gy}\]/gen_rtl_group/i_group/i_mempool_group/gen_tiles\[${t}\]/i_tile/gen_cores\[${c}\]/gen_mempool_cc/riscv_core"
     set s "${cc}/i_spatz"
@@ -64,8 +68,12 @@ proc add_spatz_core_wave {g t c NumX NumY} {
 }
 
 # Args: [group [tile [core]]], default 0 0 0.
+# Questa's `do` passes POSITIONAL macro parameters $1..$9 plus $argc -- there is no Tcl `argv`
+# here. Reading [lindex $argv 0] picked up whatever argv happened to hold (usually empty), so
+# `do add_spatz_core.tcl 3 5 0` silently added group 0 tile 0 core 0 instead. Same trap already
+# documented in add_group_cores.tcl.
 set _g 0; set _t 0; set _c 0
-if {$argc >= 1} { set _g [lindex $argv 0] }
-if {$argc >= 2} { set _t [lindex $argv 1] }
-if {$argc >= 3} { set _c [lindex $argv 2] }
+if {$argc >= 1} { set _g $1 }
+if {$argc >= 2} { set _t $2 }
+if {$argc >= 3} { set _c $3 }
 add_spatz_core_wave $_g $_t $_c $NumX $NumY
