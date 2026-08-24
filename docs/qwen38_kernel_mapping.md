@@ -291,6 +291,22 @@ Two operations want a different tile because their aspect ratio is different, an
   `512×256×256` 86.1% > `256×1024×256` 78.7% > `256×512×256` 76.2% — again M=512, and note it beats
   the tile with 4× the contraction.
 
+> ⚠️ **Do not shrink `M` on the small-`P` tiles to save L1.** The MSHR scalar cohort target is
+> derived from `M` alone (`MSHR_D_HOLD_SUBS_SINGLE`, `software/runtime/mshr_cfg.h`) and rises as
+> `M` falls: at 4×4 it is 4 at M=512, **8 at M=256**, **16 at M=128**. A high target combined with
+> a small `P` is the RH-livelock region — 0.05–4% FPU utilisation, not a slowdown but a collapse.
+> See `docs/benchmarks/8x8_scaleup/rh_livelock_root_cause.md`.
+>
+> **GDN a+b is the exposed operation**: `P = 96 → 128` is the smallest `P` in the workload. It is
+> assigned `512×512×128` (target 4) and measures 74.0%. Re-tiling it to **`256×512×128` lands on
+> target 8 at P=128 — the confirmed fp16 livelock cell** (4/4 arms, 3.11% mean at 8×8). The same
+> applies to the 8×8 assignment `2048×512×128`: at 8×8, `M=1024` gives target 8 and `M=512` gives
+> target 16, so **both** are worse than the 2048 tile in use, not better.
+>
+> The L1 budget and the cohort target happen to pull the same way here — double buffering already
+> pushes toward large `M`, and large `M` is what keeps the target low. That alignment is why the
+> table above is safe; it is not a property to rely on if the tiles are re-derived.
+
 ### 5.2 Prefill — 8×8 (1024 cores, 14.86 MiB usable L1, peak 8192 MAC/cyc)
 
 | operation | tile `M×N×P` | eff | TB util | tiles | L1 full-dbl | Mcyc/model |
