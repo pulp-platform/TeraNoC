@@ -940,6 +940,56 @@ hdr.querySelectorAll("th[data-c]").forEach(th=>{
           'state at 8&times;8 (<code>util=14.92%</code>, <code>RH=0</code>, <code>CMS=4037</code> '
           'on one ELF), extending the validated-identical result from 4&times;4, so the two '
           'simulators\' arms pool into one dataset.</p></section>']
+    # ---- live progress of the RUNNING arms -------------------------------------------------
+    # Progress is estimated from FPU lane-cycles accumulated, not from the cycle count: an arm has
+    # no idea how many cycles it will need. See scripts/gen_run_progress.py for the K correction
+    # (busy is lane OCCUPANCY, ~1.15x the MAC count on a finished arm) and why livelocked arms are
+    # excluded from that calibration.
+    try:
+        prog = json.load(open(os.path.join(ROOT, "docs/benchmarks/8x8_scaleup/run_progress.json")))
+    except Exception:
+        prog = None
+    if prog and prog.get("rows"):
+        pr_rows = prog["rows"]
+        K = prog.get("K", {})
+        def med(v):
+            v = sorted(x for x in v if x is not None)
+            return v[len(v) // 2] if v else 0
+        byb = {}
+        for r in pr_rows:
+            byb.setdefault(r["backend"], []).append(r)
+        h += ['<section class="card"><h2>Live progress of the ' + str(len(pr_rows)) + ' running arms</h2>',
+              '<p class="sub">Estimated from FPU lane-cycles accumulated against '
+              '<code>M&times;N&times;P</code>, with a per-precision correction '
+              '<code>K</code> (' + ", ".join("%s %.3f" % (k, v) for k, v in sorted(K.items())) +
+              ') calibrated on 75 completed runs &mdash; <code>busy</code> is lane <em>occupancy</em>, '
+              'not a MAC counter, so a finished arm accumulates ~15% more lane-cycles than it had '
+              'MACs. Treat these as &plusmn;10%, not exact.</p>',
+              '<div class="tiles" style="margin-bottom:14px">']
+        for b in sorted(byb):
+            g = byb[b]
+            h += ['<div class="tile run"><span class="n">%d%%</span><span class="l">%s median (%d arms)</span></div>'
+                  % (round(100 * med([x["progress"] for x in g])), b, len(g))]
+        h += ['</div>', '<div class="tw"><table>',
+              '<tr><th>arm</th><th>sim</th><th class="num">progress</th>'
+              '<th class="num">cum util</th><th class="num">cycles</th><th>node</th></tr>']
+        for r in pr_rows:
+            cls = ' class="unpaired"' if (r["cum_util"] is not None and r["cum_util"] < 5) else ''
+            h += ['<tr%s><td><code>%s</code></td><td>%s</td><td class="num">%d%%</td>'
+                  '<td class="num">%s</td><td class="num">%s</td><td>%s</td></tr>'
+                  % (cls, html.escape(r["arm"]), r["backend"], round(100 * r["progress"]),
+                     ("%.2f%%" % r["cum_util"]) if r["cum_util"] is not None else "&mdash;",
+                     "{:,}".format(r["cyc"]) if r["cyc"] else "&mdash;",
+                     html.escape(r["node"] or "-"))]
+        lowN = [r for r in pr_rows if r["cum_util"] is not None and r["cum_util"] < 5]
+        h += ['</table></div>']
+        if lowN:
+            h += ['<p class="sub"><b>' + str(len(lowN)) + ' running arms are under 5%% utilisation '
+                  'with <code>RH = 0</code></b> &mdash; so this is <em>not</em> the cohort livelock. '
+                  '%d of them have <code>N &le; 64</code>. Small contraction depth looks like a '
+                  'second, independent low-utilisation mechanism.</p>'
+                  % sum(1 for r in lowN if r["N"] <= 64)]
+        h += ['</section>']
     h += ['</div>']
     open(OUT, "w").write("\n".join(h))
     print("  wrote %s  (%d done, %d running, %d queued, %d failed)" % (OUT, done, run, q, fail))
