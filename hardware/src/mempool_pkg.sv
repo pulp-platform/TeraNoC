@@ -677,8 +677,19 @@ package mempool_pkg;
   // mshr_cfg.sv:122 $errors if the width cannot represent the max, so a half-change fails loudly.
   // Note HoldCntMax is pinned to THIS constant whenever MshrCfgRuntime=1 (mempool_group_mshr.sv:273),
   // so build knobs alone cannot widen the counter -- only these two literals do.
-  localparam integer unsigned MshrCfgHoldCntMax = 4095; // hardware bound on window / serve_timeout
-  localparam integer unsigned MshrCfgHoldCntW   = 12;  // bound 4095
+  // 8191/13. The window must cover the arrival skew of a cohort that CAN actually form -- the
+  // can-burst shapes (e.g. fp16_4096x32x512: burst target 8, B slice 512 B) where 8 cores really
+  // do share the B line but need longer than 2047 cycles to converge. Shapes whose B slice is
+  // below the 64 B burst floor are NOT the target: they cannot merge at any window length
+  // (rh_livelock_root_cause.md section 0), and should be kept out of future sweeps instead.
+  //
+  // This bound is ONLY effective if it is wired to mempool_group_mshr_cfg's HoldCntHwMax
+  // parameter -- see mempool_group.sv. It was not, and that module's own default of 2047 silently
+  // refused every write above it: the 4095 campaign wrote 4095, had it dropped, and ran at the
+  // 2047 reset value while reporting no error (MSHR_STATUS_RANGE is never $displayed; the
+  // observable is software's "[MSHR] cfg REJECTED ... MEASUREMENT INVALID").
+  localparam integer unsigned MshrCfgHoldCntMax = 8191; // hardware bound on window / serve_timeout
+  localparam integer unsigned MshrCfgHoldCntW   = 13;  // bound 8191
   // MUST hold MshrMergeReqs, whose largest shipped value is 16 -- so 5 bits, not 4.
   //
   // At 4 bits this silently truncated: subs_ok range-checks the FULL 32-bit write (so 16 <= 16

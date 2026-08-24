@@ -229,7 +229,9 @@ group_mshr_hold_window   ?= 0
 # Per-request-type hold windows (override the uniform group_mshr_hold_window above).
 # A 0 window = that class issues its fetch the same cycle (no hold). (The uniform
 # value above only applies to a class that has no override.)
-group_mshr_hold_window_single ?= 0
+# 8191 (was 0): give a single cohort that CAN form long enough to converge. Only meaningful where
+# hold_subs_single > 1; a bypass shape (target 1) never allocates, so this is inert there.
+group_mshr_hold_window_single ?= 8191
 # STANDING DECISION 2026-08-14: 2047 everywhere, 4x4 and 8x8 alike. Previously the tree carried
 # five different values (base 255, backend_4x4 511, 8x8 1023, plus 511/2047 experiment flavours),
 # so "the hold window" meant something different in almost every run and cross-config comparisons
@@ -237,7 +239,11 @@ group_mshr_hold_window_single ?= 0
 # Silicon cost of 2047 over 255: hold_cnt widens 4 -> 7 bits (HoldCntTicks = 2047>>4 = 127), i.e.
 # +192 flops/group, ~3k cluster-wide. The replay walker exists for ANY non-zero window, so its
 # cost is unchanged by this.
-group_mshr_hold_window_burst  ?= 2047
+# 8191 (was 2047): the burst cohort is the one that can actually form on the can-burst shapes --
+# e.g. fp16_4096x32x512, burst target 8, B slice 512 B, 8 cores genuinely sharing the line. 2047
+# was not long enough for them to converge. Shapes below the 64 B burst floor are NOT helped by
+# this and should be kept out of sweeps (rh_livelock_root_cause.md section 0).
+group_mshr_hold_window_burst  ?= 8191
 # Prescaler for the hold/serve countdown, in BITS. Each entry stores its window in ticks of
 # 2**W cycles instead of cycles, so hold_cnt loses W bits and toggles 2**W times less often;
 # entry e takes its tick when the shared prescaler equals e[W-1:0], which spreads expiries
@@ -249,7 +255,11 @@ group_mshr_hold_window_burst  ?= 2047
 # Measured on the 4x4 tuned config (one matched pair, one workload -- suggestive, not settled):
 #   W=0  34629 cycles   W=4  34417 cycles  (0.61% faster), and 4 bits x MshrNum fewer flops
 #   per group -- ~16.1k at 8x8. Equivalence with W=0 proven bit-exact over all 35 periods.
-group_mshr_hold_prescale_w ?= 4
+# 6 (was 4): hold_cnt ticks once per 2**6 = 64 cycles. This makes the LONGER window CHEAPER, not
+# more expensive: HoldCntTicks = MshrCfgHoldCntMax >> PrescaleW = 8191>>6 = 127, so the counter is
+# 7 bits against the 8 it took at 4095>>4 = 255. The cost is granularity -- a window is quantised
+# to 64 cycles, and hold_ticks() never rounds a non-zero window down to zero.
+group_mshr_hold_prescale_w ?= 6
 
 # Source the response-drain eligibility scan from the REGISTERED entry array (mshr_q) instead of
 # the combinational next state (mshr_d). The scan sits at the end of the same always_comb that

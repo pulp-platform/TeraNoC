@@ -983,6 +983,11 @@ module mempool_group
     .DefCacheReuseTarget      (MshrDefCacheReuseTarget),
     .DefCacheTimeout          (MshrDefCacheTimeout    ),
     .DefBankfullBp            (MshrDefBankfullBp      ),
+    // WIRE THE BOUND. Without this the module keeps its own default of 2047 and silently DROPS
+    // every CSR write above it -- which is what made the 4095 campaign run at 2047 while looking
+    // configured. The elaboration check at mshr_cfg.sv:122 only catches a width/bound mismatch,
+    // not a bound that disagrees with the package.
+    .HoldCntHwMax             (mempool_pkg::MshrCfgHoldCntMax),
     .MergeReqs                (MshrDefMergeReqs       ),
     // Same expression as mempool_group_mshr.sv:425. MaxBurstWords is a package constant, so the
     // two cannot drift; BurstAlignBits itself is a localparam inside the MSHR and not visible here.
