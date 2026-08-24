@@ -259,7 +259,29 @@ the per-arm scrape.
   utilisation oscillates 0.0–0.2% and entries cycle in and out of hold ~46 times each.
 - **"a wall-clock timeout is the wrong detector"** — still true, and §5 gives a better one.
 
-## 7. The 4095 experiment — PRELIMINARY, and negative
+## 7. The 4095 experiment — VOID, do not cite
+
+> **RETRACTED 2026-08-24 (evening). This experiment did not test what it claimed to.**
+> `mempool_group_mshr_cfg`'s `HoldCntHwMax` parameter (default **2047**) was never passed at the
+> instantiation, so the CSR write path **refused** every value above 2047 and kept the reset
+> default. Widening `MshrCfgHoldCntMax` in the package widened the *storage field*, not the *write
+> bound*. **Every s8w4 arm ran at 2047 — identical to its baseline**, which is exactly why "6 of 6
+> matched pairs were indistinguishable": they were the same configuration.
+>
+> The verification could not have caught it: it grepped transcripts for `RANGE`, but
+> `MSHR_STATUS_RANGE` is never `$display`ed anywhere in RTL or TB, so that grep can only ever
+> return 0. The real observable is software's
+> `[MSHR] cfg REJECTED status=0x%x ... MEASUREMENT INVALID` — gate on that.
+>
+> Fixed in `3756ac13` (wire the bound; 8191/13; prescale 6).
+>
+> **The conclusion happens to hold for these particular arms anyway, for a better reason:** all 26
+> were burst-broken (§0), so no window length can help them. That is why §0 does not depend on
+> this experiment — it rests on transcript evidence, not on the s8w4 arms.
+>
+> A window change must be re-tested on shapes that CAN burst.
+
+### 7-old. What the (void) run recorded
 
 2026-08-24. 26 arms re-run with `serve_timeout` and `hold_window_single` at **4095** instead of
 2047, to test whether a longer window lets the cohort assemble. Needed an RTL change, not just a
