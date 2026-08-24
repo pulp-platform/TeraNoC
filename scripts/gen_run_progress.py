@@ -60,7 +60,23 @@ def calibrate():
     return {p: (st.median(v) if v else 1.16) for p, v in cal.items()}, {p: len(v) for p, v in cal.items()}
 
 
+def delivered_arms():
+    """Arms that already have a recorded result. An arm can be FINISHED but not yet reaped, so its
+    badist ledger still says `running` while results.tsv holds its number -- 10 of 101 were in that
+    state on 2026-08-24. Counting them here pulls a full log for a finished arm and skews the
+    median. campaign_status.py already dedupes this way; match it."""
+    have = set()
+    try:
+        for r in list(csv.reader(open(TSV), delimiter="\t"))[1:]:
+            if len(r) > 3 and r[3].strip().isdigit():
+                have.add(r[1] + "_" + r[0])
+    except OSError:
+        pass
+    return have
+
+
 def running():
+    done_already = delivered_arms()
     out = []
     for jf in glob.glob(os.path.expanduser("~/badist/state/*/jobs.json")):
         d = os.path.dirname(jf)
@@ -77,6 +93,7 @@ def running():
             if stt != "running": continue
             arm = (j.get("meta") or {}).get("arm", "")
             if not arm.startswith(("fp16_", "fp32_")): continue
+            if arm in done_already: continue        # finished, just not reaped yet
             be = "vcs" if "build_vcs" in j.get("command", "") else "questa"
             out.append((arm, os.path.basename(d), j["job_id"], node, be))
     return out
