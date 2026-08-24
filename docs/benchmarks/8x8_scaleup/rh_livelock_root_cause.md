@@ -1,4 +1,73 @@
-# The 8×8 "zero-timeout wedge" — root cause
+# The 8×8 RH livelock — root cause
+
+> **MECHANISM CORRECTED 2026-08-24 (evening).** Sections 1–3 below describe the livelock as a
+> *cohort target derived from `M` that ignores `P`*, with the missing subscribers explained by
+> arrival skew on the **A** operand. **That mechanism is wrong.** The stuck traffic is **B**, not A,
+> and the cause is that B cannot form a burst. See **§0** — it supersedes §1–§3. The *predicate*
+> in §4a is unchanged and still correct; §0 explains why it has the shape it does.
+
+## 0. The real mechanism — B cannot burst, so it inherits A's merge target
+
+Measured on `fp16_512x64x128` (target 16, 243,240 stuck episodes, 0.23% efficiency):
+
+```
+per-core B slice per row = (P / SPLIT_P) x elem_bytes = (128/16) x 2 =  16 bytes
+burst threshold          = MSHR_MAX_BURST_WORDS x 4                   =  64 bytes
+```
+
+The slice is a quarter of the minimum burst, so **B never bursts**. It falls back to the
+word-interleaved path and issues **single-word** requests — which are governed by
+`hold_subs_single`, a target derived for the **A** operand.
+
+A and B have opposite sharing degrees within a group:
+
+| operand | shared by | why |
+|---|---|---|
+| **A** | all 16 cores | every core in the group takes the same `m_start..m_end` (`main.c:302-315`) |
+| **B** | **nobody** | each core owns a distinct `p_start..p_end` |
+
+So a 16-way cohort on B is **impossible by construction** — not merely mistimed. The transcript
+confirms the stuck set is B:
+
+```
+distinct stuck addresses = 4,100   ~=  B = N*P*2/4 =  4,096 words
+                                       A = M*N*2/4 = 16,384 words  (barely appears)
+```
+
+and every episode is `subs=1/16`, `peers=0`, `byp=0 stl=0` — no other core ever wants that word.
+
+### 0a. The predicate is exactly the burst threshold
+
+Burst is possible iff `(P / SPLIT_P) * elem_bytes >= 64`. Evaluating that per family reproduces
+the empirical predicate of §4a **including the fp16/fp32 asymmetry**, which §4a had attributed to
+fp16 half-word aliasing. It is simply the 2x element size moving the threshold:
+
+| family | `SPLIT_P` | burst needs | livelock observed |
+|---|---:|---|---|
+| fp16, M=512 | 16 | **P >= 512** | P <= 256 (12/12) |
+| fp32, M=512 | 16 | **P >= 256** | P = 128 (7/7); P=256 healthy |
+| fp16, M=1024 | 8 | **P >= 256** | P = 128 (4/4) |
+| fp16, M=2048 | 4 | P >= 128 | none — degraded only |
+
+**All 26 recorded livelock arms have `(P/SPLIT_P)*elem_bytes < 64`. Every one.**
+
+### 0b. What to fix
+
+Not a `P` term in the cohort formula. The defect is that **one knob serves two operands with
+opposite sharing degrees**, and B silently adopts A's target whenever it cannot burst. Either:
+
+1. gate `hold_subs_single` on whether B will actually burst at this shape, or
+2. size the tiling so `(P / SPLIT_P) * elem_bytes >= 64` (the burst floor), or
+3. give B its own single-merge target of 1 (bypass) when its slice is sub-burst.
+
+### 0c. What this does NOT explain
+
+The burst failure accounts for the livelock class completely, and for nothing else. Of 127 measured
+arms, **125 can burst**; their median efficiency is 36.0%. But **37 of them still sit below 25%**,
+and they skew hard to small `N` (N=32: 17 arms, N=64: 9, N=128: 6, N=256: 5). That is a **second,
+independent mechanism** — small contraction depth — and no MSHR or burst change addresses it.
+
+---
 
 2026-08-24. **It is not a deadlock, not an RTL bug, and not fp16-specific.** It is a *livelock*
 caused by a **software-derived MSHR cohort target that is a function of `M` alone, while whether

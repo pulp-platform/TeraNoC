@@ -32,6 +32,22 @@ def load():
     return meas, live
 
 
+EB = {"fp16": 2, "fp32": 4}
+BURST_BYTES = 64            # MSHR_MAX_BURST_WORDS(16) * 4
+
+
+def split_p(M):
+    sm = (M // 64) // 8
+    return (16 // sm) if 0 < sm < 16 else 1
+
+
+def burst_slice(M, P, prec):
+    """Bytes of B each core loads per row. Below BURST_BYTES the vector load cannot burst, so B
+    falls back to single-word requests and inherits hold_subs_single -- a target derived for A,
+    which B can never meet because each core owns a distinct p range. This is the livelock."""
+    return (P // split_p(M)) * EB[prec]
+
+
 def target(M):                                    # cohort target the software derives, 8x8/KS=8
     sm = (M // 64) // 8
     sp = (16 // sm) if (0 < sm < 16) else 1
@@ -78,11 +94,14 @@ def main():
     ok = sorted([d for d in meas if d["eff"] is not None], key=lambda d: -d["eff"])
     for title, rows in (("Best 12 by efficiency", ok[:12]), ("Worst 12 by efficiency", ok[-12:])):
         L += ["## %s" % title, "",
-              "| shape | prec | target | cycles | eff | util | RH |", "|---|---|---:|---:|---:|---:|---:|"]
+              "| shape | prec | target | B slice | cycles | eff | util | RH |",
+              "|---|---|---:|---:|---:|---:|---:|---:|"]
         for d in rows:
-            L.append("| `%s` | %s | %d | %s | **%.1f%%** | %s%% | %s |"
-                     % (d["shape"], d["prec"], target(d["M"]), "{:,}".format(int(d["cycles"])),
-                        d["eff"], d["util"], d["rh"]))
+            bs = burst_slice(d["M"], d["P"], d["prec"])
+            L.append("| `%s` | %s | %d | %s | %s | **%.1f%%** | %s%% | %s |"
+                     % (d["shape"], d["prec"], target(d["M"]),
+                        ("%dB ⚠︎" % bs) if bs < BURST_BYTES else "%dB" % bs,
+                        "{:,}".format(int(d["cycles"])), d["eff"], d["util"], d["rh"]))
         L.append("")
     # --- the second low-util population ---
     lowN = [d for d in ok if d["eff"] is not None and d["eff"] < 25 and d["rh"].isdigit() and int(d["rh"]) <= 1000]
@@ -99,12 +118,18 @@ def main():
     # --- the recorded failures ---
     if live:
         L += ["## Recorded LIVELOCK (%d) — failures, not results" % len(live), "",
-              "These measure the `mshr_cfg.h` cohort-target bug "
-              "(`docs/benchmarks/8x8_scaleup/rh_livelock_root_cause.md`), not the architecture.",
-              "Averaging them into the campaign drags the mean by ~7 pp.", "",
-              "| shape | prec | target | util | RH |", "|---|---|---:|---:|---:|"]
+              "Root cause: the per-core **B slice** `(P/SPLIT_P)*elem_bytes` is below the "
+              "**%d-byte** burst floor, so B cannot burst, falls back to single-word requests, and "
+              "inherits `hold_subs_single` — a target derived for **A**, which B can never meet "
+              "because each core owns a distinct `p` range. See "
+              "`docs/benchmarks/8x8_scaleup/rh_livelock_root_cause.md` §0. "
+              "**Every one of these has a sub-burst B slice.** Averaging them into the campaign "
+              "drags the mean by ~7 pp." % BURST_BYTES, "",
+              "| shape | prec | target | B slice | util | RH |", "|---|---|---:|---:|---:|---:|"]
         for d in sorted(live, key=lambda d: d["shape"]):
-            L.append("| `%s` | %s | %d | %s%% | %s |" % (d["shape"], d["prec"], target(d["M"]), d["util"], d["rh"]))
+            L.append("| `%s` | %s | %d | **%dB** | %s%% | %s |"
+                     % (d["shape"], d["prec"], target(d["M"]),
+                        burst_slice(d["M"], d["P"], d["prec"]), d["util"], d["rh"]))
         L.append("")
     open(OUT, "w").write("\n".join(L) + "\n")
     print("wrote %s (%d measurements, %d livelock)" % (OUT, len(meas), len(live)))

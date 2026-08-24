@@ -949,6 +949,38 @@ hdr.querySelectorAll("th[data-c]").forEach(th=>{
         prog = json.load(open(os.path.join(ROOT, "docs/benchmarks/8x8_scaleup/run_progress.json")))
     except Exception:
         prog = None
+    # Burst-floor annotation. A per-core B slice below 64 B cannot form a burst, so B degrades to
+    # single-word requests and inherits hold_subs_single -- a target derived for A that B can never
+    # meet. All 26 recorded livelocks are sub-burst. See rh_livelock_root_cause.md section 0.
+    _EB = {"fp16": 2, "fp32": 4}
+
+    def _b_slice(arm):
+        try:
+            pr, sh = arm.split("_", 1)
+            M, N, P = (int(x) for x in sh.split("x"))
+        except Exception:
+            return None
+        sm = (M // 64) // 8
+        sp = (16 // sm) if 0 < sm < 16 else 1
+        return (P // sp) * _EB[pr]
+
+    if LIVELOCKED:
+        subb = [f for f in LIVELOCKED if (_b_slice(f[1] + "_" + f[0]) or 99) < 64]
+        names = ", ".join("%s_%s(%dB)" % (f[1], f[0], _b_slice(f[1] + "_" + f[0]) or 0)
+                          for f in sorted(subb, key=lambda x: x[0]))
+        h += ['<section class="card"><h2>Why those %d arms livelock</h2>' % len(LIVELOCKED),
+              '<p class="sub">The per-core <b>B slice</b> '
+              '<code>(P/SPLIT_P)&times;elem_bytes</code> is below the <b>64&nbsp;B</b> burst floor, '
+              'so B cannot burst, falls back to single-word requests, and inherits '
+              '<code>hold_subs_single</code> &mdash; a target derived for <b>A</b>. B can never '
+              'meet it, because every core owns a distinct <code>p</code> range while all 16 cores '
+              'share the same A rows. <b>%d of %d livelocked arms have a sub-burst B slice.</b></p>'
+              % (len(subb), len(LIVELOCKED)),
+              '<p class="sub">Burst needs <code>P&nbsp;&ge;&nbsp;512</code> (fp16 M=512), '
+              '<code>256</code> (fp32 M=512 / fp16 M=1024), <code>128</code> (fp16 M=2048). '
+              'Root cause: <code>rh_livelock_root_cause.md</code> &sect;0.</p>',
+              '<p class="sub"><code>' + html.escape(names) + '</code></p></section>']
+
     if prog and prog.get("rows"):
         pr_rows = prog["rows"]
         K = prog.get("K", {})
