@@ -163,6 +163,21 @@ def main():
                         % (M, N, P, PR, a_share(M), r["cycles"],
                            ("~%.2f" % r["util"]) if r["util"] is not None else "-", r["rh"]))
             continue
+        # A LIVELOCKED ARM CAN STILL FINISH. Classifying on "did it print execution took" makes
+        # fp16_1024x32x128 (0.59%, RH=123,743) and fp16_512x64x128 (0.23%, RH=243,240) read as
+        # MEASUREMENTS -- they land in the averages and in the worst-N tables as if they were
+        # architectural results, when both are sub-burst livelocks (32 B and 16 B B slices).
+        # Classify on the RH episode count, which is the mechanism, not on whether the wall clock
+        # happened to let it reach the end. Keeps the cycle count, which is real.
+        if r["rh"] > 1000:
+            livelocked.append(arm)
+            rows.append("%dx%dx%d\tfp%s\t%d\t%d\t%s\t%d\t%d\t%d\t%s\tlivelock"
+                        % (M, N, P, PR, a_share(M), r["cycles"],
+                           (("~%.2f" if r.get("util_recon") else "%.2f") % r["util"])
+                           if r["util"] is not None else "-",
+                           r["rh"], r["tmo"], r["bf"],
+                           "completed-but-livelocked"))
+            continue
         ndone += 1
         # 64 groups at 8x8: fewer [SPOT] lines than groups means the probe did not complete
         # fp32 has NO spotcheck by construction: all 150 fp16 apps carry the [SPOT] probe and
