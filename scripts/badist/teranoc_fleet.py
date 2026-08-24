@@ -90,7 +90,14 @@ BACKENDS = {
         # silently on 2026-08-21: refused, dead in seconds, stderr sent to /dev/null),
         # and exactly wrong when a fallback simulator is available, because a queued
         # simv never fails and the fallback would never fire.
-        "cmd": '"{image}" {licwait}+PRELOAD="{elf}" -l transcript',
+        # +notracer: the per-flit NoC tracer (tb_noc_req_resp_tracer.svh:100) writes
+        # noc_trace/events.csv -- ~30 GB per NODE, none of which the result scrape reads
+        # (the job collects only `transcript`). It filled larain12 to 100% on 2026-08-24
+        # and came within ~45 min of killing three day-old arms. It has a RUNTIME
+        # disable, so this costs nothing and needs no rebuild. The other two producers
+        # (trace_hart_*.dasm ~48 GB via SNITCH_TRACE, v4m_out ~8 GB via V4M_ENABLE) are
+        # build-time and want snitch_trace=0 / +define+V4M_ENABLE=0 at the next rebuild.
+        "cmd": '"{image}" {licwait}+notracer +PRELOAD="{elf}" -l transcript',
         "mem_gb": 4,          # measured 2.0 GB across every running terapool arm
         "licensed": True,
         # SINGLE SOURCE OF TRUTH for the VCS courtesy line. 2 is the user's current figure
@@ -168,7 +175,7 @@ def questa_launch(build_dir, elf):
         # design instead means no vopt, no lock, no growth, and no ~10 min per-arm elaboration.
         # Rebuild it after any RTL change:
         #   cd hardware/build_q_8x8 && questa-2023.4-zr vopt -work work work.mempool_tb -o s8_opt
-        '+PRELOAD="%s" work.%s -do "run -a" -l transcript'
+        '+notracer +PRELOAD="%s" work.%s -do "run -a" -l transcript'
         % (QUESTA_CMD, dram, dram, dram, elf, QUESTA_OPT),
     ]
 
