@@ -11,7 +11,7 @@ Two habits this file exists to enforce:
   * record the spotcheck GROUP COUNT, not just presence. A perf number with no correctness
     signal is not a result; a kernel that computes garbage faster still wins a sweep.
 """
-import json, os, re, sys
+import gzip, json, os, re, sys
 
 ROOT = "/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC"
 OUT  = os.path.join(ROOT, "docs/benchmarks/8x8_scaleup/results.tsv")
@@ -116,6 +116,27 @@ def scrape(arm):
             _m.append({"cyc": int(_g.group(2)), "u": [round(100.0 * x / _den, 1) for x in _v]})
     if _m:
         _MESH_NEW[arm] = _m
+    # ARCHIVE THE PROBE LINES. The transcript itself is transient: badist overwrites
+    # hardware/s8_<arm>/transcript unconditionally, and a stale duplicate's gather can land an OLD
+    # partial over a complete one at any time -- a recovered 21 MB transcript was clobbered again
+    # within minutes on 2026-08-24, and 30 of 131 measurements no longer have local evidence of
+    # their own recorded cycle count. The probe lines are 0.26% of the file (59 KB vs 22 MB) and
+    # carry everything the analysis reads, so keep them the moment a complete transcript is seen.
+    try:
+        adir = os.path.join(ROOT, "docs/benchmarks/8x8_scaleup/probe_archive")
+        os.makedirs(adir, exist_ok=True)
+        apath = os.path.join(adir, arm + ".log.gz")
+        if not os.path.exists(apath):
+            keep = [l for l in txt.split(b"\n")
+                    if l.startswith((b"[FPU]", b"[FPUG]", b"[MSHRG]", b"[MSHRCFG]", b"[RH]"))
+                    or b"execution took" in l or b"[FPU FINAL]" in l or b"[SPOT] g=" in l]
+            if keep:
+                tmp = apath + ".tmp%d" % os.getpid()
+                with gzip.open(tmp, "wb") as f:
+                    f.write(b"\n".join(keep))
+                os.replace(tmp, apath)
+    except OSError:
+        pass
     return dict(state="done", cycles=int(cyc[-1]), rh=txt.count(b"RH STUCK"),
                 tmo=tot("mshr_timeout"), bf=tot("bankfull_bypass"), spot=spot,
                 util=util, util_recon=(u is None and util is not None), recon_w=recon_w,
