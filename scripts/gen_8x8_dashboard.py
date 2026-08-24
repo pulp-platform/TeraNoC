@@ -271,6 +271,7 @@ box-shadow:var(--shadow);display:flex;flex-direction:column;gap:6px}
 border:1px dashed var(--line);border-radius:4px;padding:18px;text-align:center}
 code{font-family:"IBM Plex Mono",monospace}
 td.dim,tr.unpaired td{color:var(--dim)}
+.nb{display:inline-block;margin-left:6px;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:700;letter-spacing:.03em;background:var(--bad);color:#fff;vertical-align:middle}
 .dot{color:var(--bad);font-size:9px;vertical-align:super;margin-left:3px}
 td.ratio{font-weight:600;color:var(--acc)}
 td.zero{color:var(--line)}
@@ -800,7 +801,24 @@ cascade(); reset();
               '</script></section>']
 
     # ---- results ----
-    h += ['<section><h2>Results</h2>']
+    # A shape breaks the vector burst when the per-core B slice (P/SPLIT_P)*elem_bytes is under
+    # the 64 B floor -- B then issues single-word requests and inherits hold_subs_single, a target
+    # derived for A that B can never meet. PER PRECISION: fp32's 4-byte elements clear the floor at
+    # half the P that fp16 needs, so a shape can break for fp16 and be fine for fp32.
+    def _nb(sh_, prec):
+        M_, N_, P_ = (int(x) for x in sh_.split("x"))
+        sm_ = (M_ // 64) // 8
+        sp_ = (16 // sm_) if 0 < sm_ < 16 else 1
+        return (P_ // sp_) * (2 if prec == "fp16" else 4) < 64
+
+    h += ['<section><h2>Results</h2>',
+          '<p class="sub" style="margin-bottom:14px">A <span class="nb">NO BURST</span> badge marks '
+          'a shape whose per-core <b>B slice</b> <code>(P/SPLIT_P)&times;elem_bytes</code> falls '
+          'below the <b>64&nbsp;B</b> burst floor for that precision. B then cannot burst, degrades '
+          'to single-word requests and inherits <code>hold_subs_single</code> &mdash; a target '
+          'derived for <b>A</b>, which B can never meet because each core owns a distinct '
+          '<code>p</code> range. <b>Every livelocked arm in this campaign is one of these.</b> '
+          'Root cause: <code>rh_livelock_root_cause.md</code> &sect;0.</p>']
     if not res:
         h += ['<div class="empty">No arm has completed yet. At the measured ~19 cyc/s (VCS) and '
               '~12 cyc/s (Questa), the first completions are hours out.<br>'
@@ -883,9 +901,12 @@ cascade(); reset();
                     k("fp16", 3), k("fp16", 4), k("fp16", 5), k("fp16", 6), k("fp16", 7),
                     k("fp32", 3), k("fp32", 4), k("fp32", 5), k("fp32", 6), k("fp32", 7),
                     ("%.4f" % (int(d["fp32"][3]) / float(d["fp16"][3]))) if paired and int(d["fp16"][3]) else ""]
+            nb = [pr_ for pr_ in ("fp16", "fp32") if _nb(sh, pr_)]
+            badge = ('<span class="nb" title="per-core B slice below the 64 B burst floor">'
+                     'NO BURST %s</span>' % "/".join(x[2:] for x in nb)) if nb else ""
             h += ['<tr' + ('' if paired else ' class="unpaired"') +
                   ' data-k="' + esc("|".join(keys)) + '"><td><code>' + esc(sh) +
-                  '</code></td><td class="num">' + esc(ash) + '</td>' +
+                  '</code>' + badge + '</td><td class="num">' + esc(ash) + '</td>' +
                   '<td class="num gs">' + ("%.2f" % d16 if d16 else "&mdash;") + '</td>' +
                   '<td class="num">' + ("%.2f" % d32 if d32 else "&mdash;") + '</td>' +
                   cell("fp16") + cell("fp32") + ratio + '</tr>']
