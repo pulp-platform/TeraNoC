@@ -6,9 +6,11 @@
 #   do ../scripts/questa/add_group_cores.tcl 30 0 15 0   ;# 4th arg 0 = scalar core only, no Spatz
 #
 # Each core gets the scalar set (wave_core.tcl) AND, unless the 4th argument is 0, the Spatz
-# vector set (add_spatz_core.tcl): issue/decode, the four stall sources, per-lane VFU work and
-# the VLSU beat activity. On a Spatz config the vector side is where the time actually goes, so
-# the scalar signals alone will not tell you why a core is idle.
+# vector set (add_spatz_core.tcl): issue/decode, the four stall sources, per-lane VFU work, the
+# VLSU beat activity, and the FPU sequencer's FP-LSU load/store path. On a Spatz config the
+# scalar signals alone will not tell you why a core is idle -- and scalar float loads (flh/flw)
+# go through the FP-LSU, not the Snitch integer LSU, so that group is where an A-operand stall
+# appears.
 #
 # NOTE ON ARGUMENTS: Questa's `do` passes positional macro parameters $1..$9 plus $argc -- NOT
 # a Tcl `argv` list. Referencing $2 when only one argument was given is an error, hence the
@@ -52,7 +54,7 @@ if {$argc >= 4} { set _sp $4 } else { set _sp 1 }
 
 set _n [expr {($_t1 - $_t0 + 1) * $NumCT}]
 puts "add_group_cores: group $_g -> gen_groups_x\[[expr {$_g / $NumY}]\]/gen_groups_y\[[expr {$_g % $NumY}]\]"
-puts "add_group_cores: tiles $_t0..$_t1 of $NumTG, $NumCT core(s)/tile -> $_n core(s), ~[expr {$_n * ($_sp ? 175 : 150)}] signals[expr {$_sp ? " (scalar + Spatz)" : " (scalar only)"}]"
+puts "add_group_cores: tiles $_t0..$_t1 of $NumTG, $NumCT core(s)/tile -> $_n core(s), ~[expr {$_n * ($_sp ? 205 : 150)}] signals[expr {$_sp ? " (scalar + Spatz)" : " (scalar only)"}]"
 
 set _script [file join [file dirname [info script]] wave_core.tcl]
 set _spscript [file join [file dirname [info script]] add_spatz_core.tcl]

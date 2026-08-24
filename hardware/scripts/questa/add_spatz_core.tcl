@@ -58,6 +58,47 @@ proc add_spatz_core_wave {g t c NumX NumY} {
     catch {add wave -noupdate -group $L -group VFU ${s}/i_vfu/is_ipu_busy}
     catch {add wave -noupdate -group $L -group VFU ${s}/i_vfu/is_fpu_busy}
     catch {add wave -noupdate -group $L -group VFU ${s}/i_vfu/vfu_rsp_valid_o}
+    # FP-LSU (the FPU sequencer's scalar float load/store path). This is where `flh`/`flw`/`fsw`
+    # actually go on a Spatz build -- NOT the Snitch integer LSU and NOT the VLSU -- so a scalar
+    # A-operand stall shows up here and nowhere else. The 8xVL matmul kernel issues 8 `flh` per
+    # vector B load, so at small N this path, not the vector one, is the busy one.
+    #   q* = request side (qvalid/qready is the handshake that stalls),
+    #   p* = response side (pvalid/pready; ptag matches qtag -- the FP-LSU is id-based OOO with
+    #        16 outstanding, so a high ptag/qtag spread is normal, not a bug).
+    catch {add wave -noupdate -group $L -group FP-LSU ${s}/gen_fpu_sequencer/i_fpu_sequencer/is_load}
+    catch {add wave -noupdate -group $L -group FP-LSU ${s}/gen_fpu_sequencer/i_fpu_sequencer/is_store}
+    catch {add wave -noupdate -group $L -group FP-LSU ${s}/gen_fpu_sequencer/i_fpu_sequencer/fp_lsu_qvalid}
+    catch {add wave -noupdate -group $L -group FP-LSU ${s}/gen_fpu_sequencer/i_fpu_sequencer/fp_lsu_qready}
+    catch {add wave -noupdate -group $L -group FP-LSU -radix hex ${s}/gen_fpu_sequencer/i_fpu_sequencer/fp_lsu_qaddr}
+    catch {add wave -noupdate -group $L -group FP-LSU ${s}/gen_fpu_sequencer/i_fpu_sequencer/fp_lsu_qwrite}
+    catch {add wave -noupdate -group $L -group FP-LSU -radix unsigned ${s}/gen_fpu_sequencer/i_fpu_sequencer/fp_lsu_qtag}
+    catch {add wave -noupdate -group $L -group FP-LSU -radix unsigned ${s}/gen_fpu_sequencer/i_fpu_sequencer/fp_lsu_qsize}
+    catch {add wave -noupdate -group $L -group FP-LSU ${s}/gen_fpu_sequencer/i_fpu_sequencer/fp_lsu_pvalid}
+    catch {add wave -noupdate -group $L -group FP-LSU ${s}/gen_fpu_sequencer/i_fpu_sequencer/fp_lsu_pready}
+    catch {add wave -noupdate -group $L -group FP-LSU -radix unsigned ${s}/gen_fpu_sequencer/i_fpu_sequencer/fp_lsu_ptag}
+    catch {add wave -noupdate -group $L -group FP-LSU -radix hex ${s}/gen_fpu_sequencer/i_fpu_sequencer/fp_lsu_pdata}
+    # The port out to memory, one level below the q/p handshake above.
+    catch {add wave -noupdate -group $L -group FP-LSU ${s}/gen_fpu_sequencer/i_fpu_sequencer/fp_lsu_mem_req_valid_o}
+    catch {add wave -noupdate -group $L -group FP-LSU ${s}/gen_fpu_sequencer/i_fpu_sequencer/fp_lsu_mem_req_ready_i}
+    catch {add wave -noupdate -group $L -group FP-LSU ${s}/gen_fpu_sequencer/i_fpu_sequencer/fp_lsu_mem_rsp_valid_i}
+    catch {add wave -noupdate -group $L -group FP-LSU ${s}/gen_fpu_sequencer/i_fpu_sequencer/fp_lsu_mem_req_sent_o}
+    # WHY it stalls. lsu_stall is literally (qvalid && !qready) at :635 -- the request could not be
+    # accepted. vlsu_stall (:609) is the load/store ORDERING interlock against the vector side:
+    #   (is_store && acc_mem_cnt_q != 0) || (is_load && acc_mem_str_cnt_q != 0) || acc_mem_cnt_q == 1
+    # so a scalar op waits on OUTSTANDING VECTOR ops of the opposite kind. Log both counters or the
+    # stall reads as unexplained.
+    catch {add wave -noupdate -group $L -group FP-LSU-why ${s}/gen_fpu_sequencer/i_fpu_sequencer/lsu_stall}
+    catch {add wave -noupdate -group $L -group FP-LSU-why ${s}/gen_fpu_sequencer/i_fpu_sequencer/vlsu_stall}
+    catch {add wave -noupdate -group $L -group FP-LSU-why -radix unsigned ${s}/gen_fpu_sequencer/i_fpu_sequencer/acc_mem_cnt_q}
+    catch {add wave -noupdate -group $L -group FP-LSU-why -radix unsigned ${s}/gen_fpu_sequencer/i_fpu_sequencer/acc_mem_str_cnt_q}
+    catch {add wave -noupdate -group $L -group FP-LSU-why ${s}/gen_fpu_sequencer/i_fpu_sequencer/outstanding_store_q}
+    # Scoreboard: which FP registers are busy. A `flh` result feeding the next vfmul.vf is a RAW
+    # wait, and sb_q is what shows it -- stall_raw vs stall_acc is the discriminator for the
+    # scalar-load-bound case.
+    catch {add wave -noupdate -group $L -group FP-LSU-why -radix hex ${s}/gen_fpu_sequencer/i_fpu_sequencer/sb_q}
+    catch {add wave -noupdate -group $L -group FP-LSU-why ${s}/gen_fpu_sequencer/i_fpu_sequencer/is_vector_load}
+    catch {add wave -noupdate -group $L -group FP-LSU-why ${s}/gen_fpu_sequencer/i_fpu_sequencer/is_vector_store}
+
     # VLSU: memory-beat activity + FSM state.
     catch {add wave -noupdate -group $L -group VLSU ${s}/i_vlsu/state_q}
     catch {add wave -noupdate -group $L -group VLSU ${s}/i_vlsu/spatz_mem_req_valid_o}
