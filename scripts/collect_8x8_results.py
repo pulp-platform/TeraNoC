@@ -192,8 +192,15 @@ def main():
     # can be carried forward from an earlier pass whose transcript has since been destroyed, so
     # `ndone` understates the campaign and the results loop -- which greps this line -- reported
     # 52 complete against a 54-row file, reading as a regression.
-    print("  results.tsv: %d completed arm(s)%s"
-          % (len(rows), ("  (%d scraped now, %d carried forward)" % (ndone, len(rows) - ndone))
+    # Report MEASUREMENTS and recorded failures separately. Lumping them was reporting
+    # "130 complete" when 24 of those are livelocked arms that never completed anything -- the
+    # results loop greps this line, so the inflated number reached the campaign monitor too.
+    nlive = len(livelocked)
+    nmeas = len(rows) - nlive
+    print("  results.tsv: %d measurement(s)%s%s"
+          % (nmeas,
+             ("  + %d LIVELOCK (recorded failures, not results)" % nlive) if nlive else "",
+             ("  (%d scraped now, %d carried forward)" % (ndone, len(rows) - ndone))
              if len(rows) != ndone else ""))
     if fatals:
         print("  KILLED BY $fatal (cycle count may be real, everything after it is not):")
