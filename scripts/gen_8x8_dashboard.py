@@ -4,7 +4,7 @@
 Writes /tmp/claude-620771/s8_ladder.html (the path the published artifact is redeployed from --
 keep it, a new path would claim a new URL and orphan the existing link).
 """
-import glob, json, os, re, subprocess, sys
+import glob, html, json, os, re, subprocess, sys
 
 ROOT = "/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC"
 OUT  = "/tmp/claude-620771/s8_ladder.html"
@@ -88,14 +88,31 @@ def states():
                 out[arm] = ("queued", "-")
     return out
 
+LIVELOCKED = []          # recorded failures, kept out of the analysis set but reported
+
 def results():
+    """Delivered MEASUREMENTS only.
+
+    Rows with state 'livelock' are recorded FAILURES, not results: the arm never completed, and
+    its ~0.05-4% utilisation measures the mshr_cfg.h cohort-target bug rather than the
+    architecture (docs/benchmarks/8x8_scaleup/rh_livelock_root_cause.md). Feeding them to the
+    charts would add 22 spurious near-zero points to every utilisation scatter and drag the
+    fp32/fp16 ratio, while looking like legitimate evidence that 8x8 scales badly. Count them,
+    show them separately, never average them in.
+    """
     p = os.path.join(ROOT, "docs/benchmarks/8x8_scaleup/results.tsv")
     rows = []
+    del LIVELOCKED[:]
     try:
         for i, ln in enumerate(open(p)):
             if i == 0: continue
             f = ln.rstrip("\n").split("\t")
-            if len(f) >= 10: rows.append(f)   # fpu_util added at index 4
+            if len(f) < 10:
+                continue                      # fpu_util added at index 4
+            if f[9] == "livelock":
+                LIVELOCKED.append(f)
+                continue
+            rows.append(f)
     except Exception:
         pass
     return rows
@@ -351,7 +368,25 @@ def main():
           '<div class="tile run"><span class="n">' + str(run) + '</span><span class="l">running</span></div>',
           '<div class="tile wait"><span class="n">' + str(q) + '</span><span class="l">queued</span></div>',
           '<div class="tile bad"><span class="n">' + str(fail) + '</span><span class="l">failed</span></div>',
-          '</div></section>']
+          # Recorded failures get their OWN tile rather than being folded into "complete" (which
+          # would overstate progress and put 0.05-4% points into every chart) or into "failed"
+          # (which is a dispatch verdict, not a result). See rh_livelock_root_cause.md.
+          ('<div class="tile bad"><span class="n">' + str(len(LIVELOCKED)) +
+           '</span><span class="l">livelock</span></div>') if LIVELOCKED else '',
+          '</div></section>',
+          ('<section class="card"><h2>' + str(len(LIVELOCKED)) + ' arms excluded as LIVELOCK</h2>'
+           '<p class="sub">These ran at <b>0.05&ndash;4% FPU utilisation</b> and never completed. '
+           'They measure a <b>software</b> defect, not the architecture: the scalar-load cohort '
+           'target in <code>software/runtime/mshr_cfg.h</code> is derived from <code>M</code> '
+           'alone and ignores <code>P</code>, so every remote scalar load rides out '
+           '<code>serve_timeout=2047</code> waiting for a cohort that cannot assemble in time. '
+           'They are kept out of every chart and every average on this page &mdash; including them '
+           'drags the mean utilisation from <b>40.3%</b> to <b>33.4%</b> and looks like evidence '
+           'that 8&times;8 scales badly. Root cause: '
+           '<code>docs/benchmarks/8x8_scaleup/rh_livelock_root_cause.md</code>.</p>'
+           '<p class="sub"><code>' +
+           html.escape(", ".join(sorted(f[1] + "_" + f[0] for f in LIVELOCKED))) +
+           '</code></p></section>') if LIVELOCKED else '']
 
     h += ['<div class="warn"><b>Dispatched speculatively &mdash; the pilot gate was not met.</b>',
           'No arm had completed when these launched. Read every result with these in mind:<ol>',

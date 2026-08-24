@@ -4,7 +4,10 @@ import io, os, subprocess, html, time
 
 ROOT = "/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC"
 OUTD = os.path.join(ROOT, "docs/benchmarks/8x8_scaleup")
-OUT  = "/tmp/claude-620771/s8_ladder.html"
+OUT  = "/tmp/claude-620771/s8_rungs.html"   # NOT s8_ladder.html -- gen_8x8_dashboard.py owns that
+                                           # path and the results loop republishes it, so sharing
+                                           # it meant whichever generator ran last silently
+                                           # clobbered the published artifact.
 
 RUNGS = [
     (16, "512x2048x1024",  "512x1024x1024"),
