@@ -502,7 +502,16 @@ group_mshr_resp_hold_probe ?= 1000
 # Reuses the hold_cnt field (mutually exclusive states), so no extra flops; only its width grows to
 # cover the larger of the two windows. Required whenever group_mshr_resp_wait_subs_single=1 or
 # group_mshr_cache_reclaimable=0, since both remove the release paths that used to bound the wait.
-group_mshr_serve_timeout ?= 2047   # tracks the hold window; reuses the same hold_cnt field, so no extra flops
+# 8191 (was 2047): the comment above says it TRACKS the hold window, and both windows are now
+# 8191 -- leaving this at 2047 would have made the response-side release fire 4x sooner than the
+# request-side hold it is supposed to track, so a single that waited the full request window could
+# still be cut off on the response side. Costs no flops: it reuses hold_cnt, whose width is set by
+# the LARGER of the two windows, and at prescale 6 that field is 7 bits (8191>>6 = 127).
+#
+# It DOES slow the burst-broken shapes (B slice under the 64 B floor): they cannot merge at any
+# window, so this is purely how long they wait before giving up -- 4x longer now. That is accepted
+# because those shapes are being kept out of future sweeps, not tuned for.
+group_mshr_serve_timeout ?= 8191   # tracks the hold window; reuses the same hold_cnt field, so no extra flops
 
 # Same-address request arriving in the SAME CYCLE as that entry's response.
 # 1 = STALL and retry (default). 0 = legacy, which allocated a SECOND entry for the same address.
