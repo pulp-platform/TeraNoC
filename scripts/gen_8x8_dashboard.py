@@ -340,7 +340,14 @@ def main():
     run  = sum(1 for a, (s, n) in st.items() if s == "running" and a not in _have)
     fail = sum(1 for a, (s, n) in st.items()
                if s in ("failed", "lost", "cancelled") and a not in _have)
-    q    = tot - done - run - fail
+    # QUEUED is a RESIDUAL, so every arm accounted for elsewhere must be subtracted or it lands
+    # here. When results() began excluding livelock rows (so they stay out of the charts), `done`
+    # dropped by 26 and all 26 reappeared as "queued" -- the page claimed 25 arms were waiting for
+    # a seat while campaign_status.py correctly reported 0 pending. They have their own tile; count
+    # them once. Clamp at 0: an arm can hold both a result and a live retry, so the parts can
+    # briefly exceed the total.
+    live_n = len({f[1] + "_" + f[0] for f in LIVELOCKED} - _have)
+    q    = max(0, tot - done - live_n - run - fail)
     stamp = subprocess.run(["date", "+%H:%M"], capture_output=True, text=True).stdout.strip()
 
     h = ['<title>8&times;8 Scale-Up Campaign</title>',
