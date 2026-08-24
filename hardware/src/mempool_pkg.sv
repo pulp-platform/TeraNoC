@@ -670,8 +670,15 @@ package mempool_pkg;
     `ifdef GROUP_MSHR_CACHE_RECLAIMABLE `GROUP_MSHR_CACHE_RECLAIMABLE `else 1'b0 `endif;
   localparam bit MshrServeTimeoutNonZero = MshrRespWaitSubsSingle || !MshrCacheReclaimable;
 
-  localparam integer unsigned MshrCfgHoldCntMax = 2047; // hardware bound on window / serve_timeout
-  localparam integer unsigned MshrCfgHoldCntW   = 11;  // bound 2047, matches today's shipping max
+  // 4095, not 2047: the RH-livelock experiment needs a serve_timeout/hold window ABOVE the old
+  // bound, and the CSR write path REFUSES anything over MshrCfgHoldCntMax (mempool_group_mshr_cfg.sv
+  // cnt_ok, :129) -- so a 4095 write against an 11-bit build silently kept the reset default and set
+  // the sticky RANGE bit, producing an arm that looks configured and is not. Widen both together:
+  // mshr_cfg.sv:122 $errors if the width cannot represent the max, so a half-change fails loudly.
+  // Note HoldCntMax is pinned to THIS constant whenever MshrCfgRuntime=1 (mempool_group_mshr.sv:273),
+  // so build knobs alone cannot widen the counter -- only these two literals do.
+  localparam integer unsigned MshrCfgHoldCntMax = 4095; // hardware bound on window / serve_timeout
+  localparam integer unsigned MshrCfgHoldCntW   = 12;  // bound 4095
   // MUST hold MshrMergeReqs, whose largest shipped value is 16 -- so 5 bits, not 4.
   //
   // At 4 bits this silently truncated: subs_ok range-checks the FULL 32-bit write (so 16 <= 16
