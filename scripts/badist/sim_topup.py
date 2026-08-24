@@ -24,7 +24,7 @@ KNOWN_ISSUES).
 """
 import argparse, glob, json, os, re, subprocess, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from feasibility import (stalling, KNOWN_STALL, fits, projected_hours, delivered,
+from feasibility import (stalling, stall_reason, fits, projected_hours, delivered,
                          announce_once, save_announced)
 
 ROOT   = "/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC"
@@ -184,14 +184,14 @@ def main():
         if arm in running or arm in seen or (arm in on_backend and not a.allow_requeue):
             continue
         if stalling(arm):
-            # KNOWN_STALL is now an EMPTY dict -- the hand-maintained table was superseded by
-            # feasibility.livelocked(), and indexing it raised KeyError on the first arm the
-            # predicate matched, taking the whole top-up down. Describe the arm from the
-            # predicate itself; never index a table that no longer holds entries.
+            # Was KNOWN_STALL[arm] -- an empty dict left importable after the hand-maintained
+            # table was superseded, so the first arm the predicate matched raised KeyError and
+            # killed this loop AND the rescuer. feasibility.stall_reason() cannot go stale that
+            # way: there is no key to miss.
             announce_once("stall:" + arm,
                           "  KNOWN-STALL %-22s %s -- held back (RH livelock: cohort target "
                           "cannot form at this P; see rh_livelock_root_cause.md)"
-                          % (arm, KNOWN_STALL.get(arm, "")))
+                          % (arm, stall_reason(arm)))
             continue
         if not fits(arm):
             # Do not hand a seat to a shape the deadline cannot hold: it runs the full 48h and

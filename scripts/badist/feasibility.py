@@ -262,4 +262,20 @@ def stalling(arm):
     return u is not None and u < 1.0
 
 
-KNOWN_STALL = {}   # superseded by the predicate above
+def stall_reason(arm):
+    """One-line description of WHY stalling() holds this arm back.
+
+    Replaces the KNOWN_STALL dict, which was emptied when the hand-maintained table was superseded
+    by livelocked() but left importable -- three callers still did KNOWN_STALL[arm], so the first
+    arm the predicate matched raised KeyError and killed the top-up AND the rescuer. A function
+    cannot go stale the way an empty dict did: there is no key to miss.
+    """
+    m = re.match(r"^(fp16|fp32)_(\d+)x(\d+)x(\d+)$", arm or "")
+    if not m:
+        return "matches the RH-livelock predicate"
+    t, P = _cohort_target(int(m.group(2))), int(m.group(4))
+    u, rh, state = _observed(arm)
+    ev = ("recorded livelock" if state == "livelock"
+          else "RH=%d episodes" % rh if rh is not None and rh > 1000
+          else "util %.2f%%" % u if u is not None else "predicate only")
+    return "cohort target %d cannot form at P=%d (%s)" % (t, P, ev)

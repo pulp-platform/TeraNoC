@@ -10,7 +10,7 @@ bad shape eats a fleet.
 """
 import glob, json, os, subprocess, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from feasibility import stalling, KNOWN_STALL, fits, projected_hours, delivered, announce_once, save_announced
+from feasibility import stalling, stall_reason, fits, projected_hours, delivered, announce_once, save_announced
 
 # Arms whose skip reason has already been announced. Persisted so a loop that re-invokes this
 # script every few minutes does not repeat an unchanged line forever.
@@ -139,8 +139,8 @@ def main():
         # the reader looking for a bug instead of a scope decision.
         if stalling(arm):
             announce_once("stall:" + arm,
-                          "  KNOWN-STALL %-22s %s -- held back, needs the hold-window experiment"
-                          % (arm, KNOWN_STALL[arm]))
+                          "  KNOWN-STALL %-22s %s -- held back (see rh_livelock_root_cause.md)"
+                          % (arm, stall_reason(arm)))
             continue
         if not fits(arm):
             announce_once("infeasible:" + arm,

@@ -27,7 +27,7 @@ import concurrent.futures as cf
 import glob, json, os, re, subprocess, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import time
-from feasibility import stalling, KNOWN_STALL, delivered, fits, projected_hours, announce_once, save_announced
+from feasibility import stalling, stall_reason, delivered, fits, projected_hours, announce_once, save_announced
 
 ROOT   = "/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC"
 STATE  = os.path.expanduser("~/badist/state")
@@ -159,8 +159,8 @@ def main():
             continue
         if stalling(a):
             announce_once("stall:" + a,
-                          "  KNOWN-STALL %-22s %s -- held back, needs the hold-window experiment"
-                          % (a, KNOWN_STALL[a]))
+                          "  KNOWN-STALL %-22s %s -- held back (see rh_livelock_root_cause.md)"
+                          % (a, stall_reason(a)))
             continue
         if not fits(a):
             # A shape the deadline cannot hold burns a seat for the full 48h and then fails. The
