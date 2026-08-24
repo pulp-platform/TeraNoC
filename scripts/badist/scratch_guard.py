@@ -20,6 +20,8 @@ directories. Three guards, because deleting the wrong directory destroys a runni
      hardware/s8_<arm>/transcript before anything is removed.
 Other users' data is never touched -- only /scratch2/$USER_cache/badist/run.
 """
+import json as _json
+import os as _os
 import argparse, glob, json, os, re, subprocess, sys
 
 ROOT  = "/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC"
@@ -125,14 +127,39 @@ def main():
                 print("      copy incomplete -- left in place")
         return saved
 
-    def warn_exposed(h):
+    # A host whose disk is full of OTHER people's data, with nothing of ours left to reclaim, is a
+    # state we cannot act on. Re-announcing it every cycle is how a reader learns to skim past this
+    # loop -- and then misses the cycle where the free space actually collapses. So: announce once
+    # per (host, at-risk arm set), and again only if free space has HALVED since that announcement.
+    # State in ~/.badist_scratch_warned.json so it survives the per-cycle process restart.
+    WARNED = _os.path.expanduser("~/.badist_scratch_warned.json")
+
+    def _warn_state():
+        try:
+            return _json.load(open(WARNED))
+        except Exception:
+            return {}
+
+    def warn_exposed(h, free_gb=None):
         at_risk = sorted({arm for (b, j), (arm, st, node) in info.items()
                           if st == "running" and (node or "").split(".")[0] == h
                           and re.match(r"^fp(16|32)_", arm or "")})
-        print("      STILL BELOW THRESHOLD -- not ours to free (other users hold the disk)")
-        if at_risk:
-            print("      %d running arm(s) here will lose their results to packaging: %s"
-                  % (len(at_risk), ", ".join(at_risk[:6])))
+        st_all = _warn_state()
+        key = h + "|" + ",".join(at_risk)
+        prev = st_all.get(key)
+        worse = (prev is not None and free_gb is not None
+                 and isinstance(prev, (int, float)) and free_gb <= prev / 2.0)
+        if prev is None or worse:
+            print("      STILL BELOW THRESHOLD -- not ours to free (other users hold the disk)"
+                  + ("  [free HALVED since last notice]" if worse else ""))
+            if at_risk:
+                print("      %d running arm(s) here will lose their results to packaging: %s"
+                      % (len(at_risk), ", ".join(at_risk[:6])))
+            st_all[key] = free_gb if free_gb is not None else 0
+            try:
+                _json.dump(st_all, open(WARNED, "w"))
+            except OSError:
+                pass
         return at_risk
 
     freed_hosts = 0
@@ -213,7 +240,7 @@ def main():
             victims.append(d)
         if not victims:
             print("      nothing safe to reclaim (all dirs live or still owed to badist)")
-            exposed[h] = warn_exposed(h)
+            exposed[h] = warn_exposed(h, avail)
             rescued += rescue_exposed(h, cache)
             continue
         print("      reclaiming %d spent run dir(s)" % len(victims))
@@ -228,7 +255,7 @@ def main():
         # leave the node full. Say so explicitly and name what is exposed: an arm that finishes
         # here delivers NOTHING, because packaging is the last step and it fails on ENOSPC.
         if now_gb and int(now_gb) < a.low_gb:
-            exposed[h] = warn_exposed(h)
+            exposed[h] = warn_exposed(h, int(now_gb))
             rescued += rescue_exposed(h, cache)
     n_arms = sum(len(v) for v in exposed.values())
     print("  checked %d node(s), reclaimed space on %d, %d node(s) still at risk (%d arm(s) exposed)"
