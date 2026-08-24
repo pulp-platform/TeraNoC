@@ -215,6 +215,8 @@ module mempool_tile
     assign hart_id = unsigned'(tile_id_i) * NumCoresPerTile + unsigned'(c);
 
     if (!TrafficGeneration && RedMulE && c == 0) begin : gen_snitch_redmule_cc
+      snitch_pkg::meta_id_t core_data_qid;
+
       snitch_redmule_cc #(
         .BootAddr      (BootAddr                  ),
         .RMCfgBaseAddr (RMBaseAddr                ),
@@ -250,7 +252,7 @@ module mempool_tile
         .data_qamo_o   (snitch_data_qamo[c]                             ),
         .data_qdata_o  (snitch_data_qdata[c]                            ),
         .data_qstrb_o  (snitch_data_qstrb[c]                            ),
-        .data_qid_o    (snitch_data_qid[c][snitch_pkg::MetaIdWidth-1:0]),
+        .data_qid_o    (core_data_qid                                   ),
         .data_qvalid_o (snitch_data_qvalid[c]                           ),
         .data_qready_i (snitch_data_qready[c]                           ),
         .data_pdata_i  (snitch_data_pdata[c]                            ),
@@ -276,7 +278,10 @@ module mempool_tile
         .redmule_evt_o        (redmule_evt              ),
         .core_events_o        (/* Unused */             )
       );
+      assign snitch_data_qid[c] = meta_id_t'(core_data_qid);
     end else if (!TrafficGeneration) begin : gen_mempool_cc
+      snitch_pkg::meta_id_t core_data_qid;
+
       mempool_cc #(
         .BootAddr(BootAddr)
       ) riscv_core (
@@ -301,7 +306,7 @@ module mempool_tile
         .data_qamo_o   (snitch_data_qamo[c]                             ),
         .data_qdata_o  (snitch_data_qdata[c]                            ),
         .data_qstrb_o  (snitch_data_qstrb[c]                            ),
-        .data_qid_o    (snitch_data_qid[c][snitch_pkg::MetaIdWidth-1:0]),
+        .data_qid_o    (core_data_qid                                   ),
         .data_qvalid_o (snitch_data_qvalid[c]                           ),
         .data_qready_i (snitch_data_qready[c]                           ),
         .data_pdata_i  (snitch_data_pdata[c]                            ),
@@ -312,6 +317,7 @@ module mempool_tile
         .wake_up_sync_i(wake_up[c]                                     ),
         .core_events_o (/* Unused */                                   )
       );
+      assign snitch_data_qid[c] = meta_id_t'(core_data_qid);
     end else begin : gen_traffic_tieoff
       assign snitch_data_qaddr[c]                                      = '0;
       assign snitch_data_qwrite[c]                                     = '0;

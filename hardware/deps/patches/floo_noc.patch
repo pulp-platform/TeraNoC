@@ -65,3 +65,38 @@ index 7926162..9603c4f 100644
        end
      end
    end
+diff --git a/hardware/deps/floo_noc/hw/floo_nw_router.sv b/hardware/deps/floo_noc/hw/floo_nw_router.sv
+index a6e63b5..c93bc4b 100644
+--- a/hardware/deps/floo_noc/hw/floo_nw_router.sv
++++ b/hardware/deps/floo_noc/hw/floo_nw_router.sv
+@@ -167,4 +167,6 @@ module floo_nw_router
+       assign floo_wide_o[i].credit = wide_credit_out[i];
+       assign wide_credit_in[i] = floo_wide_i[i].credit;
+     end
++  end else begin : gen_no_credit_connections
++    assign wide_credit_in = '0;
+   end
+diff --git a/hardware/deps/floo_noc/hw/floo_router.sv b/hardware/deps/floo_noc/hw/floo_router.sv
+index e6c6a50..b3b7864 100644
+--- a/hardware/deps/floo_noc/hw/floo_router.sv
++++ b/hardware/deps/floo_noc/hw/floo_router.sv
+@@ -362,6 +362,7 @@ module floo_router
+       end
+       if (!EnMultiCast) begin : gen_unicast
+         assign cross_ready[in][v] = |(masked_ready_transposed[in][v] & route_mask[in][v]);
++        assign past_handshakes_q[in][v] = '0;
+       end else begin : gen_multicast
+         // In the case of multicast transactions, each destination can assert the ready signal
+         // independently and potentially at different clock cycles. This logic ensures that
+@@ -384,4 +385,5 @@ module floo_router
+         // Send ready upstream only when all expected downstream handhsalkes have been received
+         assign cross_ready[in][v] = &(all_handshakes[in][v] | ~expected_handshakes[in][v]);
++        `FF(past_handshakes_q[in][v], past_handshakes_d[in][v], '0)
+       end
+     end
+@@ -390,5 +392,2 @@ module floo_router
+-  // TODO (lleone): Move the folloiwng FF inside the multicast
+-  `FF(past_handshakes_q, past_handshakes_d, '0)
+-
+   // We merge the data from the reduction module as an additional input of our output arbiter.
+   logic [NumOutput-1:0][NumVirtChannels-1:0][LocalNumInputs-1:0] merged_valid, merged_ready;

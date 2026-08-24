@@ -1,0 +1,40 @@
+diff --git a/hardware/deps/hwpe-ctrl/rtl/hwpe_ctrl_regfile.sv b/hardware/deps/hwpe-ctrl/rtl/hwpe_ctrl_regfile.sv
+index fee5b9b..7c1ba4f 100644
+--- a/hardware/deps/hwpe-ctrl/rtl/hwpe_ctrl_regfile.sv
++++ b/hardware/deps/hwpe-ctrl/rtl/hwpe_ctrl_regfile.sv
+@@ -122,7 +122,7 @@ module hwpe_ctrl_regfile
+       .BIST       ( 1'b0                            ),
+-      .CSN_T      (                                 ),
+-      .WEN_T      (                                 ),
+-      .A_T        (                                 ),
+-      .D_T        (                                 ),
+-      .BE_T       (                                 ),
++      .CSN_T      ( 1'b1                            ),
++      .WEN_T      ( 1'b1                            ),
++      .A_T        ( '0                              ),
++      .D_T        ( '0                              ),
++      .BE_T       ( '0                              ),
+       .Q_T        (                                 )
+@@ -306,3 +306,4 @@ module hwpe_ctrl_regfile
+   assign regfile_mem_mandatory[REGFILE_MANDATORY_SOFTCLEAR] = '0;
+   assign regfile_mem_mandatory[REGFILE_MANDATORY_FINISHED] = r_finished_cnt;
++  assign regfile_mem_mandatory[REGFILE_MANDATORY_SWEVT] = '0;
+   // Extension
+@@ -311,4 +312,4 @@ module hwpe_ctrl_regfile
+   // Assign Extension to external flag for access. Registered on demand
+   generate
+-    if (~EXT_IN_REGGED) begin : gen_assign_ext
++    if (!EXT_IN_REGGED) begin : gen_assign_ext
+         assign reg_file.ext_data = regfile_mem_mandatory[REGFILE_MANDATORY_RESERVED];
+diff --git a/hardware/deps/hwpe-ctrl/rtl/hwpe_ctrl_slave.sv b/hardware/deps/hwpe-ctrl/rtl/hwpe_ctrl_slave.sv
+index b76ac57..4814415 100644
+--- a/hardware/deps/hwpe-ctrl/rtl/hwpe_ctrl_slave.sv
++++ b/hardware/deps/hwpe-ctrl/rtl/hwpe_ctrl_slave.sv
+@@ -276,6 +276,6 @@ module hwpe_ctrl_slave
+   // If inputs registered: also register flags
+   generate
+-    if (~EXT_IN_REGGED) begin : gen_assign_ext
++    if (!EXT_IN_REGGED) begin : gen_assign_ext
+       assign flags_o.ext_we       = regfile_flags.ext_we;
+       assign flags_o.ext_re       = regfile_flags.ext_re;
+       assign flags_o.ext_id       = ext_id_n;

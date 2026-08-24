@@ -57,6 +57,13 @@ index f028c90..efc7a44 100644
    assign y_height = y_cols_iter_q == reg_file_i.hwpe_params[W_ITERS][15:0]-1 && reg_file_i.hwpe_params[LEFTOVERS][7:0] != '0 ? reg_file_i.hwpe_params[LEFTOVERS][7:0] : D;
  
    always_ff @(posedge clk_i or negedge rst_ni) begin : z_width_register
+@@ -518,4 +522,4 @@ module redmule_scheduler
+     if (computing && ~stall_engine) begin
+-      for (int i = 0; i < z_width; i++) begin
+-        row_clk_en_d[i] = 1'b1;
++      for (int i = 0; i < W; i++) begin
++        if (i < z_width) row_clk_en_d[i] = 1'b1;
+       end
 @@ -559,17 +563,24 @@ module redmule_scheduler
    // Check if the new Y rows are loaded and ready to be pushed
    // Only enable this check when the results of an iteration are available

@@ -297,6 +297,7 @@ module snitch_redmule_cc
   assign tcdm.resp_id = redmule_resp[0].id[
       idx_width(RMRobDepth) +: idx_width(RMNumStreams)];
   assign tcdm.resp_user = redmule_resp[0].id[idx_width(RMRobDepth)-1:0];
+  assign tcdm.resp_opc  = 1'b0;
 
   rm_dreq_t [RMMasterPorts-1:0] redmule_req_q;
   logic [RMMasterPorts-1:0] redmule_req_qvalid;
