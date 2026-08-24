@@ -11,7 +11,7 @@ Two habits this file exists to enforce:
   * record the spotcheck GROUP COUNT, not just presence. A perf number with no correctness
     signal is not a result; a kernel that computes garbage faster still wins a sweep.
 """
-import os, re, sys
+import json, os, re, sys
 
 ROOT = "/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC"
 OUT  = os.path.join(ROOT, "docs/benchmarks/8x8_scaleup/results.tsv")
@@ -22,6 +22,9 @@ HDR  = ("shape\tprec\tA_share\tcycles\tfpu_util\tRH\tmshr_timeout\tbankfull"
 def a_share(M):
     # at 8x8 the A-row sharing degree is set by M alone
     return {512: 16, 1024: 8, 2048: 4, 4096: 2}.get(M, 1)
+
+_MESH_NEW = {}          # arm -> per-period per-group utilisation, filled by scrape() below
+
 
 def scrape(arm):
     t = os.path.join(ROOT, "hardware", "s8_" + arm, "transcript")
@@ -97,6 +100,22 @@ def scrape(arm):
             num += sum(v); den += int(m.group(2)) * len(v); recon_w += 1
         if den:
             util = 100.0 * num / den
+    # PER-GROUP MESH DATA, from this SAME read. extract_group_util.py scrapes the transcript on its
+    # own cycle and loses the race whenever badist overwrites a finished transcript with a
+    # duplicate's partial one first: fp16_1024x1024x512 and fp16_2048x64x256 each hold a results
+    # row and NO mesh data, permanently, for exactly that reason. Deriving both from one read makes
+    # the two outputs consistent by construction.
+    _m = []
+    for _g in re.finditer(rb"^\[FPUG\]\s+(\w+)\s+cyc=(\d+)\s+denom=(\d+)\s+busy=\s*([0-9,\s]+)",
+                          txt, re.M):
+        if _g.group(1) != b"bench":
+            continue
+        _den = int(_g.group(3))
+        _v = [int(x) for x in _g.group(4).split(b",") if x.strip()]
+        if _den > 0 and len(_v) == 64:
+            _m.append({"cyc": int(_g.group(2)), "u": [round(100.0 * x / _den, 1) for x in _v]})
+    if _m:
+        _MESH_NEW[arm] = _m
     return dict(state="done", cycles=int(cyc[-1]), rh=txt.count(b"RH STUCK"),
                 tmo=tot("mshr_timeout"), bf=tot("bankfull_bypass"), spot=spot,
                 util=util, util_recon=(u is None and util is not None), recon_w=recon_w,
@@ -184,10 +203,33 @@ def main():
               "mshr_cfg.h cohort-target bug, not the architecture: %s"
               % (len(livelocked), ", ".join(sorted(livelocked))))
     rows.sort(key=lambda s: int(s.split("\t")[3]))
-    with open(OUT, "w") as f:
+    # ATOMIC: two results loops run concurrently (both agents), and a torn write to this file
+    # would corrupt the campaign's durable record -- the one thing that survives transcript loss.
+    # Same-directory temp + os.replace is atomic on POSIX, so a reader sees old or new, never half.
+    tmp = OUT + ".tmp%d" % os.getpid()
+    with open(tmp, "w") as f:
         f.write(HDR + "\n")
         for r in rows:
             f.write(r + "\n")
+    os.replace(tmp, OUT)
+    # Merge the mesh data forward, never regenerate blind -- same hazard as the rows above, and
+    # written atomically for the same reason.
+    if _MESH_NEW:
+        gpath = os.path.join(ROOT, "docs/benchmarks/8x8_scaleup/group_util.json")
+        try:
+            gu = json.load(open(gpath))
+        except Exception:
+            gu = {}
+        before = len(gu)
+        gu.update(_MESH_NEW)
+        gtmp = gpath + ".tmp%d" % os.getpid()
+        try:
+            with open(gtmp, "w") as f:
+                json.dump(gu, f)
+            os.replace(gtmp, gpath)
+            print("  mesh data: %d arm(s) (+%d new this pass)" % (len(gu), len(gu) - before))
+        except OSError:
+            pass
     # Report the FILE's total, not just what this pass scraped. Since the merge was added, a row
     # can be carried forward from an earlier pass whose transcript has since been destroyed, so
     # `ndone` understates the campaign and the results loop -- which greps this line -- reported
