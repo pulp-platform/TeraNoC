@@ -189,3 +189,47 @@ the per-arm scrape.
 - **"dead at ~27k cycles, everything after is a spinning simulator"** — it is crawling, not dead:
   utilisation oscillates 0.0–0.2% and entries cycle in and out of hold ~46 times each.
 - **"a wall-clock timeout is the wrong detector"** — still true, and §5 gives a better one.
+
+## 7. The 4095 experiment — PRELIMINARY, and negative
+
+2026-08-24. 26 arms re-run with `serve_timeout` and `hold_window_single` at **4095** instead of
+2047, to test whether a longer window lets the cohort assemble. Needed an RTL change, not just a
+CSR write: `MshrCfgHoldCntMax/W` were 2047/11 and the CSR path **refuses** anything above the max
+(`mempool_group_mshr_cfg.sv` `cnt_ok`, :129), so a 4095 write against the old build kept the reset
+default and set the sticky RANGE bit — an arm that looks configured and is not. Widened to 4095/12;
+images `build_{vcs,q}_8x8_w4`. Confirmed accepted at runtime: `[MSHRCFG] all 64 groups ENABLED`
+with **zero RANGE** on 11 arms.
+
+**It does not help.** Three independent lines, all still mid-flight:
+
+1. **Six of six matched pairs are indistinguishable.** Cumulative utilisation at equal windows past
+   benchmark-open: 0.01/0.01, 0.02/0.02, 0.03/0.02, 0.02/0.03, 0.02/0.02, 0.01/0.01 (4095/2047).
+   Scatter below the counter's resolution.
+2. **The pre-phase costs +36%.** `[MSHRCFG]` at cyc 32,213 vs the baseline's 23,606 on
+   `fp16_1024x128x128` — the I$ warm-up runs the same kernel, so its loads pay the longer window too.
+3. **Arms cross the livelock threshold anyway**, and that understates it: the RH>1000 threshold was
+   calibrated at 2047, and 4095 halves the episode count for identical stalling (§7a).
+
+Which is what §3's arithmetic predicted: at a median inter-arrival of ~2,900 cycles, 4095 moves
+expected extra arrivals per window from 0.42 to ~0.84, when a 16-cohort needs 15.
+
+### 7a. The RH count is NOT comparable across hold windows
+
+The probe fires once per hold **episode**, and an episode ends when the entry leaves hold, so the
+count scales as `1/hold_duration` for the same stalling. Measured on `fp16_1024x128x128`, first
+2800 benchmark cycles: **257 episodes at 2047 vs 73 at 4095 — 3.5x fewer — at an IDENTICAL 0.04%
+utilisation.** Read as an improvement that is exactly backwards. RH stays valid *within* one config
+(single digits healthy, 10^5 livelocked); across configs rank on cycles and utilisation only.
+
+### 7b. What the arithmetic says to try instead
+
+Lower the target so the observed timing can actually deliver it — the opposite direction:
+
+| target | window needed | window in place |
+|---:|---:|---:|
+| 2 | ~2,800 | 2,047 |
+| 4 | ~8,400 | 2,047 |
+| 16 | ~41,800 | 2,047 |
+
+**Target 2 is nearly reachable with the existing 2047**, needs no RTL change and no new image —
+`hold_subs_single` is a CSR the software already writes.
