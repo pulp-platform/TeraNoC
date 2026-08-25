@@ -5,6 +5,7 @@ Writes /tmp/claude-620771/s8_ladder.html (the path the published artifact is red
 keep it, a new path would claim a new URL and orphan the existing link).
 """
 import glob, html, json, os, re, subprocess, sys
+import time
 
 ROOT = "/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC"
 OUT  = "/tmp/claude-620771/s8_ladder.html"
@@ -349,7 +350,17 @@ def main():
     # briefly exceed the total.
     live_n = len({f[1] + "_" + f[0] for f in LIVELOCKED} - _have)
     q    = max(0, tot - done - live_n - run - fail)
-    stamp = subprocess.run(["date", "+%H:%M"], capture_output=True, text=True).stdout.strip()
+    # Stamp from the newest INPUT, not from wall-clock. A wall-clock stamp changes on every
+    # regeneration, so the output is never byte-identical and "did anything actually change?"
+    # cannot be answered by comparing two runs -- which is exactly the check that decides whether
+    # a republish is worth doing. Two monitors firing for one arm both said REPUBLISH on
+    # 2026-08-25 and the only diff between the two pages was this line.
+    _ins = ["docs/benchmarks/8x8_scaleup/results.tsv",
+            "docs/benchmarks/8x8_scaleup/run_progress.json",
+            "docs/benchmarks/8x8_scaleup/group_util.json"]
+    _mt = [os.path.getmtime(os.path.join(ROOT, f)) for f in _ins
+           if os.path.exists(os.path.join(ROOT, f))]
+    stamp = time.strftime("%H:%M", time.localtime(max(_mt))) if _mt else "--:--"
 
     h = ['<title>8&times;8 Scale-Up Campaign</title>',
          '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?'
