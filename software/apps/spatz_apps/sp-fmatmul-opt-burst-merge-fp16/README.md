@@ -1,9 +1,38 @@
-# sp-fmatmul-opt-burst-merge
+# sp-fmatmul-opt-burst-merge-fp16
 
-Burst-optimized `float32` matrix multiply (C = A·B, α=0) for TeraNoC + Spatz.
+**This is `sp-fmatmul-opt-burst-merge` with the element type changed to fp16, and nothing
+else.** It is a verbatim copy of that app; the only differences in the kernel are
 
-Each core computes a tile of C with an LMUL=2 inner loop (`vsetvli e32, m2`,
-**VL = 32 elements = 128 bytes** per B-row vector load). The Spatz VLSU
+| in the fp32 parent | here |
+|---|---|
+| `float` | `_Float16` (via `elem_t`) |
+| `vsetvli … e32, m2` | `vsetvli … e16, m2` |
+| `vle32.v` / `vse32.v` | `vle16.v` / `vse16.v` |
+
+Control flow, unrolling, register allocation, the group barrier, the p-loop rendezvous and
+every MSHR interaction are untouched, so a cycle difference against the parent is attributable
+to precision alone.
+
+**LMUL is deliberately NOT changed.** `e16,m2` is 64 elements = **128 bytes**, exactly the byte
+count of the parent's `e32,m2`, so each vector load still splits into the same two 16-word
+(64-byte) bursts and the group MSHR sees an identical burst stream — twice the arithmetic per
+byte fetched, with the memory side held constant. Raising LMUL to recover element count would
+break that and, at `e16,m8` (512 B), would silently exceed the `NrOutstandingLoads × 4` = 256 B
+burst-eligibility ceiling and drop off the burst path entirely.
+
+**Requires `spatz_vlsu_burst_ew16=1`** to burst at all: the VLSU gates the port-0 burst path on
+`vsew == EW_32` unless that knob is set. Built with the knob at 0 the kernel still runs and is
+still correct — it just takes the non-burst path, which is the intended control arm.
+
+`_Float16`, not `__fp16`: only the former is a native arithmetic type on this target, so only it
+can bind to the `"f"` asm operand the `vfmacc.vf` broadcast needs.
+
+---
+
+Burst-optimized matrix multiply (C = A·B, α=0) for TeraNoC + Spatz.
+
+Each core computes a tile of C with an LMUL=2 inner loop (`vsetvli e16, m2`,
+**VL = 64 elements = 128 bytes** per B-row vector load). The Spatz VLSU
 auto-splits each aligned 128-byte unit-stride load into **2 × 16-word
 (64-byte) burst requests** on the NoC, and the per-group MSHR can coalesce the
 identical B-row loads issued by sibling cores. This kernel exists to exercise
@@ -17,7 +46,7 @@ that VLSU-burst + group-MSHR-merge path under a realistic GEMM.
 
 ## Matrix dimensions & system config
 
-- **M = N = P = 256** — A:256×256, B:256×256, C:256×256, all `float32`
+- **M = N = P = 256** — A:256×256, B:256×256, C:256×256, all `_Float16`
   (from `script/matmul.json`; `data/data_*.h` is generated and git-ignored).
   α = 0, so the true result is plain A·B and `gemm_checksum` holds the true
   per-row sums (the `gemm_C_dram` array is a random accumulate-init, **not** a
@@ -87,7 +116,7 @@ column-strips, i.e. a larger per-core P-tile — see "tuning" below.)
 
 For a core with `m_start=0, m_end=8, p_start=0, p_end=32` (kernel/sp-fmatmul.c):
 
-- **p-loop**: one iteration — `vsetvli e32, m2` with `vl = p_end-p = 32`
+- **p-loop**: one iteration — `vsetvli e16, m2` with `vl = p_end-p = 32`
   ⇒ `gvl = 32` covers all 32 columns.
 - **m-loop**: one iteration — 8 rows.
 - **n-loop**: `n = 0 .. N-1 = 255`, unrolled by 2 with a B-row ping-pong

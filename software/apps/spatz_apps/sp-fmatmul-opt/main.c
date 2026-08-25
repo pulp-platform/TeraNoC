@@ -234,7 +234,7 @@ int main() {
         1000 * 2 * gemm_l.M * gemm_l.P * gemm_l.N / timer;
     long unsigned int utilization = performance / (2 * active_cores * N_FPU);
 
-    printf("\n----- (%dx%d) sp fmatmul -----\n", gemm_l.M, gemm_l.P);
+    printf("\n----- (%dx%dx%d) sp fmatmul -----\n", gemm_l.M, gemm_l.N, gemm_l.P);
     printf("The execution took %u cycles.\n", timer);
     printf("The performance is %u OP/1000cycle (%u%%o utilization).\n",
            performance, utilization);

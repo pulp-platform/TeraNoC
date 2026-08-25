@@ -1,0 +1,15 @@
+// Re-measurement arm for the GVSOC calibration anchors (2026-08-19).
+// The 2026-08-03 golden table was measured on pre-drift RTL; this rebuilds the
+// identical program at 128x128x512 so it can be re-run on today's tree.
+// main.c and kernel/ are byte-identical to sp-fmatmul-gvsoc-probe.
+{
+    kernel: "GEMM"
+    M: 128,
+    N: 128,
+    P: 512,
+    alpha: 0,
+    transpose_A: false,
+    transpose_B: false,
+    prec: 32,
+    expand: 0
+}
