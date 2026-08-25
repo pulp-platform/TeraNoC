@@ -103,27 +103,29 @@ def main():
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">""")
     H.append("""<style>
 :root{
-  --ground:#f4f5f7; --panel:#ffffff; --line:#dcdfe6; --line-soft:#e9ebf0;
-  --ink:#171a22; --ink-2:#4a5163; --ink-3:#767d8f;
-  --accent:#b4642f;            /* copper: efficiency, the one number that matters */
-  --fp16:#3f6f9e; --fp32:#6f5f96;
-  --good:#357a5b; --warn:#a8792c; --bad:#a2453d;
-  --track:#e6e9ef;
+  --ground:#f4f6f7; --panel:#ffffff; --line:#d8dee1; --line-soft:#e4e9ec;
+  --ink:#0e1418; --ink-2:#5a6b75; --ink-3:#7d8b93;
+  --accent:#d98324;
+  --fp16:#1f6f8b; --fp32:#7d8b93;
+  --good:#1f7a5c; --warn:#d98324; --bad:#b3382c; --wait:#7d8b93; --track:#e4e9ec;
+  --shadow:0 1px 2px rgba(14,20,24,.06);
   --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
   --sans:"IBM Plex Sans",system-ui,-apple-system,Segoe UI,sans-serif;
   --cond:"IBM Plex Sans Condensed","IBM Plex Sans",system-ui,sans-serif;
 }
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
-  --ground:#0f1219; --panel:#161a24; --line:#2a3040; --line-soft:#212736;
-  --ink:#e8eaf0; --ink-2:#a8b0c2; --ink-3:#79839a;
-  --accent:#d98950; --fp16:#6fa3d4; --fp32:#a08fd0;
-  --good:#5cb389; --warn:#d4a955; --bad:#d4756a; --track:#232936;
+  --ground:#0e1418; --panel:#161e23; --line:#26313a; --line-soft:#1e272d;
+  --ink:#e6edf1; --ink-2:#8aa0ad; --ink-3:#6b7d88;
+  --accent:#e8a04e; --fp16:#4fa3c4; --fp32:#8aa0ad;
+  --good:#3fa37c; --warn:#e8a04e; --bad:#d9614f; --wait:#6b7d88; --track:#1e272d;
+  --shadow:0 1px 2px rgba(0,0,0,.35);
 }}
 :root[data-theme="dark"]{
-  --ground:#0f1219; --panel:#161a24; --line:#2a3040; --line-soft:#212736;
-  --ink:#e8eaf0; --ink-2:#a8b0c2; --ink-3:#79839a;
-  --accent:#d98950; --fp16:#6fa3d4; --fp32:#a08fd0;
-  --good:#5cb389; --warn:#d4a955; --bad:#d4756a; --track:#232936;
+  --ground:#0e1418; --panel:#161e23; --line:#26313a; --line-soft:#1e272d;
+  --ink:#e6edf1; --ink-2:#8aa0ad; --ink-3:#6b7d88;
+  --accent:#e8a04e; --fp16:#4fa3c4; --fp32:#8aa0ad;
+  --good:#3fa37c; --warn:#e8a04e; --bad:#d9614f; --wait:#6b7d88; --track:#1e272d;
+  --shadow:0 1px 2px rgba(0,0,0,.35);
 }
 *{box-sizing:border-box}
 body{background:var(--ground);color:var(--ink);font-family:var(--sans);
@@ -135,8 +137,8 @@ h2{font-family:var(--cond);font-weight:600;font-size:19px;letter-spacing:.01em;m
 .eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;
    color:var(--ink-3);margin:0 0 8px}
 .sub{color:var(--ink-2);font-size:14.5px;margin:0}
-.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:20px 22px;
-      display:flex;flex-direction:column;gap:14px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:20px 22px;
+      box-shadow:var(--shadow);display:flex;flex-direction:column;gap:14px}
 .hero{display:flex;flex-wrap:wrap;gap:26px;align-items:flex-end;justify-content:space-between}
 .stat{display:flex;flex-direction:column;gap:2px}
 .stat .n{font-family:var(--mono);font-weight:500;font-size:34px;color:var(--accent);
@@ -157,7 +159,7 @@ code{font-family:var(--mono);font-size:12.5px;background:var(--track);padding:1p
 .st-done{color:var(--good)} .st-running{color:var(--warn)} .st-queued{color:var(--ink-3)}
 .bar{height:6px;background:var(--track);border-radius:3px;overflow:hidden;min-width:96px}
 .bar span{display:block;height:100%;border-radius:3px}
-.b-eff{background:var(--accent)} .b-live{background:var(--warn)}
+.b-eff{background:var(--fp16)} .b-live{background:var(--wait)}
 .eff{font-family:var(--mono);font-weight:500;font-variant-numeric:tabular-nums;color:var(--accent)}
 .note{font-size:13.5px;color:var(--ink-2)}
 .note b{color:var(--ink)}
@@ -180,8 +182,10 @@ ul{margin:0;padding-left:18px} li{margin:5px 0;font-size:13.5px;color:var(--ink-
 .cell.lo{color:var(--ink-3)}
 .scale{display:flex;align-items:center;gap:7px;margin-top:9px;font-family:var(--mono);
   font-size:10px;color:var(--ink-3)}
-.scale i{flex:1;height:6px;border-radius:3px;
-  background:linear-gradient(90deg,#f0f1f4,var(--accent))}
+.scale i{flex:1;height:8px;border-radius:2px;
+  background:linear-gradient(90deg,#e8eef1,#9fc7d4,#4e94ab,#1f6f8b,#0d3f52)}
+:root:not([data-theme="light"]) .scale i{background:linear-gradient(90deg,#1b2b33,#255d72,#2f88a4,#4fa3c4,#9fd8ea)}
+:root[data-theme="dark"] .scale i{background:linear-gradient(90deg,#1b2b33,#255d72,#2f88a4,#4fa3c4,#9fd8ea)}
 .mmeta{flex:1;min-width:230px}
 .mmeta dl{display:grid;grid-template-columns:repeat(2,minmax(96px,1fr));gap:11px 18px;margin:0}
 .mmeta dt{font-family:var(--mono);font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3)}
@@ -190,7 +194,7 @@ ul{margin:0;padding-left:18px} li{margin:5px 0;font-size:13.5px;color:var(--ink-
 .prow{display:flex;align-items:center;gap:7px;font-family:var(--mono);font-size:10.5px}
 .prow .gid{color:var(--ink-3);width:26px;text-align:right}
 .prow .pb{flex:1;height:7px;background:var(--track);border-radius:3px;overflow:hidden}
-.prow .pb span{display:block;height:100%;background:var(--accent);border-radius:3px}
+.prow .pb span{display:block;height:100%;background:var(--fp16);border-radius:3px}
 .prow .pv{width:40px;text-align:right;font-variant-numeric:tabular-nums;color:var(--ink-2)}
 h3.sec{font-family:var(--mono);font-weight:500;font-size:12px;letter-spacing:.08em;
   text-transform:uppercase;color:var(--ink-3);margin:30px 0 6px}
@@ -373,11 +377,12 @@ footer{color:var(--ink-3);font-size:12px;font-family:var(--mono)}
 (function(){
  const $=i=>document.getElementById(i);
  const grid=$("mgrid"), sel=$("marm"), rng=$("mper"), pg=$("pgrid");
- function colour(u){ // single-hue ramp; light end must stay light in BOTH themes
-   const t=Math.max(0,Math.min(1,u/100));
-   const c0=[240,241,244], c1=[180,100,47];
-   return `rgb(${c0.map((v,i)=>Math.round(v+(c1[i]-v)*t)).join(",")})`;
- }
+ // Same five stops as the 8x8 campaign mesh: one hue, light -> dark. Magnitude is a
+ // sequential encoding, never a rainbow.
+ const STOPS=[[232,238,241],[159,199,212],[78,148,171],[31,111,139],[13,63,82]];
+ function colour(u){const t=Math.max(0,Math.min(100,u))/100*(STOPS.length-1);
+   const i=Math.min(STOPS.length-2,Math.floor(t)),f=t-i,a=STOPS[i],b=STOPS[i+1];
+   return `rgb(${Math.round(a[0]+(b[0]-a[0])*f)},${Math.round(a[1]+(b[1]-a[1])*f)},${Math.round(a[2]+(b[2]-a[2])*f)})`;}
  function draw(){
    const a=sel.value, d=GU[a]; if(!d) return;
    const n=d.groups, side=Math.round(Math.sqrt(n));
