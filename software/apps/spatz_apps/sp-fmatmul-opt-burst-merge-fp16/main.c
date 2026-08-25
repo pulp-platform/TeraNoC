@@ -240,6 +240,41 @@ int main() {
 #ifndef ACTIVE_GROUP_DIV
 #define ACTIVE_GROUP_DIV 1
 #endif
+
+// KERNEL_SIZE's own default lives further down, next to where it is used; hoist it here so the
+// split predicate below can see it. The later #ifndef then finds it already defined and is a
+// no-op, so the two cannot disagree.
+#ifndef KERNEL_SIZE
+#define KERNEL_SIZE 8
+#endif
+
+// WHICH WORK SPLIT: derived from the SHAPE, not chosen by hand.
+//
+// The prefill split hands each active group M/active_groups rows and each core KERNEL_SIZE of
+// them, so it can only cover M when all three hold: M divides across the groups, the per-group
+// row count is a whole number of kernel tiles, and there is at least one tile per core. When any
+// fails, the prefill path cannot express the shape -- it returns -4 or -6 at RUNTIME, which is a
+// binary that rejects its own workload. Decode shapes (M = batch, e.g. 32) fail all three.
+//
+// Deriving it here makes that unrepresentable: the shape selects the split at compile time, the
+// same way mshr_cfg.h derives the MSHR targets from GEMM_M/N/P rather than from a per-shape .mk.
+// Checked against the 8x8 campaign manifest: 0 of 248 shapes change branch (all have
+// M >= 512 = 64 groups x 8), and both decode meshes select the decode branch at M = 32.
+// The boundary is M >= NUM_GROUPS * KERNEL_SIZE: 128 at 4x4, 512 at 8x8.
+//
+// An explicit -DMATMUL_DECODE_SPLIT=0/1 still wins, for forcing a branch in an experiment.
+#ifndef MATMUL_DECODE_SPLIT
+#  define MATMUL_ACTIVE_GROUPS ((NUM_GROUPS) / (ACTIVE_GROUP_DIV))
+#  if ((GEMM_M) % (MATMUL_ACTIVE_GROUPS)) != 0
+#    define MATMUL_DECODE_SPLIT 1
+#  elif ((GEMM_M) / (MATMUL_ACTIVE_GROUPS)) < (KERNEL_SIZE)
+#    define MATMUL_DECODE_SPLIT 1
+#  elif ((((GEMM_M) / (MATMUL_ACTIVE_GROUPS)) % (KERNEL_SIZE)) != 0)
+#    define MATMUL_DECODE_SPLIT 1
+#  else
+#    define MATMUL_DECODE_SPLIT 0
+#  endif
+#endif
   const uint32_t active_groups = NUM_GROUPS / ACTIVE_GROUP_DIV;
   const uint32_t active_cores = cores_per_group * active_groups;
   const uint32_t is_core_active = cid < active_cores;
