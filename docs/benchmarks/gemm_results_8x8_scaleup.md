@@ -1,6 +1,6 @@
 # GEMM results — 8×8 mesh, 1024 cores — 248-shape scale-up campaign
 
-Generated 2026-08-25 10:58 by `scripts/gen_8x8_scaleup_doc.py`. **Re-run rather than editing.**
+Generated 2026-08-25 15:59 by `scripts/gen_8x8_scaleup_doc.py`. **Re-run rather than editing.**
 
 `eff = ideal/actual`, `ideal = M·N·P / lanes` (fp16 8192 MAC/cyc, fp32 4096). Rank on `eff`,
 not on the TB `util` column — that counter is lane *occupancy*, is not conserved across runs
@@ -13,11 +13,11 @@ of identical work, and has inverted a real ranking before.
 
 | | count |
 |---|---:|
-| measurements | **144** |
+| measurements | **148** |
 | recorded livelock (failures, excluded below) | **28** |
 | of manifest | 248 |
 
-Efficiency over the 144 measurements: **median 38.4%**, mean 39.5%, range 7.4–86.6%.
+Efficiency over the 148 measurements: **median 38.9%**, mean 40.1%, range 7.4–86.6%.
 
 ## Cohort target × P
 
@@ -26,10 +26,10 @@ on `P`. Mean efficiency by (target, P) over measurements only:
 
 | target \ P | 128 | 256 | 512 | 1024 | 2048 |
 |---:|---:|---:|---:|---:|---:|
-| **16** | — | 36.5% (7) | 46.7% (13) | 45.7% (11) | 36.6% (3) |
-| **8** | 36.6% (7) | 48.1% (12) | 57.3% (10) | 56.5% (9) | 69.1% (2) |
-| **4** | 30.7% (7) | 45.3% (7) | 56.8% (6) | 53.6% (4) | 62.0% (2) |
-| **1** | 17.5% (18) | 20.2% (14) | 28.3% (10) | 31.3% (2) | — |
+| **16** | — | 36.5% (7) | 48.3% (14) | 45.7% (11) | 36.6% (3) |
+| **8** | 36.6% (7) | 48.1% (12) | 57.3% (10) | 56.5% (9) | 66.9% (3) |
+| **4** | 36.7% (8) | 45.3% (7) | 56.8% (6) | 53.6% (4) | 62.0% (2) |
+| **1** | 17.5% (18) | 20.2% (14) | 29.6% (11) | 31.3% (2) | — |
 
 Livelock arms are excluded, so the low-target/low-P cells read better here than the
 campaign actually ran — the failures are listed separately below.
@@ -42,14 +42,14 @@ campaign actually ran — the failures are listed separately below.
 | `2048x1024x256` | fp16 | 4 | 128B | 78,437 | **83.6%** | 87.42% | 0 |
 | `1024x512x512` | fp16 | 8 | 128B | 39,928 | **82.1%** | 85.86% | 0 |
 | `1024x1024x256` | fp32 | 8 | 128B | 81,530 | **80.4%** | 84.42% | 0 |
+| `2048x1024x128` | fp32 | 4 | 128B | 83,310 | **78.7%** | 82.63% | 0 |
 | `1024x512x256` | fp32 | 8 | 128B | 43,777 | **74.9%** | 79.32% | 0 |
 | `2048x256x512` | fp16 | 4 | 256B | 44,586 | **73.5%** | 78.15% | 0 |
 | `512x1024x1024` | fp16 | 16 | 128B | 90,013 | **72.8%** | 81.26% | 0 |
 | `1024x256x512` | fp16 | 8 | 128B | 22,504 | **72.8%** | 77.60% | 0 |
 | `1024x256x2048` | fp16 | 8 | 512B | 92,345 | **71.0%** | ~79.54% | 0 |
 | `1024x512x1024` | fp16 | 8 | 256B | 93,250 | **70.3%** | 81.57% | 0 |
-| `2048x256x512` | fp32 | 4 | 512B | 93,914 | **69.8%** | 75.25% | 0 |
-| `512x512x1024` | fp16 | 16 | 128B | 47,642 | **68.8%** | 77.30% | 0 |
+| `512x2048x512` | fp32 | 16 | 128B | 186,570 | **70.3%** | 77.73% | 0 |
 
 ## Worst 12 by efficiency
 
@@ -138,8 +138,8 @@ Root cause: the per-core **B slice** `(P/SPLIT_P)*elem_bytes` is below the **64-
 | `512x256x128` | fp16 | 16 | **16B** | ~0.02% | 6048 |
 | `512x256x128` | fp32 | 16 | **32B** | ~1.81% | 291364 |
 | `512x256x256` | fp16 | 16 | **32B** | ~2.33% | 234787 |
-| `512x32x128` | fp32 | 16 | **32B** | ~0.73% | 4416 |
-| `512x32x128` | fp16 | 16 | **16B** | ~0.09% | 187020 |
+| `512x32x128` | fp32 | 16 | **32B** | ~1.33% | 231648 |
+| `512x32x128` | fp16 | 16 | **16B** | ~0.07% | 230873 |
 | `512x32x256` | fp16 | 16 | **32B** | ~1.55% | 219207 |
 | `512x512x128` | fp16 | 16 | **16B** | ~0.06% | 207909 |
 | `512x512x128` | fp32 | 16 | **32B** | ~2.06% | 189333 |
