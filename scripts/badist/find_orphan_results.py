@@ -86,6 +86,19 @@ def main():
                            capture_output=True, text=True, cwd=ROOT)
         print("  fetch %-34s rc=%d %s" % (b[:34], r.returncode,
                                           r.stdout.strip().splitlines()[-1] if r.stdout.strip() else ""))
+    # HEAL WHAT THIS DISTURBED. Fetching an old batch re-extracts its tarballs, and a job the
+    # ledger marks `done` whose archive holds a PARTIAL transcript slips past the client's
+    # dest_for rule -- that rule only blocks non-`done` jobs from overwriting a complete file.
+    # Measured: a sweep over 15 stale batches cost 8 completed sweep transcripts, all of which
+    # the vault restored in seconds. A rare manual operation should clean up after itself rather
+    # than depend on someone noticing the integrity alarm.
+    v = os.path.join(ROOT, "scripts/badist/transcript_vault.py")
+    if os.path.exists(v):
+        out = subprocess.run(["timeout", "900", "python3", v, "restore"],
+                             capture_output=True, text=True, cwd=ROOT).stdout
+        for ln in out.splitlines():
+            if "RESTORED" in ln or "restored" in ln:
+                print("  vault %s" % ln.strip())
 
 
 main()
