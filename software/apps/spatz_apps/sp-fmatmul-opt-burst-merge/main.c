@@ -240,7 +240,12 @@ int main() {
   // silently produce wrong results or out-of-bounds accesses (e.g. an odd N
   // makes the n+=2 unrolled inner loop read one B row past the matrix).
   if ((gemm_l.N % 2u) != 0u)            return -3;  // inner loop unrolls n by 2
+#if !MATMUL_DECODE_SPLIT
+  // PREFILL ONLY. The prefill scheme hands each group M/active_groups rows, so M must divide.
+  // Decode never splits M (M = batch, far below active_groups) and this check would reject
+  // every legal decode shape with -4 -- see the decode branch of STEP 2.
   if ((gemm_l.M % active_groups) != 0u) return -4;  // M rows split across groups
+#endif
 
   const uint32_t measure_iterations = 1;  // Run matmul once
 
@@ -278,6 +283,41 @@ int main() {
   //========================================================--
   // STEP 2: DISTRIBUTE WORK ACROSS CORES
   //========================================================--
+#if MATMUL_DECODE_SPLIT
+  // DECODE DISTRIBUTION -- split P (output width) and B (rows), never M.
+  //
+  // The prefill split divides M across groups first; decode has M = B = batch (32), so
+  // dim_group = M/active_groups = 0 and the prefill path returns -6. Nothing about the INNER
+  // kernel is wrong for decode -- matmul_8xVL already does scalar-A broadcast against a
+  // contiguous vector B load, which is exactly C[B][I] = A[B][D] x W[D][I] wants:
+  //     A is [B][D] row-major -> A[b][d] contiguous in d  -> scalar flh, no transpose
+  //     W is [D][I] row-major -> W[d][p:p+VL] contiguous  -> vector load, BURSTS, no transpose
+  // So only the work SPLIT changes, and no DMA transpose is needed for either operand.
+  //
+  //   row_chunk = cid % n_row_chunks      (which 8 rows of B this core owns)
+  //   p_block   = cid / n_row_chunks      (which VL-wide column slice it owns)
+  //
+  // row_chunk VARIES FASTEST ON PURPOSE. Cores sharing a p_block read the SAME W bytes, and
+  // consecutive core ids sit in the same group (hartid = (group<<4)|tile), so those cores land
+  // together and the group MSHR burst-merges their identical W loads -- W leaves L2 once, not
+  // n_row_chunks times. Reversing the two would scatter them across groups and lose that.
+  const uint32_t n_row_chunks = gemm_l.M / kernel_size;      // B / 8
+  const uint32_t n_p_blocks   = active_cores / n_row_chunks;
+
+  // Uniform across cores -- safe to return before the work barrier.
+  if (n_row_chunks == 0u || (gemm_l.M % kernel_size) != 0u) return -6;
+  if (n_p_blocks == 0u || (active_cores % n_row_chunks) != 0u) return -7;
+  if ((gemm_l.P % n_p_blocks) != 0u) return -5;
+
+  const uint32_t row_chunk = cid % n_row_chunks;
+  const uint32_t p_block   = cid / n_row_chunks;
+  const uint32_t p_span    = gemm_l.P / n_p_blocks;
+
+  m_start = row_chunk * kernel_size;
+  m_end   = m_start + kernel_size;
+  p_start = p_block * p_span;
+  p_end   = p_start + p_span;
+#else
   // Divide the M dimension (rows) among groups
   const uint32_t dim_group = gemm_l.M / active_groups;
   
@@ -313,6 +353,7 @@ int main() {
     m_start = dim_group * gid + (dim_group / cores_per_group) * core_gid;
     m_end   = dim_group * gid + (dim_group / cores_per_group) * (core_gid + 1);
   }
+#endif
 
   // Wait for all cores to finish work distribution
   mempool_barrier(num_cores);

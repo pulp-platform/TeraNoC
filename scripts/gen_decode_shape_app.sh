@@ -16,7 +16,13 @@ set -u
 B=$1; D=$2; I=$3; PREC=${4:-16}; S="${B}x${D}x${I}"
 ROOT=/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC
 APPS=$ROOT/software/apps/spatz_apps
-SRC=$APPS/sp-decode-gemm-fp16
+# ONE source for both schemes. The decode kernel is the PREFILL kernel: kernel/sp-fmatmul.c is
+# byte-identical and main.c differed in only two places -- a prefill-only precondition and the
+# work-distribution block. Both are now behind MATMUL_DECODE_SPLIT in the matmul source, so there
+# is no separate decode main.c to keep in sync. Precision picks the source exactly as
+# gen_gemm_shape_app.sh does.
+if [ "$PREC" = "32" ]; then SRC=$APPS/sp-fmatmul-opt-burst-merge
+else                        SRC=$APPS/sp-fmatmul-opt-burst-merge-fp16; fi
 PFX=sp-decode
 d=$APPS/$PFX-$S
 
@@ -52,7 +58,7 @@ LOG=/tmp/claude-620771/decodebuild_${OUT_PREFIX:-}$S.log
 if (cd "$APPS" && timeout 3600 make "$PFX-$S" \
       config=${CONFIG:-terapool_spatz4_fpu} \
       group_mshr_merge_reqs=${MERGE_REQS:-16} \
-      ${MAKE_VARS:-} EXTRA_DEFINES="${EXTRA_DEFINES:-}" >"$LOG" 2>&1) \
+      ${MAKE_VARS:-} EXTRA_DEFINES="-DMATMUL_DECODE_SPLIT=1 ${EXTRA_DEFINES:-}" >"$LOG" 2>&1) \
    && [ -s "$ROOT/software/bin/apps/spatz_apps/$PFX-$S" ]; then
   OUT="$ROOT/hardware/${OUT_PREFIX:-dec_}${S}.elf"
   cp -f "$ROOT/software/bin/apps/spatz_apps/$PFX-$S" "$OUT"
