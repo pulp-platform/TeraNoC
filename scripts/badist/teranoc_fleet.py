@@ -821,7 +821,26 @@ def cmd_fetch(args):
             run_dirs[j["job_id"]] = rd
 
     def dest_for(st):
-        return run_dirs.get(st["job"])
+        """Refuse to unpack a non-`done` job over a destination that already holds a result.
+
+        Prevention, not repair. A failed job's tarball contains a partial, design-load-only
+        transcript; extracting it over a result another job delivered for the same arm destroys
+        that result. The guard below can put it back, but it has to win a race with whatever
+        else is running, and repeatedly rewriting 100+ MB files to undo work that should not
+        have happened is its own problem. Skip the extraction instead.
+
+        Only `done` jobs are exempt: a re-delivery of a genuinely completed run is legitimate,
+        and the size-and-completeness guard still adjudicates that case.
+        """
+        # State comes off the status ROW, which carries it. `read_jobs` does NOT -- its records
+        # have no `state` key at all, so reading it there yields None for every job and the
+        # check below would have skipped every re-delivery, including legitimate ones.
+        d = run_dirs.get(st["job"])
+        if d and st.get("state") != "done":
+            t = os.path.join(d, "transcript")
+            if os.path.exists(t) and _transcript_complete(t):
+                return None
+        return d
 
     with _FetchLock():
         # Global, not per-batch: see _all_run_dirs.
