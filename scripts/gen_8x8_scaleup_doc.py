@@ -115,6 +115,50 @@ def main():
         for n in sorted(byN): L.append("| %d | %d |" % (n, byN[n]))
         L += ["", "Small contraction depth, not the cohort mechanism. Distinct from the livelock and",
               "not addressed by any MSHR hold-window change.", ""]
+    # --- shapes withdrawn from the sweep ---
+    # These never produce a row anywhere else in this document: they have no result to report.
+    # Saying so explicitly is the point -- a shape that is simply absent reads as "not run yet",
+    # which is how the family attracted 26 dispatches and ~480 seat-hours before anyone added up
+    # what it had returned.
+    try:
+        import sys as _sys
+        _sys.path.insert(0, os.path.join(ROOT, "scripts/badist"))
+        from feasibility import GATED, GUI_DEBUG_SHAPE
+    except Exception:
+        GATED, GUI_DEBUG_SHAPE = set(), None
+    if GATED:
+        L += ["## Gated shapes (%d) — withdrawn from the sweep" % len(GATED), "",
+              "The **N=32 / P=2048** family. 26 dispatches across %d shapes, roughly 480 licence"
+              % len(GATED),
+              "seat-hours, and **not one completed run**. Every copy ran 59-118x over its ideal",
+              "cycle count and never reached the end of the kernel.", "",
+              "This is **not** the sub-burst livelock below: these B slices are 256-512 B, well",
+              "past the 128 B optimum, and they carry `RH = 0` and `mshr_timeout = 0`. It is the",
+              "low-N collapse -- at `N = 32` there is too little contraction work to keep a",
+              "1024-core mesh fed -- taken to the point where the shape does not finish in any",
+              "budget worth spending.", "",
+              "They are gated by name in `scripts/badist/feasibility.py`. The dispatchers block on",
+              "*evidence*, and \"never produced a number\" is not evidence they can read: with no",
+              "delivered utilisation and no RH count there was nothing to observe, so the family",
+              "stayed eligible and the top-up loops re-dispatched it indefinitely.", "",
+              "| shape | prec | B slice | role |", "|---|---|---:|---|"]
+        import re as _re
+        for a in sorted(GATED):
+            m = _re.match(r"(fp16|fp32)_(\d+)x(\d+)x(\d+)", a)
+            if not m:
+                continue
+            pr, M, P = m.group(1), int(m.group(2)), int(m.group(4))
+            role = ("**GUI debug shape** — reproduce this one interactively"
+                    if a == GUI_DEBUG_SHAPE else
+                    "cross-precision control" if a == "fp32_512x32x2048" else "gated")
+            L.append("| `%dx%sx%d` | %s | %dB | %s |"
+                     % (M, m.group(3), P, pr, burst_slice(M, P, pr), role))
+        L += ["", "`%s` is the shape to open in QuestaSim when someone debugs this collapse: the"
+              % (GUI_DEBUG_SHAPE or "-"),
+              "smallest `M` in the family, so the shortest elaboration, at the precision the decode",
+              "workload uses. `fp32_512x32x2048` is the control if the fp16 datapath itself falls",
+              "under suspicion.", ""]
+
     # --- the recorded failures ---
     if live:
         L += ["## Recorded LIVELOCK (%d) — failures, not results" % len(live), "",

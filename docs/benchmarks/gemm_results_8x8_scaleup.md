@@ -1,15 +1,11 @@
 # GEMM results — 8×8 mesh, 1024 cores — 248-shape scale-up campaign
 
-Generated 2026-08-25 08:26 by `scripts/gen_8x8_scaleup_doc.py`. **Re-run rather than editing.**
+Generated 2026-08-25 09:21 by `scripts/gen_8x8_scaleup_doc.py`. **Re-run rather than editing.**
 
 `eff = ideal/actual`, `ideal = M·N·P / lanes` (fp16 8192 MAC/cyc, fp32 4096). Rank on `eff`,
 not on the TB `util` column — that counter is lane *occupancy*, is not conserved across runs
 of identical work, and has inverted a real ranking before.
 
-> **Findings and design rules: `8x8_scaleup/FINDINGS.md`** (the 128 B B-slice rule, the N
-> curve, the three failure mechanisms, and the metric traps that produced wrong answers).
-> **Open decisions: `8x8_scaleup/OPEN_DECISIONS.md`**.
->
 > **Not comparable with `gemm_results_8x8_1024core.md`.** That file records a different sweep
 > (MSHR / response-channel, single shape 2048×512×512) whose build dirs were reclaimed.
 
@@ -85,6 +81,36 @@ campaign actually ran — the failures are listed separately below.
 
 Small contraction depth, not the cohort mechanism. Distinct from the livelock and
 not addressed by any MSHR hold-window change.
+
+## Gated shapes (5) — withdrawn from the sweep
+
+The **N=32 / P=2048** family. 26 dispatches across 5 shapes, roughly 480 licence
+seat-hours, and **not one completed run**. Every copy ran 59-118x over its ideal
+cycle count and never reached the end of the kernel.
+
+This is **not** the sub-burst livelock below: these B slices are 256-512 B, well
+past the 128 B optimum, and they carry `RH = 0` and `mshr_timeout = 0`. It is the
+low-N collapse -- at `N = 32` there is too little contraction work to keep a
+1024-core mesh fed -- taken to the point where the shape does not finish in any
+budget worth spending.
+
+They are gated by name in `scripts/badist/feasibility.py`. The dispatchers block on
+*evidence*, and "never produced a number" is not evidence they can read: with no
+delivered utilisation and no RH count there was nothing to observe, so the family
+stayed eligible and the top-up loops re-dispatched it indefinitely.
+
+| shape | prec | B slice | role |
+|---|---|---:|---|
+| `1024x32x2048` | fp16 | 512B | gated |
+| `2048x32x2048` | fp16 | 1024B | gated |
+| `512x32x2048` | fp16 | 256B | **GUI debug shape** — reproduce this one interactively |
+| `1024x32x2048` | fp32 | 1024B | gated |
+| `512x32x2048` | fp32 | 512B | cross-precision control |
+
+`fp16_512x32x2048` is the shape to open in QuestaSim when someone debugs this collapse: the
+smallest `M` in the family, so the shortest elaboration, at the precision the decode
+workload uses. `fp32_512x32x2048` is the control if the fp16 datapath itself falls
+under suspicion.
 
 ## Recorded LIVELOCK (28) — failures, not results
 

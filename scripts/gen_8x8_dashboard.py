@@ -1043,6 +1043,51 @@ hdr.querySelectorAll("th[data-c]").forEach(th=>{
                   'second, independent low-utilisation mechanism.</p>'
                   % sum(1 for r in lowN if r["N"] <= 64)]
         h += ['</section>']
+    # --- gated shapes -------------------------------------------------------------------
+    # A shape that is simply missing from every table reads as "not run yet". This family was
+    # run 26 times; it belongs on the page as a withdrawal, with the reason attached.
+    try:
+        import sys as _sys
+        _sys.path.insert(0, os.path.join(ROOT, "scripts/badist"))
+        from feasibility import GATED, GUI_DEBUG_SHAPE
+    except Exception:
+        GATED, GUI_DEBUG_SHAPE = set(), None
+    if GATED:
+        import re as _re
+        h += ['<section class="card"><h2>Gated shapes (%d) &mdash; withdrawn from the sweep</h2>'
+              % len(GATED),
+              '<p class="sub">The <b>N=32 / P=2048</b> family: 26 dispatches, roughly 480 licence '
+              'seat-hours, and <b>not one completed run</b>. Every copy ran 59&ndash;118&times; over '
+              'its ideal cycle count and never reached the end of the kernel.</p>',
+              '<p class="sub">This is <em>not</em> the sub-burst livelock &mdash; these B slices are '
+              '256&ndash;512 B, past the 128 B optimum, with <code>RH = 0</code> and '
+              '<code>mshr_timeout = 0</code>. It is the <b>low-N collapse</b>: at <code>N = 32</code> '
+              'there is too little contraction work to keep a 1024-core mesh fed. Gated by name in '
+              '<code>scripts/badist/feasibility.py</code>.</p>',
+              '<div class="tw"><table><tr><th>shape</th><th>prec</th><th class="num">B slice</th>'
+              '<th>role</th></tr>']
+        for a in sorted(GATED):
+            m = _re.match(r"(fp16|fp32)_(\d+)x(\d+)x(\d+)", a)
+            if not m:
+                continue
+            pr, M, N, P = m.group(1), int(m.group(2)), int(m.group(3)), int(m.group(4))
+            eb = 2 if pr == "fp16" else 4
+            sl = max(1, M * P * eb // 8192)
+            if a == GUI_DEBUG_SHAPE:
+                role = '<span class="nb">GUI DEBUG</span> reproduce this one interactively'
+            elif a == "fp32_512x32x2048":
+                role = 'cross-precision control'
+            else:
+                role = 'gated'
+            h += ['<tr><td><code>%dx%dx%d</code></td><td>%s</td><td class="num">%d B</td>'
+                  '<td>%s</td></tr>' % (M, N, P, pr, sl, role)]
+        h += ['</table></div>',
+              '<p class="sub"><code>%s</code> is the shape to open in QuestaSim when someone debugs '
+              'this collapse: the smallest <code>M</code> in the family, so the shortest '
+              'elaboration, at the precision the decode workload uses. '
+              '<code>fp32_512x32x2048</code> is the control if the fp16 datapath itself falls under '
+              'suspicion.</p>' % (GUI_DEBUG_SHAPE or "-"),
+              '</section>']
     h += ['</div>']
     open(OUT, "w").write("\n".join(h))
     print("  wrote %s  (%d done, %d running, %d queued, %d failed)" % (OUT, done, run, q, fail))

@@ -238,6 +238,37 @@ def _observed_util(arm):                      # kept: other callers use this nam
     return _observed(arm)[0]
 
 
+# --- explicitly gated shapes ---------------------------------------------------------------
+# The N=32 / P=2048 family. 26 dispatches across 5 shapes, ~480 licence-seat-hours, and not one
+# result: every copy runs 59-118x over its ideal cycle count and never reaches the end of the
+# kernel. This is NOT the sub-burst livelock -- their B slices are 256-512 B, comfortably past
+# the 128 B optimum, and they carry RH=0 and mshr_timeout=0. It is the low-N collapse: at N=32
+# there is too little column work to keep the mesh fed, and the shape simply does not finish in
+# any budget we are willing to spend.
+#
+# stalling() blocks on evidence, and "never produced a number" is not evidence it can read: with
+# no delivered utilisation and no RH count there is nothing to observe, so the family stayed
+# eligible and the top-up loops kept re-dispatching it forever. Gate it by name.
+#
+# GUI_DEBUG_SHAPE is kept OUT of the fleet too -- it is the shape to reproduce interactively in
+# QuestaSim when someone debugs this collapse, chosen as the smallest M in the family (shortest
+# elaboration) at the precision the decode workload uses. fp32_512x32x2048 is the cross-precision
+# control if the fp16 datapath itself falls under suspicion.
+GUI_DEBUG_SHAPE = "fp16_512x32x2048"
+
+GATED = {
+    "fp16_512x32x2048",
+    "fp16_1024x32x2048",
+    "fp16_2048x32x2048",
+    "fp32_512x32x2048",
+    "fp32_1024x32x2048",
+}
+
+
+def gated(arm):
+    return arm in GATED
+
+
 # kept as the public name the submitters already call
 def stalling(arm):
     """Hold an arm back only on EVIDENCE, never on the predicate alone.
@@ -250,6 +281,8 @@ def stalling(arm):
     So: block only an arm that BOTH matches the predicate AND has already demonstrated the stall
     (delivered utilisation under 1%). An arm with no history is always allowed to try.
     """
+    if gated(arm):
+        return True
     if not livelocked(arm):
         return False
     u, rh, state = _observed(arm)
@@ -270,6 +303,9 @@ def stall_reason(arm):
     arm the predicate matched raised KeyError and killed the top-up AND the rescuer. A function
     cannot go stale the way an empty dict did: there is no key to miss.
     """
+    if gated(arm):
+        return ("gated: the N=32/P=2048 family never completes (26 dispatches, 0 results)"
+                + ("; kept as the GUI debug shape" if arm == GUI_DEBUG_SHAPE else ""))
     m = re.match(r"^(fp16|fp32)_(\d+)x(\d+)x(\d+)$", arm or "")
     if not m:
         return "matches the RH-livelock predicate"

@@ -156,3 +156,41 @@ explained in the results doc rather than looking like missing work.
 **Recommendation: gate them, and record the six in `FINDINGS.md` §3B as a measured result** —
 "cannot complete at ~1% utilisation" is itself a finding about the low-N mechanism, and a more
 useful one than six empty cells.
+
+---
+
+## RESOLVED 2026-08-25 — Gate the N=32 / P=2048 family
+
+**Decision: gate all five shapes; keep `fp16_512x32x2048` as the GUI debug shape.**
+
+The family had taken **26 dispatches** across five shapes — roughly **480 licence
+seat-hours** — and returned **zero results**. Every copy runs 59–118x over its ideal
+cycle count and never reaches the end of the kernel.
+
+It is *not* the sub-burst livelock. These B slices are 256–512 B, past the 128 B
+optimum, and the arms carry `RH = 0` and `mshr_timeout = 0`. It is the **low-N
+collapse**: at `N = 32` there is too little contraction work to keep a 1024-core mesh
+fed.
+
+**Why it kept being re-dispatched.** `feasibility.stalling()` blocks an arm only on
+*evidence* — a delivered utilisation under 1%, or an RH episode count over 1000. A shape
+that never completes delivers neither, so there was nothing to observe and the family
+stayed eligible forever. The lesson generalises: **an evidence-based gate is blind to a
+failure whose signature is the absence of data.** Such cases have to be gated by name.
+
+Implemented as `GATED` / `GUI_DEBUG_SHAPE` in `scripts/badist/feasibility.py`; the doc
+and dashboard generators read that set directly, so the two can't drift apart.
+
+| shape | prec | B slice | role |
+|---|---|---:|---|
+| `512x32x2048` | fp16 | 256 B | **GUI debug shape** |
+| `512x32x2048` | fp32 | 512 B | cross-precision control |
+| `1024x32x2048` | fp16 | 512 B | gated |
+| `1024x32x2048` | fp32 | 1024 B | gated |
+| `2048x32x2048` | fp16 | 1024 B | gated |
+
+`fp16_512x32x2048` is the one to open in QuestaSim: smallest `M` in the family, so the
+shortest elaboration, at the precision the decode workload uses. Reach for
+`fp32_512x32x2048` only if the fp16 datapath itself falls under suspicion.
+
+Five running copies were killed when the gate went in, freeing five VCS seats.
