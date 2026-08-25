@@ -630,6 +630,78 @@ def _resolve_batch(badist, batch):
     return known[0]["batch"] if isinstance(known[0], dict) else known[0]
 
 
+_KEEP = ".transcript.fetchkeep"
+
+
+def _transcript_complete(path, tail=64 << 20):
+    """Does this transcript end in a completed run?
+
+    Reads only the last `tail` bytes -- the `execution took` banner is emitted by the
+    benchmark at the end, ~1 MB from EOF even on a 12 MB transcript. A full read of the
+    227 MB arms would make this guard too slow to run on every fetch, and a guard that
+    is too slow to run is a guard that gets removed.
+    """
+    try:
+        sz = os.path.getsize(path)
+        with open(path, "rb") as f:
+            if sz > tail:
+                f.seek(sz - tail)
+            return b"execution took" in f.read()
+    except OSError:
+        return False
+
+
+def _guard_transcripts(dests):
+    """Hardlink every already-complete transcript aside before an extraction overwrites it.
+
+    WHY: extract_batch unpacks a job's tarball straight over hardware/<prefix>_<arm>/, and
+    a FAILED job's tarball holds a partial, design-load-only transcript. Re-fetching an old
+    batch therefore destroys a good result that a later batch delivered for the same arm.
+    On 2026-08-25 a results loop re-fetching 2026-08-23 batches clobbered 50 of 138
+    completed 8x8 transcripts this way. The numbers survived only because they had already
+    been extracted into results.tsv / group_util.json / probe_archive.
+
+    A hardlink costs nothing and survives tar's unlink-and-recreate, so the old bytes are
+    still reachable after the overwrite.
+    """
+    guard = {}
+    for rd in sorted(set(dests)):
+        t = os.path.join(rd, "transcript")
+        if not os.path.exists(t) or not _transcript_complete(t):
+            continue
+        k = os.path.join(rd, _KEEP)
+        try:
+            if os.path.exists(k):
+                os.remove(k)
+            os.link(t, k)
+            guard[t] = (k, os.path.getsize(t))
+        except OSError:
+            pass
+    return guard
+
+
+def _restore_transcripts(guard):
+    """Put a complete transcript back if the extraction replaced it with a lesser one.
+
+    Restores only when the new file is BOTH shorter AND incomplete -- a genuine re-delivery
+    of the same run may differ in length without being worse.
+    """
+    restored = 0
+    for t, (k, old_size) in guard.items():
+        try:
+            if not os.path.exists(t) or (os.path.getsize(t) < old_size
+                                         and not _transcript_complete(t)):
+                os.replace(k, t)
+                restored += 1
+                warn("kept the complete transcript for %s -- the fetched one was incomplete"
+                     % os.path.basename(os.path.dirname(t)))
+            else:
+                os.remove(k)
+        except OSError:
+            pass
+    return restored
+
+
 def cmd_fetch(args):
     badist = _badist()
     batch = _resolve_batch(badist, args.batch)
@@ -654,8 +726,12 @@ def cmd_fetch(args):
     def dest_for(st):
         return run_dirs.get(st["job"])
 
+    guard = _guard_transcripts(run_dirs.values())
     out = badist.extract_batch(batch, dest_for=dest_for, verbose=not args.quiet)
+    kept = _restore_transcripts(guard)
     print("extracted %d, missing %d" % (out["extracted"], out["missing"]))
+    if kept:
+        print("protected %d complete transcript(s) from an incomplete re-fetch" % kept)
     for job, err in out.get("errors", []):
         warn("%s: %s" % (job, err))
 

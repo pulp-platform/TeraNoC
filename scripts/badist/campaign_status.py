@@ -266,13 +266,63 @@ def our_batches():
             out.append(os.path.basename(d))
     return out
 
+SETTLED = "/tmp/claude-620771/.fetch_settled.json"
+
+
+def _settled():
+    try:
+        return set(json.load(open(SETTLED)))
+    except Exception:
+        return set()
+
+
+def _batch_terminal(b):
+    """True once no job in this batch can still deliver anything new.
+
+    A batch every one of whose jobs has reached done/failed/cancelled will never produce
+    another result, so re-fetching it only decompresses gigabytes to write the same bytes --
+    or, before the client grew its transcript guard, to write WORSE bytes over a good result.
+    """
+    d = os.path.join(STATE, b)
+    try:
+        jobs = json.load(open(os.path.join(d, "jobs.json")))
+    except Exception:
+        return False
+    for j in jobs:
+        f = os.path.join(d, "jobs", j["job_id"] + ".jsonl")
+        st = None
+        try:
+            for ln in open(f):
+                try:
+                    st = json.loads(ln).get("state")
+                except Exception:
+                    pass
+        except OSError:
+            return False
+        if st not in ("done", "failed", "cancelled"):
+            return False
+    return True
+
+
 def fetch_all(batches):
     """cmd_fetch resolves exactly ONE batch (_resolve_batch), and with no --batch it takes the
     NEWEST. A campaign spanning waves therefore needs a loop -- a bare `fetch` silently delivers
-    only the last wave, leaving earlier arms' transcripts on the workers."""
+    only the last wave, leaving earlier arms' transcripts on the workers.
+
+    Fetch each settled batch ONCE. On 2026-08-25 this function re-fetched all ~40 batches every
+    pass, and a 2026-08-23 batch whose jobs had FAILED kept unpacking its partial, design-load
+    -only transcripts over results a later batch had delivered -- 50 of 138 completed 8x8
+    transcripts were clobbered that way. The client now refuses to replace a complete transcript
+    with a shorter incomplete one; this skip keeps the loop from doing the work at all.
+    """
     cl = os.path.join(ROOT, "scripts/badist/teranoc_fleet.py")
     tot = [0, 0]
+    settled = _settled()
+    skipped = 0
     for b in batches:
+        if b in settled:
+            skipped += 1
+            continue
         try:
             r = subprocess.run(["timeout", "300", cl, "fetch", b, "--quiet"],
                                capture_output=True, text=True, cwd=ROOT)
@@ -288,8 +338,15 @@ def fetch_all(batches):
                 print("  fetch %-34s rc=%d  (no counters in output)" % (b, r.returncode))
         except Exception as e:
             print("  fetch FAILED %s: %s" % (b, e))
-    print("  fetch total: extracted %d, missing %d  (missing = still running, not an error)"
-          % (tot[0], tot[1]))
+        if _batch_terminal(b):
+            settled.add(b)
+    try:
+        json.dump(sorted(settled), open(SETTLED, "w"))
+    except OSError:
+        pass
+    print("  fetch total: extracted %d, missing %d  (missing = still running, not an error)%s"
+          % (tot[0], tot[1],
+             "  [%d settled batch(es) skipped]" % skipped if skipped else ""))
 
 def main():
     verbose = "--verbose" in sys.argv
