@@ -183,7 +183,7 @@ def main():
                           # design-load before the next begins.
                           "--run-prefix", "s8", "--name", "s8heal", "--max-parallel", "6",
                           "--mem-gb", "18", "--est-runtime-s", "90000",
-                          "--timeout-s", "172800", "--force"],
+                          "--timeout-s", "2592000", "--force"],
                          cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                          text=True, start_new_session=True)
     try:

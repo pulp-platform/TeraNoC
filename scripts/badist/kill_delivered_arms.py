@@ -7,9 +7,13 @@ overwrite a good transcript with a worse one. This finds those copies and kills 
 Discipline, in order -- every step exists because skipping it destroyed data before:
   1. The delivered transcript must contain `execution took` (a complete run), else it is not
      a result and the running copy is the only chance of getting one.
-  2. The delivered result must PREDATE the running job's start. If the transcript was written
-     after the job began, that transcript IS this job's own output -- the ledger simply has not
-     caught up -- and there is nothing redundant to reclaim.
+  2. Some OTHER job of the same arm must be able to account for that result -- a sibling in
+     state `done`, or a sibling whose result archive holds a complete transcript. That is
+     positive proof the transcript did not come from the copy about to be killed. An earlier
+     version compared the transcript's mtime against the job start instead; restoring the 50
+     transcripts a stale re-fetch had clobbered reset every mtime to `now`, which under that
+     rule made all 100 running arms look like their own producer. Provenance has to come from
+     the ledger and the archives, never from a timestamp anything else may touch.
   3. Never touch a batch this campaign did not create (another agent shares the fleet).
   4. Back the transcript up before the kill and restore if a partial gather lands on it.
      `badist` gathers the run dir when a job dies, so killing writes a design-load-only
@@ -17,14 +21,14 @@ Discipline, in order -- every step exists because skipping it destroyed data bef
 
   usage: kill_delivered_arms.py [--dry-run]
 """
-import glob, json, os, shutil, subprocess, sys, collections, time
+import glob, json, os, shutil, subprocess, sys, collections, time, tempfile
 
 ROOT   = "/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC"
 STATE  = os.path.expanduser("~/badist/state")
 SEEN   = "/tmp/claude-620771/delivered_killed.json"
 MINE   = ("s8auto", "s8heal", "s8rescue", "s8qtop", "s8vtop", "s8big", "s8rehome",
           "s8requeue", "s8vfill", "s8orph", "s8rq", "s8vcs", "s8q-", "s8q2", "teranoc")
-GRACE  = 900   # s: a result written within 15 min of the job start is treated as the job's own
+RESULTS = "/usr/scratch/fenga1/zexifu/badist-results"
 
 
 def running_jobs():
@@ -69,6 +73,65 @@ def delivered(arm):
         return None
 
 
+def siblings(arm):
+    """Every (batch, job_id, last_state) recorded for this arm, across all batches."""
+    out = []
+    for d in sorted(glob.glob(os.path.join(STATE, "*"))):
+        jf = os.path.join(d, "jobs.json")
+        if not os.path.exists(jf):
+            continue
+        try:
+            jobs = json.load(open(jf))
+        except Exception:
+            continue
+        for j in jobs:
+            if (j.get("meta") or {}).get("arm", "") != arm:
+                continue
+            f = os.path.join(d, "jobs", j["job_id"] + ".jsonl")
+            st = None
+            try:
+                for ln in open(f):
+                    try:
+                        st = json.loads(ln).get("state")
+                    except Exception:
+                        pass
+            except OSError:
+                pass
+            out.append((os.path.basename(d), j["job_id"], st))
+    return out
+
+
+def other_produced_it(arm, batch, jid):
+    """Can a job OTHER than (batch, jid) account for the delivered transcript?
+
+    Two acceptable proofs, cheapest first: a sibling the ledger marks `done`, or a sibling
+    whose result archive actually contains a complete transcript. The second matters because
+    a job can deliver and still never have its ledger state flipped -- six arms of this
+    campaign are in exactly that state.
+    """
+    sibs = [s for s in siblings(arm) if (s[0], s[1]) != (batch, jid)]
+    for b, j, st in sibs:
+        if st == "done":
+            return "sibling %s/%s is done" % (b[:22], j)
+    for b, j, _ in sibs:
+        tar = os.path.join(RESULTS, b, j + ".tar.zst")
+        if not os.path.exists(tar):
+            continue
+        with tempfile.TemporaryDirectory() as td:
+            try:
+                p1 = subprocess.Popen(["zstd", "-dcq", tar], stdout=subprocess.PIPE,
+                                      stderr=subprocess.DEVNULL)
+                subprocess.run(["tar", "-xf", "-", "-C", td, "transcript"], stdin=p1.stdout,
+                               check=True, timeout=600, stderr=subprocess.DEVNULL)
+                p1.wait()
+                f = os.path.join(td, "transcript")
+                if os.path.exists(f) and b"execution took" in open(f, "rb").read():
+                    return "archive %s/%s holds a complete transcript" % (b[:22], j)
+            except Exception:
+                pass
+    return None
+
+
 def main():
     dry = "--dry-run" in sys.argv
     try:
@@ -80,7 +143,6 @@ def main():
         dv = delivered(arm)
         if not dv or not dv[0]:
             continue
-        _, dmtime = dv
         for ts, batch, jid, node in sorted(copies):
             key = "%s/%s" % (batch, jid)
             if key in seen:
@@ -88,14 +150,15 @@ def main():
             if not batch.startswith(MINE):
                 print("  FOREIGN %-22s %s/%s -- not ours, leaving it" % (arm, batch[:24], jid))
                 continue
-            # Step 2: is the result this job's own output?
-            if dmtime > ts + GRACE:
-                print("  OWN     %-22s result written %.0f min AFTER job start -- this job's own"
-                      % (arm, (dmtime - ts) / 60.0))
+            # Step 2: prove another job produced the delivered result.
+            why = other_produced_it(arm, batch, jid)
+            if not why:
+                print("  UNPROVEN %-21s no sibling accounts for the result -- leaving it running"
+                      % arm)
                 skipped += 1
                 continue
-            print("  DONE    %-22s kill %s/%s on %-10s (result delivered %.1f h before start)"
-                  % (arm, batch[:22], jid, node, (ts - dmtime) / 3600.0))
+            print("  DONE    %-22s kill %s/%s on %-10s (%s)"
+                  % (arm, batch[:22], jid, node, why))
             killed += 1
             if dry:
                 continue
