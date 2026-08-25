@@ -32,6 +32,7 @@ from __future__ import print_function
 
 import argparse
 import json
+import time
 import os
 import re
 import subprocess
@@ -631,6 +632,54 @@ def _resolve_batch(badist, batch):
 
 
 _KEEP = ".transcript.fetchkeep"
+_FETCH_LOCK = "/tmp/claude-620771/.teranoc_fetch.lock"
+
+
+class _FetchLock(object):
+    """Serialise extractions across every process that fetches.
+
+    The transcript guard links a good file aside, lets the extraction run, then restores.
+    Two fetches interleaved on the same run dir defeat that: the second guard pass deletes
+    the first's keepfile and re-links the clobbered transcript, so the only complete copy
+    disappears. Several loops call `fetch`, so the lock is not optional.
+    """
+
+    def __init__(self, timeout=1800):
+        self.timeout = timeout
+        self.fh = None
+
+    def __enter__(self):
+        import fcntl
+        d = os.path.dirname(_FETCH_LOCK)
+        try:
+            os.makedirs(d, exist_ok=True)
+        except OSError:
+            pass
+        try:
+            self.fh = open(_FETCH_LOCK, "w")
+        except OSError:
+            return self                      # no lock file: proceed rather than block a fetch
+        deadline = time.time() + self.timeout
+        while True:
+            try:
+                fcntl.flock(self.fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return self
+            except IOError:
+                if time.time() > deadline:
+                    warn("another fetch has held the lock for %ds -- proceeding without it"
+                         % self.timeout)
+                    return self
+                time.sleep(2)
+
+    def __exit__(self, *a):
+        if self.fh:
+            try:
+                import fcntl
+                fcntl.flock(self.fh, fcntl.LOCK_UN)
+                self.fh.close()
+            except Exception:
+                pass
+        return False
 
 
 def _transcript_complete(path, tail=64 << 20):
@@ -680,6 +729,34 @@ def _guard_transcripts(dests):
     return guard
 
 
+def _recover_orphans(dests):
+    """Salvage a keepfile left behind by a fetch that was interrupted mid-extraction.
+
+    _guard_transcripts links the good transcript aside and _restore_transcripts puts it back,
+    but a fetch killed between the two leaves the clobbered transcript in place next to a
+    keepfile holding the only complete copy. Left alone, the NEXT fetch would guard the
+    clobbered file, delete that keepfile, and destroy the last copy -- so recover before
+    guarding, never after.
+    """
+    n = 0
+    for rd in sorted(set(dests)):
+        k = os.path.join(rd, _KEEP)
+        t = os.path.join(rd, "transcript")
+        if not os.path.exists(k):
+            continue
+        try:
+            if _transcript_complete(k) and not _transcript_complete(t):
+                os.replace(k, t)
+                n += 1
+                warn("recovered %s from a keepfile left by an interrupted fetch"
+                     % os.path.basename(rd))
+            elif os.path.exists(t) and os.path.samefile(k, t):
+                os.remove(k)
+        except OSError:
+            pass
+    return n
+
+
 def _restore_transcripts(guard):
     """Put a complete transcript back if the extraction replaced it with a lesser one.
 
@@ -726,9 +803,15 @@ def cmd_fetch(args):
     def dest_for(st):
         return run_dirs.get(st["job"])
 
-    guard = _guard_transcripts(run_dirs.values())
-    out = badist.extract_batch(batch, dest_for=dest_for, verbose=not args.quiet)
-    kept = _restore_transcripts(guard)
+    with _FetchLock():
+        rescued = _recover_orphans(run_dirs.values())
+        if rescued:
+            print("recovered %d transcript(s) from an interrupted earlier fetch" % rescued)
+        guard = _guard_transcripts(run_dirs.values())
+        try:
+            out = badist.extract_batch(batch, dest_for=dest_for, verbose=not args.quiet)
+        finally:
+            kept = _restore_transcripts(guard)
     print("extracted %d, missing %d" % (out["extracted"], out["missing"]))
     if kept:
         print("protected %d complete transcript(s) from an incomplete re-fetch" % kept)
