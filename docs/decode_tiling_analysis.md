@@ -73,9 +73,56 @@ KS sets rows of B per core, so it trades per-core W reuse against tile footprint
 | 2 | 2x | 4096 | 512 |
 | 1 | 1x | 2048 | 1024 |
 
-**KS=4 is the interesting point:** it reaches D_tile=256's efficiency *and* keeps double
-buffering, at half the register-level W reuse. Whether that nets out is an experiment, not a
-derivation -- one A/B pair at fixed I_tile settles it.
+### KS is a REQUIREMENT at 8x8, not an optimisation
+
+At 8x8 with KS=8, `n_p_blocks = cores*KS/B = 256`, so `p_span = I/256`. Against the real shapes,
+**five of six decode projections are sub-burst** (fp16, 64 B floor):
+
+| GEMM | I | p_span | slice | |
+|---|---:|---:|---:|---|
+| Attn k/v | 1024 | 4 | **8 B** | sub-burst |
+| DeltaNet q/k | 2048 | 8 | **16 B** | sub-burst |
+| DeltaNet v/o/gate, Attn q/gate | 6144 | 24 | **48 B** | sub-burst |
+| FFN down | 5120 | 20 | **40 B** | sub-burst |
+| FFN gate/up | 17408 | 68 | 136 B | OK |
+
+Only FFN gate/up clears the floor. It carries 67% of decode MACs, so it is not nothing, but every
+projection would livelock. Note the direction: a BIGGER mesh divides `p_span`, so scaling up pushes
+shapes *toward* the floor. The same `32x256x2048` that is fine at 4x4 (64 B fp16) is 16 B at 8x8.
+
+### Smaller KS does NOT cost NoC traffic -- the MSHR absorbs it exactly
+
+The obvious objection to lowering KS is losing register-level W reuse. But the cores sharing a W
+slice are exactly `B/KS`, and `row_chunk` varies fastest in the split, so those sharers have
+**consecutive core ids and land in the same group** -- which is what the source-side group MSHR
+coalesces.
+
+| KS | sharers/W | same group? | merged | NoC duplication | MAC per W element |
+|---:|---:|---|---:|---:|---:|
+| 8 | 4 | yes | 4 | **1x** | 8 |
+| 4 | 8 | yes | 8 | **1x** | 4 |
+| 2 | 16 | yes | 16 | **1x** | 2 |
+| 1 | 32 | **no, spans 2** | 16 | **2x** | 1 |
+
+**NoC traffic is flat from KS=8 down to KS=2.** Smaller KS creates exactly the duplication the
+MSHR removes. KS=1 breaks it for two reasons at once: 32 sharers exceed both the 16-core group
+and the 16-way merge capacity.
+
+**But the merge protects the NoC hop, not the core's own load issue.** Each core owns
+`KS` rows x `p_span` columns, so it loads `D*p_span` elements and does `KS*D*p_span` MACs --
+arithmetic intensity is exactly **KS MACs per W element**, and total load volume is `D*I*B/KS`.
+At KS=1 every element is used once: one vector load per vector FMA, making the VLSU the limit no
+matter how well the NoC behaves. That cost lands on L1/TCDM bandwidth and LSU issue rate, which
+merging does not touch.
+
+**So KS=2 is the sweet spot the argument implies:** NoC still 1x, sharers exactly fill one group
+and the merge capacity, `p_span` 4x larger -- clearing the floor for `I >= 2048` -- while keeping
+2 MACs per element rather than 1. `I=1024` (Attn k/v) still lands at 32 B and clears only at KS=1,
+so it needs either different treatment or an accepted 2x NoC cost on the model's cheapest
+projection.
+
+Worth measuring, not deciding: a KS in {8,4,2} sweep on a small-I shape tests whether the flat-NoC
+prediction holds and where the VLSU cost starts to bite.
 
 ## What NOT to conclude
 
