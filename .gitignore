@@ -28,3 +28,7 @@ venv
 *.pdf
 logs/
 work/
+
+# Write-once transcript vault: local recovery copies of completed 8x8 transcripts.
+# Regenerable from hardware/s8_*/transcript; ~0.4 GB and not review material.
+docs/benchmarks/8x8_scaleup/transcript_vault/
