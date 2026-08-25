@@ -729,6 +729,17 @@ def _guard_transcripts(dests):
     return guard
 
 
+def _all_run_dirs():
+    """Every run dir this campaign delivers into, not just the batch being fetched.
+
+    Orphan recovery has to be global. A fetch killed by its `timeout` leaves an orphan in the
+    dirs of the batch it was mid-way through, and the settled-batch skip means that batch may
+    never be fetched again -- so recovery scoped to the current batch would never reach it.
+    """
+    import glob as _g
+    return [os.path.dirname(f) for f in _g.glob(os.path.join(HW, "*", _KEEP))]
+
+
 def _recover_orphans(dests):
     """Salvage a keepfile left behind by a fetch that was interrupted mid-extraction.
 
@@ -745,12 +756,21 @@ def _recover_orphans(dests):
         if not os.path.exists(k):
             continue
         try:
-            if _transcript_complete(k) and not _transcript_complete(t):
+            kc, tc = _transcript_complete(k), _transcript_complete(t)
+            if kc and not tc:
                 os.replace(k, t)
                 n += 1
                 warn("recovered %s from a keepfile left by an interrupted fetch"
                      % os.path.basename(rd))
-            elif os.path.exists(t) and os.path.samefile(k, t):
+            elif kc and tc and os.path.getsize(k) > os.path.getsize(t):
+                # Both complete: keep the longer one, which carries strictly more probe output.
+                os.replace(k, t)
+                n += 1
+            else:
+                # The live file is already as good or better -- often because the vault healed
+                # it first. Drop the keepfile: leaving it is a real disk leak (it stops sharing
+                # an inode the moment the live file is replaced) and the next guard pass would
+                # only delete it anyway.
                 os.remove(k)
         except OSError:
             pass
@@ -804,14 +824,36 @@ def cmd_fetch(args):
         return run_dirs.get(st["job"])
 
     with _FetchLock():
-        rescued = _recover_orphans(run_dirs.values())
+        # Global, not per-batch: see _all_run_dirs.
+        rescued = _recover_orphans(list(run_dirs.values()) + _all_run_dirs())
         if rescued:
             print("recovered %d transcript(s) from an interrupted earlier fetch" % rescued)
         guard = _guard_transcripts(run_dirs.values())
+
+        # `timeout 300` (every loop wraps fetch in one) sends SIGTERM, and Python's default
+        # handler exits WITHOUT unwinding -- so the `finally` below never ran and every
+        # timed-out fetch left a clobbered transcript behind. Restore from the signal itself.
+        import signal as _sig
+
+        def _on_term(signum, frame):
+            _restore_transcripts(guard)
+            os._exit(143)
+
+        _prev = {}
+        for _s in (_sig.SIGTERM, _sig.SIGINT, _sig.SIGHUP):
+            try:
+                _prev[_s] = _sig.signal(_s, _on_term)
+            except Exception:
+                pass
         try:
             out = badist.extract_batch(batch, dest_for=dest_for, verbose=not args.quiet)
         finally:
             kept = _restore_transcripts(guard)
+            for _s, _h in _prev.items():
+                try:
+                    _sig.signal(_s, _h)
+                except Exception:
+                    pass
     print("extracted %d, missing %d" % (out["extracted"], out["missing"]))
     if kept:
         print("protected %d complete transcript(s) from an incomplete re-fetch" % kept)
