@@ -1,272 +1,278 @@
 {
  "fp16_2048x256x256": {
-  "cycles": 32816,
-  "in_bench": 0,
-  "post": 206,
+  "bench": 206,
+  "post": 0,
+  "pre": 0,
   "whole": 206
  },
  "fp16_2048x32x1024": {
-  "cycles": 24443,
-  "in_bench": 0,
-  "post": 16,
+  "bench": 16,
+  "post": 0,
+  "pre": 0,
   "whole": 16
  },
  "fp16_2048x32x128": {
-  "cycles": 13840,
-  "in_bench": 0,
-  "post": 11,
+  "bench": 11,
+  "post": 0,
+  "pre": 0,
   "whole": 11
  },
  "fp16_2048x32x256": {
-  "cycles": 22626,
-  "in_bench": 0,
-  "post": 6,
+  "bench": 6,
+  "post": 0,
+  "pre": 0,
   "whole": 6
  },
  "fp16_2048x512x256": {
-  "cycles": 60968,
-  "in_bench": 0,
-  "post": 320,
+  "bench": 320,
+  "post": 0,
+  "pre": 0,
   "whole": 320
  },
  "fp16_2048x64x128": {
-  "cycles": 12670,
-  "in_bench": 0,
-  "post": 35,
+  "bench": 35,
+  "post": 0,
+  "pre": 0,
   "whole": 35
  },
  "fp16_4096x128x128": {
-  "cycles": 49166,
-  "in_bench": 103,
-  "post": 1325,
+  "bench": 1426,
+  "post": 0,
+  "pre": 2,
   "whole": 1428
  },
  "fp16_4096x128x256": {
-  "cycles": 68919,
-  "in_bench": 506,
-  "post": 1084,
+  "bench": 1590,
+  "post": 0,
+  "pre": 0,
   "whole": 1590
  },
  "fp16_4096x128x512": {
-  "cycles": 85264,
-  "in_bench": 694,
-  "post": 194,
+  "bench": 888,
+  "post": 0,
+  "pre": 0,
   "whole": 888
  },
  "fp16_4096x256x128": {
-  "cycles": 114185,
-  "in_bench": 3345,
-  "post": 896,
+  "bench": 4241,
+  "post": 0,
+  "pre": 0,
   "whole": 4241
  },
  "fp16_4096x256x256": {
-  "cycles": 141251,
-  "in_bench": 2960,
-  "post": 360,
+  "bench": 3320,
+  "post": 0,
+  "pre": 0,
   "whole": 3320
  },
+ "fp16_4096x256x512": {
+  "bench": 2137,
+  "post": 0,
+  "pre": 0,
+  "whole": 2137
+ },
  "fp16_4096x32x1024": {
-  "cycles": 61584,
-  "in_bench": 0,
-  "post": 62,
+  "bench": 62,
+  "post": 0,
+  "pre": 0,
   "whole": 62
  },
  "fp16_4096x32x128": {
-  "cycles": 14362,
-  "in_bench": 0,
-  "post": 15,
+  "bench": 15,
+  "post": 0,
+  "pre": 0,
   "whole": 15
  },
  "fp16_4096x32x256": {
-  "cycles": 27090,
-  "in_bench": 0,
-  "post": 289,
+  "bench": 289,
+  "post": 0,
+  "pre": 0,
   "whole": 289
  },
  "fp16_4096x32x512": {
-  "cycles": 48987,
-  "in_bench": 0,
-  "post": 425,
+  "bench": 425,
+  "post": 0,
+  "pre": 0,
   "whole": 425
  },
  "fp16_4096x64x128": {
-  "cycles": 21318,
-  "in_bench": 0,
-  "post": 67,
+  "bench": 67,
+  "post": 0,
+  "pre": 0,
   "whole": 67
  },
  "fp16_4096x64x256": {
-  "cycles": 76555,
-  "in_bench": 469,
-  "post": 352,
+  "bench": 819,
+  "post": 0,
+  "pre": 2,
   "whole": 821
  },
  "fp16_8192x128x128": {
-  "cycles": 166574,
-  "in_bench": 5750,
-  "post": 734,
+  "bench": 6484,
+  "post": 0,
+  "pre": 0,
   "whole": 6484
  },
  "fp16_8192x128x256": {
-  "cycles": 182140,
-  "in_bench": 4156,
-  "post": 330,
+  "bench": 4486,
+  "post": 0,
+  "pre": 0,
   "whole": 4486
  },
  "fp16_8192x128x512": {
-  "cycles": 326542,
-  "in_bench": 6478,
-  "post": 266,
+  "bench": 6744,
+  "post": 0,
+  "pre": 0,
   "whole": 6744
  },
  "fp16_8192x256x128": {
-  "cycles": 314480,
-  "in_bench": 25504,
-  "post": 2754,
+  "bench": 28258,
+  "post": 0,
+  "pre": 0,
   "whole": 28258
  },
  "fp16_8192x32x128": {
-  "cycles": 43048,
-  "in_bench": 0,
-  "post": 11,
+  "bench": 11,
+  "post": 0,
+  "pre": 0,
   "whole": 11
  },
  "fp16_8192x32x256": {
-  "cycles": 70746,
-  "in_bench": 73,
-  "post": 113,
+  "bench": 186,
+  "post": 0,
+  "pre": 0,
   "whole": 186
  },
  "fp16_8192x32x512": {
-  "cycles": 118658,
-  "in_bench": 672,
-  "post": 1145,
+  "bench": 1817,
+  "post": 0,
+  "pre": 0,
   "whole": 1817
  },
  "fp16_8192x512x128": {
-  "cycles": 404824,
-  "in_bench": 11796,
-  "post": 992,
+  "bench": 12788,
+  "post": 0,
+  "pre": 0,
   "whole": 12788
  },
  "fp16_8192x64x128": {
-  "cycles": 53291,
-  "in_bench": 0,
-  "post": 536,
+  "bench": 536,
+  "post": 0,
+  "pre": 0,
   "whole": 536
  },
  "fp16_8192x64x512": {
-  "cycles": 148780,
-  "in_bench": 939,
-  "post": 846,
+  "bench": 1785,
+  "post": 0,
+  "pre": 0,
   "whole": 1785
  },
  "fp32_2048x32x128": {
-  "cycles": 10798,
-  "in_bench": 0,
-  "post": 9,
+  "bench": 9,
+  "post": 0,
+  "pre": 0,
   "whole": 9
  },
  "fp32_4096x128x128": {
-  "cycles": 84797,
-  "in_bench": 1630,
-  "post": 1852,
+  "bench": 3482,
+  "post": 0,
+  "pre": 0,
   "whole": 3482
  },
  "fp32_4096x128x256": {
-  "cycles": 104844,
-  "in_bench": 872,
-  "post": 478,
+  "bench": 1350,
+  "post": 0,
+  "pre": 0,
   "whole": 1350
  },
  "fp32_4096x128x512": {
-  "cycles": 172332,
-  "in_bench": 1499,
+  "bench": 1499,
   "post": 0,
+  "pre": 0,
   "whole": 1499
  },
  "fp32_4096x256x128": {
-  "cycles": 214175,
-  "in_bench": 8323,
-  "post": 1176,
+  "bench": 9499,
+  "post": 0,
+  "pre": 0,
   "whole": 9499
  },
  "fp32_4096x32x128": {
-  "cycles": 25373,
-  "in_bench": 0,
-  "post": 36,
+  "bench": 36,
+  "post": 0,
+  "pre": 0,
   "whole": 36
  },
  "fp32_4096x32x256": {
-  "cycles": 58440,
-  "in_bench": 211,
-  "post": 558,
+  "bench": 769,
+  "post": 0,
+  "pre": 0,
   "whole": 769
  },
  "fp32_4096x32x512": {
-  "cycles": 62452,
-  "in_bench": 0,
-  "post": 2,
+  "bench": 2,
+  "post": 0,
+  "pre": 0,
   "whole": 2
  },
  "fp32_4096x64x128": {
-  "cycles": 39802,
-  "in_bench": 0,
-  "post": 934,
+  "bench": 934,
+  "post": 0,
+  "pre": 0,
   "whole": 934
  },
  "fp32_4096x64x256": {
-  "cycles": 54470,
-  "in_bench": 0,
-  "post": 558,
+  "bench": 558,
+  "post": 0,
+  "pre": 0,
   "whole": 558
  },
  "fp32_4096x64x512": {
-  "cycles": 94774,
-  "in_bench": 352,
-  "post": 159,
+  "bench": 511,
+  "post": 0,
+  "pre": 0,
   "whole": 511
  },
  "fp32_8192x128x128": {
-  "cycles": 211996,
-  "in_bench": 11533,
-  "post": 1868,
+  "bench": 13401,
+  "post": 0,
+  "pre": 0,
   "whole": 13401
  },
  "fp32_8192x128x256": {
-  "cycles": 365073,
-  "in_bench": 15240,
-  "post": 334,
+  "bench": 15574,
+  "post": 0,
+  "pre": 0,
   "whole": 15574
  },
  "fp32_8192x256x128": {
-  "cycles": 288617,
-  "in_bench": 6386,
-  "post": 454,
+  "bench": 6840,
+  "post": 0,
+  "pre": 0,
   "whole": 6840
  },
  "fp32_8192x32x128": {
-  "cycles": 75423,
-  "in_bench": 125,
-  "post": 786,
+  "bench": 911,
+  "post": 0,
+  "pre": 0,
   "whole": 911
  },
  "fp32_8192x32x256": {
-  "cycles": 114936,
-  "in_bench": 212,
-  "post": 1220,
+  "bench": 1432,
+  "post": 0,
+  "pre": 0,
   "whole": 1432
  },
  "fp32_8192x64x128": {
-  "cycles": 112771,
-  "in_bench": 1713,
-  "post": 880,
+  "bench": 2593,
+  "post": 0,
+  "pre": 0,
   "whole": 2593
  },
  "fp32_8192x64x256": {
-  "cycles": 198040,
-  "in_bench": 2267,
-  "post": 1225,
+  "bench": 3492,
+  "post": 0,
+  "pre": 0,
   "whole": 3492
  }
 }

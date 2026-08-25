@@ -1,28 +1,34 @@
 #!/usr/bin/env python3
-"""Split each arm's mshr_timeout into IN-BENCHMARK and POST-BENCHMARK -> tmo_split.json.
+"""Split each arm's mshr_timeout by the probe's own PHASE LABEL -> tmo_split.json.
 
-WHY THIS EXISTS. results.tsv's `mshr_timeout` sums every `+N` delta in the transcript, but the
-probe keeps printing long after the benchmark ends, so the column mixes timeouts that cost
-benchmark cycles with teardown drain that costs nothing. Measured across the 48 arms with a
-nonzero count:
+SPLIT BY LABEL, NEVER BY COMPARING cyc TO THE CYCLE COUNT. The TB's `cyc=` is a GLOBAL counter
+-- for fp16_4096x128x128 the `bench` phase runs from cyc 35,000 to 82,000 -- while the software's
+"execution took N cycles" is a DURATION, not a position on that axis. An earlier version of this
+script classified `cyc > N` as post-benchmark, which put the middle of the bench window on the
+wrong side and reported 93% of that arm's timeouts as teardown. The truth by label is 1,426 of
+1,428 in `bench`. Every downstream conclusion from that version was void:
 
-    M=2048   0 in-benchmark, 603 post      -> 100% teardown; the window NEVER binds during work
-    M=4096   20,964 in-benchmark, 10,822 post -> 34% teardown
-    M=8192   92,844 in-benchmark, 14,494 post -> 14% teardown
+    "M=2048 timeouts are 100% teardown"          -- WRONG
+    "18 of 48 arms are pure teardown"            -- WRONG
+    "fp16_4096x128x128 is 14x overstated"        -- WRONG; it is a real in-benchmark signal
 
-and 18 of the 48 arms are 100% teardown. Reading the whole-transcript number as a performance
-signal overstates it -- for fp16_4096x128x128 by 14x (1428 whole vs 103 in-benchmark), which is
-enough to have put that shape into an A/B it did not belong in.
-
-Written as a SEPARATE file rather than a results.tsv column on purpose: four consumers read that
-file positionally and the collector merges rows against existing records, so widening the schema
-mid-campaign is a much larger change than the finding warrants.
+The probe emits `pre` before the benchmark region and `bench` inside it; a `post` label exists in
+the format but is not produced by these runs.
 """
 import csv, json, os, re
 
 ROOT = "/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC"
 OUT  = os.path.join(ROOT, "docs/benchmarks/8x8_scaleup/tmo_split.json")
-EV   = re.compile(rb"cyc=(\d+)[^\n]*?mshr_timeout=\+(\d+)")
+PH   = ("pre", "bench", "post")
+
+
+def phase_sums(b):
+    out = {}
+    for ph in PH:
+        pat = (r"\[FPU\]\s+%s\s+cyc=\d+[^\n]*?mshr_timeout=\+(\d+)" % ph).encode()
+        out[ph] = sum(int(m.group(1)) for m in re.finditer(pat, b))
+    return out
+
 
 out = {}
 for r in csv.DictReader(open(os.path.join(ROOT, "docs/benchmarks/8x8_scaleup/results.tsv")),
@@ -35,17 +41,14 @@ for r in csv.DictReader(open(os.path.join(ROOT, "docs/benchmarks/8x8_scaleup/res
     except OSError:
         continue
     b = b"\n".join(l[2:] if l.startswith(b"# ") else l for l in b.split(b"\n"))
-    m = re.search(rb"execution took (\d+)", b)
-    if not m:
-        continue
-    end = int(m.group(1))
-    ev = [(int(c), int(v)) for c, v in EV.findall(b)]
-    inb = sum(v for c, v in ev if c <= end)
-    post = sum(v for c, v in ev if c > end)
-    if inb or post:
-        out[arm] = {"cycles": end, "in_bench": inb, "post": post, "whole": inb + post}
+    s = phase_sums(b)
+    if sum(s.values()):
+        s["whole"] = sum(s[p] for p in PH)
+        out[arm] = s
 
 os.makedirs(os.path.dirname(OUT), exist_ok=True)
 json.dump(out, open(OUT, "w"), indent=1, sort_keys=True)
-pure = sum(1 for v in out.values() if v["in_bench"] == 0)
-print("wrote %s (%d arm(s) with timeouts; %d are 100%% post-benchmark)" % (OUT, len(out), pure))
+tot = sum(v["whole"] for v in out.values())
+bench = sum(v["bench"] for v in out.values())
+print("wrote %s (%d arms; %d of %d timeouts are in the bench phase = %.1f%%)"
+      % (OUT, len(out), bench, tot, 100.0 * bench / tot if tot else 0))
