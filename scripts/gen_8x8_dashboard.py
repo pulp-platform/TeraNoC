@@ -1036,17 +1036,36 @@ hdr.querySelectorAll("th[data-c]").forEach(th=>{
                   % (round(100 * med([x["progress"] for x in g])), b, len(g))]
         h += ['</div>', '<div class="tw"><table>',
               '<tr><th>arm</th><th>sim</th><th class="num">progress</th>'
-              '<th class="num">cum util</th><th class="num">cycles</th><th>node</th></tr>']
+              '<th class="num">cum util</th><th class="num">proj eff</th>'
+              '<th class="num">cycles</th><th>node</th></tr>']
         for r in pr_rows:
             cls = ' class="unpaired"' if (r["cum_util"] is not None and r["cum_util"] < 5) else ''
+            # Projected EFFICIENCY, the same ideal/actual the delivered table ranks on. Without it
+            # the only number here is `cum util` -- lane OCCUPANCY -- and a reader compares it
+            # straight against the delivered efficiencies. fp32_1024x2048x256 read 94.93% util at
+            # 68% progress while projecting 54.6% efficiency: it looks like the best arm in the
+            # campaign and is below the chosen tile. Occupancy counts a busy lane whether or not
+            # its work was useful, and it has inverted a real ranking here before.
+            pe = "&mdash;"
+            if r["progress"] and r["progress"] > 0.05 and r["cyc"]:
+                lanes = 8192 if r["arm"].startswith("fp16") else 4096
+                ideal = (r["M"] * r["N"] * r["P"]) / lanes
+                pe = "%.1f%%" % (100.0 * ideal / (r["cyc"] / r["progress"]))
             h += ['<tr%s><td><code>%s</code></td><td>%s</td><td class="num">%d%%</td>'
-                  '<td class="num">%s</td><td class="num">%s</td><td>%s</td></tr>'
+                  '<td class="num">%s</td><td class="num">%s</td><td class="num">%s</td><td>%s</td></tr>'
                   % (cls, html.escape(r["arm"]), r["backend"], round(100 * r["progress"]),
                      ("%.2f%%" % r["cum_util"]) if r["cum_util"] is not None else "&mdash;",
+                     pe,
                      "{:,}".format(r["cyc"]) if r["cyc"] else "&mdash;",
                      html.escape(r["node"] or "-"))]
         lowN = [r for r in pr_rows if r["cum_util"] is not None and r["cum_util"] < 5]
-        h += ['</table></div>']
+        h += ['</table></div>',
+              '<p class="sub"><b>cum util</b> is the testbench lane-occupancy counter; '
+              '<b>proj eff</b> is <code>ideal / (cycles / progress)</code> &mdash; the same '
+              '<code>ideal/actual</code> the delivered table ranks on, extrapolated to completion. '
+              'Rank on <b>proj eff</b>. The two diverge when lanes are busy on redundant or spill '
+              'work, and the gap can be large: an arm at 95% occupancy can be projecting 55% '
+              'efficiency.</p>']
         if lowN:
             h += ['<p class="sub"><b>' + str(len(lowN)) + ' running arms are under 5%% utilisation '
                   'with <code>RH = 0</code></b> &mdash; so this is <em>not</em> the cohort livelock. '
