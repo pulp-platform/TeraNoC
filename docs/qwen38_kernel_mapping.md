@@ -344,7 +344,8 @@ Useful work for one decode step across the whole model: **779,469 M MAC**. Three
 |---|---:|---:|
 | ideal, if `M = 32` were expressible | 381 Mcyc | 95 Mcyc |
 | **padding M=32 up to the row floor** | ×4 → **1,522 Mcyc** | ×16 → **1,522 Mcyc** |
-| GEMV path (`gemv` / `gemv-opt`, M=1) | exists, unmeasured in this campaign | exists, unmeasured |
+| **decode split (§5.6), measured per tile** | **52.2–65.9%** | **16.8–22.8%** |
+| GEMV path (`gemv` / `gemv-opt`, M=1) | FFN gate/up only | no operation clears the burst floor |
 
 **Padded decode costs exactly the same on both meshes — 1,522 Mcyc.** That is not a coincidence and
 it is not a rounding: the row floor scales 4× with the mesh (128 → 512) while the peak also scales
@@ -419,13 +420,77 @@ GDN a+b is `P = 96` padded to 128, and `P < 128` has never been run at either me
 contraction is 2,048 keys and we tile it to 512 with no evidence that split is right. Both are in
 the §5.4 list.
 
-**(e) Decode is untested, by construction.** `M = 32` is not expressible under the current work
-split, so there is no decode arm at either mesh. The GEMV path exists (`gemv`, `gemv-opt`) but has
-no measurement in this campaign. Everything in §5.3 is derived from the row floor and the peak, not
-measured.
+**(e) Decode WAS untested by construction; it no longer is.** ✅ **Superseded 2026-08-25** by the
+decode work split (`MATMUL_DECODE_SPLIT`), which divides `P` as well as `M` and so makes `M = 32`
+expressible at both meshes. Six arms delivered across both meshes and both precisions — see §5.6.
+The batch-1 GEMV path remains unmeasured.
 
 **Currently running and due to close (b), (c) and part of §5.4:** `fp32 2048×256×512`,
 `fp32 2048×512×256`, `fp32 2048×512×128`, and `2048×512×512` at both precisions.
+
+---
+
+### 5.6 Decode — measured, and the `KERNEL_SIZE` rule (added 2026-08-25)
+
+The decode split landed, so §5.3's "not expressible" is superseded. What governs decode is **not** a
+tile shape but the **per-core slice of the output row**:
+
+    slice = I * elem_bytes * B / (cores * KERNEL_SIZE)
+
+`I` is the operation's output width (a model fact), `B = 32`, `cores` is the mesh. **`KERNEL_SIZE` is
+the only free parameter**, and note the direction: **larger KS makes the slice SMALLER**. Target 128 B;
+the hard floor is 64 B, below which the load stops being a burst and the run collapses (measured
+directly at 48 B and 32 B: 2.5% and 1.6% efficiency, RH ~ 10^5).
+
+#### Required KERNEL_SIZE per decode operation (fp16, B=32)
+
+| operation | output `I` | 4×4 KS | 4×4 slice | 8×8 KS | 8×8 slice |
+|---|---:|---:|---:|---:|---:|
+| FFN gate / up (each) | 17,408 | 8 | 544 B | 8 | 136 B |
+| Attention Q+gate | 12,288 | 8 | 384 B | 4 | 192 B |
+| GDN QKV | 10,240 | 8 | 320 B | 4 | 160 B |
+| GDN Z | 6,144 | 8 | 192 B | 2 | 192 B |
+| FFN down · Attn O · GDN O | 5,120 | 8 | 160 B | 2 | 160 B |
+| Attention K+V (fused) | 2,048 | 4 | 128 B | 1 | 128 B |
+| **GDN a+b** | 128 | 1 | ⚠️ 32 B | 1 | ⚠️ 8 B |
+
+**At 4×4 one `KS = 8` serves every operation but two.** At 8×8 each output width needs its own,
+because the same width is spread over 4× the cores. **GDN a+b cannot be spread at all**: at `I = 128`
+even `KS = 1` is far under the floor, so it must be **restricted to 64 cores** (25% of 4×4, 6.25% of
+8×8) with the rest idle. It is 0.13% of decode MACs, so the restriction costs nothing — but spreading
+it wider is the livelock region, not a slower run.
+
+#### Delivered decode arms
+
+| mesh | prec | `B×D×I` | slice | cycles | efficiency | TB util | state |
+|---|---|---|---:|---:|---:|---:|---|
+| 4×4 | fp16 | `32x128x4096` | 128 B | 15,697 | **52.2%** | — | done |
+| 4×4 | fp16 | `32x256x4096` | 128 B | 24,867 | **65.9%** | — | done |
+| 4×4 | fp32 | `32x128x2048` | 128 B | 13,291 | **61.6%** | 66.78% | done |
+| 4×4 | fp32 | `32x256x2048` | 128 B | 25,768 | **63.6%** | 66.61% | done |
+| 8×8 | fp16 | `32x128x16384` | 128 B | 48,825 | **16.8%** | 18.87% | done |
+| 8×8 | fp16 | `32x256x16384` | 128 B | — | — | — | running |
+| 8×8 | fp32 | `32x128x8192` | 128 B | 35,946 | **22.8%** | 26.01% | done |
+| 8×8 | fp32 | `32x256x8192` | 128 B | — | — | — | running |
+
+`D` is the contraction tile; the real operations contract over 5,120 / 6,144 / 17,408, so a full
+operation is `D/D_tile` of these back to back. `D = 256` is worth **+26%** over `D = 128` at 4×4, but
+at 8×8 fp16 it needs 8 MiB for `W` alone and therefore forces single buffering.
+
+#### Decode does not scale with the mesh
+
+Each 8×8 arm runs 4× the work on 4× the cores, so equal cycles would be perfect scaling:
+
+| prec | 4×4 cycles | 8×8 cycles | throughput | of ideal 4.00× |
+|---|---:|---:|---:|---:|
+| fp16 | 15,697 | 48,825 | **1.29×** | 32% |
+| fp32 | 13,291 | 35,946 | **1.48×** | 37% |
+
+Prefill returns **3.10×** on the same hardware. The reason is structural: decode arithmetic intensity
+is `B / elem_bytes` — **the tile dimensions cancel** — so no tiling scheme can make decode
+compute-bound. Only batch can: 16 MAC/byte at `B=32`, 32 at `B=64`, 64 at `B=128`.
+
+Full derivation: `docs/decode_tiling_analysis.md`. Live results: `docs/benchmarks/decode_gemm_results.md`.
 
 ---
 

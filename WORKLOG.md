@@ -11357,3 +11357,48 @@ artefact (`fp16_512x32x128` peaks on g32–g39); `M=512` is causal only through 
 `6274302b`). Fix not yet applied — needs a `P` term in the derivation, or a non-zero
 `hold_window_single`, or `resp_wait_subs_single=0` for high-target shapes. Cheap regression
 detector: RH-STUCK episode count (healthy arms have single digits).
+
+---
+
+## 2026-08-25 — decode kernel inventory for Qwen, and a transcript guard that never guarded
+
+**Purpose.** Answer "what kernel size does each Qwen stage need"; along the way, close a
+data-integrity hole that had been silently destroying delivered results.
+
+**Implementation.**
+
+1. `scripts/badist/teranoc_fleet.py` — `_guard_transcripts` now **moves** the complete transcript
+   aside (`os.rename`) instead of hardlinking it. badist's `extract()` writes the member **in
+   place**, so a hardlink is not a snapshot: both names kept pointing at the one inode and the
+   "saved" copy was overwritten with the live one. The guard then restored a partial over a partial
+   and printed `protected 1`. Reproduced deliberately and re-verified after the fix.
+2. `scripts/collect_decode_results.py` — enumerate arms from the **badist ledger unioned with**
+   local run dirs (globbing dropped `d8f32_32x256x8192` entirely, which read as "never planned");
+   carry the fleet state and show it when it disagrees with the local scrape; add the cross-mesh
+   scaling table; `KERNEL_SIZE` is now a named constant instead of a bare `8`.
+3. `scripts/badist/loops/decode_dash_loop3.sh` — replaces loop2, which had **no fetch step**:
+   `refresh_decode_progress.py` reads the node's live scratch copy and the collector reads local
+   dirs, so a *finished* arm was invisible to both. `dec8_32x128x16384` sat `done` on the fleet for
+   over an hour while the table said `running`.
+4. `docs/qwen38_kernel_mapping.md` §5.6 (new) — the decode `KERNEL_SIZE` rule and the delivered
+   arms; §5.3 and §5.5(e) marked superseded.
+
+**Result.**
+
+- Decode is measured on both meshes and both precisions: 4×4 **52.2 / 65.9%** fp16,
+  **61.6 / 63.6%** fp32; 8×8 **16.8%** fp16, **22.8%** fp32 (D=256 arms still running).
+- **Prefill scales 3.10×, decode 1.29–1.48×**, on the same 4× hardware. Structural: decode
+  arithmetic intensity is `B / elem_bytes`, in which the tile dimensions cancel.
+- Decode `KERNEL_SIZE` must be chosen **per operation** at 8×8 (8/4/2/1 by output width); at 4×4 a
+  single `KS = 8` covers all but two. GDN a+b must be **restricted to 64 cores**, never spread.
+- `4096x256x512` answered §5.4's "more rows" question: **38.5% fp16 / 42.2% fp32 vs 73.5%** for the
+  half-height tile, with `mshr_timeout = 2137`. More rows past 2048 does not pay.
+- 8×8 fp32 gap closed: `2048x256x512` fp32 **69.8%** vs fp16 73.5%, so fp16 is worth **2.11×** there.
+
+**Status.** Artifact "Qwen3.8 on TeraNoC" republished with a new §6 carrying the whole inventory.
+Still undelivered: `2048x512x512` at both precisions; no `B = 1` GEMV arm at either mesh.
+
+**Lesson.** A guard that reports success is not a guard that works. The hardlink-vs-in-place-write
+assumption was never tested against the actual extractor, and the "protected N" line made the
+failure look like a fix for two days. Reproduce the failure the guard exists to prevent, then
+re-run it after the fix — both directions.

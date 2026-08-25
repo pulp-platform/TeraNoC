@@ -710,8 +710,16 @@ def _guard_transcripts(dests):
     completed 8x8 transcripts this way. The numbers survived only because they had already
     been extracted into results.tsv / group_util.json / probe_archive.
 
-    A hardlink costs nothing and survives tar's unlink-and-recreate, so the old bytes are
-    still reachable after the overwrite.
+    MOVE it aside, do not hardlink it. A hardlink is NOT a snapshot here: badist's extract()
+    writes the member IN PLACE rather than unlink-and-recreate, so both names keep pointing at
+    the one inode and the "saved" copy is overwritten along with the live file. The guard then
+    restores a partial over a partial and prints "protected 1" -- which is how a complete
+    31.6 MB dec8_32x128x16384 transcript was destroyed on 2026-08-25 by a re-fetch of a
+    SUPERSEDED batch, with the guard reporting success. Verified by reproducing it.
+
+    A rename is atomic and free on the same filesystem, and it leaves the path empty so the
+    extraction creates a fresh inode. If the fetch dies in between, _recover_orphans and
+    _restore_transcripts both already treat a missing transcript as restore-worthy.
     """
     guard = {}
     for rd in sorted(set(dests)):
@@ -720,10 +728,11 @@ def _guard_transcripts(dests):
             continue
         k = os.path.join(rd, _KEEP)
         try:
+            sz = os.path.getsize(t)
             if os.path.exists(k):
                 os.remove(k)
-            os.link(t, k)
-            guard[t] = (k, os.path.getsize(t))
+            os.rename(t, k)          # MOVE, never link -- see the docstring
+            guard[t] = (k, sz)
         except OSError:
             pass
     return guard
