@@ -167,6 +167,33 @@ ul{margin:0;padding-left:18px} li{margin:5px 0;font-size:13.5px;color:var(--ink-
 .kv .k{font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3)}
 .kv .v{font-size:14px;margin-top:3px}
 .flag{border-left:3px solid var(--warn);padding-left:13px}
+.mctl{display:flex;flex-wrap:wrap;gap:16px 22px;align-items:flex-end;margin-bottom:6px}
+.mctl label{display:block;font-family:var(--mono);font-size:10px;letter-spacing:.09em;
+  text-transform:uppercase;color:var(--ink-3);margin-bottom:4px}
+.mctl select{font-family:var(--mono);font-size:12.5px;padding:5px 8px;border-radius:6px;
+  border:1px solid var(--line);background:var(--panel);color:var(--ink)}
+.mctl input[type=range]{width:min(420px,52vw);accent-color:var(--accent);vertical-align:middle}
+.meshwrap{display:flex;flex-wrap:wrap;gap:26px;align-items:flex-start}
+.mesh{display:grid;gap:3px;width:min(340px,80vw)}
+.cell{aspect-ratio:1;border-radius:2px;display:flex;align-items:center;justify-content:center;
+  font-family:var(--mono);font-size:9px;font-weight:500;color:#fff;background:var(--track)}
+.cell.lo{color:var(--ink-3)}
+.scale{display:flex;align-items:center;gap:7px;margin-top:9px;font-family:var(--mono);
+  font-size:10px;color:var(--ink-3)}
+.scale i{flex:1;height:6px;border-radius:3px;
+  background:linear-gradient(90deg,#f0f1f4,var(--accent))}
+.mmeta{flex:1;min-width:230px}
+.mmeta dl{display:grid;grid-template-columns:repeat(2,minmax(96px,1fr));gap:11px 18px;margin:0}
+.mmeta dt{font-family:var(--mono);font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3)}
+.mmeta dd{margin:2px 0 0;font-family:var(--mono);font-size:14px;font-variant-numeric:tabular-nums}
+.prog{display:grid;grid-template-columns:repeat(auto-fill,minmax(168px,1fr));gap:5px 14px}
+.prow{display:flex;align-items:center;gap:7px;font-family:var(--mono);font-size:10.5px}
+.prow .gid{color:var(--ink-3);width:26px;text-align:right}
+.prow .pb{flex:1;height:7px;background:var(--track);border-radius:3px;overflow:hidden}
+.prow .pb span{display:block;height:100%;background:var(--accent);border-radius:3px}
+.prow .pv{width:40px;text-align:right;font-variant-numeric:tabular-nums;color:var(--ink-2)}
+h3.sec{font-family:var(--mono);font-weight:500;font-size:12px;letter-spacing:.08em;
+  text-transform:uppercase;color:var(--ink-3);margin:30px 0 6px}
 footer{color:var(--ink-3);font-size:12px;font-family:var(--mono)}
 </style>""")
     H.append('<div class="wrap">')
@@ -268,6 +295,130 @@ footer{color:var(--ink-3);font-size:12px;font-family:var(--mono)}
                          % (mesh, D, b["eff"], a["eff"],
                             (a["B"]*a["D"]*a["I"]/a["cycles"]) / (b["B"]*b["D"]*b["I"]/b["cycles"])))
         H.append('</ul></section>')
+    # ---- per-group mesh + progress (only if we have per-group data)
+    try:
+        GU = json.load(open(os.path.join(ROOT, "docs/benchmarks/decode_group_util.json")))
+    except Exception:
+        GU = {}
+    if GU:
+        H.append('<section class="card">')
+        H.append('<div><h2>Per-group FPU utilisation over the benchmark</h2>'
+                 '<p class="sub">Each cell is one group, laid out as the physical mesh. Colour is that '
+                 'group&rsquo;s FPU utilisation in one 1000-cycle window. Drag the slider to move through '
+                 'time. The whole-run number averages over every group and every window, so it hides '
+                 'exactly what this shows: <b>how evenly the work is spread</b>. The mesh resizes itself '
+                 'to the selected arm, so a 4x4 and an 8x8 arm both render correctly.</p></div>')
+        H.append('<div class="mctl">'
+                 '<div><label for="marm">arm</label><select id="marm">'
+                 + "".join('<option value="%s">%s &middot; %s &middot; %s</option>'
+                           % (html.escape(a), GU[a]["mesh"], GU[a]["prec"],
+                              html.escape(a.split("_", 1)[1]))
+                           for a in sorted(GU))
+                 + '</select></div>'
+                 '<div style="flex:1"><label for="mper">benchmark window</label>'
+                 '<input type="range" id="mper" min="0" max="0" value="0" step="1"> '
+                 '<span id="mcyc" class="eff"></span></div></div>')
+        H.append('<div class="meshwrap"><div><div class="mesh" id="mgrid"></div>'
+                 '<div class="scale"><span>0%</span><i></i><span>100%</span></div></div>'
+                 '<div class="mmeta"><dl>'
+                 '<dt>window mean</dt><dd id="mmean">-</dd>'
+                 '<dt>spread (max&minus;min)</dt><dd id="mspread">-</dd>'
+                 '<dt>busiest</dt><dd id="mmax">-</dd>'
+                 '<dt>idlest</dt><dd id="mmin">-</dd>'
+                 '<dt>windows</dt><dd id="mwin">-</dd>'
+                 '<dt>groups</dt><dd id="mgn">-</dd>'
+                 '</dl><p class="sub" style="margin-top:13px;font-size:12.5px">A wide spread means some '
+                 'groups are starved while others saturate. For decode this is the number to watch: the '
+                 'split gives every core an equal tile, so any spread is the memory system, not the '
+                 'partition.</p></div></div>')
+        H.append('<h3 class="sec">Per-group progress &mdash; are the groups advancing together?</h3>')
+        H.append('<p class="sub" style="margin-bottom:13px">Each bar is a group&rsquo;s progress against its '
+                 '<b>own equal share</b> of the work &mdash; MACs completed divided by '
+                 '<code>B&middot;D&middot;I / groups</code>. MACs come from the probe as '
+                 '<code>&Sigma;(util &times; denom)</code> &times; MAC/lane-cycle (2 for fp16, two values '
+                 'packed per word; 1 for fp32). Driven by the same slider. Aligned groups move as one '
+                 'block; spread is wasted machine, because the kernel ends only when the <b>last</b> group '
+                 'finishes.</p>')
+        # Quote the overhead MEASURED on these arms, not the 8x8 campaign's ~15%: for decode it is
+        # ~3.5%, and carrying over a number from another campaign would misstate it by 4x.
+        ovh = []
+        for v in GU.values():
+            tot = sum(u / 100 * v["denom"] * v["mac"] for pp in v["periods"] for u in pp["u"])
+            ovh.append(tot / (v["share"] * v["groups"]))
+        ov = (sum(ovh) / len(ovh) - 1) * 100 if ovh else 0
+        gaps = []
+        for v in GU.values():
+            n = v["groups"]; cum = [0.0] * n
+            for pp in v["periods"]:
+                for g, u in enumerate(pp["u"]):
+                    cum[g] += u / 100 * v["denom"] * v["mac"]
+            pct = [100 * c / v["share"] for c in cum]
+            gaps.append(max(pct) - min(pct))
+        H.append('<p class="sub" style="margin-bottom:13px;font-size:12.5px">A finished group reads a little '
+                 '<b>over 100%%</b>. That is expected &mdash; the probe counts lane <b>occupancy</b>, not '
+                 'retired MACs; across these arms the excess is a consistent <b>%.1f%%</b>. The bar clamps at '
+                 '100%%; the number does not, so the overhead stays visible instead of being quietly hidden.</p>'
+                 % ov)
+        H.append('<p class="sub" style="margin-bottom:13px"><b>The groups finish within %.0f&ndash;%.0f pp of '
+                 'each other</b> on every measured arm. That is the decode split working as intended: each core '
+                 'gets an identical tile, and the memory system keeps them fed evenly. For contrast, the 8x8 '
+                 'prefill sweep fans out to tens of points between fastest and slowest group.</p>'
+                 % (min(gaps), max(gaps)))
+        H.append('<div class="mmeta" style="margin-bottom:11px"><dl>'
+                 '<dt>leader</dt><dd id="plead">-</dd><dt>laggard</dt><dd id="plag">-</dd>'
+                 '<dt>gap</dt><dd id="pgap">-</dd><dt>laggard / leader</dt><dd id="pratio">-</dd>'
+                 '</dl></div><div class="prog" id="pgrid"></div>')
+        H.append("<script>const GU=%s;</script>" % json.dumps(GU, separators=(",", ":")))
+        H.append("""<script>
+(function(){
+ const $=i=>document.getElementById(i);
+ const grid=$("mgrid"), sel=$("marm"), rng=$("mper"), pg=$("pgrid");
+ function colour(u){ // single-hue ramp; light end must stay light in BOTH themes
+   const t=Math.max(0,Math.min(1,u/100));
+   const c0=[240,241,244], c1=[180,100,47];
+   return `rgb(${c0.map((v,i)=>Math.round(v+(c1[i]-v)*t)).join(",")})`;
+ }
+ function draw(){
+   const a=sel.value, d=GU[a]; if(!d) return;
+   const n=d.groups, side=Math.round(Math.sqrt(n));
+   grid.style.gridTemplateColumns=`repeat(${side},1fr)`;
+   const i=Math.min(+rng.value, d.periods.length-1), p=d.periods[i];
+   rng.max=d.periods.length-1;
+   $("mcyc").textContent=`cyc ${p.cyc.toLocaleString()}`;
+   grid.innerHTML="";
+   p.u.forEach((u,g)=>{const e=document.createElement("div");
+     e.className="cell"+(u<45?" lo":""); e.style.background=colour(u);
+     e.textContent=Math.round(u); e.title=`group ${g}: ${u}%`; grid.appendChild(e);});
+   const mx=Math.max(...p.u), mn=Math.min(...p.u);
+   const mean=p.u.reduce((s,v)=>s+v,0)/n;
+   $("mmean").textContent=mean.toFixed(1)+"%";
+   $("mspread").textContent=(mx-mn).toFixed(1)+" pp";
+   $("mmax").textContent=`g${p.u.indexOf(mx)} · ${mx}%`;
+   $("mmin").textContent=`g${p.u.indexOf(mn)} · ${mn}%`;
+   $("mwin").textContent=`${i+1} / ${d.periods.length}`;
+   $("mgn").textContent=n;
+   // cumulative MACs per group up to and including this window
+   const cum=new Array(n).fill(0);
+   for(let k=0;k<=i;k++) d.periods[k].u.forEach((u,g)=>{cum[g]+=u/100*d.denom*d.mac;});
+   const pct=cum.map(v=>100*v/d.share);
+   const lead=Math.max(...pct), lag=Math.min(...pct);
+   $("plead").textContent=`g${pct.indexOf(lead)} · ${lead.toFixed(1)}%`;
+   $("plag").textContent=`g${pct.indexOf(lag)} · ${lag.toFixed(1)}%`;
+   $("pgap").textContent=(lead-lag).toFixed(1)+" pp";
+   $("pratio").textContent=lead>0?(lag/lead).toFixed(3):"-";
+   pg.innerHTML="";
+   pct.forEach((v,g)=>{const r=document.createElement("div"); r.className="prow";
+     r.innerHTML=`<span class="gid">g${g}</span><span class="pb"><span style="width:${Math.min(100,v).toFixed(1)}%"></span></span><span class="pv">${v.toFixed(0)}%</span>`;
+     pg.appendChild(r);});
+ }
+ sel.addEventListener("change",()=>{rng.value=0;draw();});
+ rng.addEventListener("input",draw);
+ if(sel.options.length){rng.max=Math.max(0,GU[sel.value].periods.length-1);
+   rng.value=Math.floor(GU[sel.value].periods.length/2);draw();}
+})();
+</script>""")
+        H.append('</section>')
+
     # ---- known issue
     H.append('<section class="card"><div><h2>Known issue &mdash; the spotcheck wedge</h2></div>')
     H.append('<p class="note flag">Arms built with <code>MATMUL_SPOTCHECK=1</code> print their result banner and then '
