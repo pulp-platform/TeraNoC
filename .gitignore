@@ -32,3 +32,9 @@ work/
 # Write-once transcript vault: local recovery copies of completed 8x8 transcripts.
 # Regenerable from hardware/s8_*/transcript; ~0.4 GB and not review material.
 docs/benchmarks/8x8_scaleup/transcript_vault/
+
+# Per-shape apps emitted by scripts/gen_decode_shape_app.sh. Generated from the matmul source
+# plus MATMUL_DECODE_SPLIT; the ELF is copied to hardware/ and is standalone, so the app dir is
+# a build artifact. Committing generated shape apps is what left 1064 sp-fp16-* files in the
+# tree; do not repeat it for decode.
+software/apps/spatz_apps/sp-decode-*/
