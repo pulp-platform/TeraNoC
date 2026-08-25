@@ -1,6 +1,6 @@
 # GEMM results — 8×8 mesh, 1024 cores — 248-shape scale-up campaign
 
-Generated 2026-08-25 09:21 by `scripts/gen_8x8_scaleup_doc.py`. **Re-run rather than editing.**
+Generated 2026-08-25 10:58 by `scripts/gen_8x8_scaleup_doc.py`. **Re-run rather than editing.**
 
 `eff = ideal/actual`, `ideal = M·N·P / lanes` (fp16 8192 MAC/cyc, fp32 4096). Rank on `eff`,
 not on the TB `util` column — that counter is lane *occupancy*, is not conserved across runs
@@ -13,11 +13,11 @@ of identical work, and has inverted a real ranking before.
 
 | | count |
 |---|---:|
-| measurements | **138** |
+| measurements | **144** |
 | recorded livelock (failures, excluded below) | **28** |
 | of manifest | 248 |
 
-Efficiency over the 138 measurements: **median 38.4%**, mean 39.4%, range 7.4–86.6%.
+Efficiency over the 144 measurements: **median 38.4%**, mean 39.5%, range 7.4–86.6%.
 
 ## Cohort target × P
 
@@ -26,10 +26,10 @@ on `P`. Mean efficiency by (target, P) over measurements only:
 
 | target \ P | 128 | 256 | 512 | 1024 | 2048 |
 |---:|---:|---:|---:|---:|---:|
-| **16** | — | 36.5% (7) | 46.7% (13) | 45.7% (11) | 36.7% (2) |
-| **8** | 34.6% (6) | 48.1% (12) | 57.3% (10) | 55.3% (8) | 69.1% (2) |
-| **4** | 30.7% (7) | 45.3% (7) | 56.8% (6) | 51.4% (3) | 62.0% (2) |
-| **1** | 17.5% (17) | 20.2% (14) | 29.3% (9) | 31.3% (2) | — |
+| **16** | — | 36.5% (7) | 46.7% (13) | 45.7% (11) | 36.6% (3) |
+| **8** | 36.6% (7) | 48.1% (12) | 57.3% (10) | 56.5% (9) | 69.1% (2) |
+| **4** | 30.7% (7) | 45.3% (7) | 56.8% (6) | 53.6% (4) | 62.0% (2) |
+| **1** | 17.5% (18) | 20.2% (14) | 28.3% (10) | 31.3% (2) | — |
 
 Livelock arms are excluded, so the low-target/low-P cells read better here than the
 campaign actually ran — the failures are listed separately below.
@@ -70,14 +70,15 @@ campaign actually ran — the failures are listed separately below.
 
 ## Low efficiency with `RH = 0` — a second, separate mechanism
 
-38 measurements sit below 25% efficiency with **no** RH-livelock. Their `N` distribution:
+40 measurements sit below 25% efficiency with **no** RH-livelock. Their `N` distribution:
 
 | N | arms |
 |---:|---:|
 | 32 | 17 |
 | 64 | 9 |
-| 128 | 7 |
+| 128 | 8 |
 | 256 | 5 |
+| 512 | 1 |
 
 Small contraction depth, not the cohort mechanism. Distinct from the livelock and
 not addressed by any MSHR hold-window change.
@@ -134,7 +135,7 @@ Root cause: the per-core **B slice** `(P/SPLIT_P)*elem_bytes` is below the **64-
 | `512x2048x128` | fp32 | 16 | **32B** | ~0.44% | 47908 |
 | `512x2048x128` | fp16 | 16 | **16B** | ~0.02% | 167916 |
 | `512x2048x256` | fp16 | 16 | **32B** | ~1.19% | 97472 |
-| `512x256x128` | fp16 | 16 | **16B** | ~0.08% | 232618 |
+| `512x256x128` | fp16 | 16 | **16B** | ~0.02% | 6048 |
 | `512x256x128` | fp32 | 16 | **32B** | ~1.81% | 291364 |
 | `512x256x256` | fp16 | 16 | **32B** | ~2.33% | 234787 |
 | `512x32x128` | fp32 | 16 | **32B** | ~0.73% | 4416 |
