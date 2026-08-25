@@ -129,3 +129,70 @@ prediction holds and where the VLSU cost starts to bite.
 - Not "bigger tiles are better". I_tile cannot move, and D_tile buys efficiency only until it
   breaks double buffering.
 - Not "tiling fixes the bandwidth problem". Intensity is B/elem_bytes regardless.
+
+---
+
+## GEMV (batch 1) — KERNEL_SIZE cannot help, and 8x8 cannot be filled
+
+`n_row_chunks = B / KS`, and the kernel rejects `n_row_chunks == 0` (returns -6): each core
+computes KS rows of B, so B rows must exist. **At B=1 the only legal KS is 1.**
+
+| B | legal KS |
+|---:|---|
+| 1 | **{1}** |
+| 2 | {1, 2} |
+| 4 | {1, 2, 4} |
+| 8, 32 | {1, 2, 4, 8} |
+
+So the GEMV slices below are the BEST case, not a KS=8 artefact:
+
+| GEMM | I | 4x4 slice | 8x8 slice |
+|---|---:|---:|---:|
+| Attn k/v | 1024 | 8 B | **2 B** |
+| DeltaNet q/k | 2048 | 16 B | **4 B** |
+| FFN down | 5120 | 40 B | **10 B** |
+| DeltaNet v/o/gate, Attn q/gate | 6144 | 48 B | **12 B** |
+| FFN gate/up | 17408 | **136 B** | **34 B** |
+
+**Not one Qwen GEMV clears the 64 B floor at 8x8.** Usable cores at the 128 B optimum are
+`I*elem_bytes/128`: 272 of 1024 for the widest GEMM (26.6% of the mesh), 16-96 for the
+projections (1.6-9.4%). Spreading wider walks into the livelock regime measured directly at
+32-48 B.
+
+### Direction of KS, stated precisely
+
+    p_span = I*B / (cores*KS)     ->  LARGER KS makes the slice SMALLER
+
+An earlier draft of this doc described small KS as costing burst quality; it is the reverse.
+Small KS creates fewer p_blocks and therefore a WIDER per-core slice. This matters because it
+means the KS that is good for the burst floor is the one that costs register reuse -- and the
+group MSHR absorbs exactly that cost (see above), which is what makes small KS affordable.
+
+### The rule that falls out
+
+For a fixed I, the optimum sits where `B/KS` gives `n_p_blocks = I*elem_bytes/128`:
+
+`FFN gate/up`, fp16, 8x8 -- the optimum is the diagonal **B/KS = 4**:
+
+| B | KS=1 | KS=2 | KS=4 | KS=8 |
+|---:|---|---|---|---|
+| 1 | 34 B | -- | -- | -- |
+| 4 | **136 B** | 68 B | 34 B | -- |
+| 8 | 272 B | **136 B** | 68 B | 34 B |
+| 32 | 1088 B | 544 B | 272 B | **136 B** |
+
+**Pick `KS = B/4` at 8x8** and you land on 128 B for this I. At 4x4 the equivalent is
+`B/KS = 1`, and every batch from 1 upward is at or above the optimum -- 4x4 is far more
+forgiving for this workload.
+
+### What to do at batch 1
+
+- **4x4:** usable for FFN gate/up across all 256 cores. Narrower GEMMs should restrict to
+  `I*elem_bytes/128` cores and leave the rest idle rather than go sub-burst.
+- **8x8:** do not. Batch to >= 4 (FFN), or pack independent projections (q/k/v are independent)
+  to widen the effective I.
+- Staying at batch 1 on 8x8 needs a structural change: split the D contraction across cores with
+  a reduction, which this kernel does not do.
+
+Not yet measured: no B=1 arm has been run. A single `1x5120x17408` GEMV at both meshes would
+test the prediction directly.
