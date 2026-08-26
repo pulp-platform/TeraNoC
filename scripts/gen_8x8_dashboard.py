@@ -110,7 +110,11 @@ def results():
             f = ln.rstrip("\n").split("\t")
             if len(f) < 10:
                 continue                      # fpu_util added at index 4
-            if f[9] == "livelock":
+            # `deadlock` is a SECOND recorded-failure state (2026-08-26). It carries a cycle
+            # count like livelock does, so a test for "livelock" alone let 20 non-results into
+            # the charts and the efficiency stats -- the progress loop reported "175
+            # measurements" when 153 were real. Any new terminal state must be added here.
+            if f[9] in ("livelock", "deadlock"):
                 LIVELOCKED.append(f)
                 continue
             rows.append(f)

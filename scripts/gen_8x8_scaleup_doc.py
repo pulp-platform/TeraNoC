@@ -28,7 +28,8 @@ def load():
         d = dict(shape=r[0], prec=r[1], share=r[2], cycles=r[3], util=r[4], rh=r[5],
                  tmo=r[6], bf=r[7], spot=r[8], state=r[9], M=M, N=N, P=P)
         d["eff"] = (100.0 * (M * N * P / PEAK[r[1]]) / int(r[3])) if r[3].isdigit() and int(r[3]) else None
-        (live if r[9] == "livelock" else meas).append(d)
+        # deadlock is a second recorded-failure state; excluded from measurements like livelock
+        (live if r[9] in ("livelock", "deadlock") else meas).append(d)
     return meas, live
 
 
