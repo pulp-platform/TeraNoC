@@ -507,10 +507,18 @@ at 8×8 fp16 it needs 8 MiB for `W` alone and therefore forces single buffering.
 
 Each 8×8 arm runs 4× the work on 4× the cores, so equal cycles would be perfect scaling:
 
-| prec | 4×4 cycles | 8×8 cycles | throughput | of ideal 4.00× |
-|---|---:|---:|---:|---:|
-| fp16 | 15,697 | 48,825 | **1.29×** | 32% |
-| fp32 | 13,291 | 35,946 | **1.48×** | 37% |
+| prec | `D` | 4×4 cycles | 8×8 cycles | throughput | of ideal 4.00× |
+|---|---:|---:|---:|---:|---:|
+| fp16 | 128 | 15,697 | 48,825 | **1.29×** | 32% |
+| fp32 | 128 | 13,291 | 35,946 | **1.48×** | 37% |
+| **fp32** | **256** | 25,768 | 50,747 | **2.03×** | 51% |
+
+**The contraction tile is a bigger lever at 8×8 than at 4×4.** Doubling `D` from 128 to 256 takes
+fp32 scaling from 1.48× to **2.03×** — a 37% improvement from one parameter. The same change at
+4×4 is worth only +3% (61.6% → 63.6%). The fixed per-iteration cost (barriers, scalar A loads, DMA
+issue) is spread over 4× the cores at 8×8 and so weighs 4× as heavily; halving the iteration count
+halves it. **Prefer the widest `D` the L1 budget allows at 8×8**, which is the same direction §5.2's
+prefill result points (`N = 512`–`1024` beating `N = 256`).
 
 Prefill returns **3.10×** on the same hardware. The reason is structural: decode arithmetic intensity
 is `B / elem_bytes` — **the tile dimensions cancel** — so no tiling scheme can make decode
