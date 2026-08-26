@@ -37,11 +37,35 @@ does the **hold window** (2047 vs 8191) pay, and does **`noc_router_remapping`**
 
 ## `4096x256x128` fp32 — ideal 32,768 cyc
 
-| remap | hold | cycles | eff | TB util | tmo |
-|---:|---:|---:|---:|---:|---:|
-| 3 | 8191 | 65,060 | 50.4% | 57.88% | 0 |
+| remap | hold | cycles | eff | tmo |
+|---:|---:|---:|---:|---:|
+| 3 | 2047 | 88,972 | 36.8% | 3,471 |
+| **3** | **8191** | **65,060** | **50.4%** | 0 |
 
-fp16 is worth **1.79x** at this cell (65,060 / 36,379).
+⚠️ **`mshr_timeout=+N` in a `[FPU] bench` line is a PER-PERIOD DELTA, not a running total.** The
+completion monitor reported this arm as `mshr_timeout=+0` — that was the last period's delta, and
+the summed total is **3,471**. Reading the last line as the total said "fp32 has no timeout problem
+at 2047", which is the opposite of the truth. Always sum:
+`grep -ao 'mshr_timeout=+[0-9]*' | awk -F+ '{s+=$2} END{print s}'`.
+
+## The window is what lets fp16 realise its 2x at 8x8
+
+Both precisions accumulate timeouts at 2047 and both go to zero at 8191, but the payoff is very
+different — **2.34x for fp16, 1.37x for fp32**. The reason shows up in the cross-precision ratio at
+`4096x256x128`:
+
+| hold | fp16 cyc | fp32 cyc | fp16 speedup | fp16 eff | fp32 eff |
+|---:|---:|---:|---:|---:|---:|
+| 2047 | 84,952 | 88,972 | **1.05x** | 19.3% | 36.8% |
+| 8191 | 36,379 | 65,060 | **1.79x** | 45.0% | 50.4% |
+
+At 2047 fp16 is **barely faster than fp32 at all** despite having twice the lanes — its advantage
+is entirely eaten by the short hold window, and it ends up the *worse* of the two on efficiency
+(19.3% against 36.8%). At 8191 it recovers to 1.79x, near the 2x its lanes should give.
+
+**This matters for the Qwen plan, which is an fp16 plan.** The prefill tile efficiencies in
+`qwen38_kernel_mapping.md` §5.2 are fp16 numbers; if any of them were measured on an image with a
+short hold window, they are not measuring the tile.
 
 ## What the grid says
 
