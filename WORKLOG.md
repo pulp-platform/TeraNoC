@@ -11402,3 +11402,60 @@ Still undelivered: `2048x512x512` at both precisions; no `B = 1` GEMV arm at eit
 assumption was never tested against the actual extractor, and the "protected N" line made the
 failure look like a fix for two days. Reproduce the failure the guard exists to prevent, then
 re-run it after the fix — both directions.
+
+---
+
+## 2026-08-26 — decode MSHR merge was configured OFF; corrected and re-run (run 3)
+
+**Purpose.** The decode arms sit far below their roofline ceiling, and the `[BP]` stage
+classification put the loss squarely on the L1→core path: `REQ_TILE_OUT` / `REQ_MSHR_IN` stalled
+**90.2%** of cycles while mesh links ran only **9.3%** busy, and measured request-merge capture was
+**1.06×** against an available **4×**. That is the signature of MSHR *entry admission*, not
+bandwidth. The question was why merging captured so little when the decode work split gives a
+group sharing degree of 4.
+
+**Implementation.**
+
+1. `software/runtime/mshr_cfg.h` — the derivation used the **prefill** work split
+   (`share_W = (GEMM_M / NUM_GROUPS) / KERNEL_SIZE`), which assumes M is divided across groups. The
+   decode kernel divides M across *cores* and P across groups instead. At B=32 on 8×8,
+   `32 / 64 = 0` in integer arithmetic, so the derivation collapsed to "no sharing" and emitted:
+
+   | | run 1 / run 2 (prefill formula) | run 3 (decode formula) |
+   |---|---:|---:|
+   | `hold_subs_single` | 1 (= bypass) | 4 |
+   | `hold_subs_burst` | 0 (= off) | 4 |
+   | `hold_window_single` | 0 | 8191 |
+   | `hold_window_burst` | 0 | 8191 |
+   | `gap_words` | 8192 | 32 |
+
+   Added a `MATMUL_DECODE_SPLIT` branch deriving from the real decode split:
+   `n_row_chunks = M/KERNEL_SIZE`, `n_p_blocks = NUM_CORES/n_row_chunks`,
+   `share_W = min(n_row_chunks, cores_per_group)`, `share_A = cores_per_group / share_W`,
+   `pgap = n_p_blocks`.
+2. Rewrote `mshr_cfg_check_splits()` — it existed but **was never called from anywhere**, so the
+   mismatch had no way to surface. Wired it into both burst-merge `main.c` files, printing
+   `[MSHR] SPLIT MISMATCH` from core 0 when the compile-time derivation disagrees with what the
+   kernel computes at run time. (The function also had to move *after* the enum that defines the
+   values it compares — it referenced them from above and failed all 8 builds first time.)
+3. `scripts/collect_decode_results.py` — generated "Run 3" section, so the doc and artifact fill in
+   as arms land.
+
+**Result.**
+
+- Verified out of the built ELFs, not from the source: emitting each derived value as an array
+  whose *size* is the value and reading it back with `nm -S`. 8×8 `32x256x16384` and 4×4
+  `32x256x4096` both give `subs 4/4`, windows `8191/8191`, `gap_words=32`, splits 4/4.
+- **Request merging was off for every decode arm ever measured**, runs 1 and 2 included. Every
+  decode utilisation number recorded before today was taken with the merge path bypassed.
+- Run 3 submitted: 8 arms (4×4 and 8×8, fp16 and fp32), VCS, **identical HW images to run 2**
+  (`build_vcs_r3`, `build_vcs_r3_4x4`), so the only delta is the CSR config. All 8 dispatched to
+  distinct badile nodes.
+
+**Status.** Run 3 in flight. `decode_gemm_results.md` and the "Decode-shape GEMM" artifact refresh
+automatically as arms complete. Four run-2 arms still running and untouched.
+
+**Lesson.** A derivation that is *correct for one work split* is not flagged when reused under
+another — it silently produced 0 and 0 reads as "no sharing available", which is a legal answer.
+The guard that would have caught it had been written and never called. A consistency check only
+counts once something invokes it.

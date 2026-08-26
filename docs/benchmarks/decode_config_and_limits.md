@@ -98,3 +98,79 @@ scales better: fp16 has twice the lanes chasing the same bytes, so more of its c
 contended; at 8x8 the requests never arrive fast enough to contend. **A counter reading zero here
 is a symptom of starvation, not of health.**
 
+
+---
+
+## The MSHR merge was configured OFF for runs 1 and 2 (found 2026-08-26)
+
+Every decode number in this document above the line was measured with **request merging bypassed**.
+This is a software configuration defect, not a hardware limit, and it is the most likely single
+explanation for the gap between the measured utilisation and the roofline ceiling.
+
+### What went wrong
+
+`software/runtime/mshr_cfg.h` derives the MSHR merge configuration from the kernel's work split, so
+the hardware knows how many cores in a group will ask for the same line. It only ever implemented
+the **prefill** split, which divides M across groups:
+
+```c
+share_W = (GEMM_M / NUM_GROUPS) / KERNEL_SIZE;
+share_A = share_W ? (cores_per_group / share_W) : 1;
+```
+
+The decode kernel divides M across *cores* and P across *groups* — a different split entirely. At
+decode batch B=32 on 8x8, `GEMM_M / NUM_GROUPS` is `32 / 64`, which is **0** in integer arithmetic.
+`share_W` became 0, `share_A` fell to its `1` fallback, and the emitted configuration was:
+
+| field | runs 1 & 2 | meaning | run 3 |
+|---|---:|---|---:|
+| `hold_subs_single` | 1 | **bypass** — do not hold, do not merge | 4 |
+| `hold_subs_burst` | 0 | **off** | 4 |
+| `hold_window_single` | 0 | no hold window | 8191 |
+| `hold_window_burst` | 0 | no hold window | 8191 |
+| `gap_words` | 8192 | wrong stride (from `GEMM_P / share_A` with `share_A = 1`) | 32 |
+
+Zero is a *legal* answer here — it means "no sharing is available, so do not pay to look for it" —
+so nothing errored and nothing warned.
+
+### The sharing degree really is 4
+
+From the decode work split in `main.c`: `n_row_chunks = M / KERNEL_SIZE = 32/8 = 4`, and
+`row_chunk = cid % n_row_chunks` varies fastest, so the 4 cores sharing a W column-block are
+consecutive `cid` and land in the same group. With 16 cores per group that gives
+**share_W = 4 and share_A = 4** — for both operands, at both meshes.
+
+### Corroborating measurement
+
+The `[BP] kind=stage` classification already pointed here before the cause was known:
+
+| stage | stall |
+|---|---:|
+| `REQ_TILE_OUT` / `REQ_MSHR_IN` | **90.2%** |
+| `RESP_MSHR_IN` | 32.4% |
+| everything downstream | 0.3–10.4% |
+| mesh link utilisation | 9.3% busy |
+
+Requests could not get *into* the MSHR while the network sat almost idle, and measured merge
+capture was **1.06x** against an available 4x — consistent with the merge path being bypassed
+rather than merely ineffective.
+
+### Fix and verification
+
+`mshr_cfg.h` gained a `MATMUL_DECODE_SPLIT` branch deriving from the decode split, and
+`mshr_cfg_check_splits()` — which existed but **had no caller** — is now invoked from core 0 in
+both burst-merge kernels, printing `[MSHR] SPLIT MISMATCH` if the compile-time derivation ever
+disagrees with the kernel's run-time split again.
+
+Values were verified **out of the built ELFs** rather than from the source, by emitting each
+derived value as an array whose size is the value and reading it back with `nm -S`. Both
+`32x256x16384` (8x8) and `32x256x4096` (4x4) give `subs 4/4`, windows `8191/8191`, `gap_words=32`,
+splits 4/4.
+
+Run 3 re-runs all 8 arms on **byte-identical hardware images** to run 2 (`build_vcs_r3`,
+`build_vcs_r3_4x4`), so the CSR configuration is the only variable. Results land in the generated
+`decode_gemm_results.md` "Run 3" section.
+
+**What this does not yet tell us.** Merging being off explains why capture was 1.06x; it does not
+by itself prove admission pressure is what caps these kernels. If run 3 comes back flat, the
+ceiling is elsewhere and the W-streaming bandwidth argument above stands unchanged.

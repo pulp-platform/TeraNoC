@@ -348,6 +348,23 @@ int main() {
   const uint32_t p_block   = cid / n_row_chunks;
   const uint32_t p_span    = gemm_l.P / n_p_blocks;
 
+  // The MSHR's subscriber targets are derived at COMPILE TIME; this split is computed HERE. If
+  // they disagree the MSHR is tuned for a sharing degree that does not exist -- which is exactly
+  // what happened before 2026-08-26, when the prefill formula gave GEMM_M/NUM_GROUPS = 0 at
+  // B=32 and configured "never merge" against an engineered 4-way share. Report once, from one
+  // core, and keep going: a mistuned MSHR is slow, not wrong.
+  {
+    const uint32_t cpg     = (uint32_t)NUM_CORES / (uint32_t)NUM_GROUPS;
+    const uint32_t share_w = (n_row_chunks < cpg) ? n_row_chunks : cpg;
+    const uint32_t share_a = cpg / share_w;
+    if (cid == 0 && mshr_cfg_check_splits(share_w, share_a, n_p_blocks) != 0) {
+      printf("[MSHR] SPLIT MISMATCH: kernel share_w=%u share_a=%u n_p_blocks=%u, "
+             "MSHR derived %d/%d/%d -- MSHR IS MISTUNED\n",
+             (unsigned)share_w, (unsigned)share_a, (unsigned)n_p_blocks,
+             (int)MSHR_D_SPLIT_M, (int)MSHR_D_SPLIT_P, (int)MSHR_D_PGAP);
+    }
+  }
+
   m_start = row_chunk * kernel_size;
   m_end   = m_start + kernel_size;
   p_start = p_block * p_span;

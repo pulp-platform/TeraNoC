@@ -18,10 +18,10 @@ the TB `util` column, which is lane occupancy.
 
 | mesh | prec | B x D x I | B slice | cycles | ideal | efficiency | util | tmo | bankfull | RH | state |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| 4x4 | fp16 | `32x128x4096` | 128 B | 15,697 | 8192 | **52.2%** | — | 0 | 6,759 | 0 | done |
-| 4x4 | fp16 | `32x256x4096` | 128 B | 24,867 | 16384 | **65.9%** | — | 0 | 16,399 | 0 | done |
-| 4x4 | fp32 | `32x128x2048` | 128 B | 13,291 | 8192 | **61.6%** | 66.78% | 0 | 7,493 | 0 | done |
-| 4x4 | fp32 | `32x256x2048` | 128 B | 25,768 | 16384 | **63.6%** | 66.61% | 0 | 13,713 | 0 | done |
+| 4x4 | fp16 | `32x128x4096` | 128 B | 15,697 | 8192 | **52.2%** | — | 0 | 6,759 | 0 | done (fleet: running) |
+| 4x4 | fp16 | `32x256x4096` | 128 B | 24,867 | 16384 | **65.9%** | — | 0 | 16,399 | 0 | done (fleet: running) |
+| 4x4 | fp32 | `32x128x2048` | 128 B | 13,291 | 8192 | **61.6%** | 66.78% | 0 | 7,493 | 0 | done (fleet: running) |
+| 4x4 | fp32 | `32x256x2048` | 128 B | 25,768 | 16384 | **63.6%** | 66.61% | 0 | 13,713 | 0 | done (fleet: running) |
 | 8x8 | fp16 | `32x128x16384` | 128 B | 48,825 | 8192 | **16.8%** | 18.87% | 0 | 0 | 0 | done (fleet: running) |
 | 8x8 | fp16 | `32x256x16384` | 128 B | 66,868 | 16384 | **24.5%** | 27.87% | 0 | 0 | 0 | done (fleet: running) |
 | 8x8 | fp32 | `32x128x8192` | 128 B | 35,946 | 8192 | **22.8%** | 26.01% | 0 | 0 | 0 | done (fleet: running) |
@@ -61,8 +61,9 @@ old 4x4 image and present in the old 8x8 one (see `decode_config_and_limits.md`)
 | 4x4 | fp16 | 256 | 24,867 | 25,451 | **+2.3%** | 65.9% | 64.4% | 16,399 | 0 |
 | 4x4 | fp32 | 128 | 13,291 | 13,213 | **-0.6%** | 61.6% | 62.0% | 7,493 | 0 |
 | 4x4 | fp32 | 256 | 25,768 | 25,452 | **-1.2%** | 63.6% | 64.4% | 13,713 | 0 |
+| 8x8 | fp32 | 128 | 35,946 | 33,139 | **-7.8%** | 22.8% | 24.7% | 0 | 0 |
 
-**4 of 8 arms in; spread -1.2% to +2.3%, mean +0.2%.**
+**5 of 8 arms in; spread -7.8% to +2.3%, mean -1.4%.**
 
 The prediction was NO effect, on the grounds that every decode arm already runs at
 `tmo = 0` and the hold window only pays where there are timeouts to eliminate — the

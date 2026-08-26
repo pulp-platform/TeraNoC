@@ -273,14 +273,7 @@ static inline int mshr_cfg_derive(uint32_t M, uint32_t N, uint32_t P,
 
 /// Cross-check against the kernel's own work-split. Call with main.c's values; a non-zero
 /// return means the two derivations have drifted apart and the tuning cannot be trusted.
-static inline int mshr_cfg_check_splits(uint32_t M, uint32_t kernel_size,
-                                        uint32_t split_m_count, uint32_t split_p_count) {
-  const uint32_t cores_per_group = (uint32_t)NUM_CORES / (uint32_t)NUM_GROUPS;
-  const uint32_t dim_group = M / (uint32_t)NUM_GROUPS;
-  const uint32_t my_m = (kernel_size ? dim_group / kernel_size : 0u);
-  const uint32_t my_p = (my_m && my_m < cores_per_group) ? (cores_per_group / my_m) : 1u;
-  return (my_m == split_m_count && my_p == split_p_count) ? 0 : -1;
-}
+
 
 // ---------------------------------------------------------------------------------------------
 // COMPILE-TIME derivation. Same arithmetic as mshr_cfg_derive() above, but evaluated by the
@@ -314,11 +307,48 @@ static inline int mshr_cfg_check_splits(uint32_t M, uint32_t kernel_size,
                        (x) <= 4096 ? 12 : (x) <= 8192 ? 13 : (x) <= 16384 ? 14 : \
                        (x) <= 32768 ? 15 : 16)
 
+// ---------------------------------------------------------------------------------------------
+// WORK-SPLIT PRIMITIVES -- prefill and decode split differently, so they derive differently.
+//
+// PREFILL divides M across groups: each group gets GEMM_M/NUM_GROUPS rows, each core KERNEL_SIZE
+// of them, and every group covers the FULL P. DECODE divides M *and* P across the whole machine
+// (main.c: row_chunk = cid % n_row_chunks, p_block = cid / n_row_chunks).
+//
+// Deriving decode from the prefill formula is wrong in three ways at once, and all three were
+// live until 2026-08-26. At B=32 on 8x8, GEMM_M/NUM_GROUPS = 32/64 = 0 in integer arithmetic, so:
+//   * hold_subs_single collapsed to 1 -- the RTL's "bypass this class, never merge" encoding;
+//   * hold_subs_burst  collapsed to 0 -- below the documented [1, merge_reqs] range entirely;
+//   * hold_window_* collapsed to 0 on both classes.
+// Meanwhile the decode split deliberately places FOUR sharers of each matrix in the same group
+// (row_chunk varies fastest precisely so the MSHR can merge them). Measured consequence: request
+// merging captured 1.06x of that engineered 4x, response multicast 1.29x, and REQ_MSHR_IN stalled
+// 90% because every unmerged request burns its own entry and entries are the scarce resource.
+//
+// The P STRIDE differs too. In prefill each group covers all of P, so the gap between adjacent
+// p-slices is P/split_p_count. In decode P is partitioned across the WHOLE machine into
+// n_p_blocks, so the gap is P/n_p_blocks -- a factor of 64 apart at 32x256x16384. Using the
+// prefill gap there does not error; it just picks the wrong bank-hash bits and runs quietly slow.
+#if defined(MATMUL_DECODE_SPLIT) && (MATMUL_DECODE_SPLIT)
+#  define MSHR_D_CPG_   ((int)NUM_CORES / (int)NUM_GROUPS)
+#  define MSHR_D_NROW   ((int)GEMM_M / (int)MSHR_KERNEL_SIZE)          /* row chunks */
+#  define MSHR_D_NPB    ((int)NUM_CORES / MSHR_D_NROW)                 /* p blocks, machine-wide */
+   /* W sharers per group = the n_row_chunks consecutive cids that hold one p_block, capped by
+      the group; A sharers per group = however many groups-of-those fit in the group. */
+#  define MSHR_D_SHR_B  (MSHR_D_NROW < MSHR_D_CPG_ ? MSHR_D_NROW : MSHR_D_CPG_)
+#  define MSHR_D_SHR_A  (MSHR_D_CPG_ / MSHR_D_SHR_B)
+#  define MSHR_D_PGAP   MSHR_D_NPB
+#else
+#  define MSHR_D_CPG_   ((int)NUM_CORES / (int)NUM_GROUPS)
+#  define MSHR_D_SHR_B  (((int)GEMM_M / (int)NUM_GROUPS) / (int)MSHR_KERNEL_SIZE)
+#  define MSHR_D_SHR_A  ((MSHR_D_SHR_B > 0 && MSHR_D_SHR_B < MSHR_D_CPG_) \
+                           ? (MSHR_D_CPG_ / MSHR_D_SHR_B) : 1)
+#  define MSHR_D_PGAP   MSHR_D_SHR_A
+#endif
+
 enum {
   MSHR_D_CPG      = NUM_CORES / NUM_GROUPS,
-  MSHR_D_SPLIT_M  = (GEMM_M / NUM_GROUPS) / MSHR_KERNEL_SIZE,
-  MSHR_D_SPLIT_P  = (MSHR_D_SPLIT_M > 0 && MSHR_D_SPLIT_M < MSHR_D_CPG)
-                      ? (MSHR_D_CPG / MSHR_D_SPLIT_M) : 1,
+  MSHR_D_SPLIT_M  = MSHR_D_SHR_B,
+  MSHR_D_SPLIT_P  = MSHR_D_SHR_A,
   MSHR_D_MERGE    = (MSHR_D_SPLIT_P > MSHR_D_SPLIT_M) ? MSHR_D_SPLIT_P : MSHR_D_SPLIT_M,
 
   // share_a <= 2 MUST bypass (hold_subs==1). NON-MONOTONIC: 1 fine, 2 catastrophic, >=4 fine --
@@ -364,7 +394,8 @@ enum {
 
   // N and P count ELEMENTS; the hash selects WORD-address bits, so at fp16 both shifts drop one.
   MSHR_D_N_WORDS   = ((int)GEMM_N * (int)GEMM_ELEM_BYTES) / 4,
-  MSHR_D_GAP_WORDS = (((int)GEMM_P / MSHR_D_SPLIT_P) * (int)GEMM_ELEM_BYTES) / 4,
+  /* PGAP is split_p_count in prefill and n_p_blocks in decode -- see the primitives above. */
+  MSHR_D_GAP_WORDS = (((int)GEMM_P / MSHR_D_PGAP) * (int)GEMM_ELEM_BYTES) / 4,
 
   // Stricter than the CSR window: the burst field must sit above the burst-align bits.
   MSHR_D_BURST_FLOOR = ((MSHR_CLOG2((int)MSHR_MAX_BURST_WORDS) + MSHR_D_BANK_BURST_BITS)
@@ -382,6 +413,21 @@ enum {
                            : ((MSHR_D_SH_B_RAW > (int)MSHR_SHIFT_MAX) ? (int)MSHR_SHIFT_MAX
                                                                       : MSHR_D_SH_B_RAW)
 };
+
+/// Assert the MSHR's assumed sharing matches the kernel's ACTUAL work split.
+///
+/// Compares the COMPILE-TIME derived MSHR_D_SPLIT_M/P against what the kernel computed at run
+/// time. This function existed before 2026-08-26 but had NO CALL SITE, so the decode shapes ran
+/// for a full campaign with merging configured off while the split engineered 4-way sharing.
+/// A guard nobody calls is not a guard.
+///
+/// `share_w` / `share_a` are the PER-GROUP sharing degrees the kernel actually creates.
+/// Returns 0 on agreement, -1 on divergence.
+static inline int mshr_cfg_check_splits(uint32_t share_w, uint32_t share_a, uint32_t pgap) {
+  return ((uint32_t)MSHR_D_SPLIT_M == share_w &&
+          (uint32_t)MSHR_D_SPLIT_P == share_a &&
+          (uint32_t)MSHR_D_PGAP    == pgap) ? 0 : -1;
+}
 
 /// Drop-in initialiser: shape-derived fields folded at compile time, timeouts from the macros.
 #define MSHR_CFG_DERIVED_INIT {                          \

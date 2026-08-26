@@ -216,5 +216,52 @@ if ab:
           "(`8x8_scaleup/remap_x_window_ab.md`). Scatter around zero in both directions is",
           "consistent with that; a systematic gain would not be.", ""]
 
+
+# ---- run 3: the corrected MSHR merge derivation ----
+# Runs 1 and 2 both derived the MSHR merge config with the PREFILL formula, which divides M
+# across groups.  At B=32 on 8x8 that is 32/64 = 0 in integer arithmetic, so the derivation
+# collapsed to "no sharing": hold_subs_single=1 (bypass), hold_subs_burst=0 (off), both hold
+# windows 0, and a nonsense gap_words=8192.  Request merging was therefore OFF for every decode
+# arm ever run, even though the decode split gives a group sharing degree of 4 for BOTH A and W.
+# Run 3 uses the decode-aware derivation (MATMUL_DECODE_SPLIT): 4/4, windows 8191, gap_words 32.
+r3 = []
+for r in rows:
+    if not r["cycles"]:
+        continue
+    s3 = scrape(os.path.join(ROOT, "hardware", "fix_" + r["arm"]))
+    if s3 and s3.get("cycles"):
+        s2 = scrape(os.path.join(ROOT, "hardware", "w8k_" + r["arm"]))
+        r3.append((r, s2, s3))
+if r3:
+    L += ["## Run 3 — corrected MSHR merge configuration", "",
+          "Runs 1 and 2 derived the MSHR merge config with the **prefill** formula",
+          "(`(GEMM_M/NUM_GROUPS)/KERNEL_SIZE`). At B=32 on 8x8 that is `32/64 = 0` in integer",
+          "arithmetic, so it collapsed to *no sharing*: `hold_subs_single=1` (bypass),",
+          "`hold_subs_burst=0` (off), both hold windows `0`, `gap_words=8192`. **Request merging",
+          "was off for every decode arm ever measured**, even though the decode work split gives a",
+          "group sharing degree of **4 for both A and W**. Run 3 derives from the decode split:",
+          "`subs 4/4`, windows `8191/8191`, `gap_words=32` (verified out of the built ELFs).", "",
+          "Run 3 arms live in `hardware/fix_<arm>/`; HW image is identical to run 2.", "",
+          "| mesh | prec | D | run1 cyc | run2 cyc | run3 cyc | r3 vs r2 | r3 eff | r3 tmo | r3 bankfull |",
+          "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|"]
+    ds = []
+    for r, s2, s3 in sorted(r3, key=lambda x: (x[0]["mesh"], x[0]["prec"], x[0]["D"])):
+        base2 = s2["cycles"] if (s2 and s2.get("cycles")) else r["cycles"]
+        d = 100.0 * (s3["cycles"] - base2) / base2
+        ds.append(d)
+        L.append("| %s | %s | %d | %s | %s | %s | **%+.1f%%** | %.1f%% | %s | %s |"
+                 % (r["mesh"], r["prec"], r["D"], "{:,}".format(r["cycles"]),
+                    "{:,}".format(s2["cycles"]) if (s2 and s2.get("cycles")) else "—",
+                    "{:,}".format(s3["cycles"]), d,
+                    100.0 * r["ideal"] / s3["cycles"],
+                    "{:,}".format(s3["tmo"]) if s3.get("tmo") is not None else "—",
+                    "{:,}".format(s3["bf"]) if s3.get("bf") is not None else "—"))
+    L += ["", "**%d of 8 arms in; spread %+.1f%% to %+.1f%%, mean %+.1f%%.**"
+          % (len(r3), min(ds), max(ds), sum(ds) / len(ds)), "",
+          "The measured L1->core bottleneck was MSHR *entry admission* (`REQ_MSHR_IN` stalled",
+          "90.2% while links ran 9.3% busy), and merge capture was 1.06x of an available 4x.",
+          "If admission pressure is what caps these kernels, turning merging on is where it",
+          "should show; if the arms come back flat, the ceiling is elsewhere.", ""]
+
 open(OUT, "w").write("\n".join(L) + "\n")
 print("wrote %s (%d arms, %d done)" % (OUT, len(rows), len(done)))
