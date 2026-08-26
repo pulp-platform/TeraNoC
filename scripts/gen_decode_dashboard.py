@@ -238,6 +238,30 @@ footer{color:var(--ink-3);font-size:12px;font-family:var(--mono)}
              'At <code>B&nbsp;=&nbsp;32</code> the prefill work split leaves almost the whole mesh idle, so the '
              'kernel keeps the same inner loop and changes only how work is divided.</p>')
     H.append('</header>')
+    # ---- 2026-08-26: every number below predates the MSHR merge fix
+    H.append('<section class="card"><div><h2>Read this first &mdash; the merge was off</h2></div>')
+    H.append('<p class="note flag">Every measurement on this page was taken with <b>MSHR request '
+             'merging bypassed</b>. <code>mshr_cfg.h</code> derived the merge config from the '
+             '<b>prefill</b> split, <code>(GEMM_M / NUM_GROUPS) / KERNEL_SIZE</code> &mdash; at '
+             'decode <code>B&nbsp;=&nbsp;32</code> on 8&times;8 that is <code>32/64&nbsp;=&nbsp;0</code> '
+             'in integer arithmetic. It emitted <code>hold_subs_single=1</code> (bypass), '
+             '<code>hold_subs_burst=0</code> (off), both hold windows <code>0</code>, and '
+             '<code>gap_words=8192</code>. Zero is a <i>legal</i> value there &mdash; it means '
+             '&ldquo;no sharing available&rdquo; &mdash; so nothing errored.</p>')
+    H.append('<p class="note">The decode split actually gives a group sharing degree of '
+             '<b>4 for both A and W</b>: <code>n_row_chunks = M/KERNEL_SIZE = 4</code> and '
+             '<code>row_chunk</code> varies fastest, so the four cores sharing a W column-block are '
+             'consecutive <code>cid</code> and land in one group. Fixed 2026-08-26; run 3 re-runs '
+             'all 8 arms on <b>byte-identical hardware images</b>, so the CSR config is the only '
+             'variable. Derived values were verified out of the built ELFs '
+             '(<code>subs 4/4</code>, windows <code>8191/8191</code>, <code>gap_words 32</code>), '
+             'not from the source.</p>')
+    H.append('<p class="note">This is consistent with what the stage profile already showed: '
+             '<code>REQ_TILE_OUT</code>/<code>REQ_MSHR_IN</code> stalled <b>90.2%</b> while mesh '
+             'links ran only <b>9.3%</b> busy, and merge capture measured <b>1.06&times;</b> against '
+             'an available 4&times;. It does not yet prove admission pressure is the ceiling &mdash; '
+             'if run 3 comes back flat, the W-streaming bandwidth argument stands unchanged.</p>')
+    H.append('</section>')
     # ---- hero
     if best:
         H.append('<section class="card"><div class="hero">')
