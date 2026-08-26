@@ -49,7 +49,34 @@ def scrape(arm):
         return None
     u = re.search(rb"\[FPU FINAL\][^\n]*?util=([0-9.]+)%", b)
     eoc = b.count(b"[EOC]") > 0 or b.count(b"Simulation ended") > 0
-    return {"cycles": int(m.group(1)), "util": float(u.group(1)) if u else None, "eoc": eoc}
+    # SUM the per-period deltas: mshr_timeout / bankfull_bypass are per-period, not totals.
+    txt = b"\n".join(l[2:] if l.startswith(b"# ") else l for l in b.split(b"\n"))
+    tot = lambda tag: sum(int(x) for x in re.findall(tag + rb"=\+(\d+)", txt))
+    return {"cycles": int(m.group(1)), "util": float(u.group(1)) if u else None, "eoc": eoc,
+            "tmo": tot(rb"mshr_timeout"), "bf": tot(rb"bankfull_bypass"),
+            "rh": txt.count(b"RH STUCK")}
+
+
+def scrape_dir(d):
+    """Same fields as scrape(), but takes a DIRECTORY PATH.
+
+    scrape() takes an ARM NAME and prepends "dec_" internally; handing it a path yields
+    hardware/dec_/usr/... and a silent None. The w8k re-runs live under a different prefix, so
+    they need this. Keep the two in step.
+    """
+    try:
+        b = open(os.path.join(d, "transcript"), "rb").read()
+    except OSError:
+        return None
+    m = re.search(rb"execution took (\d+)", b)
+    if not m:
+        return None
+    u = re.search(rb"\[FPU FINAL\][^\n]*?util=([0-9.]+)%", b)
+    txt = b"\n".join(l[2:] if l.startswith(b"# ") else l for l in b.split(b"\n"))
+    tot = lambda tag: sum(int(x) for x in re.findall(tag + rb"=\+(\d+)", txt))
+    return {"cycles": int(m.group(1)), "util": float(u.group(1)) if u else None,
+            "eoc": b.count(b"[EOC]") > 0, "tmo": tot(rb"mshr_timeout"),
+            "bf": tot(rb"bankfull_bypass"), "rh": txt.count(b"RH STUCK")}
 
 
 def collect():
@@ -80,6 +107,8 @@ def collect():
                          ws=(B * D * eb + D * I * eb + B * I * eb) / 2**20,
                          cycles=r["cycles"] if r else None,
                          util=r["util"] if r else None,
+                         tmo=r["tmo"] if r else None, bf=r["bf"] if r else None,
+                         rh=r["rh"] if r else None,
                          eoc=r["eoc"] if r else None,
                          eff=(100.0 * ideal / r["cycles"]) if r and r["cycles"] else None,
                          live_cyc=p.get("cyc"), live_cum=p.get("cum"),
@@ -231,7 +260,9 @@ footer{color:var(--ink-3);font-size:12px;font-family:var(--mono)}
         H.append('<div class="tw"><table><tr>'
                  '<th>shape B&times;D&times;I</th><th>prec</th><th class="num">B slice</th>'
                  '<th class="num">cycles</th><th class="num">ideal</th><th class="num">efficiency</th>'
-                 '<th style="min-width:110px">&nbsp;</th><th class="num">working set</th><th>state</th></tr>')
+                 '<th style="min-width:110px">&nbsp;</th>'
+                 '<th class="num">tmo</th><th class="num">bankfull</th><th class="num">RH</th>'
+                 '<th class="num">working set</th><th>state</th></tr>')
         for r in sorted(fam, key=lambda x: (x["prec"], x["D"], x["I"])):
             if r["state"] == "done":
                 eff = '<span class="eff">%.1f%%</span>' % r["eff"]
@@ -243,15 +274,65 @@ footer{color:var(--ink-3);font-size:12px;font-family:var(--mono)}
                 cyc = "at %s" % "{:,}".format(r["live_cyc"] or 0)
             else:
                 eff = '<span class="st-queued">&mdash;</span>'; bar_html = ""; cyc = "&mdash;"
+            ctr = lambda v: ("{:,}".format(v) if v is not None else "&mdash;")
             H.append('<tr><td><code>%d&times;%d&times;%d</code></td>'
                      '<td><span class="chip %s">%s</span></td>'
                      '<td class="num">%d B</td><td class="num">%s</td><td class="num">%s</td>'
-                     '<td class="num">%s</td><td>%s</td><td class="num">%.2f MiB</td>'
+                     '<td class="num">%s</td><td>%s</td>'
+                     '<td class="num">%s</td><td class="num">%s</td><td class="num">%s</td>'
+                     '<td class="num">%.2f MiB</td>'
                      '<td><span class="chip st-%s">%s</span></td></tr>'
                      % (r["B"], r["D"], r["I"], r["prec"], r["prec"], r["slice"], cyc,
-                        "{:,}".format(int(r["ideal"])), eff, bar_html, r["ws"],
+                        "{:,}".format(int(r["ideal"])), eff, bar_html,
+                        ctr(r.get("tmo")), ctr(r.get("bf")), ctr(r.get("rh")), r["ws"],
                         r["state"], r["state"]))
         H.append('</table></div></section>')
+    # ---- config A/B: the w8k re-runs (remap 2->3, hold/serve 2047->8191)
+    ab = []
+    for r in rows:
+        if not r.get("cycles"):
+            continue
+        s2 = scrape_dir(os.path.join(ROOT, "hardware", "w8k_" + r["arm"]))
+        if s2 and s2.get("cycles"):
+            ab.append((r, s2))
+    if ab:
+        H.append('<section class="card">')
+        H.append('<div><h2>Config A/B &mdash; <code>remap 2&rarr;3</code>, '
+                 '<code>hold/serve 2047&rarr;8191</code></h2></div>')
+        H.append('<p class="note">Same shapes, same <code>KERNEL_SIZE=8</code>, same ELF source; '
+                 're-runs in <code>hardware/w8k_&lt;arm&gt;/</code>. The 4&times;4 pair also flips '
+                 '<code>BANKFULL_BACKPRESSURE</code> off&rarr;on, which is why <b>bankfull</b> '
+                 'collapses to 0 there. <b>The prediction was no effect</b>: every decode arm '
+                 'already runs at <code>tmo = 0</code>, and the sweep A/B found the hold window&rsquo;s '
+                 'payoff tracks the timeout <i>rate</i> &mdash; a shape with no timeouts has nothing '
+                 'to gain.</p>')
+        H.append('<div class="tw"><table><tr><th>shape B&times;D&times;I</th><th>prec</th>'
+                 '<th class="num">baseline</th><th class="num">re-run</th><th class="num">delta</th>'
+                 '<th class="num">base eff</th><th class="num">new eff</th>'
+                 '<th class="num">bankfull</th></tr>')
+        ds = []
+        for r, s2 in sorted(ab, key=lambda x: (x[0]["mesh"], x[0]["prec"], x[0]["D"])):
+            d = 100.0 * (s2["cycles"] - r["cycles"]) / r["cycles"]
+            ds.append(d)
+            e0 = 100.0 * r["ideal"] / r["cycles"]; e1 = 100.0 * r["ideal"] / s2["cycles"]
+            cls = "eff" if abs(d) < 3 else "st-running"
+            H.append('<tr><td><code>%d&times;%d&times;%d</code></td>'
+                     '<td><span class="chip %s">%s</span></td>'
+                     '<td class="num">%s</td><td class="num">%s</td>'
+                     '<td class="num"><span class="%s">%+.1f%%</span></td>'
+                     '<td class="num">%.1f%%</td><td class="num">%.1f%%</td>'
+                     '<td class="num">%s &rarr; %s</td></tr>'
+                     % (r["B"], r["D"], r["I"], r["prec"], r["prec"],
+                        "{:,}".format(r["cycles"]), "{:,}".format(s2["cycles"]), cls, d, e0, e1,
+                        "{:,}".format(r["bf"]) if r.get("bf") is not None else "&mdash;",
+                        "{:,}".format(s2["bf"]) if s2.get("bf") is not None else "&mdash;"))
+        H.append('</table></div>')
+        H.append('<p class="note"><b>%d of 8 arms in; spread %+.1f%% to %+.1f%%, mean %+.1f%%.</b> '
+                 'Scatter around zero in both directions is what the timeout-rate model predicts; '
+                 'a systematic gain would not be.</p>'
+                 % (len(ab), min(ds), max(ds), sum(ds)/len(ds)))
+        H.append('</section>')
+
     # ---- how the split works
     H.append('<section class="card">')
     H.append('<div><h2>Why this needs its own work split</h2></div>')

@@ -177,5 +177,44 @@ if len(done) >= 2:
                      % (prec, D, "{:,}".format(small["cycles"]), "{:,}".format(big["cycles"]),
                         sp, 100.0 * sp / 4.0))
     L.append("")
+
+# ---- config A/B: the w8k re-runs (remap 2->3, hold/serve 2047->8191, bankfull ON at 4x4) ----
+# GENERATED, so it stays current as the remaining arms land. Baseline numbers come from the rows
+# above; the re-run numbers are scraped from hardware/w8k_<arm>/.
+ab = []
+for r in rows:
+    if not r["cycles"]:
+        continue
+    d2 = os.path.join(ROOT, "hardware", "w8k_" + r["arm"])
+    s2 = scrape(d2)
+    if s2 and s2.get("cycles"):
+        ab.append((r, s2))
+if ab:
+    L += ["## Config A/B — `remap 2→3`, `hold/serve 2047→8191`", "",
+          "Same shapes, same `KERNEL_SIZE=8`, same ELF source. Re-run arms live in",
+          "`hardware/w8k_<arm>/`. The 4x4 pair ALSO flips `GROUP_MSHR_BANKFULL_BACKPRESSURE`",
+          "off→on, which is why `bankfull` collapses to 0 there — that knob was absent from the",
+          "old 4x4 image and present in the old 8x8 one (see `decode_config_and_limits.md`).", "",
+          "| mesh | prec | D | baseline cyc | re-run cyc | delta | base eff | new eff | base bankfull | new bankfull |",
+          "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|"]
+    ds = []
+    for r, s2 in sorted(ab, key=lambda x: (x[0]["mesh"], x[0]["prec"], x[0]["D"])):
+        d = 100.0 * (s2["cycles"] - r["cycles"]) / r["cycles"]
+        ds.append(d)
+        e0 = 100.0 * r["ideal"] / r["cycles"]
+        e1 = 100.0 * r["ideal"] / s2["cycles"]
+        L.append("| %s | %s | %d | %s | %s | **%+.1f%%** | %.1f%% | %.1f%% | %s | %s |"
+                 % (r["mesh"], r["prec"], r["D"], "{:,}".format(r["cycles"]),
+                    "{:,}".format(s2["cycles"]), d, e0, e1,
+                    "{:,}".format(r["bf"]) if r.get("bf") is not None else "—",
+                    "{:,}".format(s2["bf"]) if s2.get("bf") is not None else "—"))
+    L += ["", "**%d of 8 arms in; spread %+.1f%% to %+.1f%%, mean %+.1f%%.**"
+          % (len(ab), min(ds), max(ds), sum(ds) / len(ds)), "",
+          "The prediction was NO effect, on the grounds that every decode arm already runs at",
+          "`tmo = 0` and the hold window only pays where there are timeouts to eliminate — the",
+          "8x8 sweep A/B found its payoff tracks the timeout RATE",
+          "(`8x8_scaleup/remap_x_window_ab.md`). Scatter around zero in both directions is",
+          "consistent with that; a systematic gain would not be.", ""]
+
 open(OUT, "w").write("\n".join(L) + "\n")
 print("wrote %s (%d arms, %d done)" % (OUT, len(rows), len(done)))

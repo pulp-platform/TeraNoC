@@ -18,14 +18,14 @@ the TB `util` column, which is lane occupancy.
 
 | mesh | prec | B x D x I | B slice | cycles | ideal | efficiency | util | tmo | bankfull | RH | state |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| 4x4 | fp16 | `32x128x4096` | 128 B | 15,697 | 8192 | **52.2%** | — | 0 | 6,759 | 0 | done (fleet: failed) |
-| 4x4 | fp16 | `32x256x4096` | 128 B | 24,867 | 16384 | **65.9%** | — | 0 | 16,399 | 0 | done (fleet: failed) |
+| 4x4 | fp16 | `32x128x4096` | 128 B | 15,697 | 8192 | **52.2%** | — | 0 | 6,759 | 0 | done |
+| 4x4 | fp16 | `32x256x4096` | 128 B | 24,867 | 16384 | **65.9%** | — | 0 | 16,399 | 0 | done |
 | 4x4 | fp32 | `32x128x2048` | 128 B | 13,291 | 8192 | **61.6%** | 66.78% | 0 | 7,493 | 0 | done |
 | 4x4 | fp32 | `32x256x2048` | 128 B | 25,768 | 16384 | **63.6%** | 66.61% | 0 | 13,713 | 0 | done |
-| 8x8 | fp16 | `32x128x16384` | 128 B | 48,825 | 8192 | **16.8%** | 18.87% | 0 | 0 | 0 | done |
-| 8x8 | fp16 | `32x256x16384` | 128 B | 66,868 | 16384 | **24.5%** | 27.87% | 0 | 0 | 0 | done (fleet: cancelled) |
-| 8x8 | fp32 | `32x128x8192` | 128 B | 35,946 | 8192 | **22.8%** | 26.01% | 0 | 0 | 0 | done |
-| 8x8 | fp32 | `32x256x8192` | 128 B | 50,747 | 16384 | **32.3%** | 36.31% | 0 | 0 | 0 | done |
+| 8x8 | fp16 | `32x128x16384` | 128 B | 48,825 | 8192 | **16.8%** | 18.87% | 0 | 0 | 0 | done (fleet: running) |
+| 8x8 | fp16 | `32x256x16384` | 128 B | 66,868 | 16384 | **24.5%** | 27.87% | 0 | 0 | 0 | done (fleet: running) |
+| 8x8 | fp32 | `32x128x8192` | 128 B | 35,946 | 8192 | **22.8%** | 26.01% | 0 | 0 | 0 | done (fleet: running) |
+| 8x8 | fp32 | `32x256x8192` | 128 B | 50,747 | 16384 | **32.3%** | 36.31% | 0 | 0 | 0 | done (fleet: running) |
 
 ## Notes
 
@@ -47,4 +47,26 @@ Both meshes run the SAME work per core: the 8x8 arm has 4x the cores and 4x the
 | fp16 | 256 | 24,867 | 66,868 | **1.49x** | 37% |
 | fp32 | 128 | 13,291 | 35,946 | **1.48x** | 37% |
 | fp32 | 256 | 25,768 | 50,747 | **2.03x** | 51% |
+
+## Config A/B — `remap 2→3`, `hold/serve 2047→8191`
+
+Same shapes, same `KERNEL_SIZE=8`, same ELF source. Re-run arms live in
+`hardware/w8k_<arm>/`. The 4x4 pair ALSO flips `GROUP_MSHR_BANKFULL_BACKPRESSURE`
+off→on, which is why `bankfull` collapses to 0 there — that knob was absent from the
+old 4x4 image and present in the old 8x8 one (see `decode_config_and_limits.md`).
+
+| mesh | prec | D | baseline cyc | re-run cyc | delta | base eff | new eff | base bankfull | new bankfull |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 4x4 | fp16 | 128 | 15,697 | 15,759 | **+0.4%** | 52.2% | 52.0% | 6,759 | 0 |
+| 4x4 | fp16 | 256 | 24,867 | 25,451 | **+2.3%** | 65.9% | 64.4% | 16,399 | 0 |
+| 4x4 | fp32 | 128 | 13,291 | 13,213 | **-0.6%** | 61.6% | 62.0% | 7,493 | 0 |
+| 4x4 | fp32 | 256 | 25,768 | 25,452 | **-1.2%** | 63.6% | 64.4% | 13,713 | 0 |
+
+**4 of 8 arms in; spread -1.2% to +2.3%, mean +0.2%.**
+
+The prediction was NO effect, on the grounds that every decode arm already runs at
+`tmo = 0` and the hold window only pays where there are timeouts to eliminate — the
+8x8 sweep A/B found its payoff tracks the timeout RATE
+(`8x8_scaleup/remap_x_window_ab.md`). Scatter around zero in both directions is
+consistent with that; a systematic gain would not be.
 
