@@ -1,5 +1,10 @@
 # Decode-shape GEMM — benchmark results
 
+> ⚠️ **THIS FILE IS GENERATED** by `scripts/collect_decode_results.py` and is rewritten in
+> full on every run, including from the dashboard loop. **Do not add analysis here — it will
+> be destroyed silently.** Hand-maintained prose lives in `decode_config_and_limits.md`,
+> which also records the config, the `KERNEL_SIZE`, and the caveats that bound these numbers.
+
 `C[B][I] = A[B][D] x W[D][I]`, mapped to GEMM as `M=B, N=D, P=I`. Batch is 32 throughout,
 which is why the prefill work split cannot be used: it would give `M/KERNEL_SIZE = 4`
 row-chunks for the whole mesh. The decode split divides `P` as well as `M`.
