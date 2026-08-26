@@ -407,6 +407,11 @@ It **dominates every other usable tile** — more efficient AND smaller:
 | `2048×512×512` | 82.8% | 9.00 MiB | 5.86 | yes (10) |
 | `2048×256×512` *(previous)* | 73.5% | 6.50 MiB | 8.36 | yes (20) |
 
+**fp32 counterpart measured 2026-08-26: 195,195 cyc = 67.1%**, so fp16 is worth **2.58×** at this
+tile — 2× from the extra lanes and the rest from higher efficiency (86.6% vs 67.1%). That is a
+better fp16 return than the previous tile gave (2.11× at `2048×256×512`), and it matters because
+§5.1/§5.2 are an fp16 plan.
+
 Its 6.86 MiB of spare also removes the footprint-model risk that made `2048×1024×512` a gamble:
 the model is analytic and unvalidated, so a tile with margin is worth more than one at the ceiling.
 
