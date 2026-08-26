@@ -116,6 +116,12 @@ def main():
         tot, n = lanecycles(txt)
         cum = re.findall(rb"\[FPU\] bench[^\n]*?cum=([0-9.]+)%", txt)
         cyc = re.findall(rb"\[FPU\] bench cyc=(\d+)", txt)
+        # cyc counts from SIMULATION start, so it includes the boot/DMA prefix (~57k
+        # cycles on a settled 8x8 arm). `execution took` counts the BENCHMARK REGION only.
+        # Anything dividing benchmark work by raw cyc understates efficiency badly --
+        # fp32_1024x2048x256 read 61.8%% that way against a true 83.3%%. Emit the first
+        # bench sample so consumers can subtract it: (last-first) tracks execution-took
+        # to within 1.5%% on that arm.
         rh  = txt.count(b"RH STUCK")
         need = M * N * P
         prog = (tot * MULT[pr] / (need * K[pr])) if need else 0.0
@@ -124,6 +130,7 @@ def main():
                          progress=round(min(prog, 1.5), 4),
                          cum_util=float(cum[-1]) if cum else None,
                          cyc=int(cyc[-1]) if cyc else None,
+                         cyc0=int(cyc[0]) if cyc else None,
                          rh=rh, livelock=rh > 1000))
     rows.sort(key=lambda r: -(r["progress"] or 0))
     json.dump(dict(K=K, rows=rows), open(OUT, "w"), indent=1)

@@ -1051,10 +1051,16 @@ hdr.querySelectorAll("th[data-c]").forEach(th=>{
             # campaign and is below the chosen tile. Occupancy counts a busy lane whether or not
             # its work was useful, and it has inverted a real ranking here before.
             pe = "&mdash;"
+            # Subtract the BENCHMARK START cycle. `cyc` counts from simulation start and carries
+            # the boot/DMA prefix (~57k cycles at 8x8); `ideal` is benchmark work only. Dividing
+            # one by the other understated fp32_1024x2048x256 as 61.8% against a true 83.3%.
+            # With the prefix removed the same arm projects 84.6%.
             if r["progress"] and r["progress"] > 0.05 and r["cyc"]:
-                lanes = 8192 if r["arm"].startswith("fp16") else 4096
-                ideal = (r["M"] * r["N"] * r["P"]) / lanes
-                pe = "%.1f%%" % (100.0 * ideal / (r["cyc"] / r["progress"]))
+                elapsed = r["cyc"] - (r.get("cyc0") or 0)
+                if elapsed > 0:
+                    lanes = 8192 if r["arm"].startswith("fp16") else 4096
+                    ideal = (r["M"] * r["N"] * r["P"]) / lanes
+                    pe = "%.1f%%" % (100.0 * ideal / (elapsed / r["progress"]))
             h += ['<tr%s><td><code>%s</code></td><td>%s</td><td class="num">%d%%</td>'
                   '<td class="num">%s</td><td class="num">%s</td><td class="num">%s</td><td>%s</td></tr>'
                   % (cls, html.escape(r["arm"]), r["backend"], round(100 * r["progress"]),

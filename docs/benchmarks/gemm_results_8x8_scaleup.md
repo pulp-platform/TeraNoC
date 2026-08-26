@@ -1,6 +1,6 @@
 # GEMM results — 8×8 mesh, 1024 cores — 248-shape scale-up campaign
 
-Generated 2026-08-26 19:47 by `scripts/gen_8x8_scaleup_doc.py`. **Re-run rather than editing.**
+Generated 2026-08-26 20:40 by `scripts/gen_8x8_scaleup_doc.py`. **Re-run rather than editing.**
 
 `eff = ideal/actual`, `ideal = M·N·P / lanes` (fp16 8192 MAC/cyc, fp32 4096). Rank on `eff`,
 not on the TB `util` column — that counter is lane *occupancy*, is not conserved across runs
@@ -13,11 +13,11 @@ of identical work, and has inverted a real ranking before.
 
 | | count |
 |---|---:|
-| measurements | **160** |
+| measurements | **161** |
 | recorded livelock (failures, excluded below) | **50** |
 | of manifest | 248 |
 
-Efficiency over the 160 measurements: **median 40.9%**, mean 42.3%, range 7.4–89.3%.
+Efficiency over the 161 measurements: **median 41.1%**, mean 42.5%, range 7.4–89.3%.
 
 ## Cohort target × P
 
@@ -27,7 +27,7 @@ on `P`. Mean efficiency by (target, P) over measurements only:
 | target \ P | 128 | 256 | 512 | 1024 | 2048 |
 |---:|---:|---:|---:|---:|---:|
 | **16** | — | 36.5% (7) | 48.3% (14) | 47.3% (13) | 36.7% (4) |
-| **8** | 36.6% (7) | 48.1% (12) | 60.2% (11) | 58.0% (10) | 66.9% (3) |
+| **8** | 36.6% (7) | 50.8% (13) | 60.2% (11) | 58.0% (10) | 66.9% (3) |
 | **4** | 38.7% (9) | 53.4% (9) | 65.0% (9) | 53.6% (4) | 62.0% (2) |
 | **1** | 17.5% (18) | 22.8% (15) | 29.6% (11) | 31.3% (2) | — |
 
@@ -43,13 +43,13 @@ campaign actually ran — the failures are listed separately below.
 | `1024x1024x512` | fp16 | 8 | 128B | 75,645 | **86.6%** | 89.79% | 0 |
 | `2048x1024x512` | fp16 | 4 | 256B | 151,919 | **86.3%** | 90.52% | 0 |
 | `2048x1024x256` | fp16 | 4 | 128B | 78,437 | **83.6%** | 87.42% | 0 |
+| `1024x2048x256` | fp32 | 8 | 128B | 157,344 | **83.3%** | 86.50% | 0 |
 | `2048x512x512` | fp16 | 4 | 256B | 79,169 | **82.8%** | 87.12% | 4 |
 | `1024x512x512` | fp16 | 8 | 128B | 39,928 | **82.1%** | 85.86% | 0 |
 | `1024x1024x256` | fp32 | 8 | 128B | 81,530 | **80.4%** | 84.42% | 0 |
 | `2048x1024x128` | fp32 | 4 | 128B | 83,310 | **78.7%** | 82.63% | 0 |
 | `2048x512x512` | fp32 | 4 | 512B | 174,741 | **75.0%** | 80.85% | 0 |
 | `1024x512x256` | fp32 | 8 | 128B | 43,777 | **74.9%** | 79.32% | 0 |
-| `2048x512x256` | fp32 | 4 | 256B | 88,041 | **74.4%** | 80.28% | 0 |
 
 ## Worst 12 by efficiency
 
