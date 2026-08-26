@@ -176,8 +176,23 @@ def main():
         worse = (prev is not None and free_gb is not None
                  and isinstance(prev, (int, float)) and free_gb <= prev / 2.0)
         if prev is None or worse:
-            print("      STILL BELOW THRESHOLD -- not ours to free (other users hold the disk)"
-                  + ("  [free HALVED since last notice]" if worse else ""))
+            # Report our PERSONAL scratch too. This message used to assert flatly that the disk
+            # belonged to other users -- and on 2026-08-26 that was false on the two nodes that
+            # mattered: larain7 held 1,297 GB in /scratch2/zexifu (more than any other user there)
+            # and larain12 held 77 GB, none of it visible to this guard, which manages only
+            # /scratch*/zexifu_cache. An alert that states a wrong cause is worse than one that
+            # states none. READ-ONLY: personal scratch is another project's data and is never
+            # touched here; it is surfaced so a human can decide.
+            mine = sh(h, "for d in /scratch*/zexifu; do [ -d \"$d\" ] || continue; "
+                         "echo \"$d $(du -sb \"$d\" 2>/dev/null | cut -f1)\"; done", timeout=240)
+            extra = ""
+            for ln in (mine or "").splitlines():
+                f = ln.split()
+                if len(f) == 2 and f[1].isdigit() and int(f[1]) > (10 << 30):
+                    extra += "\n      NOTE %s holds %.0f GB of OUR personal scratch (not managed " \
+                             "here, not touched -- reclaimable only by a human)" % (f[0], int(f[1]) / 2**30)
+            print("      STILL BELOW THRESHOLD -- nothing of ours to free IN THE BADIST CACHE"
+                  + ("  [free HALVED since last notice]" if worse else "") + extra)
             if at_risk:
                 print("      %d running arm(s) here will lose their results to packaging: %s"
                       % (len(at_risk), ", ".join(at_risk[:6])))
