@@ -55,6 +55,19 @@ def scrape(arm):
                             tmo=0, bf=0, spot=0,
                             util=(100.0 * num / den) if den else None,
                             util_recon=True, recon_w=0, fatal="", fmsg="")
+        # QUIESCENT DEADLOCK -- a THIRD terminal state, and the livelock detector above cannot
+        # see it because it keys on RH STUCK > 1000 and these arms sit at RH = 0. Every FPU lane
+        # idle across all 64 groups, no MSHR timeouts, bank links idle rather than stalled: the
+        # machine is stopped, not thrashing. Without a row these stay "pending" forever and the
+        # retry loops re-dispatch them indefinitely -- exactly the failure the livelock detector
+        # was written to stop, for a class it does not cover.
+        # See docs/benchmarks/8x8_scaleup/quiescent_deadlock.md.
+        # The >=200-sample floor matters: a freshly started arm has busy=0 too, and killing one
+        # of those would destroy healthy work.
+        b = re.findall(rb"\[FPU\]\s+bench\s+cyc=(\d+)\s+util=[0-9.]+%\s+cum=([0-9.]+)%\s+busy=(\d+)/", txt)
+        if len(b) >= 200 and int(b[-1][2]) == 0 and float(b[-1][1]) < 5.0:
+            return dict(state="deadlock", cycles=int(b[-1][0]), rh=rh, tmo=0, bf=0, spot=0,
+                        util=float(b[-1][1]), util_recon=True, recon_w=0, fatal="", fmsg="")
         return dict(state="running")
     def tot(tag):
         return sum(int(x) for x in re.findall(tag.encode() + rb"=\+?(\d+)", txt))
@@ -146,6 +159,7 @@ def scrape(arm):
 def main():
     rows, ndone, fatals, unverified, partial = [], 0, [], [], []
     livelocked = []
+    deadlocked = []
     for ln in open(MANI):
         p = ln.split()
         if len(p) != 4:
@@ -153,7 +167,15 @@ def main():
         M, N, P, PR = int(p[0]), int(p[1]), int(p[2]), p[3]
         arm = "fp%s_%dx%dx%d" % (PR, M, N, P)
         r = scrape(arm)
-        if not r or r["state"] not in ("done", "livelock"):
+        if not r or r["state"] not in ("done", "livelock", "deadlock"):
+            continue
+        if r["state"] == "deadlock":
+            # Same contract as livelock: a recorded FAILURE, not a result. state != "done" keeps
+            # it out of every done-filtered consumer while its presence stops the retry loops.
+            deadlocked.append(arm)
+            rows.append("%dx%dx%d\tfp%s\t%d\t%d\t%s\t%d\t0\t0\tDEADLOCK\tdeadlock"
+                        % (M, N, P, PR, a_share(M), r["cycles"],
+                           ("~%.2f" % r["util"]) if r["util"] is not None else "-", r["rh"]))
             continue
         if r["state"] == "livelock":
             # Not a result -- a recorded failure. state != "done" keeps it out of every
@@ -234,6 +256,9 @@ def main():
         print("  kept %d earlier row(s) whose transcript is no longer on disk: %s"
               % (len(kept), ", ".join("%s_%s" % (k[1], k[0]) for k in prev if k not in have)))
         rows.extend(kept)
+    if deadlocked:
+        print("  %d arm(s) recorded as QUIESCENT DEADLOCK (busy=0, RH=0): %s"
+              % (len(deadlocked), ", ".join(sorted(deadlocked))))
     if livelocked:
         print("  %d arm(s) recorded LIVELOCK (RH>1000, no completion) -- these measure the "
               "mshr_cfg.h cohort-target bug, not the architecture: %s"
