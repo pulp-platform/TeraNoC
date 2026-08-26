@@ -108,6 +108,7 @@ measured so far has `tmo = 0`.
 
 | shape | prec | remap=2 @8191 | remap=3 @8191 | r3 vs r2 |
 |---|---|---:|---:|---:|
+| `8192x128x512` | fp16 | 261,902 (25.0%) | 184,886 (35.4%) | **+42%** |
 | `4096x256x128` | fp32 | 88,425 (37.1%) | 65,060 (50.4%) | **+36%** |
 | `4096x256x128` | fp16 | 41,381 (39.6%) | 36,379 (45.0%) | **+14%** |
 | `4096x128x128` | fp16 | 23,110 (35.4%) | 24,555 (33.4%) | **-6%** |
@@ -117,10 +118,15 @@ All timeout-free, so none of this is a livelock artefact. **remap=3 is a large w
 real but it is not symmetric: the gain where it helps is far bigger than the loss where it hurts,
 and it helps more in fp32 than in fp16.
 
-That still does not justify a blanket default: one shape loses, and the whole grid is two shapes.
-What it does justify is **measuring remap per tile before fixing it**, and expecting remap=3 to be
-right for the small-`P` tiles specifically — which is where the Qwen plan's worst cells live
-(`2048x512x128` for GDN a+b, `2048x512x256` for PV).
+✅ **GRID COMPLETE (12/12 cells, 2026-08-26). Three shapes gain, one loses, and the gains are
+large: +42%, +36%, +14% against a single -6%.** The earlier reading — "does not generalise, do not
+promote to a default" — was written when only two shapes existed and one of them was the loss. With
+four cells the evidence supports **remap=3 as the default**, which is what
+`config/terapool_spatz4_fpu.mk` now ships.
+
+The one loss (`4096x128x128`, -6%) is the smallest shape in the grid and the only one where BOTH
+`N` and `P` are 128. Worth remembering as a known exception rather than treated as a reason to
+withhold the default.
 
 ## Gaps
 
