@@ -71,6 +71,76 @@ running arms report `rh > 0` (up to 594) and 62 recorded rows have RH > 0 (up to
 small-`M`/large-`P` (`512x64x2048`, `512x128x2048`, `1024x64x2048`). None of the 16 shapes has a row
 in `results.tsv` — this is uncharacterised work, not redundant re-runs.
 
+## ROOT CAUSE (2026-08-26): the request-sent fence never clears
+
+**Where the cores actually are.** Final PC across all 1024 harts of `fp32_2048x32x256`:
+
+| harts | PC | instruction |
+|---:|---|---|
+| 346 | `0x80002604` | `bne` — group-barrier spin |
+| **221** | **`0x80000294`** | **`sfence.vma`** |
+| **221** | `0x80000298` | `lw` — the instruction immediately after it |
+| 65 | `0x80002620` / `0x80002a84` | `wfi` — parked |
+| 33 | `0x80002600` | `amoadd.w` — barrier increment |
+
+`0x80000294` is inside **`matmul_8xVL`** (confirmed by disassembling
+`s8_fp32_2048x32x256.elf`). **442 of 1024 cores are stuck on the fence**; the 346 at the barrier
+are simply waiting for them.
+
+**`sfence.vma` is not a TLB op in this tree — it is the VLSU request-sent fence.**
+`hardware/deps/snitch/src/snitch.sv:894-901`:
+
+```systemverilog
+riscv_instr::SFENCE_VMA: begin
+  fence_stall = (|acc_mem_req_cnt_q);
+end
+```
+
+**The counter and its decrement do not have the same shape.**
+`snitch.sv:2865-2870` — **+1 per offloaded FP/vector mem op**, **−1 per pulse**:
+
+```systemverilog
+if (acc_qdata_rsp_i.loadstore && acc_qready_i && acc_qvalid_o) acc_mem_req_cnt_d += 1;
+if (acc_mem_req_sent_i[0]) acc_mem_req_cnt_d -= 1;   // FP-LSU
+if (acc_mem_req_sent_i[1]) acc_mem_req_cnt_d -= 1;   // VLSU
+```
+
+and the VLSU pulse, `working_dir/spatz/hw/ip/spatz/src/spatz_vlsu.sv:875-877`, is a **rising-edge
+detect on a level**:
+
+```systemverilog
+assign mem_req_all_issued   = mem_spatz_req_valid && (&mem_port_req_issued);
+`FF(mem_req_all_issued_q, mem_req_all_issued, 1'b0)
+assign spatz_mem_req_sent_o = mem_req_all_issued && !mem_req_all_issued_q;
+```
+
+The comment at the counter asserts *"Each offload (+1) is balanced by exactly one request-sent
+(−1) on its own lane."* **A rising-edge detector cannot honour that.** If two vector mem ops are
+offloaded and `mem_req_all_issued` stays continuously high across both — no low cycle in
+between — the edge fires **once** for **two** increments. The counter never returns to zero,
+`fence_stall` never clears, and the core is parked at that PC for the rest of the simulation.
+
+That matches every observation: no outstanding memory anywhere (CMS silent since cyc 36,000),
+no MSHR timeouts, no RH episodes, links idle rather than stalled. **Nothing is pending — the core
+is waiting for a decrement that already happened, or never will.**
+
+**Why small `N`.** All 17 quiescent arms have `N ≤ 256`. With a short contraction the vector mem
+ops are short and issue back-to-back, so the level has no gap between them and pulses are lost;
+with a long contraction each op takes many cycles to issue its beats, the level drops between
+instructions, and every offload gets its own edge. 7 healthy arms also have `N ≤ 256`, so this is
+a race whose probability rises as `N` falls, not a hard threshold.
+
+⚠️ **Confidence.** The PCs, the disassembly, the fence semantics and both RTL fragments are
+**established**. That back-to-back ops actually coalesce the level in these runs is **inferred** —
+it fits all the evidence but the definitive proof is a waveform showing `acc_mem_req_cnt_q` stuck
+non-zero after two offloads and one pulse. `hardware/deps/snitch/src/snitch.sv` is the **compiled**
+snitch (checked against `build_q_8x8/compile.tcl`); `working_dir/spatz/hw/ip/snitch/src/snitch.sv`
+is NOT built and its `SFENCE_VMA` is a plain `tlb_flush` — do not read that one.
+
+**Fix direction:** make the VLSU emit one pulse **per completed mem instruction** rather than a
+rising edge on a shared level, so every `+1` has its own `-1`. A counter-based handshake on the
+VLSU side would be immune to back-to-back coalescing.
+
 ## Open
 
 1. **A detector.** Proposed: no `execution took`, `busy=0` on the last bench line, and `bar_rel=+0`
