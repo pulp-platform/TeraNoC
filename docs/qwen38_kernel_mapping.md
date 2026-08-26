@@ -392,20 +392,42 @@ and the same section withdrew a 4×4 tile at 0.11 MiB spare as "inside the error
 leaving nothing for stack, barriers or runtime". 0.86 MiB is roomier than that but still thin, and
 the footprint model is analytic, not measured.
 
-### ✅ ADOPTED: `2048×1024×256` (user decision, 2026-08-26)
+### ✅ ADOPTED: `1024×1024×512` (user decision, 2026-08-26)
 
-**83.6%, 11.00 MiB fully double-buffered, 3.86 MiB spare, `N = 1024` divides 5120 into 5 exact
-tiles, and it is clean (RH = 0, timeout = 0).** Whole prefill pass **8,453 → 7,432 Mcyc, −12.1%**.
+**86.6%, 8.00 MiB fully double-buffered, 6.86 MiB spare, `N = 1024` divides 5120 into 5 exact
+tiles.** Whole prefill pass **8,453 → 7,175 Mcyc, −15.1%**.
 
-Chosen over `2048×1024×512` (86.3%) deliberately: that tile is only 2.7 pp better and leaves
-**4.5× less L1 headroom** (0.86 MiB vs 3.86). The whole spread across the three viable tiles is
-~4% of the prefill pass, so pushing to the ceiling buys little — and the footprint model is
-**analytic, never validated against a real kernel**. A 6% modelling error (one alignment pad, one
-uncounted buffer) erases 0.86 MiB; §5.0 withdrew a 4×4 tile at 0.11 MiB spare on the same
-reasoning.
+It **dominates every other usable tile** — more efficient AND smaller:
 
-**Revisit `2048×1024×512` once a double-buffered kernel exists and its real footprint is
-measured** — that is +3% on the pass waiting on one measurement, not a decision to take blind.
+| tile | eff | L1 full-dbl | spare | `N` \| 5120 |
+|---|---:|---:|---:|---|
+| **`1024×1024×512`** | **86.6%** | **8.00 MiB** | **6.86** | yes (5) |
+| `2048×1024×512` | 86.3% | 14.00 MiB | 0.86 | yes (5) |
+| `2048×1024×256` | 83.6% | 11.00 MiB | 3.86 | yes (5) |
+| `2048×512×512` | 82.8% | 9.00 MiB | 5.86 | yes (10) |
+| `2048×256×512` *(previous)* | 73.5% | 6.50 MiB | 8.36 | yes (20) |
+
+Its 6.86 MiB of spare also removes the footprint-model risk that made `2048×1024×512` a gamble:
+the model is analytic and unvalidated, so a tile with margin is worth more than one at the ceiling.
+
+⚠️ **`1024×2048×512` measures higher still (89.3%) and is NOT usable** — 14.00 MiB (0.86 spare) and
+`N = 2048` leaves a ragged 2.5 tiles across the 5,120 contraction. Same disqualification as
+`2048×2048×256` (89.1%). The two best raw numbers in the campaign are both unusable.
+
+### ⚠️ `P = 512` is the sweet spot, and it is NOT monotonic
+
+An earlier revision of this section adopted `2048×1024×256` on the reasoning that `M = 2048` was
+the optimum, read off `M ∈ {512, 1024, 2048, 4096}`. **That comparison varied `N` and `P` too, so
+it attributed to `M` an effect that belongs to `P`.** At fixed `M = 1024, N = 1024`:
+
+| `P` | eff |
+|---:|---:|
+| 256 | 50.9% |
+| **512** | **86.6%** |
+| 1024 | 71.8% |
+
+Seven of the top eight fp16 tiles have `P = 512`. Both 256 and 1024 are substantially worse, so
+this is a peak, not a trend — **do not extrapolate past 512 in either direction.**
 
 ⚠️ The win is still **not monotonic in `N`**: `1024×2048×128` falls to 48.9% and `512×1024×1024`
 to 38.4%, so `M` and `P` bound it. `N = 512`–`1024` beats `N = 256` **at large `M`**.
