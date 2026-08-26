@@ -357,6 +357,57 @@ footer{color:var(--ink-3);font-size:12px;font-family:var(--mono)}
                  % (len(ab), min(ds), max(ds), sum(ds)/len(ds)))
         H.append('</section>')
 
+    # ---- run 3: the corrected merge derivation
+    r3 = []
+    for r in rows:
+        if not r.get("cycles"):
+            continue
+        s3 = scrape_dir(os.path.join(ROOT, "hardware", "fix_" + r["arm"]))
+        if s3 and s3.get("cycles"):
+            s2 = scrape_dir(os.path.join(ROOT, "hardware", "w8k_" + r["arm"]))
+            r3.append((r, s2, s3))
+    if r3:
+        H.append('<section class="card">')
+        H.append('<div><h2>Run 3 &mdash; the merge turned on</h2></div>')
+        H.append('<p class="note">Same shapes, same <code>KERNEL_SIZE=8</code>, '
+                 '<b>byte-identical hardware images</b> to run 2 &mdash; the MSHR CSR config is the '
+                 'only variable. <code>subs 4/4</code>, windows <code>8191/8191</code>, '
+                 '<code>gap_words 32</code>, verified out of the built ELFs. Every arm also carries '
+                 'a runtime guard that prints <code>[MSHR] SPLIT MISMATCH</code> if the compile-time '
+                 'derivation and the kernel&rsquo;s own split ever disagree again; no arm has printed it.</p>')
+        H.append('<div class="tw"><table><tr><th>shape B&times;D&times;I</th><th>mesh</th><th>prec</th>'
+                 '<th class="num">run 1</th><th class="num">run 2</th><th class="num">run 3</th>'
+                 '<th class="num">vs run 2</th><th class="num">eff before</th><th class="num">eff after</th>'
+                 '<th class="num">tmo</th></tr>')
+        ds = []
+        for r, s2, s3 in sorted(r3, key=lambda x: (x[0]["mesh"], x[0]["prec"], x[0]["D"])):
+            base2 = s2["cycles"] if (s2 and s2.get("cycles")) else r["cycles"]
+            d = 100.0 * (s3["cycles"] - base2) / base2
+            ds.append(d)
+            e0 = 100.0 * r["ideal"] / base2
+            e1 = 100.0 * r["ideal"] / s3["cycles"]
+            cls = "eff" if d < -3 else ("st-running" if d > 3 else "")
+            H.append('<tr><td><code>%d&times;%d&times;%d</code></td><td>%s</td>'
+                     '<td><span class="chip %s">%s</span></td>'
+                     '<td class="num">%s</td><td class="num">%s</td><td class="num"><b>%s</b></td>'
+                     '<td class="num"><span class="%s">%+.1f%%</span></td>'
+                     '<td class="num">%.1f%%</td><td class="num"><b>%.1f%%</b></td>'
+                     '<td class="num">%s</td></tr>'
+                     % (r["B"], r["D"], r["I"], r["mesh"], r["prec"], r["prec"],
+                        "{:,}".format(r["cycles"]),
+                        "{:,}".format(s2["cycles"]) if (s2 and s2.get("cycles")) else "&mdash;",
+                        "{:,}".format(s3["cycles"]), cls, d, e0, e1,
+                        "{:,}".format(s3["tmo"]) if s3.get("tmo") is not None else "&mdash;"))
+        H.append('</table></div>')
+        H.append('<p class="note"><b>%d of 8 arms in; spread %+.1f%% to %+.1f%%, mean %+.1f%%.</b> '
+                 'The measured bottleneck was MSHR <i>entry admission</i> &mdash; <code>REQ_MSHR_IN</code> '
+                 'stalled 90.2%% while links ran 9.3%% busy &mdash; so this is where turning merging on '
+                 'should show, and at 4&times;4 it does. The 8&times;8 arms are the real test: there the '
+                 'roofline ceiling for <code>B&nbsp;=&nbsp;32</code> fp16 is 49%%, so merging can close '
+                 'the admission gap but cannot lift the arm past its bandwidth bound.</p>'
+                 % (len(r3), min(ds), max(ds), sum(ds)/len(ds)))
+        H.append('</section>')
+
     # ---- how the split works
     H.append('<section class="card">')
     H.append('<div><h2>Why this needs its own work split</h2></div>')

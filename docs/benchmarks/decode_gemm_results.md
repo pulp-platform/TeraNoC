@@ -18,9 +18,9 @@ the TB `util` column, which is lane occupancy.
 
 | mesh | prec | B x D x I | B slice | cycles | ideal | efficiency | util | tmo | bankfull | RH | state |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| 4x4 | fp16 | `32x128x4096` | 128 B | 15,697 | 8192 | **52.2%** | — | 0 | 6,759 | 0 | done (fleet: running) |
+| 4x4 | fp16 | `32x128x4096` | 128 B | 15,697 | 8192 | **52.2%** | — | 0 | 6,759 | 0 | done |
 | 4x4 | fp16 | `32x256x4096` | 128 B | 24,867 | 16384 | **65.9%** | — | 0 | 16,399 | 0 | done (fleet: running) |
-| 4x4 | fp32 | `32x128x2048` | 128 B | 13,291 | 8192 | **61.6%** | 66.78% | 0 | 7,493 | 0 | done (fleet: running) |
+| 4x4 | fp32 | `32x128x2048` | 128 B | 13,291 | 8192 | **61.6%** | 66.78% | 0 | 7,493 | 0 | done |
 | 4x4 | fp32 | `32x256x2048` | 128 B | 25,768 | 16384 | **63.6%** | 66.61% | 0 | 13,713 | 0 | done (fleet: running) |
 | 8x8 | fp16 | `32x128x16384` | 128 B | 48,825 | 8192 | **16.8%** | 18.87% | 0 | 0 | 0 | done (fleet: running) |
 | 8x8 | fp16 | `32x256x16384` | 128 B | 66,868 | 16384 | **24.5%** | 27.87% | 0 | 0 | 0 | done (fleet: running) |
@@ -70,4 +70,28 @@ The prediction was NO effect, on the grounds that every decode arm already runs 
 8x8 sweep A/B found its payoff tracks the timeout RATE
 (`8x8_scaleup/remap_x_window_ab.md`). Scatter around zero in both directions is
 consistent with that; a systematic gain would not be.
+
+## Run 3 — corrected MSHR merge configuration
+
+Runs 1 and 2 derived the MSHR merge config with the **prefill** formula
+(`(GEMM_M/NUM_GROUPS)/KERNEL_SIZE`). At B=32 on 8x8 that is `32/64 = 0` in integer
+arithmetic, so it collapsed to *no sharing*: `hold_subs_single=1` (bypass),
+`hold_subs_burst=0` (off), both hold windows `0`, `gap_words=8192`. **Request merging
+was off for every decode arm ever measured**, even though the decode work split gives a
+group sharing degree of **4 for both A and W**. Run 3 derives from the decode split:
+`subs 4/4`, windows `8191/8191`, `gap_words=32` (verified out of the built ELFs).
+
+Run 3 arms live in `hardware/fix_<arm>/`; HW image is identical to run 2.
+
+| mesh | prec | D | run1 cyc | run2 cyc | run3 cyc | r3 vs r2 | r3 eff | r3 tmo | r3 bankfull |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 4x4 | fp16 | 128 | 15,697 | 15,759 | 10,344 | **-34.4%** | 79.2% | 0 | 0 |
+| 4x4 | fp32 | 128 | 13,291 | 13,213 | 10,755 | **-18.6%** | 76.2% | 0 | 0 |
+
+**2 of 8 arms in; spread -34.4% to -18.6%, mean -26.5%.**
+
+The measured L1->core bottleneck was MSHR *entry admission* (`REQ_MSHR_IN` stalled
+90.2% while links ran 9.3% busy), and merge capture was 1.06x of an available 4x.
+If admission pressure is what caps these kernels, turning merging on is where it
+should show; if the arms come back flat, the ceiling is elsewhere.
 
