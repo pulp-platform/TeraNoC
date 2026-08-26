@@ -331,10 +331,27 @@ contraction is exactly what the best 8×8 point already uses.
 the campaign's independent scale-up figure, and it comes from efficiency, not from capability — the
 per-tile efficiency falls from 94.8% to 73.5%.
 
-⚠️ **We are leaving L1 on the table at 8×8.** The chosen tile uses **4.50 of 14.86 MiB**. A
-`2048×512×512` tile needs 7.0 MiB A/B-double-buffered and **9.0 MiB fully double-buffered** (§5.0),
-still leaving 5.86 MiB; it is in the running manifest but has not been delivered. Arithmetic intensity rises with N, and 8×8 is the more bandwidth-starved mesh, so this
-is the single most likely improvement to the table above. **Re-derive §5.2 when it lands.**
+✅ **SETTLED 2026-08-26 — more contraction does pay at 8×8.** The chosen tile uses **4.50 of
+14.86 MiB**; the hypothesis was that a larger `N` would pay because arithmetic intensity rises with
+it and 8×8 is the bandwidth-starved mesh. The arm landed. In **fp32**:
+
+| tile | cycles | eff |
+|---|---:|---:|
+| `1024×1024×256` | 81,530 | **80.4%** |
+| `2048×1024×128` | 83,310 | **78.7%** |
+| `2048×512×512` | 174,741 | **75.0%** |
+| `2048×256×512` *(chosen)* | 93,914 | 69.8% |
+| `1024×256×1024` | 98,893 | 66.3% |
+| `1024×128×2048` | 105,108 | 62.4% |
+| `2048×128×1024` | 109,144 | 60.0% |
+| `1024×2048×128` | 134,041 | 48.9% |
+| `4096×256×512` | 310,591 | 42.2% |
+| `512×1024×1024` | 341,047 | 38.4% |
+
+⚠️ **Two caveats before re-tiling §5.2 on this.** These are **fp32** and §5.2 is fp16 — the fp16
+counterparts have not landed. And the win is **not monotonic in `N`**: `1024×2048×128` falls to
+48.9% and `512×1024×1024` to 38.4%, so `M` and `P` still bound it. The honest reading is that
+`N = 512`–`1024` beats `N = 256` **at large `M`**, not that bigger `N` is always better.
 
 ### 5.3 Decode (`B = 32`, `T_NEW = 1`) — and why it needs T3
 
