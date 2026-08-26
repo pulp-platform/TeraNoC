@@ -19,6 +19,7 @@ This is a PROJECTION from medians, and the per-arm spread is wide (fp16 1.7e-4..
 it as a planning filter, never as grounds for discarding a delivered measurement.
 """
 import re
+import json as _json_mod
 
 import csv as _csv
 import os as _os
@@ -145,6 +146,44 @@ def delivered(arm):
         return b"execution took" in open(t, "rb").read()
     except OSError:
         return False
+
+
+def finished_on_fleet(arm):
+    """True if ANY badist job for this arm reached state `done`.
+
+    delivered() is deliberately local -- it means "we have the number in hand". But an arm is
+    finished on the fleet HOURS before fetch+collect lands its row, and during that window
+    delivered() is False while the work is complete. sim_topup then dispatches a duplicate onto
+    a fresh seat. That happened twice inside 30 minutes on 2026-08-26 (fp32_2048x512x512 and
+    fp32_2048x512x256), each time burning a multi-hour Questa seat on work already done.
+
+    Kept SEPARATE from delivered() so the two questions stay distinct: "do we have the result?"
+    (delivered) versus "is it pointless to run this again right now?" (this). Dispatch guards want
+    the second. campaign_status still reports an arm that is `done` with no usable result, so a
+    genuinely empty completion is not hidden by this.
+    """
+    import glob as _glob
+    state = _os.path.expanduser("~/badist/state")
+    for d in _glob.glob(_os.path.join(state, "*")):
+        jf = _os.path.join(d, "jobs.json")
+        if not _os.path.exists(jf):
+            continue
+        try:
+            jobs = _json_mod.load(open(jf))
+        except Exception:
+            continue
+        for j in jobs:
+            if (j.get("meta") or {}).get("arm") != arm:
+                continue
+            st = None
+            try:
+                for ln in open(_os.path.join(d, "jobs", j["job_id"] + ".jsonl")):
+                    st = _json_mod.loads(ln).get("state") or st
+            except OSError:
+                continue
+            if st == "done":
+                return True
+    return False
 
 
 # --- announce-once -------------------------------------------------------------------------

@@ -51,7 +51,7 @@ def main():
         print("  pool is at the reserve line; nothing to add")
         return
 
-    running, queued, on_vcs = set(), [], set()
+    running, queued, on_vcs, finished = set(), [], set(), set()
     for d in sorted(glob.glob(os.path.join(STATE, "*"))):
         jf = os.path.join(d, "jobs.json")
         if not os.path.exists(jf):
@@ -83,11 +83,18 @@ def main():
                     pass
             if last and last.get("state") == "running":
                 running.add(a)
+            # An arm is finished on the fleet HOURS before fetch+collect lands its transcript
+            # here, and during that window the local check below sees nothing and the arm looks
+            # undone. That dispatched duplicates of fp32_2048x512x512 and fp32_2048x512x256 on
+            # 2026-08-26, each burning a multi-hour seat on work already complete. The ledger
+            # already says `done`; this loop is already reading it.
+            elif last and last.get("state") == "done":
+                finished.add(a)
 
     pick, seen = [], set()
     for a in queued:
         # never move an arm that is already executing, and never one already finished
-        if a in running or a in seen or a in on_vcs:
+        if a in running or a in seen or a in on_vcs or a in finished:
             continue
         t = os.path.join(ROOT, "hardware", "s8_" + a, "transcript")
         try:
@@ -99,7 +106,8 @@ def main():
         if len(pick) >= want:
             break
     if not pick:
-        print("  no queued arm is free to move (%d already waiting on VCS)" % len(on_vcs))
+        print("  no queued arm is free to move (%d already waiting on VCS, %d already finished)"
+              % (len(on_vcs), len(finished)))
         return
     print("  moving %d queued arm(s) to VCS: %s%s"
           % (len(pick), ", ".join(pick[:4]), " ..." if len(pick) > 4 else ""))

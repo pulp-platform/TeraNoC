@@ -25,6 +25,7 @@ KNOWN_ISSUES).
 import argparse, glob, json, os, re, subprocess, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from feasibility import (stalling, stall_reason, fits, projected_hours, delivered,
+                         finished_on_fleet,
                          announce_once, save_announced)
 
 ROOT   = "/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC"
@@ -198,8 +199,11 @@ def main():
             # then fails. The top-up moved fp16_2048x1024x1024 (~200 h projected) to VCS before
             # this guard existed.
             continue
-        if delivered(arm):
-            continue              # already recorded; re-running it wastes a seat
+        if delivered(arm) or finished_on_fleet(arm):
+            # `delivered` is local (row or transcript); `finished_on_fleet` covers the window
+            # between an arm completing on a node and its row landing here, during which the
+            # work is done but looks undone. Both must be checked or duplicates get dispatched.
+            continue              # already recorded or already finished; re-running wastes a seat
         seen.add(arm); pick.append(arm)
         if len(pick) >= min(a.batch, room):
             break
