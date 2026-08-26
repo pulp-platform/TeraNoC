@@ -126,7 +126,8 @@ enough (`g=32 t=2 p=0 id=0`) to trace directly.
 
 | | count |
 |---|---:|
-| arms hung right now | **17** (16 Questa, 1 VCS) |
+| arms hung, retired 2026-08-26 | **17** (16 Questa, 1 VCS) |
+| dispatches they consumed before retirement | **~105** |
 | delivered results contaminated | **0** — a hung arm never prints `execution took`, so no published number comes from one |
 | at-risk population (`N ≤ 256`) | 163 of 248 |
 | of those, completed cleanly | **118** |
@@ -145,9 +146,25 @@ Quiescence rate by contraction, over the whole manifest:
 | 1024 | 12 | 4 | 0 | **0%** |
 | 2048 | 4 | 4 | 0 | **0%** |
 
-A hard floor at `N ≥ 512` and a roughly flat ~11% below it: **a race that only becomes reachable
-when the contraction is short**, not a size threshold. The 16 small-`N` arms recorded as `livelock`
-carry RH ~10^5 and are a different signature.
+A hard floor at `N ≥ 512` and a roughly flat ~11% below it.
+
+⚠️ **CORRECTED 2026-08-26 — the ~11% is a fraction of SHAPES, not a per-run probability.** An
+earlier version of this file read it as "a race that fires ~11% of the time", which implies a
+re-run would usually succeed. The dispatch history refutes that: across the 17 arms, **4–12
+attempts each, ~105 dispatches in total, and not one has ever produced a result row.**
+
+| | |
+|---|---:|
+| attempts across the 17 arms | ~105 |
+| arms that ever produced a result | **0** |
+| arms showing `done` in the ledger | 4 — but `done` only means the wrapper exited; none has a row |
+
+So the affected **shapes fail deterministically**; what is ~11% is the share of small-`N` shapes
+that are affected at all. That distinction decides policy: **re-running these is futile**, which is
+exactly how they accumulated ~105 dispatches. It also means the retry loops were the main consumer
+of the wasted seat-time, not the individual hangs.
+
+The 16 small-`N` arms recorded as `livelock` carry RH ~10^5 and are a different signature.
 
 **Cost of a fix: not estimable yet.** It depends entirely on which of the three candidates above is
 true — a timeout that should have armed is a logic fix with essentially no area, whereas a dropped

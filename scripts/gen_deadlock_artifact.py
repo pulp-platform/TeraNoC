@@ -31,9 +31,17 @@ for M, N, P, PR in mani:
         st = "not-dispatched"
     byN[int(N)][st] += 1
     if st == "deadlock":
+        # Source the retired arms from results.tsv, NOT run_progress: once they are killed they
+        # are no longer running, so run_progress drops them and the table would come out empty.
+        r = rec.get((prec, shape))
         p = prog.get(arm, {})
-        stuck.append((arm, p.get("node", "-"), p.get("backend", "-"),
-                      p.get("cum_util") or 0, p.get("cyc") or 0,
+        cyc = int(r[3]) if r and r[3].strip().isdigit() else (p.get("cyc") or 0)
+        u = r[4].lstrip("~") if r else ""
+        try:
+            util = float(u)
+        except ValueError:
+            util = p.get("cum_util") or 0.0
+        stuck.append((arm, p.get("node", "-"), p.get("backend", "-"), util, cyc,
                       int(M), int(N), int(P)))
 stuck.sort(key=lambda x: (-x[4],))
 
