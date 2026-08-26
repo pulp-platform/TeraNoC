@@ -49,6 +49,36 @@ the summed total is **3,471**. Reading the last line as the total said "fp32 has
 at 2047", which is the opposite of the truth. Always sum:
 `grep -ao 'mshr_timeout=+[0-9]*' | awk -F+ '{s+=$2} END{print s}'`.
 
+## `8192x128x512` fp16 — the third shape, and what predicts the window's payoff
+
+| remap | hold | cycles | eff | tmo |
+|---:|---:|---:|---:|---:|
+| 3 | 2047 | 223,413 | 29.3% | 1,160 |
+| **3** | **8191** | **184,886** | **35.4%** | 0 |
+
+**1.21x** — far less than the 1.85x and 2.34x on the `4096x*x128` shapes. Every 8191 arm still
+lands at `tmo = 0`, so the window works; there was simply less for it to fix.
+
+**Within fp16 the payoff tracks the timeout RATE, not the raw count:**
+
+| shape | tmo @2047 | tmo per kcyc | window payoff |
+|---|---:|---:|---:|
+| `8192x128x512` | 1,160 | **5.2** | 1.21x |
+| `4096x128x128` | 735 | **16.2** | 1.85x |
+| `4096x256x128` | 2,209 | **26.0** | 2.34x |
+
+Monotonic in the rate, and NOT in the count — `8192x128x512` has more absolute timeouts than
+`4096x128x128` and gains less, because it runs 5x longer. **Quote the rate.**
+
+⚠️ fp32 `4096x256x128` breaks the ordering (39.0 tmo/kcyc, only 1.37x). Consistent with fp32 having
+half the lanes, so each stalled cohort costs relatively less throughput — but it means the rate
+predicts the payoff **within a precision**, not across one.
+
+**Practical reading:** the hold window is worth having everywhere (it never costs anything — every
+8191 arm is timeout-free), but its value is proportional to how timeout-bound the shape already is.
+A shape at `tmo = 0` has nothing to gain, which is exactly why the decode arms are not expected to
+move.
+
 ## The window is what lets fp16 realise its 2x at 8x8
 
 Both precisions accumulate timeouts at 2047 and both go to zero at 8191, but the payoff is very
