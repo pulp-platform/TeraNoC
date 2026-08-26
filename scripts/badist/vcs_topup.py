@@ -20,6 +20,9 @@ only decides how many arms to hand it, never how many run.
 """
 import glob, json, os, re, subprocess, sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from feasibility import delivered, stalling, stall_reason
+
 ROOT   = "/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC"
 STATE  = os.path.expanduser("~/badist/state")
 CLIENT = os.path.join(ROOT, "scripts/badist/teranoc_fleet.py")
@@ -95,6 +98,19 @@ def main():
     for a in queued:
         # never move an arm that is already executing, and never one already finished
         if a in running or a in seen or a in on_vcs or a in finished:
+            continue
+        # delivered() checks results.tsv for a RECORDED CYCLE COUNT, which the local-transcript
+        # test below cannot see. A LIVELOCK arm is the case that matters: it is characterised and
+        # has a row (e.g. fp16_512x256x128, 55,000 cyc, 0.02% util), but it was killed rather than
+        # completing, so it never printed 'execution took' and it ends `cancelled`/`failed` rather
+        # than `done`. Without this the top-up re-dispatched 12 already-characterised livelock arms
+        # onto VCS seats, each for hours, to re-derive an answer already in the table.
+        if delivered(a):
+            continue
+        # The gate is deliberate: these shapes collapse into sub-burst livelock and are held back
+        # on purpose (feasibility.GATED, plus the reserved GUI-debug shape). sim_topup honours it;
+        # this one did not, so a gated arm could still reach a seat through the VCS path.
+        if stalling(a):
             continue
         t = os.path.join(ROOT, "hardware", "s8_" + a, "transcript")
         try:
