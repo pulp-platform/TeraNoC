@@ -9,11 +9,15 @@ forever. See docs/benchmarks/8x8_scaleup/quiescent_deadlock.md.
 SAFETY -- this kills the user's running simulations, so every arm must clear ALL of:
 
   1. no `execution took` in its transcript (it has not finished);
-  2. `busy=0` on the last [FPU] bench line (no FPU work at this instant);
-  3. TWO samples separated by --settle seconds show the simulated cycle ADVANCING while
+  2. it is MATURE -- at least --min-samples [FPU] bench lines. A freshly started arm has busy=0
+     too, because the counters read zero until the benchmark region opens. The first dry run of
+     this tool flagged fp16_8192x512x256 at cycle 4,000, fifteen minutes into a legitimate
+     re-run, and it passed every other check. Without this guard the tool kills healthy work.
+  3. `busy=0` on the last [FPU] bench line (no FPU work at this instant);
+  4. TWO samples separated by --settle seconds show the simulated cycle ADVANCING while
      `busy` stays 0 and cumulative utilisation does not rise. Time passing with no work is the
      discriminator between "stuck" and "slow"; a single sample cannot tell those apart.
-  4. the run dir resolved from the ledger matches the arm (guards against killing a neighbour).
+  5. the run dir resolved from the ledger matches the arm (guards against killing a neighbour).
 
 Then, and only then: cancel the badist job, and kill the simulator by PID verified against
 /proc/PID/cwd -- `badist cancel` and `pkill` both hit the wrapper, and QuestaSim's vsimk carries
@@ -70,16 +74,21 @@ def sample(node, batch, job):
     cmd = ("D=$(ls -d /scratch*/zexifu_cache/badist/run/%s/%s 2>/dev/null|head -1); "
            "[ -n \"$D\" ] || exit; T=$D/transcript; "
            "grep -acm1 'execution took' $T; "
+           "grep -ac '\\[FPU\\] bench' $T; "
            "sed 's/^# //' $T | grep -a '\\[FPU\\]' | tail -1" % (batch, job))
     out = sh(node, cmd)
     if not out:
         return None
     lines = out.splitlines()
     fin = lines[0].strip() not in ("0", "")
+    try:
+        nsamp = int(lines[1].strip())
+    except (IndexError, ValueError):
+        nsamp = 0
     m = BENCH.search(out)
     if not m:
         return None
-    return (int(m.group(1)), float(m.group(2)), float(m.group(3)), int(m.group(4)), fin)
+    return (int(m.group(1)), float(m.group(2)), float(m.group(3)), int(m.group(4)), fin, nsamp)
 
 
 def main():
@@ -87,6 +96,9 @@ def main():
     ap.add_argument("--settle", type=int, default=120,
                     help="seconds between the two progress samples")
     ap.add_argument("--max-util", type=float, default=5.0)
+    ap.add_argument("--min-samples", type=int, default=200,
+                    help="minimum [FPU] bench lines before an arm may be judged stuck; a young "
+                         "arm reads busy=0 simply because tracing has not opened yet")
     ap.add_argument("--dry-run", action="store_true")
     a = ap.parse_args()
 
@@ -96,8 +108,13 @@ def main():
     first = {}
     for arm, (b, j, node) in sorted(arms.items()):
         s = sample(node, b, j)
-        if s and not s[4] and s[3] == 0 and s[2] < a.max_util:
-            first[arm] = (b, j, node, s)
+        if not s or s[4] or s[3] != 0 or s[2] >= a.max_util:
+            continue
+        if s[5] < a.min_samples:
+            print("  YOUNG %-26s only %d bench samples (cyc=%s) -- too early to judge, skipping"
+                  % (arm, s[5], "{:,}".format(s[0])))
+            continue
+        first[arm] = (b, j, node, s)
     print("candidates after sample 1 (busy=0, cum<%.1f%%, unfinished): %d" % (a.max_util, len(first)))
     if not first:
         return
@@ -117,6 +134,8 @@ def main():
             print("  SKIP %-26s it FINISHED between samples" % arm); continue
         if s2[3] != 0:
             print("  SKIP %-26s busy=%d -- doing work now" % (arm, s2[3])); continue
+        if s2[5] < a.min_samples:
+            print("  SKIP %-26s only %d bench samples" % (arm, s2[5])); continue
         if s2[2] > s1[2] + 0.01:
             print("  SKIP %-26s cum util RISING %.2f -> %.2f" % (arm, s1[2], s2[2])); continue
         if s2[0] <= s1[0]:
