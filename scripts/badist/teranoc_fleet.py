@@ -724,7 +724,14 @@ def _guard_transcripts(dests):
     guard = {}
     for rd in sorted(set(dests)):
         t = os.path.join(rd, "transcript")
-        if not os.path.exists(t) or not _transcript_complete(t):
+        # Guard EVERY existing transcript, not only the finished ones. The old test was
+        # `_transcript_complete`, i.e. "contains `execution took`" -- but a DEADLOCKED arm never
+        # prints that line, so a 628 MB deadlock transcript (the evidence for a real bug) counted
+        # as worthless and was silently replaced by a 1.7 MB stale partial from a superseded
+        # batch. _restore_transcripts adjudicates correctly on its own: it puts the old file back
+        # only when the new one is BOTH shorter AND incomplete, so guarding everything costs one
+        # rename and never keeps a worse file.
+        if not os.path.exists(t):
             continue
         k = os.path.join(rd, _KEEP)
         try:
