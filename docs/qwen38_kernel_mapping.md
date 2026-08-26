@@ -373,14 +373,30 @@ Same ideal (65,536 cyc) as `2048×512×512`, so the two are directly comparable 
 lookup used to check it was broken and returned nothing, and a zero-result search was reported as a
 finding without first proving the search worked.
 
-**Either tile is a clear upgrade over 73.5%. Pick on L1 headroom, not on the 0.8 pp:**
+✅ **`2048×1024×512` landed 2026-08-26 at 86.3% — the best USABLE tile measured.** The full
+picture at `M = 2048`, fp16:
 
-| tile | eff | cycles | L1 full-dbl | spare | clean? |
-|---|---:|---:|---:|---:|---|
-| `2048×1024×256` | **83.6%** | 78,437 | 11.00 MiB | 3.86 | RH 0, tmo 0 |
-| `2048×512×512` | 82.8% | 79,169 | **9.00 MiB** | **5.86** | RH 4, tmo 0 |
+| tile | eff | cycles | L1 full-dbl | spare | `N` \| 5120 | clean? |
+|---|---:|---:|---:|---:|---|---|
+| `2048×2048×256` | 89.1% | 147,182 | ⚠️ 20.00 MiB | **−5.14** | ⚠️ no (2.5) | — |
+| **`2048×1024×512`** | **86.3%** | 151,919 | **14.00 MiB** | **0.86** | yes (5) | RH 0, tmo 0 |
+| `2048×1024×256` | 83.6% | 78,437 | 11.00 MiB | 3.86 | yes (5) | RH 0, tmo 0 |
+| `2048×512×512` | 82.8% | 79,169 | 9.00 MiB | 5.86 | yes (10) | RH 4, tmo 0 |
+| `2048×256×512` *(current)* | 73.5% | 44,586 | 6.50 MiB | 8.36 | yes (20) | clean |
 
-`2048×512×512` is the safer default — 2 MiB more headroom for the same throughput within noise.
+Whole prefill pass: **8,453 → 7,504 Mcyc** at `2048×512×512`, **→ 7,199 Mcyc** at
+`2048×1024×512` (−14.8% against the current tile).
+
+⚠️ **`2048×1024×512` is at the L1 ceiling — 0.86 MiB spare.** §5.0 already names it "the ceiling",
+and the same section withdrew a 4×4 tile at 0.11 MiB spare as "inside the error bar on *usable*,
+leaving nothing for stack, barriers or runtime". 0.86 MiB is roomier than that but still thin, and
+the footprint model is analytic, not measured.
+
+**Recommendation, in order of risk appetite:**
+1. **`2048×512×512`** — 82.8%, 5.86 MiB spare. The safe default; −11.2% on the pass.
+2. **`2048×1024×512`** — 86.3%, 0.86 MiB spare. Best usable throughput, −14.8% on the pass, but it
+   needs the footprint model **confirmed against a real double-buffered kernel** before committing.
+3. `2048×1024×256` — 83.6%, 3.86 MiB spare. The middle option if 0.86 proves too tight.
 
 ⚠️ The win is still **not monotonic in `N`**: `1024×2048×128` falls to 48.9% and `512×1024×1024`
 to 38.4%, so `M` and `P` bound it. `N = 512`–`1024` beats `N = 256` **at large `M`**.
