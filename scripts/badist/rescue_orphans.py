@@ -27,7 +27,8 @@ import concurrent.futures as cf
 import glob, json, os, re, subprocess, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import time
-from feasibility import stalling, stall_reason, delivered, fits, projected_hours, announce_once, save_announced
+from feasibility import (stalling, stall_reason, delivered, finished_on_fleet, fits,
+                         projected_hours, announce_once, save_announced)
 
 ROOT   = "/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC"
 STATE  = os.path.expanduser("~/badist/state")
@@ -169,6 +170,12 @@ def main():
             announce_once("infeasible:" + a,
                           "  INFEASIBLE %-24s ~%.0f h projected -- not rescued"
                           % (a, projected_hours(a) or 0))
+            continue
+        # An arm is finished on the fleet before its row is collected, and in that window
+        # delivered() is False while the work is complete. This is the THIRD dispatcher to need
+        # the check -- both top-ups were fixed earlier today, and this one re-dispatched
+        # fp16_2048x2048x256 (89.1% efficiency, a real result) 2 minutes after it completed.
+        if finished_on_fleet(a):
             continue
         if delivered(a):
             # durable record, not the overwritable transcript: delivered() handles its own
