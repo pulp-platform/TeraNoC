@@ -19,7 +19,7 @@ the TB `util` column, which is lane occupancy.
 | mesh | prec | B x D x I | B slice | cycles | ideal | efficiency | util | tmo | bankfull | RH | state |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
 | 4x4 | fp16 | `32x128x4096` | 128 B | 15,697 | 8192 | **52.2%** | — | 0 | 6,759 | 0 | done |
-| 4x4 | fp16 | `32x256x4096` | 128 B | 24,867 | 16384 | **65.9%** | — | 0 | 16,399 | 0 | done (fleet: running) |
+| 4x4 | fp16 | `32x256x4096` | 128 B | 24,867 | 16384 | **65.9%** | — | 0 | 16,399 | 0 | done |
 | 4x4 | fp32 | `32x128x2048` | 128 B | 13,291 | 8192 | **61.6%** | 66.78% | 0 | 7,493 | 0 | done |
 | 4x4 | fp32 | `32x256x2048` | 128 B | 25,768 | 16384 | **63.6%** | 66.61% | 0 | 13,713 | 0 | done (fleet: running) |
 | 8x8 | fp16 | `32x128x16384` | 128 B | 48,825 | 8192 | **16.8%** | 18.87% | 0 | 0 | 0 | done (fleet: running) |
@@ -86,9 +86,10 @@ Run 3 arms live in `hardware/fix_<arm>/`; HW image is identical to run 2.
 | mesh | prec | D | run1 cyc | run2 cyc | run3 cyc | r3 vs r2 | r3 eff | r3 tmo | r3 bankfull |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|
 | 4x4 | fp16 | 128 | 15,697 | 15,759 | 10,344 | **-34.4%** | 79.2% | 0 | 0 |
+| 4x4 | fp16 | 256 | 24,867 | 25,451 | 19,458 | **-23.5%** | 84.2% | 0 | 0 |
 | 4x4 | fp32 | 128 | 13,291 | 13,213 | 10,755 | **-18.6%** | 76.2% | 0 | 0 |
 
-**2 of 8 arms in; spread -34.4% to -18.6%, mean -26.5%.**
+**3 of 8 arms in; spread -34.4% to -18.6%, mean -25.5%.**
 
 The measured L1->core bottleneck was MSHR *entry admission* (`REQ_MSHR_IN` stalled
 90.2% while links ran 9.3% busy), and merge capture was 1.06x of an available 4x.
