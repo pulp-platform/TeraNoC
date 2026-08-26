@@ -542,8 +542,18 @@ Each 8×8 arm runs 4× the work on 4× the cores, so equal cycles would be perfe
 | prec | `D` | 4×4 cycles | 8×8 cycles | throughput | of ideal 4.00× |
 |---|---:|---:|---:|---:|---:|
 | fp16 | 128 | 15,697 | 48,825 | **1.29×** | 32% |
+| fp16 | 256 | 24,867 | 66,868 | **1.49×** | 37% |
 | fp32 | 128 | 13,291 | 35,946 | **1.48×** | 37% |
 | **fp32** | **256** | 25,768 | 50,747 | **2.03×** | 51% |
+
+✅ **All 8 decode cells measured (2026-08-26).** `D=256` wins everywhere and wins bigger on the big
+mesh: **+46%** (fp16) and **+42%** (fp32) at 8×8, against +26% and +3% at 4×4.
+
+⚠️ **fp32 scales BETTER than fp16 — 1.48×/2.03× against 1.29×/1.49×.** That is the right direction
+for a bandwidth-bound kernel: fp16 has **twice the lanes to feed from the same bytes**, so the extra
+compute has nothing to do. fp16 is still the faster kernel in absolute time; it just converts less
+of the bigger mesh into throughput. **The mesh scale-up favours the precision with fewer lanes,
+which is the opposite of the prefill result** (where fp16 is worth 2.11× at the dominant tile).
 
 **The contraction tile is a bigger lever at 8×8 than at 4×4.** Doubling `D` from 128 to 256 takes
 fp32 scaling from 1.48× to **2.03×** — a 37% improvement from one parameter. The same change at

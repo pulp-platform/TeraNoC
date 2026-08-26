@@ -18,7 +18,7 @@ the TB `util` column, which is lane occupancy.
 | 4x4 | fp32 | `32x128x2048` | 128 B | 13,291 | 8192 | **61.6%** | 66.78% | done |
 | 4x4 | fp32 | `32x256x2048` | 128 B | 25,768 | 16384 | **63.6%** | 66.61% | done |
 | 8x8 | fp16 | `32x128x16384` | 128 B | 48,825 | 8192 | **16.8%** | 18.87% | done |
-| 8x8 | fp16 | `32x256x16384` | 128 B | — | 16384 | — | — | running |
+| 8x8 | fp16 | `32x256x16384` | 128 B | 66,868 | 16384 | **24.5%** | 27.87% | done (fleet: running) |
 | 8x8 | fp32 | `32x128x8192` | 128 B | 35,946 | 8192 | **22.8%** | 26.01% | done |
 | 8x8 | fp32 | `32x256x8192` | 128 B | 50,747 | 16384 | **32.3%** | 36.31% | done |
 
@@ -26,6 +26,7 @@ the TB `util` column, which is lane occupancy.
 
 * 4x4 fp16: D=128 gives 52.2%, D=256 gives 65.9% — the wider hidden dimension amortises the fixed per-iteration cost.
 * 4x4 fp32: D=128 gives 61.6%, D=256 gives 63.6% — the wider hidden dimension amortises the fixed per-iteration cost.
+* 8x8 fp16: D=128 gives 16.8%, D=256 gives 24.5% — the wider hidden dimension amortises the fixed per-iteration cost.
 * 8x8 fp32: D=128 gives 22.8%, D=256 gives 32.3% — the wider hidden dimension amortises the fixed per-iteration cost.
 
 ## Scaling 4x4 -> 8x8
@@ -38,6 +39,7 @@ Both meshes run the SAME work per core: the 8x8 arm has 4x the cores and 4x the
 | prec | D | 4x4 cycles | 8x8 cycles | speedup | of ideal |
 |---|---:|---:|---:|---:|---:|
 | fp16 | 128 | 15,697 | 48,825 | **1.29x** | 32% |
+| fp16 | 256 | 24,867 | 66,868 | **1.49x** | 37% |
 | fp32 | 128 | 13,291 | 35,946 | **1.48x** | 37% |
 | fp32 | 256 | 25,768 | 50,747 | **2.03x** | 51% |
 
