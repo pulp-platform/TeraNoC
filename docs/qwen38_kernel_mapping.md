@@ -364,8 +364,23 @@ contraction exactly. Whole prefill pass **8,453 → 7,504 Mcyc, −11.2%**.
 double-buffered against a 14.86 MiB L1, and `N = 2048` leaves a ragged 2.5 tiles across the
 contraction. Quote it as evidence that efficiency keeps climbing with `N`, never as a tile choice.
 
-**Next candidate: `2048×1024×256`** — 11.00 MiB full-dbl (3.86 spare), `N = 1024` divides 5120 into
-5 tiles, and it sits between the two measured points. **Unmeasured; worth one arm.**
+**`2048×1024×256` is ALREADY MEASURED and marginally better still: 78,437 cyc = 83.6%**, clean
+(RH = 0, timeout = 0), 11.00 MiB full-dbl (3.86 spare), `N = 1024` divides 5120 into 5 tiles.
+Same ideal (65,536 cyc) as `2048×512×512`, so the two are directly comparable by cycle count:
+78,437 vs 79,169 — **0.9% apart, effectively tied**.
+
+⚠️ An earlier revision of this section called it "unmeasured; worth one arm". That was wrong — the
+lookup used to check it was broken and returned nothing, and a zero-result search was reported as a
+finding without first proving the search worked.
+
+**Either tile is a clear upgrade over 73.5%. Pick on L1 headroom, not on the 0.8 pp:**
+
+| tile | eff | cycles | L1 full-dbl | spare | clean? |
+|---|---:|---:|---:|---:|---|
+| `2048×1024×256` | **83.6%** | 78,437 | 11.00 MiB | 3.86 | RH 0, tmo 0 |
+| `2048×512×512` | 82.8% | 79,169 | **9.00 MiB** | **5.86** | RH 4, tmo 0 |
+
+`2048×512×512` is the safer default — 2 MiB more headroom for the same throughput within noise.
 
 ⚠️ The win is still **not monotonic in `N`**: `1024×2048×128` falls to 48.9% and `512×1024×1024`
 to 38.4%, so `M` and `P` bound it. `N = 512`–`1024` beats `N = 256` **at large `M`**.
