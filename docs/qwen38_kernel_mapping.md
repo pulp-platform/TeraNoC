@@ -392,11 +392,20 @@ and the same section withdrew a 4×4 tile at 0.11 MiB spare as "inside the error
 leaving nothing for stack, barriers or runtime". 0.86 MiB is roomier than that but still thin, and
 the footprint model is analytic, not measured.
 
-**Recommendation, in order of risk appetite:**
-1. **`2048×512×512`** — 82.8%, 5.86 MiB spare. The safe default; −11.2% on the pass.
-2. **`2048×1024×512`** — 86.3%, 0.86 MiB spare. Best usable throughput, −14.8% on the pass, but it
-   needs the footprint model **confirmed against a real double-buffered kernel** before committing.
-3. `2048×1024×256` — 83.6%, 3.86 MiB spare. The middle option if 0.86 proves too tight.
+### ✅ ADOPTED: `2048×1024×256` (user decision, 2026-08-26)
+
+**83.6%, 11.00 MiB fully double-buffered, 3.86 MiB spare, `N = 1024` divides 5120 into 5 exact
+tiles, and it is clean (RH = 0, timeout = 0).** Whole prefill pass **8,453 → 7,432 Mcyc, −12.1%**.
+
+Chosen over `2048×1024×512` (86.3%) deliberately: that tile is only 2.7 pp better and leaves
+**4.5× less L1 headroom** (0.86 MiB vs 3.86). The whole spread across the three viable tiles is
+~4% of the prefill pass, so pushing to the ceiling buys little — and the footprint model is
+**analytic, never validated against a real kernel**. A 6% modelling error (one alignment pad, one
+uncounted buffer) erases 0.86 MiB; §5.0 withdrew a 4×4 tile at 0.11 MiB spare on the same
+reasoning.
+
+**Revisit `2048×1024×512` once a double-buffered kernel exists and its real footprint is
+measured** — that is +3% on the pass waiting on one measurement, not a decision to take blind.
 
 ⚠️ The win is still **not monotonic in `N`**: `1024×2048×128` falls to 48.9% and `512×1024×1024`
 to 38.4%, so `M` and `P` bound it. `N = 512`–`1024` beats `N = 256` **at large `M`**.
