@@ -70,10 +70,18 @@ def scrape(d):
         return None
     m = re.search(rb"execution took (\d+)", b)
     if not m:
-        return {"state": "running", "cycles": None, "util": None}
+        return {"state": "running", "cycles": None, "util": None, "tmo": None, "bf": None, "rh": None}
     u = re.search(rb"\[FPU FINAL\][^\n]*?util=([0-9.]+)%", b)
+    # Sum the per-period deltas -- `mshr_timeout=+N` and `bankfull_bypass=+N` are PER-PERIOD, not
+    # running totals. Reading the last bench line as the total understates them to near zero, and
+    # doing exactly that once inverted a conclusion about an A/B arm.
+    txt = b"\n".join(l[2:] if l.startswith(b"# ") else l for l in b.split(b"\n"))
+    def tot(tag):
+        return sum(int(x) for x in re.findall(tag + rb"=\+(\d+)", txt))
     return {"state": "done", "cycles": int(m.group(1)),
-            "util": float(u.group(1)) if u else None}
+            "util": float(u.group(1)) if u else None,
+            "tmo": tot(rb"mshr_timeout"), "bf": tot(rb"bankfull_bypass"),
+            "rh": txt.count(b"RH STUCK")}
 
 
 fleet = ledger_arms()
@@ -90,7 +98,8 @@ for arm in sorted(set(fleet) | set(local)):
     if not m:
         continue
     B, D, I = (int(x) for x in m.groups())
-    r = scrape(d) or {"state": fleet.get(arm, "pending"), "cycles": None, "util": None}
+    r = scrape(d) or {"state": fleet.get(arm, "pending"), "cycles": None, "util": None,
+                      "tmo": None, "bf": None, "rh": None}
     fl = fleet.get(arm)
     # A measured arm the fleet calls failed keeps its number and says so; an unmeasured one
     # reports the fleet's own word, so "no local dir" never masquerades as "not planned".
@@ -107,7 +116,7 @@ for arm in sorted(set(fleet) | set(local)):
         state = "%s (fleet: %s)" % (state, fl)
     rows.append(dict(arm=arm, mesh=mesh, prec=prec, B=B, D=D, I=I, slice=slice_b,
                      cycles=r["cycles"], util=r["util"], eff=eff, state=state,
-                     ideal=ideal))
+                     tmo=r.get("tmo"), bf=r.get("bf"), rh=r.get("rh"), ideal=ideal))
 
 L = ["# Decode-shape GEMM — benchmark results", "",
      "`C[B][I] = A[B][D] x W[D][I]`, mapped to GEMM as `M=B, N=D, P=I`. Batch is 32 throughout,",
@@ -118,14 +127,16 @@ L = ["# Decode-shape GEMM — benchmark results", "",
      "unchanged (`MATMUL_DECODE_SPLIT` selects only the work split).", "",
      "Efficiency is `ideal/actual`; peak is `cores * 4 FPU * (2 for fp16)`. Rank on it, not on",
      "the TB `util` column, which is lane occupancy.", "",
-     "| mesh | prec | B x D x I | B slice | cycles | ideal | efficiency | util | state |",
-     "|---|---|---|---:|---:|---:|---:|---:|---|"]
+     "| mesh | prec | B x D x I | B slice | cycles | ideal | efficiency | util | tmo | bankfull | RH | state |",
+     "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|"]
 for r in sorted(rows, key=lambda x: (x["mesh"], x["prec"], x["D"])):
-    L.append("| %s | %s | `%dx%dx%d` | %d B | %s | %.0f | %s | %s | %s |"
+    n = lambda v: ("{:,}".format(v) if v is not None else "—")
+    L.append("| %s | %s | `%dx%dx%d` | %d B | %s | %.0f | %s | %s | %s | %s | %s | %s |"
              % (r["mesh"], r["prec"], r["B"], r["D"], r["I"], r["slice"],
                 "{:,}".format(r["cycles"]) if r["cycles"] else "—", r["ideal"],
                 ("**%.1f%%**" % r["eff"]) if r["eff"] else "—",
-                ("%.2f%%" % r["util"]) if r["util"] else "—", r["state"]))
+                ("%.2f%%" % r["util"]) if r["util"] else "—",
+                n(r.get("tmo")), n(r.get("bf")), n(r.get("rh")), r["state"]))
 done = [r for r in rows if r["cycles"]]
 if len(done) >= 2:
     L += ["", "## Notes", ""]
