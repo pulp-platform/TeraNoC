@@ -71,75 +71,87 @@ running arms report `rh > 0` (up to 594) and 62 recorded rows have RH > 0 (up to
 small-`M`/large-`P` (`512x64x2048`, `512x128x2048`, `1024x64x2048`). None of the 16 shapes has a row
 in `results.tsv` — this is uncharacterised work, not redundant re-runs.
 
-## ROOT CAUSE (2026-08-26): the request-sent fence never clears
+## ⚠️ RETRACTED: "the request-sent fence never clears"
 
-**Where the cores actually are.** Final PC across all 1024 harts of `fp32_2048x32x256`:
+An earlier version of this file blamed the VLSU request-sent fence — `fence_stall =
+(|acc_mem_req_cnt_q)` decremented by a rising-edge pulse that back-to-back mem ops could
+coalesce. **That is refuted.** The per-hart `.dasm` trace records *retired* instructions, and the
+fence retires normally: on hart `0x202` `sfence.vma` appears 6 times with per-instruction
+`stall_tot` of 0x00, 0x23, 0x13c and **0x0a** — ten cycles, not a hang. The counter/pulse shape
+mismatch may still be a latent defect, but **it is not what stops these arms.**
 
-| harts | PC | instruction |
-|---:|---|---|
-| 346 | `0x80002604` | `bne` — group-barrier spin |
-| **221** | **`0x80000294`** | **`sfence.vma`** |
-| **221** | `0x80000298` | `lw` — the instruction immediately after it |
-| 65 | `0x80002620` / `0x80002a84` | `wfi` — parked |
-| 33 | `0x80002600` | `amoadd.w` — barrier increment |
+Kept as a worked example of a plausible mechanism that fits a summary and dies on the raw trace.
 
-`0x80000294` is inside **`matmul_8xVL`** (confirmed by disassembling
-`s8_fp32_2048x32x256.elf`). **442 of 1024 cores are stuck on the fence**; the 346 at the barrier
-are simply waiting for them.
+## What IS established: a remote scalar load that never gets a response
 
-**`sfence.vma` is not a TLB op in this tree — it is the VLSU request-sent fence.**
-`hardware/deps/snitch/src/snitch.sv:894-901`:
+**Where the cores stop.** Final *retired* PC across all 1024 harts of `fp32_2048x32x256`:
 
-```systemverilog
-riscv_instr::SFENCE_VMA: begin
-  fence_stall = (|acc_mem_req_cnt_q);
-end
+| harts | last retired PC | instruction | ⇒ blocked on |
+|---:|---|---|---|
+| 221 | `0x80000294` | `sfence.vma` | `0x80000298` `lw t1, 0(a0)` |
+| 221 | `0x80000298` | `lw t1, 0(a0)` | `0x8000029c` `fence.i` |
+| 346 | `0x80002604` | `bne` — barrier spin | waiting on the 442 above |
+| 65 | — | `wfi` | parked |
+
+`0x80000294`–`0x8000029c` is the barrier-entry sequence inside **`matmul_8xVL`**
+(`sfence.vma; lw; fence.i`), confirmed by disassembling `s8_fp32_2048x32x256.elf`.
+
+**The blocking event, from the CMS scoreboard.** Hart `0x202` (group 32, tile 2) has exactly two
+`STUCK_REQ` records, and they are **the same request**:
+
+```
+cyc=21000 STUCK_REQ g=32 t=2 p=0 hart=0x202 id=0 age=1053 addr=0x00f880c0 R bl=1 beats=0
+cyc=33000 STUCK_REQ g=32 t=2 p=0 hart=0x202 id=0 age=1935 addr=0x00f880c0 R bl=1 beats=0
 ```
 
-**The counter and its decrement do not have the same shape.**
-`snitch.sv:2865-2870` — **+1 per offloaded FP/vector mem op**, **−1 per pulse**:
+Same `id`, same address, `beats=0` throughout, age growing. `p=0` is the shared scalar port and
+`addr=0x00f880c0` decodes to **group 0, tile 12** — a remote scalar read. The hart's last
+instruction retired at cycle **31,064**, and the second warning at cyc 33,000 carries age 1935,
+placing the request's start at ~31,065. **The core issued that load and never got an answer.**
 
-```systemverilog
-if (acc_qdata_rsp_i.loadstore && acc_qready_i && acc_qvalid_o) acc_mem_req_cnt_d += 1;
-if (acc_mem_req_sent_i[0]) acc_mem_req_cnt_d -= 1;   // FP-LSU
-if (acc_mem_req_sent_i[1]) acc_mem_req_cnt_d -= 1;   // VLSU
-```
+Everything else follows: ~442 cores blocked this way, the 346 at the barrier waiting on them, no
+FPU work, links idle rather than stalled, and the machine quiescent from ~cyc 36,000 onward.
 
-and the VLSU pulse, `working_dir/spatz/hw/ip/spatz/src/spatz_vlsu.sv:875-877`, is a **rising-edge
-detect on a level**:
+**What does NOT explain it.** `mshr_timeout=+0` in **both** the `pre` and `bench` phases, and
+`RH STUCK = 0`. So the request is neither timing out nor riding a hold window — the two mechanisms
+in `rh_livelock_root_cause.md`. Why the response is lost is **not yet established**; candidates are
+a response dropped in the NoC, an MSHR entry that never completes without arming the timeout, or a
+request that never reached the MSHR at all.
 
-```systemverilog
-assign mem_req_all_issued   = mem_spatz_req_valid && (&mem_port_req_issued);
-`FF(mem_req_all_issued_q, mem_req_all_issued, 1'b0)
-assign spatz_mem_req_sent_o = mem_req_all_issued && !mem_req_all_issued_q;
-```
+**Next step that would settle it:** a waveform on one stuck arm following `addr=0x00f880c0` from
+the tile port through the group MSHR to the NoC and back — the request is identified precisely
+enough (`g=32 t=2 p=0 id=0`) to trace directly.
 
-The comment at the counter asserts *"Each offload (+1) is balanced by exactly one request-sent
-(−1) on its own lane."* **A rising-edge detector cannot honour that.** If two vector mem ops are
-offloaded and `mem_req_all_issued` stays continuously high across both — no low cycle in
-between — the edge fires **once** for **two** increments. The counter never returns to zero,
-`fence_stall` never clears, and the core is parked at that PC for the rest of the simulation.
+## Blast radius
 
-That matches every observation: no outstanding memory anywhere (CMS silent since cyc 36,000),
-no MSHR timeouts, no RH episodes, links idle rather than stalled. **Nothing is pending — the core
-is waiting for a decrement that already happened, or never will.**
+| | count |
+|---|---:|
+| arms hung right now | **17** (16 Questa, 1 VCS) |
+| delivered results contaminated | **0** — a hung arm never prints `execution took`, so no published number comes from one |
+| at-risk population (`N ≤ 256`) | 163 of 248 |
+| of those, completed cleanly | **118** |
+| hit rate among settled small-`N` arms | **~11%** |
+| arms with `N ≥ 512` ever hung | **0 of 35 settled** |
 
-**Why small `N`.** All 17 quiescent arms have `N ≤ 256`. With a short contraction the vector mem
-ops are short and issue back-to-back, so the level has no gap between them and pulses are lost;
-with a long contraction each op takes many cycles to issue its beats, the level drops between
-instructions, and every offload gets its own edge. 7 healthy arms also have `N ≤ 256`, so this is
-a race whose probability rises as `N` falls, not a hard threshold.
+Quiescence rate by contraction, over the whole manifest:
 
-⚠️ **Confidence.** The PCs, the disassembly, the fence semantics and both RTL fragments are
-**established**. That back-to-back ops actually coalesce the level in these runs is **inferred** —
-it fits all the evidence but the definitive proof is a waveform showing `acc_mem_req_cnt_q` stuck
-non-zero after two offloads and one pulse. `hardware/deps/snitch/src/snitch.sv` is the **compiled**
-snitch (checked against `build_q_8x8/compile.tcl`); `working_dir/spatz/hw/ip/snitch/src/snitch.sv`
-is NOT built and its `SFENCE_VMA` is a plain `tlb_flush` — do not read that one.
+| `N` | done | livelock | quiescent | rate |
+|---:|---:|---:|---:|---:|
+| 32 | 29 | 4 | 3 | 8.3% |
+| 64 | 30 | 4 | 7 | 17.1% |
+| 128 | 32 | 4 | 4 | 10.0% |
+| 256 | 27 | 4 | 3 | 8.8% |
+| 512 | 19 | 4 | 0 | **0%** |
+| 1024 | 12 | 4 | 0 | **0%** |
+| 2048 | 4 | 4 | 0 | **0%** |
 
-**Fix direction:** make the VLSU emit one pulse **per completed mem instruction** rather than a
-rising edge on a shared level, so every `+1` has its own `-1`. A counter-based handshake on the
-VLSU side would be immune to back-to-back coalescing.
+A hard floor at `N ≥ 512` and a roughly flat ~11% below it: **a race that only becomes reachable
+when the contraction is short**, not a size threshold. The 16 small-`N` arms recorded as `livelock`
+carry RH ~10^5 and are a different signature.
+
+**Cost of a fix: not estimable yet.** It depends entirely on which of the three candidates above is
+true — a timeout that should have armed is a logic fix with essentially no area, whereas a dropped
+NoC response could be materially more. Any number quoted before the waveform would be invented.
 
 ## Open
 
