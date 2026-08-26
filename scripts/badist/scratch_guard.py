@@ -239,8 +239,16 @@ def main():
                     hours_left = avail / rate
         _record_avail(h, avail)
 
+        # The time rule only applies when free space is ALREADY low. A single transient drop
+        # between two samples -- another user's job finishing, our own reclaim churn -- makes the
+        # linear extrapolation say "full in 5 h" on a node with 2 TB free. badile20 was flagged
+        # that way on 2026-08-26 with 2,115 GB available, which is not at risk under any drain
+        # this fleet produces. Bytes bound the rate's authority; the rate refines the ordering
+        # among nodes that are genuinely tight.
+        TIME_RULE_CEILING = 20 * a.low_gb        # 500 GB at the default LOW_GB=25
         at_risk = (0 <= avail < a.low_gb) or (hours_left is not None
-                                              and hours_left < a.low_hours)
+                                              and hours_left < a.low_hours
+                                              and avail < TIME_RULE_CEILING)
         if avail < 0 or not at_risk:
             continue
         print("  %-12s %s has %d GB free%s -- packaging is at risk"
