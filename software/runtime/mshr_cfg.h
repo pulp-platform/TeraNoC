@@ -353,9 +353,34 @@ enum {
 
   // share_a <= 2 MUST bypass (hold_subs==1). NON-MONOTONIC: 1 fine, 2 catastrophic, >=4 fine --
   // measured 20.1x on 1024x128x256. Do not "simplify" to min(split_p, merge).
-  MSHR_D_HOLD_SUBS_SINGLE = (MSHR_D_SPLIT_P <= 2) ? 1
+  MSHR_D_HOLD_SUBS_SINGLE_RAW = (MSHR_D_SPLIT_P <= 2) ? 1
                           : ((MSHR_D_SPLIT_P < MSHR_D_MERGE) ? MSHR_D_SPLIT_P : MSHR_D_MERGE),
-  MSHR_D_HOLD_SUBS_BURST  = (MSHR_D_SPLIT_M < MSHR_D_MERGE) ? MSHR_D_SPLIT_M : MSHR_D_MERGE,
+  MSHR_D_HOLD_SUBS_BURST_RAW  = (MSHR_D_SPLIT_M < MSHR_D_MERGE) ? MSHR_D_SPLIT_M : MSHR_D_MERGE,
+
+  // CLAMP into the range the hardware accepts -- subs_ok = [1, MergeReqs]
+  // (mempool_group_mshr_cfg.sv:128). Out of range, the write is DROPPED, the reset value stays in
+  // force, and only a sticky status bit records it: the run reports a tuning it never used. This is
+  // the same clamp the bank shifts get below, and for the same reason.
+  //
+  // Both bounds are reached by shapes in the tree, and at both bounds the clamp is the ANSWER, not
+  // a cover-up:
+  //   * RAW 0  -- M/NUM_GROUPS < KERNEL_SIZE, so a group holds less than one row-chunk and no
+  //     second core in it shares those rows. Sharing degree really is 1, and 1 is the encoding for
+  //     "this class bypasses". (M=128 and M=256 at 8x8.)
+  //   * RAW > MergeReqs -- the split wants more sharers than the MSHR can hold; MergeReqs is the
+  //     most that is achievable. (M=4096 at 4x4 wants 32.)
+  //
+  // NOTE this clamp cannot catch a WRONG FORMULA -- a raw 0 from the decode-vs-prefill mix-up is
+  // arithmetically identical to a legitimate raw 0 above. That case is guarded at run time by
+  // mshr_cfg_check_splits(), which compares this derivation against the split the kernel actually
+  // creates. The clamp guarantees hardware gets a legal value; the runtime check guarantees it is
+  // the RIGHT legal value. Neither substitutes for the other.
+  MSHR_D_HOLD_SUBS_SINGLE = (MSHR_D_HOLD_SUBS_SINGLE_RAW < 1) ? 1
+                          : ((MSHR_D_HOLD_SUBS_SINGLE_RAW > (int)MSHR_MERGE_REQS)
+                               ? (int)MSHR_MERGE_REQS : MSHR_D_HOLD_SUBS_SINGLE_RAW),
+  MSHR_D_HOLD_SUBS_BURST  = (MSHR_D_HOLD_SUBS_BURST_RAW < 1) ? 1
+                          : ((MSHR_D_HOLD_SUBS_BURST_RAW > (int)MSHR_MERGE_REQS)
+                               ? (int)MSHR_MERGE_REQS : MSHR_D_HOLD_SUBS_BURST_RAW),
 
   // HOLD WINDOWS are a hybrid: the SHAPE decides whether a class may be held at all, the macro
   // supplies how long. A share degree below 2 means no second requester for that class can ever
@@ -413,6 +438,40 @@ enum {
                            : ((MSHR_D_SH_B_RAW > (int)MSHR_SHIFT_MAX) ? (int)MSHR_SHIFT_MAX
                                                                       : MSHR_D_SH_B_RAW)
 };
+
+// ---------------------------------------------------------------------------------------------
+// COMPILE-TIME RANGE GUARD on the two CSRs that hardware range-checks but software cannot clamp.
+//
+// mempool_group_mshr_cfg.sv:128 gates both HOLD_SUBS writes on
+//     subs_ok = (wr_data >= 1) && (wr_data <= MergeReqs)
+// and on failure DROPS the write, keeps the reset value, and raises a sticky MSHR_STATUS_RANGE.
+// A refused write is therefore invisible in the cycle count -- the run simply uses a tuning it was
+// never asked for. That is the same failure the bank-shift clamp above exists to prevent.
+//
+// The bank shifts are CLAMPED in the enum, so they cannot go out of range. hold_subs cannot be
+// clamped the same way: 1 is a meaningful value ("this class bypasses"), so silently lifting a
+// derived 0 to 1 would convert a broken derivation into a legal-looking bypass and hide it. Fail
+// the BUILD instead -- the only point where a bad value is still cheap to fix.
+//
+// These now assert the CLAMP above rather than the raw arithmetic, so they cannot fire for a
+// legitimate shape -- they exist to fail the build if a future edit removes or breaks the clamp
+// and lets an out-of-range value reach a CSR again. The wrong-FORMULA case (what runs 1 and 2 of
+// the decode campaign hit) is not detectable here and is guarded by mshr_cfg_check_splits().
+_Static_assert((int)MSHR_D_HOLD_SUBS_SINGLE >= 1 &&
+               (int)MSHR_D_HOLD_SUBS_SINGLE <= (int)MSHR_MERGE_REQS,
+               "MSHR_D_HOLD_SUBS_SINGLE out of [1, MSHR_MERGE_REQS]: hardware would REFUSE this "
+               "CSR write and silently keep its reset value. Check the work-split derivation for "
+               "this shape (integer division to 0 is the usual cause).");
+_Static_assert((int)MSHR_D_HOLD_SUBS_BURST >= 1 &&
+               (int)MSHR_D_HOLD_SUBS_BURST <= (int)MSHR_MERGE_REQS,
+               "MSHR_D_HOLD_SUBS_BURST out of [1, MSHR_MERGE_REQS]: hardware would REFUSE this "
+               "CSR write and silently keep its reset value. Check the work-split derivation for "
+               "this shape (integer division to 0 is the usual cause).");
+// Same contract, lower stakes: reuse_ok = (wr_data <= 2 * MergeReqs). Already ternary-guarded in
+// the enum, so this asserts the guard rather than the arithmetic.
+_Static_assert((int)MSHR_D_CACHE_REUSE_TARGET >= 0 &&
+               (int)MSHR_D_CACHE_REUSE_TARGET <= 2 * (int)MSHR_MERGE_REQS,
+               "MSHR_D_CACHE_REUSE_TARGET exceeds 2 * MSHR_MERGE_REQS; hardware would refuse it.");
 
 /// Assert the MSHR's assumed sharing matches the kernel's ACTUAL work split.
 ///

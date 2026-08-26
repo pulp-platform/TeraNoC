@@ -11497,3 +11497,48 @@ needs the shipped negative test (`MSHR_CFG_NEGTEST` / `[V5A]`, currently compile
 path validates its input, and I reasoned from the value software *sent* rather than the value the
 hardware *kept*. When a config value looks pathological, check whether it was accepted before
 explaining what it did.
+
+---
+
+## 2026-08-27 — compile-time range guard on `hold_subs`, and two latent prefill bugs it found
+
+**Purpose.** Add a `_Static_assert` so a `hold_subs` value the hardware would refuse fails the build
+instead of silently running the reset default.
+
+**Implementation.**
+
+1. `mshr_cfg.h` — `_Static_assert` on `MSHR_D_HOLD_SUBS_SINGLE/BURST` in `[1, MSHR_MERGE_REQS]`
+   (the RTL's `subs_ok`, `mempool_group_mshr_cfg.sv:128`) plus `CACHE_REUSE_TARGET <= 2*MergeReqs`.
+   `_Static_assert` works under `-std=gnu99` with clang, no warning.
+2. Adding it **broke the build of the prefill app in the tree** (`M=256` at 8x8), which exposed two
+   latent bugs of the same family — the prefill formula leaves the hardware's range at both ends:
+
+   | config | raw `subs_burst` | hardware | was really running |
+   |---|---:|---|---|
+   | prefill `M=128`, `M=256` @ 8x8 | **0** | refused | reset default |
+   | prefill `M=4096` @ 4x4 | **32** | refused (>16) | reset default |
+
+3. So `hold_subs` is now **clamped** into `[1, MergeReqs]`, exactly as the bank shifts already are
+   and for the same reason. At both bounds the clamp is the right answer, not a cover-up: raw 0
+   means the group holds less than one row-chunk so sharing degree really is 1 (= the bypass
+   encoding); raw >MergeReqs means the split wants more sharers than the MSHR can hold.
+4. The asserts therefore now guard the **clamp** (a future edit that breaks it), not the arithmetic.
+   Said so in the comment rather than leaving the stronger claim standing.
+
+**Result.**
+
+- Decode values **unchanged** — `subs 4/4`, windows `8191/8191`, `gap_words 32` — so the six
+  in-flight run-3 arms are exactly as documented.
+- Prefill app builds again; `M=256` @ 8x8 now sends a deliberate `1` (bypass) instead of a refused 0.
+- 4x4 `M=4096` clamps `32 -> 16`.
+- **No recorded measurement is affected**: the 8x8 campaign uses `M` in {512,1024,2048,4096,8192}
+  only (0 rows at M=128/256), and every recorded `M=4096` row is 8x8, where it derives to 8.
+
+**Status.** Committed. The wrong-FORMULA case stays guarded by `mshr_cfg_check_splits()` at run
+time — a clamp cannot detect it, because a raw 0 from the decode/prefill mix-up is arithmetically
+identical to a legitimate raw 0.
+
+**Lesson.** The assert earned its keep by failing, not by passing: it broke the build on the first
+real app it met and that break was a two-year-old silent misconfiguration. But an assert that
+cannot fire for any legitimate input is a regression guard, not a correctness guard — worth keeping,
+worth not overselling.
