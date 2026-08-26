@@ -426,7 +426,16 @@ the same shape — and unacceptable for anything downstream of it. See
 (fp32: 89.0 / 85.2 / 87.1 / 87.3%). At 8×8 all three fp32 counterparts are **running now** and
 undelivered, so the fp16-vs-fp32 question is open exactly where the mesh matters most.
 
-**(c) The 8×8 PV arm is dirty.** `2048×512×256` reports **RH = 80, mshr_timeout = 320**. Response
+**(c) The 8×8 PV arm is dirty — and the fp32 counterpart now corroborates it.**
+`2048×512×256` fp16 reports **RH = 80, mshr_timeout = 320**.
+
+✅ **Added 2026-08-26:** the fp32 counterpart landed **clean** (RH = 0, timeout = 0) at
+**88,041 cyc = 74.4%**. That makes fp16 only **1.44×** faster than fp32 on this tile, where every
+clean pair measured here lands near 2× (2.11× at `2048×256×512`, 1.79× at the burst-window A/B
+cell). A second, independent line of evidence that 53.7% is a defect reading, not the tile's
+number. ⚠️ **Do not write ~74% into §5.2 from this** — it is an inference from a cross-precision
+ratio, not a measurement. The measurement that settles it is the fp16 arm re-run with bank-full
+backpressure. Response
 hazards are precisely what bank-full backpressure eliminates at 4×4 — 2–8% efficiency to 54–91%,
 with both counters driven to zero — and that treatment has **not** been applied at 8×8. Read 53.7%
 as a floor for this tile, not as its number. The other two 8×8 tiles are clean (RH = 0, timeout = 0)
