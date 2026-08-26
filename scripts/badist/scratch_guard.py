@@ -21,6 +21,7 @@ directories. Three guards, because deleting the wrong directory destroys a runni
 Other users' data is never touched -- only /scratch2/$USER_cache/badist/run.
 """
 import json as _json
+import time as _time
 import os as _os
 import argparse, glob, json, os, re, subprocess, sys
 
@@ -79,6 +80,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--low-gb", type=int, default=LOW_GB)
+
+    ap.add_argument("--low-hours", type=float, default=24.0,
+
+                   help="flag a host projected to fill within this many hours, whatever its free bytes")
     ap.add_argument("--hosts", help="comma-separated override")
     a = ap.parse_args()
 
@@ -167,18 +172,47 @@ def main():
     exposed = {}
     for h in hosts:
         # resolve this host's cache dir, then measure the filesystem it actually lives on
+        # Also measure how fast OUR live dirs are growing, so risk can be judged in TIME rather
+        # than in bytes. Free space alone ranks the wrong host: on 2026-08-26 badile35 had 41 GB
+        # free against larain12's 22 GB and so was never examined -- but badile35 was growing at
+        # 3.3 GiB/h and larain12 at 1.1, so badile35 was 12 h from full and larain12 was 21 h.
+        # The host that looked safer was the one about to die. Growth is estimated per live dir as
+        # size/age, which needs no history and is accurate enough to rank on.
         out = sh(h, 'd=$(ls -d %s 2>/dev/null | head -1); [ -n "$d" ] || exit 1; '
-                    'echo "$d"; df -BG --output=avail "$d" 2>/dev/null | tail -1' % CACHE_GLOB)
-        if not out or len(out.split()) < 2:
+                    'echo "$d"; df -BG --output=avail "$d" 2>/dev/null | tail -1; '
+                    'for r in $d/run/*/*; do [ -d "$r" ] || continue; '
+                    '  [ -f "$r/.badist_cmd.sh" ] || continue; '
+                    '  echo "G $(du -sb "$r" 2>/dev/null | cut -f1) $(stat -c %%Y "$r/.badist_cmd.sh")"; '
+                    'done' % CACHE_GLOB, timeout=300)
+        if not out or len(out.splitlines()) < 2:
             continue
-        cache = out.split()[0]
+        lines = out.splitlines()
+        cache = lines[0].split()[0]
         try:
-            avail = int(re.sub(r"[^0-9]", "", out.split()[-1]) or -1)
+            avail = int(re.sub(r"[^0-9]", "", lines[1]) or -1)
         except ValueError:
             continue
-        if avail < 0 or avail >= a.low_gb:
+        now = _time.time()
+        rate = 0.0                                  # GiB/h, summed over live dirs
+        for ln in lines[2:]:
+            f = ln.split()
+            if len(f) == 3 and f[0] == "G":
+                try:
+                    sz, st = int(f[1]), int(f[2])
+                except ValueError:
+                    continue
+                age_h = (now - st) / 3600.0
+                if age_h > 1:
+                    rate += (sz / 2**30) / age_h
+        hours_left = (avail / rate) if rate > 0.01 else None
+        at_risk = (0 <= avail < a.low_gb) or (hours_left is not None
+                                              and hours_left < a.low_hours)
+        if avail < 0 or not at_risk:
             continue
-        print("  %-12s %s has %d GB free -- packaging is at risk" % (h, cache, avail))
+        print("  %-12s %s has %d GB free%s -- packaging is at risk"
+              % (h, cache, avail,
+                 ("" if hours_left is None
+                  else ", growing %.1f GiB/h -> full in %.0f h" % (rate, hours_left))))
 
         # LIVE-PROCESS GUARD -- match on /proc/<pid>/cwd, NOT on the command line.
         # This was `pgrep -u $USER -f "$d"`, which is a NO-OP for the simulators we run: a run
