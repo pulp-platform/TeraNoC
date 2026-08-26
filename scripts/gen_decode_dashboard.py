@@ -245,9 +245,8 @@ footer{color:var(--ink-3);font-size:12px;font-family:var(--mono)}
              '<b>prefill</b> split, <code>(GEMM_M / NUM_GROUPS) / KERNEL_SIZE</code> &mdash; at '
              'decode <code>B&nbsp;=&nbsp;32</code> on 8&times;8 that is <code>32/64&nbsp;=&nbsp;0</code> '
              'in integer arithmetic. It emitted <code>hold_subs_single=1</code> (bypass), '
-             '<code>hold_subs_burst=0</code> (off), both hold windows <code>0</code>, and '
-             '<code>gap_words=8192</code>. Zero is a <i>legal</i> value there &mdash; it means '
-             '&ldquo;no sharing available&rdquo; &mdash; so nothing errored.</p>')
+             '<code>hold_subs_burst=0</code>, both hold windows <code>0</code>, and '
+             '<code>gap_words=8192</code>. The hardware <b>rejected</b> the out-of-range <code>0</code> (<code>subs_ok</code>, <code>mempool_group_mshr_cfg.sv:128</code>) and kept its default of 4, but it <i>accepted</i> both zero hold windows &mdash; 0 is in range. So bursts could merge yet were never held: an entry issued the instant it allocated, and only coincidental overlap merged. That is the measured <b>1.06&times;</b>. Singles were genuinely bypassed: <code>1</code> is the legal bypass encoding.</p>')
     H.append('<p class="note">The decode split actually gives a group sharing degree of '
              '<b>4 for both A and W</b>: <code>n_row_chunks = M/KERNEL_SIZE = 4</code> and '
              '<code>row_chunk</code> varies fastest, so the four cores sharing a W column-block are '

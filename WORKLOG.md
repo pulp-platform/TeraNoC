@@ -11459,3 +11459,41 @@ automatically as arms complete. Four run-2 arms still running and untouched.
 another — it silently produced 0 and 0 reads as "no sharing available", which is a legal answer.
 The guard that would have caught it had been written and never called. A consistency check only
 counts once something invokes it.
+
+---
+
+## 2026-08-27 — correction: the RTL rejected `hold_subs_burst = 0`; it never took effect
+
+**Purpose.** Asked whether `hold_subs == 0` should also be treated as bypass in the RTL. Checking
+that revealed the previous entry's account of run 2 was wrong.
+
+**Result.**
+
+- `mempool_group_mshr_cfg.sv:128` gates both `HOLD_SUBS` CSRs on
+  `subs_ok = (wr_data >= 1) && (wr_data <= MergeReqs)`. A write of 0 is **rejected**, the field
+  keeps its reset value, and a sticky `MSHR_STATUS_RANGE` is raised. `hold_subs_burst` therefore
+  stayed at the image default **4** — it was never 0 in hardware.
+- The zero **hold windows** were accepted (0 is in range). So bursts could merge but were never
+  held: `replay_ready` (`mempool_group_mshr.sv:3405`) fires as soon as an entry allocates, so it
+  issued without waiting for its four sharers. Only coincidental overlap merged → the measured
+  1.06x. Singles were genuinely bypassed (`1` is the legal bypass encoding).
+- **Cross-check:** the image defaults are `SUBS 4/4`, `WINDOW 8191/8191` — identical to run 3. Had
+  every run-2 write been rejected, run 2 would equal run 3; it does not (15,759 vs 10,344). Exactly
+  the accepted subset took effect.
+- **Run 3 therefore measures** "open both hold windows + stop bypassing singles", not "merge target
+  0 → 4". The 1.52x stands; its attribution changes.
+
+**Decision — do NOT make 0 mean bypass.** The RTL already handles 0 the better way: it rejects and
+flags, which is detectable. Bypass-on-0 would turn a detectable misconfiguration into a plausible
+slowdown — the exact failure class that cost this campaign. It would also collapse a useful
+distinction: `1` means "I intend to bypass", `0` means "I computed garbage".
+
+**Status.** Open defect is *reporting*, not policy: run 2 wrote a value the RTL rejects, which
+should have tripped `[MSHR] cfg REJECTED ... MEASUREMENT INVALID`. That printf appears zero times in
+a transcript with 19,980 other printf lines. The read path is wired (`mempool_group.sv:584`), so it
+needs the shipped negative test (`MSHR_CFG_NEGTEST` / `[V5A]`, currently compiled out) run once.
+
+**Lesson.** I attributed a measured effect to a mechanism I had not traced to ground — the CSR write
+path validates its input, and I reasoned from the value software *sent* rather than the value the
+hardware *kept*. When a config value looks pathological, check whether it was accepted before
+explaining what it did.

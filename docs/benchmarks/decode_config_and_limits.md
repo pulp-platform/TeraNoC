@@ -174,3 +174,50 @@ Run 3 re-runs all 8 arms on **byte-identical hardware images** to run 2 (`build_
 **What this does not yet tell us.** Merging being off explains why capture was 1.06x; it does not
 by itself prove admission pressure is what caps these kernels. If run 3 comes back flat, the
 ceiling is elsewhere and the W-streaming bandwidth argument above stands unchanged.
+
+### Correction (2026-08-27) — what the hardware actually did with `hold_subs_burst = 0`
+
+The section above says bursts ran with a merge target of 0. **That is wrong**, and the RTL is the
+one part of this that behaved correctly.
+
+`mempool_group_mshr_cfg.sv:128` validates every write to the two `HOLD_SUBS` CSRs:
+
+```systemverilog
+assign subs_ok = (wr_data_i >= 32'd1) && (wr_data_i <= MergeReqs);
+...
+IdxW'(MSHR_CSR_HOLD_SUBS_BURST) : if (subs_ok) cfg_d.hold_subs_burst = MshrCfgSubsW'(wr_data_i);
+                                  else status_d[MSHR_STATUS_RANGE] = 1'b1;
+```
+
+A write of 0 is **rejected**: the field keeps its reset value and a sticky `MSHR_STATUS_RANGE` bit
+is raised. So `hold_subs_burst` stayed at the image default of **4**, never 0. What actually
+differed between run 2 and run 3 was this:
+
+| CSR | run 2 wrote | accepted? | in effect (run 2) | run 3 |
+|---|---:|---|---:|---:|
+| `hold_subs_single` | 1 | yes — 1 is the legal *bypass* encoding | 1 → **singles bypassed** | 4 |
+| `hold_subs_burst` | 0 | **no** — out of range | **4** (image default) | 4 |
+| `hold_window_single` | 0 | yes — 0 is in range | 0 | 8191 |
+| `hold_window_burst` | 0 | yes | 0 | 8191 |
+
+Bursts therefore *could* merge (target 4) but were never *held*: with `hold_window_burst = 0`,
+`replay_ready` (`mempool_group_mshr.sv:3405`) fires the moment an entry allocates, so it issues to
+the NoC without waiting to accumulate its four sharers. Only requests that happened to overlap an
+entry's live window merged — which is exactly the measured **1.06x**.
+
+**Independent cross-check.** The hardware image defaults are `HOLD_SUBS_SINGLE/BURST = 4` and
+`HOLD_WINDOW_SINGLE/BURST = 8191` — *identical to run 3's values*. If every run-2 write had been
+rejected, run 2 would equal run 3. It does not (15,759 vs 10,344 on `dec4_32x128x4096`), so exactly
+the accepted subset took effect and no more.
+
+**So run 3 vs run 2 measures**: open both hold windows, and stop bypassing singles. It does **not**
+measure a merge target going 0 → 4.
+
+**The open defect is reporting, not policy.** Run 2 wrote a value the RTL is documented to reject,
+which should have raised `MSHR_STATUS_RANGE` and tripped the kernel's
+`[MSHR] cfg REJECTED ... MEASUREMENT INVALID` printf. That message appears **zero** times in a
+transcript carrying 19,980 other printf lines. Either the sticky bit did not reach software or the
+guard did not fire; the read path is wired (`mempool_group.sv:584`), so this needs a targeted test.
+The design already ships one — the `MSHR_CFG_NEGTEST` / `[V5A]` block writes a deliberately
+out-of-range value and asserts reject-and-report — and it is compiled out (`MSHR_CFG_NEGTEST=0`).
+Running one arm with it on is the cheapest way to settle it.
