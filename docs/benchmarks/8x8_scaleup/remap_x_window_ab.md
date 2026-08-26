@@ -41,6 +41,7 @@ does the **hold window** (2047 vs 8191) pay, and does **`noc_router_remapping`**
 |---:|---:|---:|---:|---:|
 | 3 | 2047 | 88,972 | 36.8% | 3,471 |
 | **3** | **8191** | **65,060** | **50.4%** | 0 |
+| 2 | 8191 | 88,425 | 37.1% | 0 |
 
 ⚠️ **`mshr_timeout=+N` in a `[FPU] bench` line is a PER-PERIOD DELTA, not a running total.** The
 completion monitor reported this arm as `mshr_timeout=+0` — that was the last period's delta, and
@@ -75,14 +76,21 @@ measured so far has `tmo = 0`.
 
 **2. `noc_router_remapping=3` is NOT uniformly better — it reverses sign between the two shapes.**
 
-| shape | remap=2 @8191 | remap=3 @8191 | r3 vs r2 |
-|---|---:|---:|---:|
-| `4096x256x128` | 41,381 | 36,379 | **+14%** |
-| `4096x128x128` | 23,110 | 24,555 | **-6%** |
+| shape | prec | remap=2 @8191 | remap=3 @8191 | r3 vs r2 |
+|---|---|---:|---:|---:|
+| `4096x256x128` | fp32 | 88,425 (37.1%) | 65,060 (50.4%) | **+36%** |
+| `4096x256x128` | fp16 | 41,381 (39.6%) | 36,379 (45.0%) | **+14%** |
+| `4096x128x128` | fp16 | 23,110 (35.4%) | 24,555 (33.4%) | **-6%** |
 
-Both timeout-free, so this is not a livelock artefact. One cell each way is thin, but it is enough
-to retire the earlier reading that remap=3 is simply better. Whatever it buys depends on `P`, or on
-the `N:P` ratio. **Do not promote remapping=3 to a default on this evidence.**
+All timeout-free, so none of this is a livelock artefact. **remap=3 is a large win at
+`N=256, P=128` — +36% in fp32 and +14% in fp16 — and a small loss at `N=128`.** The sign flip is
+real but it is not symmetric: the gain where it helps is far bigger than the loss where it hurts,
+and it helps more in fp32 than in fp16.
+
+That still does not justify a blanket default: one shape loses, and the whole grid is two shapes.
+What it does justify is **measuring remap per tile before fixing it**, and expecting remap=3 to be
+right for the small-`P` tiles specifically — which is where the Qwen plan's worst cells live
+(`2048x512x128` for GDN a+b, `2048x512x256` for PV).
 
 ## Gaps
 
