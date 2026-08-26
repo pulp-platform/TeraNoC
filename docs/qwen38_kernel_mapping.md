@@ -348,10 +348,27 @@ it and 8×8 is the bandwidth-starved mesh. The arm landed. In **fp32**:
 | `4096×256×512` | 310,591 | 42.2% |
 | `512×1024×1024` | 341,047 | 38.4% |
 
-⚠️ **Two caveats before re-tiling §5.2 on this.** These are **fp32** and §5.2 is fp16 — the fp16
-counterparts have not landed. And the win is **not monotonic in `N`**: `1024×2048×128` falls to
-48.9% and `512×1024×1024` to 38.4%, so `M` and `P` still bound it. The honest reading is that
-`N = 512`–`1024` beats `N = 256` **at large `M`**, not that bigger `N` is always better.
+✅ **The fp16 counterparts landed (2026-08-26), and §5.2 should be re-tiled.**
+
+| tile fp16 | cycles | eff | L1 full-dbl | `N` divides 5120? |
+|---|---:|---:|---:|---|
+| `2048×256×512` *(currently chosen)* | 44,586 | 73.5% | 6.50 MiB | yes, 20 tiles |
+| **`2048×512×512`** | **79,169** | **82.8%** | **9.00 MiB** (5.86 spare) | **yes, 10 tiles** |
+| `2048×2048×256` | 147,182 | **89.1%** | ⚠️ 20.00 MiB — **over by 5.14** | ⚠️ **no** — 5120/2048 = 2.5 |
+
+**Adopt `2048×512×512`.** It is the best tile that satisfies every constraint: +9.3 pp over the
+chosen tile, fits fully double-buffered with 5.86 MiB spare, and `N = 512` divides the 5,120
+contraction exactly. Whole prefill pass **8,453 → 7,504 Mcyc, −11.2%**.
+
+⚠️ **`2048×2048×256`'s 89.1% is real but NOT usable as a tile** — it needs 20.00 MiB fully
+double-buffered against a 14.86 MiB L1, and `N = 2048` leaves a ragged 2.5 tiles across the
+contraction. Quote it as evidence that efficiency keeps climbing with `N`, never as a tile choice.
+
+**Next candidate: `2048×1024×256`** — 11.00 MiB full-dbl (3.86 spare), `N = 1024` divides 5120 into
+5 tiles, and it sits between the two measured points. **Unmeasured; worth one arm.**
+
+⚠️ The win is still **not monotonic in `N`**: `1024×2048×128` falls to 48.9% and `512×1024×1024`
+to 38.4%, so `M` and `P` bound it. `N = 512`–`1024` beats `N = 256` **at large `M`**.
 
 ### 5.3 Decode (`B = 32`, `T_NEW = 1`) — and why it needs T3
 
