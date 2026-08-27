@@ -1,6 +1,6 @@
 # GEMM results — 8×8 mesh, 1024 cores — 248-shape scale-up campaign
 
-Generated 2026-08-26 21:19 by `scripts/gen_8x8_scaleup_doc.py`. **Re-run rather than editing.**
+Generated 2026-08-27 05:27 by `scripts/gen_8x8_scaleup_doc.py`. **Re-run rather than editing.**
 
 `eff = ideal/actual`, `ideal = M·N·P / lanes` (fp16 8192 MAC/cyc, fp32 4096). Rank on `eff`,
 not on the TB `util` column — that counter is lane *occupancy*, is not conserved across runs
@@ -13,11 +13,11 @@ of identical work, and has inverted a real ranking before.
 
 | | count |
 |---|---:|
-| measurements | **162** |
+| measurements | **171** |
 | recorded livelock (failures, excluded below) | **50** |
 | of manifest | 248 |
 
-Efficiency over the 162 measurements: **median 41.2%**, mean 42.7%, range 7.4–89.3%.
+Efficiency over the 171 measurements: **median 41.5%**, mean 43.1%, range 7.4–89.3%.
 
 ## Cohort target × P
 
@@ -27,9 +27,9 @@ on `P`. Mean efficiency by (target, P) over measurements only:
 | target \ P | 128 | 256 | 512 | 1024 | 2048 |
 |---:|---:|---:|---:|---:|---:|
 | **16** | — | 36.5% (7) | 48.3% (14) | 47.3% (13) | 36.7% (4) |
-| **8** | 36.6% (7) | 50.8% (13) | 60.8% (12) | 58.0% (10) | 66.9% (3) |
-| **4** | 38.7% (9) | 53.4% (9) | 65.0% (9) | 53.6% (4) | 62.0% (2) |
-| **1** | 17.5% (18) | 22.8% (15) | 29.6% (11) | 31.3% (2) | — |
+| **8** | 36.6% (7) | 50.8% (13) | 60.8% (12) | 58.0% (10) | 68.6% (4) |
+| **4** | 38.7% (9) | 53.4% (9) | 65.0% (9) | 62.2% (6) | 66.5% (3) |
+| **1** | 18.7% (20) | 22.4% (16) | 28.8% (12) | 35.5% (3) | — |
 
 Livelock arms are excluded, so the low-target/low-P cells read better here than the
 campaign actually ran — the failures are listed separately below.
@@ -44,18 +44,17 @@ campaign actually ran — the failures are listed separately below.
 | `2048x1024x512` | fp16 | 4 | 256B | 151,919 | **86.3%** | 90.52% | 0 |
 | `2048x1024x256` | fp16 | 4 | 128B | 78,437 | **83.6%** | 87.42% | 0 |
 | `1024x2048x256` | fp32 | 8 | 128B | 157,344 | **83.3%** | 86.50% | 0 |
+| `2048x512x1024` | fp16 | 4 | 512B | 158,268 | **82.8%** | ~87.37% | 0 |
 | `2048x512x512` | fp16 | 4 | 256B | 79,169 | **82.8%** | 87.12% | 4 |
 | `1024x512x512` | fp16 | 8 | 128B | 39,928 | **82.1%** | 85.86% | 0 |
 | `1024x1024x256` | fp32 | 8 | 128B | 81,530 | **80.4%** | 84.42% | 0 |
 | `2048x1024x128` | fp32 | 4 | 128B | 83,310 | **78.7%** | 82.63% | 0 |
-| `2048x512x512` | fp32 | 4 | 512B | 174,741 | **75.0%** | 80.85% | 0 |
-| `1024x512x256` | fp32 | 8 | 128B | 43,777 | **74.9%** | 79.32% | 0 |
+| `2048x256x1024` | fp16 | 4 | 512B | 86,327 | **75.9%** | ~80.44% | 11 |
 
 ## Worst 12 by efficiency
 
 | shape | prec | target | B slice | cycles | eff | util | RH |
 |---|---|---:|---:|---:|---:|---:|---:|
-| `4096x32x128` | fp16 | 1 | 128B | 14,362 | **14.3%** | ~18.36% | 0 |
 | `8192x32x256` | fp32 | 1 | 1024B | 114,936 | **14.3%** | 16.71% | 0 |
 | `4096x32x256` | fp32 | 1 | 512B | 58,440 | **14.0%** | 15.90% | 0 |
 | `8192x32x512` | fp16 | 1 | 1024B | 118,658 | **13.8%** | ~16.02% | 0 |
@@ -66,11 +65,12 @@ campaign actually ran — the failures are listed separately below.
 | `8192x128x128` | fp16 | 1 | 256B | 166,574 | **9.8%** | ~11.40% | 0 |
 | `8192x32x128` | fp16 | 1 | 256B | 43,048 | **9.5%** | ~12.68% | 0 |
 | `2048x32x256` | fp16 | 4 | 128B | 22,626 | **9.1%** | 10.92% | 270 |
+| `4096x512x128` | fp16 | 1 | 128B | 384,616 | **8.5%** | ~9.68% | 0 |
 | `2048x32x128` | fp16 | 4 | 64B | 13,840 | **7.4%** | 9.27% | 250 |
 
 ## Low efficiency with `RH = 0` — a second, separate mechanism
 
-40 measurements sit below 25% efficiency with **no** RH-livelock. Their `N` distribution:
+43 measurements sit below 25% efficiency with **no** RH-livelock. Their `N` distribution:
 
 | N | arms |
 |---:|---:|
@@ -78,7 +78,7 @@ campaign actually ran — the failures are listed separately below.
 | 64 | 9 |
 | 128 | 8 |
 | 256 | 5 |
-| 512 | 1 |
+| 512 | 4 |
 
 Small contraction depth, not the cohort mechanism. Distinct from the livelock and
 not addressed by any MSHR hold-window change.
@@ -152,7 +152,7 @@ Root cause: the per-core **B slice** `(P/SPLIT_P)*elem_bytes` is below the **64-
 | `512x2048x128` | fp32 | 16 | **32B** | ~0.44% | 47908 |
 | `512x2048x128` | fp16 | 16 | **16B** | ~0.02% | 167916 |
 | `512x2048x256` | fp16 | 16 | **32B** | ~1.19% | 97472 |
-| `512x256x128` | fp16 | 16 | **16B** | ~0.02% | 6048 |
+| `512x256x128` | fp16 | 16 | **16B** | ~0.08% | 232618 |
 | `512x256x128` | fp32 | 16 | **32B** | ~1.81% | 291364 |
 | `512x256x256` | fp16 | 16 | **32B** | ~2.33% | 234787 |
 | `512x32x128` | fp32 | 16 | **32B** | ~1.33% | 231648 |
