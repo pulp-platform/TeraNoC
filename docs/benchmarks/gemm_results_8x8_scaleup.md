@@ -1,6 +1,6 @@
 # GEMM results — 8×8 mesh, 1024 cores — 248-shape scale-up campaign
 
-Generated 2026-08-27 05:27 by `scripts/gen_8x8_scaleup_doc.py`. **Re-run rather than editing.**
+Generated 2026-08-27 07:50 by `scripts/gen_8x8_scaleup_doc.py`. **Re-run rather than editing.**
 
 `eff = ideal/actual`, `ideal = M·N·P / lanes` (fp16 8192 MAC/cyc, fp32 4096). Rank on `eff`,
 not on the TB `util` column — that counter is lane *occupancy*, is not conserved across runs
@@ -13,11 +13,11 @@ of identical work, and has inverted a real ranking before.
 
 | | count |
 |---|---:|
-| measurements | **171** |
-| recorded livelock (failures, excluded below) | **50** |
+| measurements | **172** |
+| recorded livelock (failures, excluded below) | **51** |
 | of manifest | 248 |
 
-Efficiency over the 171 measurements: **median 41.5%**, mean 43.1%, range 7.4–89.3%.
+Efficiency over the 172 measurements: **median 41.7%**, mean 43.2%, range 7.4–89.3%.
 
 ## Cohort target × P
 
@@ -27,7 +27,7 @@ on `P`. Mean efficiency by (target, P) over measurements only:
 | target \ P | 128 | 256 | 512 | 1024 | 2048 |
 |---:|---:|---:|---:|---:|---:|
 | **16** | — | 36.5% (7) | 48.3% (14) | 47.3% (13) | 36.7% (4) |
-| **8** | 36.6% (7) | 50.8% (13) | 60.8% (12) | 58.0% (10) | 68.6% (4) |
+| **8** | 36.6% (7) | 50.8% (13) | 61.1% (13) | 58.0% (10) | 68.6% (4) |
 | **4** | 38.7% (9) | 53.4% (9) | 65.0% (9) | 62.2% (6) | 66.5% (3) |
 | **1** | 18.7% (20) | 22.4% (16) | 28.8% (12) | 35.5% (3) | — |
 
@@ -113,7 +113,7 @@ smallest `M` in the family, so the shortest elaboration, at the precision the de
 workload uses. `fp32_512x32x2048` is the control if the fp16 datapath itself falls
 under suspicion.
 
-## Recorded LIVELOCK (50) — failures, not results
+## Recorded LIVELOCK (51) — failures, not results
 
 Root cause: the per-core **B slice** `(P/SPLIT_P)*elem_bytes` is below the **64-byte** burst floor, so B cannot burst, falls back to single-word requests, and inherits `hold_subs_single` — a target derived for **A**, which B can never meet because each core owns a distinct `p` range. See `docs/benchmarks/8x8_scaleup/rh_livelock_root_cause.md` §0. **Every one of these has a sub-burst B slice.** Averaging them into the campaign drags the mean by ~7 pp.
 
@@ -143,6 +143,7 @@ Root cause: the per-core **B slice** `(P/SPLIT_P)*elem_bytes` is below the **64-
 | `2048x64x512` | fp32 | 4 | **512B** | ~0.40% | 0 |
 | `512x1024x128` | fp16 | 16 | **16B** | ~0.05% | 215285 |
 | `512x1024x128` | fp32 | 16 | **32B** | ~1.29% | 133614 |
+| `512x1024x2048` | fp16 | 16 | **256B** | 53.02% | 1300 |
 | `512x1024x256` | fp16 | 16 | **32B** | ~2.20% | 214655 |
 | `512x128x128` | fp16 | 16 | **16B** | ~0.09% | 228733 |
 | `512x128x128` | fp32 | 16 | **32B** | ~1.86% | 313085 |
