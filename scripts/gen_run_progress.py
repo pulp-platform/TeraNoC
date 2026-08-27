@@ -18,7 +18,7 @@ wildly out of proportion to their MACs (fp16_1024x32x128 finished at ratio 3.37 
 median), so a single K cannot describe both populations. For those arms progress is reported but
 marked unreliable.
 """
-import csv, json, glob, os, re, statistics as st, subprocess, sys
+import collections, csv, json, glob, os, re, statistics as st, subprocess, sys, time
 
 ROOT = "/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC"
 TSV  = os.path.join(ROOT, "docs/benchmarks/8x8_scaleup/results.tsv")
@@ -99,6 +99,77 @@ def running():
     return out
 
 
+def node_procs(nodes):
+    """One probe per NODE -> {node: [(arm, cwd, tx_age_s, last_marker), ...]} or None if unreachable.
+
+    Two traps this exists to avoid, both of which produced a WRONG answer on 2026-08-27:
+
+      1. `pgrep simv` misses QuestaSim, whose process is `vsimk`. Counting only simv reported six
+         busy nodes as empty and called ten live arms dead.
+      2. The transcript under hardware/<prefix>_<arm>/ is the DELIVERED copy. A running arm writes
+         to its NODE-LOCAL run dir, so the shared one stays cold for the whole run -- and a killed
+         duplicate leaves a cold shared transcript behind while a rescue copy runs happily
+         elsewhere. Freshness has to be read from the process's own cwd.
+    """
+    script = (
+        "for p in $(pgrep -u $USER -f 'simv|vsimk' 2>/dev/null); do "
+        # -f (full cmdline), NOT -x (process NAME): the VCS binary is named
+        # mempool_simvopt, so -x 'simv' matches nothing and every VCS arm reads as dead.
+
+        "  a=$(tr '\\0' ' ' < /proc/$p/cmdline 2>/dev/null | grep -oE '(fp16|fp32)_[0-9]+x[0-9]+x[0-9]+' | head -1); "
+        "  c=$(readlink /proc/$p/cwd 2>/dev/null); t=$c/transcript; "
+        "  m=$(stat -c%Y \"$t\" 2>/dev/null || echo 0); "
+        "  l=$(grep -ao 'execution took [0-9]*' \"$t\" 2>/dev/null | tail -1); "
+        "  echo \"$a|$c|$m|$l\"; done")
+    out = {}
+    for n in nodes:
+        if not n or n in ("?", "local"):
+            out[n] = None
+            continue
+        try:
+            r = subprocess.run(["ssh", "-n", "-o", "ConnectTimeout=8", "-o", "BatchMode=yes", n, script],
+                               capture_output=True, text=True, timeout=40)
+            if r.returncode != 0:      # unreachable/auth: NOT the same as "no processes"
+                out[n] = None
+                continue
+            recs = []
+            now = time.time()
+            for ln in r.stdout.splitlines():
+                f = ln.split("|")
+                if len(f) < 4 or not f[0]:
+                    continue
+                mt = int(f[2]) if f[2].isdigit() else 0
+                recs.append((f[0], f[1], (now - mt) if mt else None, f[3]))
+            out[n] = recs
+        except Exception:
+            out[n] = None
+    return out
+
+
+def arm_state(arm, node, procs, hung_after=1800):
+    """running | hung | done | dead | unknown -- and never guesses when evidence is missing."""
+    recs = procs.get(node, None)
+    if recs is None:
+        return "unknown"                        # unreachable: say so, do not accuse
+    for a, cwd, age, marker in recs:
+        if a != arm:
+            continue
+        if marker:
+            return "done"                       # finished; sitting in the epilogue wedge
+        if age is None:
+            return "running"                    # no transcript yet -> still elaborating
+        return "running" if age <= hung_after else "hung"
+    # No process for this arm anywhere on its node. It may still have DELIVERED.
+    for d in glob.glob("hardware/*_%s" % arm):
+        t = os.path.join(d, "transcript")
+        try:
+            if os.path.exists(t) and re.search(rb"execution took", open(t, "rb").read()):
+                return "done"
+        except OSError:
+            pass
+    return "dead"
+
+
 def main():
     K, ncal = calibrate()
     sys.stderr.write("  calibration K: %s   (from %s complete non-livelock arms)\n" % (
@@ -132,9 +203,21 @@ def main():
                          cyc=int(cyc[-1]) if cyc else None,
                          cyc0=int(cyc[0]) if cyc else None,
                          rh=rh, livelock=rh > 1000))
+    # LIVENESS: the ledger says "running"; the node says whether that is still true.
+    procs = node_procs(sorted({r["node"] for r in rows}))
+    for r in rows:
+        r["state"] = arm_state(r["arm"], r["node"], procs)
     rows.sort(key=lambda r: -(r["progress"] or 0))
     json.dump(dict(K=K, rows=rows), open(OUT, "w"), indent=1)
-    print("wrote %s (%d running arms)" % (OUT, len(rows)))
+    by = collections.Counter(r["state"] for r in rows)
+    print("wrote %s (%d tracked: %s)" % (OUT, len(rows), dict(by)))
+    dead = [r for r in rows if r["state"] == "dead"]
+    if dead:
+        # loud, and on stdout, so a watching loop actually surfaces it
+        print("DEAD ARMS: %d -- dispatched, no process on node, transcript cold" % len(dead))
+        for r in sorted(dead, key=lambda x: -(x["progress"] or 0)):
+            print("   %-24s %-9s progress=%.1f%%" % (r["arm"], r["node"],
+                                                    100.0 * (r["progress"] or 0)))
     return 0
 
 

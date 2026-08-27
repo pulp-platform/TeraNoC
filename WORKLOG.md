@@ -11578,3 +11578,47 @@ stated in the artifact.
 **Lesson.** A substring match is not a check. `pass` inside `BankfullBackpressure` passed silently
 for eight arms and read as validation in four separate reports. Anchor the pattern to its label, and
 confirm the thing being grepped for is actually emitted before treating its presence as evidence.
+
+---
+
+## 2026-08-27 — sweep-arm liveness: a wrong diagnosis, then a real check
+
+**Purpose.** Asked why sweep arms die, and to fix the check that had 35 arms reading as "running".
+
+**The wrong answer first.** I reported **10 dead arms**, two at ~97%. That was wrong, and both halves
+of the evidence were bad:
+
+1. I probed nodes with `pgrep -c -u $USER simv`. QuestaSim's process is **`vsimk`**, so six busy
+   nodes reported zero and every Questa arm looked dead. (`fenga8` actually had five.)
+2. I then read `hardware/s8_<arm>/transcript` and found it cold for 46-96 h. That is the
+   **delivered** copy: a running arm writes to its **node-local** run dir, so the shared file stays
+   cold for the entire run. Worse, a killed duplicate leaves a cold shared transcript behind while a
+   rescue copy runs happily elsewhere -- which is exactly what had happened.
+
+`fp16_4096x1024x128`, which I called "died at 97.4%", was running at 99% CPU on larain9 and has
+since **finished at 126,211 cycles**.
+
+**Why arms did die on 2026-08-23.** The real cause is duplicate dispatch. `infeasible_running.txt`
+from that morning lists the same arm running in two batches at once -- `fp16_4096x512x512` on
+badile20 *and* larain13, `fp16_8192x256x512` on larain7 *and* larain3. The auto-resubmit/topup loops
+re-dispatched arms that were already running; a dedup pass then killed the redundant copies to free
+seats, without regard to progress. Rescue copies were relaunched the same morning and most are still
+going. Secondary and genuine: **OOM on 62 GB badile nodes** -- badile49 shows two `vsimk` kills of
+our uid on Aug 23 (15 GB each; Questa needs ~16 GB, so a 62 GB node fits three, not ten).
+
+**Implementation.** `scripts/gen_run_progress.py` now derives liveness from the node, not the ledger
+(which records `running` at dispatch and is never corrected). One probe per node returns
+`(arm, cwd, transcript_age, result_marker)` per simulator process; `arm_state()` returns
+**running / hung / done / dead / unknown**, with `unknown` reserved for an unreachable node so a
+failed ssh can never read as an accusation. Two traps are commented at the site: `pgrep -f`, never
+`-x` (the VCS binary is `mempool_simvopt`, so `-x 'simv'` matches nothing and calls every VCS arm
+dead -- this bit me during the fix itself), and freshness read from the process's own cwd.
+
+**Result.** Real state of the 8x8 campaign: **25 running, 9 done, 1 hung (`fp32_2048x1024x256`,
+larain1, 81.6%), 0 dead.** The 9 finished arms are sitting in the epilogue wedge, so badist will not
+deliver them -- their results need harvesting at the banner.
+
+**Lesson.** Both of my false-death signals were *absence* readings: no matching process, no fresh
+file. Absence is only evidence once you have shown the thing would have been present -- the right
+process name, the right path. I had a note saying a zero-result grep is not a finding until the path
+is proven, and I made the same mistake twice in one hour with `simv` and with the shared transcript.
