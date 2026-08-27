@@ -52,17 +52,30 @@ The rule therefore reads: *you cannot have more outstanding words than you have 
 Reusing a tag while its earlier request is still in flight makes a response unattributable. Raising
 `NrOutstandingLoads` raises the ceiling because it adds **tags**, not buffer.
 
-## And the deadlock it guards is real
+## The deadlock it guards — CORRECTED
 
-Exceeding the ceiling means issuing in batches — issue a ROB-worth, wait for tags to free, issue
-more. The hazard is that **the group MSHR can hold a response pending future requests**: that is
-precisely what a hold window does. If batch 1's responses are held waiting for merge partners, and
-the partner request is batch 2 which cannot issue because batch 1 holds every tag, nothing advances
-until `serve_timeout` fires.
+Exceeding the ceiling means issuing in batches: issue a ROB-worth, wait for tags to free, issue more.
 
-That is plausibly the same mechanism as the quiescent deadlock recorded in
-`8x8_scaleup/quiescent_deadlock.md` — whose two newest instances ran the only config in the campaign
-with 8191 hold windows **and** merging bypassed, so cohorts could never complete.
+⚠️ **This section first claimed the hazard was the MSHR holding a RESPONSE pending future requests.
+That is wrong.** It conflated two distinct mechanisms:
+
+| mechanism | knob | applies to |
+|---|---|---|
+| **request**-side hold — delay issuing to the NoC while merge partners gather | `hold_window_single` / `hold_window_burst` | **both** classes |
+| **response**-side hold — withhold returned data from the cores | `serve_timeout` (`MSHR_RESP_HOLD`) | **SINGLES ONLY** |
+
+The response hold is gated at `mempool_group_mshr.sv:3601` on `burst_len == BurstLenWidth'(1)` (and
+on `RespWaitSubsSingle`). **A burst response is never withheld from the cores.** `mshr_cfg.h:64`
+documents the same thing: `serve_timeout` is "response-side, SINGLE-only (RESP_HOLD / CACHED)".
+
+For a burst load the only MSHR-side delay is on the **request** path — before a response exists to
+free tags. Whether that can starve a single core of tags is **not established**: request-side merge
+partners come from the group's other 15 cores, which hold their own tags and progress independently,
+so the obvious circular path does not close.
+
+**Established:** the ceiling is a tag-uniqueness rule — no more outstanding words than distinct tags.
+**Not established:** that exceeding it is actually unsafe. Settling that costs a directed test
+(relax the check, issue `vl > ROB*4`, see whether anything wedges), not an RTL redesign.
 
 ## The VRF grant, by contrast, cannot deadlock
 

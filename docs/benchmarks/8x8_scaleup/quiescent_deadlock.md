@@ -222,3 +222,36 @@ Run 2's remaining 6 arms completed, so the config is not universally fatal — b
 unique, and the shapes complete either side of it. What is NOT established: the mechanism by which a
 long hold window plus a bypassed merge target stops the machine. The `deadlock_evidence` probe logs
 are kept so that can be chased without re-running 22 h.
+
+### ⚠️ CORRECTION (same day) — the hypothesis above is withdrawn
+
+The entry above attributed the two run-2 deadlocks to "8191 hold windows **while** merging is
+bypassed". **Both halves are wrong.**
+
+**Run 2's hold windows were 0, not 8191.** Verified by compiling the assert-TU against the header as
+it existed when the w8k ELFs were built (`802d94e5^`), with that path FIRST on the include list —
+compiling against today's header silently reports the *fixed* values and is how the wrong number was
+reached the first time:
+
+```
+run 2 (w8k) as actually built:  split_M=0 split_P=1  subs=1/0  hold_window=0/0
+```
+
+The `w8k` name refers to the **image default** of 8191; the software CSR writes overrode it to 0,
+which is the entire point of the run-2/run-3 story.
+
+**And a long hold could not have stalled the bursts anyway.** `serve_timeout` / `MSHR_RESP_HOLD` is
+**single-only** — gated on `burst_len == 1` at `mempool_group_mshr.sv:3601`, and documented as such
+at `mshr_cfg.h:64`. A burst response is never withheld from the cores.
+
+**What actually differs between run 1 and run 2** is the hardware image, since both ran the same
+(old) software derivation: `NOC_ROUTER_REMAPPING` 2→3, and the image-default hold/serve 2047→8191
+(the hold windows overridden to 0 by software, `serve_timeout` left at 8191 but irrelevant here
+because singles bypassed and so never allocated an entry to hold).
+
+**The mechanism is therefore unknown.** The signature match to the documented class stands; the
+attribution does not. The probe logs remain in `deadlock_evidence/` for whoever chases it.
+
+**Lesson.** Both errors came from reading a configuration off its *intent* rather than its artifact —
+the arm's name, and a header that had since been fixed. Derived values must be read out of the thing
+that actually ran.
