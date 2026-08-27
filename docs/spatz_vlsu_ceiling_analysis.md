@@ -101,3 +101,60 @@ So the comment's "scoreboard-blocked VRF writes" is not the binding constraint. 
 
 **Not established:** whether the MSHR's timeout guarantees are strong enough to make multi-batch
 issue safe. That is the question any tag-recycling design must answer first.
+
+---
+
+## MEASURED 2026-08-27 — the ceiling is NOT over-conservative. Removing it is fatal.
+
+The directed test in §"Not established" was run. **The ceiling is load-bearing.**
+
+### Method
+
+`vector-burst-test` extended with an `lmul` field and five cases whose `vl` crosses the ceiling
+(m2=128 B, m4=256 B, m8=512 B, m8+tail=384 B, m8 unaligned). Same ELF against three images that
+differ only in the intended defines: `build_vcs_r3` (ROB64), `build_rob32` (ROB32), and
+`build_rob32_noceil` (ROB32 + `SPATZ_VLSU_NO_VL_CEILING=1`).
+
+### Baselines — the probe is trustworthy
+
+| image | ceiling | `BURST DROPPED` at | allowed | verdict |
+|---|---:|---|---|---|
+| ROB64 | 256 B | 384, 512 B | 256 B (m4) | **PASS** 15/15 |
+| ROB32 | 128 B | 256, 384, 512 B | 128 B (m2) | **PASS** 15/15 |
+
+Fires on exactly the over-ceiling cases and not the at-ceiling ones, confirming the `<=` semantics.
+Both pass: over-ceiling loads return correct data via the non-burst path, so the drop is invisible
+in results — which is why it needed instrumenting rather than just running.
+
+### With the ceiling relaxed: assertion A4 fires
+
+```
+Fatal: spatz_vlsu.sv:2026
+  Offending '(!(rob_req_block[0] && rob_req_id[0]))'
+  [spatz_vlsu] Block and single ROB id request asserted together.
+$finish at cycle 14,849 -- no UART output at all
+```
+
+A4's own comment states the consequence: *"block and single id request are mutually exclusive — the
+ROB serves the block and **drops the single silently**."* A dropped id request is an unattributable
+response, i.e. wrong data, which is why it is `$fatal` and not a warning.
+
+So the answer to "what assumes one-shot allocation" is **the block-reservation allocator**. Admitting
+a load whose `vl` exceeds the tag budget makes it request a `MaxBurstWords` block *and* a single id in
+the same cycle, which the ROB cannot serve.
+
+⚠️ **Read `CMS WARN` carefully here.** The relaxed run shows 508 — but the **passing** ROB32 baseline
+shows **1,477**. It is not a failure signal for this workload; the discriminators are the missing
+UART verdict and the `$fatal`.
+
+### What this does and does not settle
+
+* **Settled:** `vl <= NrOutstandingLoads*MemDataWidthB` cannot simply be deleted. With
+  `SPATZ_VLSU_BLOCK_ALLOC=1` (every image here) it protects an allocator invariant.
+* **Not settled:** the assertion lives inside `if (BlockWords > 1)`. Whether the one-id-per-cycle
+  fallback walk (`BLOCK_ALLOC=0`) tolerates an over-ceiling `vl` is untested — but that path costs
+  ~18 cycles per burst to allocate, so it trades the thing the ceiling buys.
+* **Therefore:** a small ROB *and* a high ceiling needs the allocator taught to split one load across
+  several block reservations, not a deleted check. That is real design work, not a knob.
+
+`SPATZ_VLSU_NO_VL_CEILING` stays in the tree, default 0, as the reproducer.
