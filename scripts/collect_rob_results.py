@@ -67,8 +67,22 @@ def scrape(d):
     rh  = txt.count(b"RH STUCK")
     cum = re.findall(rb"\[FPU\] bench[^\n]*?cum=([0-9.]+)%", txt)
     why = re.findall(rb"BURSTWHY[^\n]*burst=([01])", txt)
+    # How the SIMULATION ended, which is not the same as whether the KERNEL ran.
+    # Every p* arm in this sweep dies on mempool_group_mshr.sv:2269 ("MSHR clock gate dropped a
+    # resp_buf write") in the EPILOGUE -- after the benchmark region has opened and closed. The
+    # cycle count above is therefore still a real workload measure, but the arm must never be
+    # described as having finished. Only "[FPU FINAL] ... never active" invalidates the data.
+    fin  = re.search(rb"\[FPU FINAL\][^\n]*", txt)
+    if fin and b"never active" in fin.group(0):
+        state = "no-bench"                 # benchmark never opened: NO DATA
+    elif b"[EOC]" in txt:
+        state = "eoc"                      # simulation completed
+    elif b"Fatal:" in txt:
+        state = "epilogue-fatal"           # kernel ran, sim died after the benchmark closed
+    else:
+        state = "unknown"
     return {"cycles": int(cyc[-1]),
-            "tmo": tmo, "bf": bf, "rh": rh,
+            "tmo": tmo, "bf": bf, "rh": rh, "state": state,
             "util": float(cum[-1]) if cum else None,
             "burst": why.count(b"1"), "nonburst": why.count(b"0")}
 
@@ -91,12 +105,12 @@ def main():
         return 0
 
     with open(OUT_TSV, "w") as f:
-        f.write("shape\tprec\timage\tconfig\tcycles\teff\tutil\trh\ttmo\tbankfull\tburst\tnonburst\n")
+        f.write("shape\tprec\timage\tconfig\tcycles\teff\tutil\trh\ttmo\tbankfull\tburst\tnonburst\tstate\n")
         for r in sorted(rows, key=lambda x: (x["shape"], x["img"])):
-            f.write("%s\tfp%d\t%s\t%s\t%d\t%.2f\t%s\t%d\t%d\t%d\t%d\t%d\n" % (
+            f.write("%s\tfp%d\t%s\t%s\t%d\t%.2f\t%s\t%d\t%d\t%d\t%d\t%d\t%s\n" % (
                 r["shape"], r["prec"], r["img"], r["cfg"], r["cycles"], r["eff"],
                 ("%.2f" % r["util"]) if r["util"] is not None else "-",
-                r["rh"], r["tmo"], r["bf"], r["burst"], r["nonburst"]))
+                r["rh"], r["tmo"], r["bf"], r["burst"], r["nonburst"], r.get("state","?")))
 
     by = {}
     for r in rows:

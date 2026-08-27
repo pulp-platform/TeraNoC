@@ -1,27 +1,29 @@
-shape	prec	image	config	cycles	eff	util	rh	tmo	bankfull	burst	nonburst
-d16a	fp16	A	rob64 + dual-load	12878	63.61	69.86	0	0	0	24576	0
-d16a	fp16	B	rob64, no dual-load	13906	58.91	67.25	0	0	0	24576	0
-d16a	fp16	C	rob32, no dual-load	13906	58.91	67.25	0	0	0	24576	0
-d16b	fp16	A	rob64 + dual-load	21587	75.90	82.17	0	0	0	24576	0
-d16b	fp16	B	rob64, no dual-load	26168	62.61	69.47	0	0	0	24576	0
-d16b	fp16	C	rob32, no dual-load	26168	62.61	69.47	0	0	0	24576	0
-d32a	fp32	A	rob64 + dual-load	13544	60.48	67.90	0	0	0	24576	0
-d32a	fp32	B	rob64, no dual-load	13962	58.67	70.03	0	0	0	24576	0
-d32a	fp32	C	rob32, no dual-load	13962	58.67	70.03	0	0	0	24576	0
-d32b	fp32	A	rob64 + dual-load	24149	67.85	76.69	0	0	0	24576	0
-p09	fp16	A	rob64 + dual-load	29660	3.45	4.47	551	74	0	24576	0
-p09	fp16	B	rob64, no dual-load	34519	2.97	3.89	861	93	0	24576	0
-p09	fp16	C	rob32, no dual-load	34519	2.97	3.89	861	93	0	24576	0
-p20	fp16	A	rob64 + dual-load	10669	19.20	26.28	178	4	0	24576	0
-p20	fp16	C	rob32, no dual-load	290561	0.70	0.89	87277	17499	0	24576	0
-p49f	fp32	A	rob64 + dual-load	9441	43.39	53.10	0	0	0	24576	0
-p49f	fp32	B	rob64, no dual-load	9836	41.64	50.24	0	0	0	24576	0
-p49f	fp32	C	rob32, no dual-load	9836	41.64	50.24	0	0	0	24576	0
-p50	fp16	A	rob64 + dual-load	10261	39.92	51.36	4	0	0	24576	0
-p50	fp16	B	rob64, no dual-load	11886	34.46	44.82	0	0	0	24576	0
-p50	fp16	C	rob32, no dual-load	11886	34.46	44.82	0	0	0	24576	0
-p66	fp16	A	rob64 + dual-load	13865	59.08	68.67	4	0	0	24576	0
-p66	fp16	B	rob64, no dual-load	14939	54.84	66.25	0	0	0	24576	0
-p66	fp16	C	rob32, no dual-load	14939	54.84	66.25	0	0	0	24576	0
-p78	fp16	A	rob64 + dual-load	22941	71.42	77.95	0	0	0	24576	0
-p78	fp16	C	rob32, no dual-load	24584	66.64	77.94	0	0	0	24576	0
+shape	prec	image	config	cycles	eff	util	rh	tmo	bankfull	burst	nonburst	state
+d16a	fp16	A	rob64 + dual-load	12878	63.61	69.86	0	0	0	24576	0	eoc
+d16a	fp16	B	rob64, no dual-load	13906	58.91	67.25	0	0	0	24576	0	eoc
+d16a	fp16	C	rob32, no dual-load	13906	58.91	67.25	0	0	0	24576	0	eoc
+d16b	fp16	A	rob64 + dual-load	21587	75.90	82.17	0	0	0	24576	0	eoc
+d16b	fp16	B	rob64, no dual-load	26168	62.61	69.47	0	0	0	24576	0	eoc
+d16b	fp16	C	rob32, no dual-load	26168	62.61	69.47	0	0	0	24576	0	eoc
+d32a	fp32	A	rob64 + dual-load	13544	60.48	67.90	0	0	0	24576	0	eoc
+d32a	fp32	B	rob64, no dual-load	13962	58.67	70.03	0	0	0	24576	0	eoc
+d32a	fp32	C	rob32, no dual-load	13962	58.67	70.03	0	0	0	24576	0	eoc
+d32b	fp32	A	rob64 + dual-load	24149	67.85	76.69	0	0	0	24576	0	eoc
+d32b	fp32	B	rob64, no dual-load	26682	61.40	68.40	0	0	0	24576	0	eoc
+p09	fp16	A	rob64 + dual-load	29660	3.45	4.47	551	74	0	24576	0	epilogue-fatal
+p09	fp16	B	rob64, no dual-load	34519	2.97	3.89	861	93	0	24576	0	epilogue-fatal
+p09	fp16	C	rob32, no dual-load	34519	2.97	3.89	861	93	0	24576	0	epilogue-fatal
+p09	fp16	D1	ROB0 64 / ROB1-3 16	29660	3.45	4.47	551	74	0	24576	0	epilogue-fatal
+p20	fp16	A	rob64 + dual-load	10669	19.20	26.28	178	4	0	24576	0	epilogue-fatal
+p20	fp16	C	rob32, no dual-load	290561	0.70	0.89	87277	17499	0	24576	0	epilogue-fatal
+p49f	fp32	A	rob64 + dual-load	9441	43.39	53.10	0	0	0	24576	0	eoc
+p49f	fp32	B	rob64, no dual-load	9836	41.64	50.24	0	0	0	24576	0	eoc
+p49f	fp32	C	rob32, no dual-load	9836	41.64	50.24	0	0	0	24576	0	eoc
+p50	fp16	A	rob64 + dual-load	10261	39.92	51.36	4	0	0	24576	0	epilogue-fatal
+p50	fp16	B	rob64, no dual-load	11886	34.46	44.82	0	0	0	24576	0	epilogue-fatal
+p50	fp16	C	rob32, no dual-load	11886	34.46	44.82	0	0	0	24576	0	epilogue-fatal
+p66	fp16	A	rob64 + dual-load	13865	59.08	68.67	4	0	0	24576	0	epilogue-fatal
+p66	fp16	B	rob64, no dual-load	14939	54.84	66.25	0	0	0	24576	0	epilogue-fatal
+p66	fp16	C	rob32, no dual-load	14939	54.84	66.25	0	0	0	24576	0	epilogue-fatal
+p78	fp16	A	rob64 + dual-load	22941	71.42	77.95	0	0	0	24576	0	epilogue-fatal
+p78	fp16	C	rob32, no dual-load	24584	66.64	77.94	0	0	0	24576	0	epilogue-fatal

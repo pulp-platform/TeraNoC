@@ -11747,3 +11747,51 @@ correction: `Error-[EEST] $error elaboration system task` /
 `[spatz_mempool_cc] spatz_mem_req_t.id (6) narrower than meta_id_t (7) -- request truncation.`,
 rc=2, no simv. A blocked build, not silent corruption, with the widths exactly as derived. The
 `MemReqIdWidth` fix unblocks it; the rebuild is queued behind the A-TRUNC validation build.
+
+### 2026-08-28 — correction: no `p*` arm in the ROB sweep ever finished
+
+**What I got wrong.** I wrote that on `p20` dual-load is "the difference between finishing and
+livelocking". Neither arm finishes. Auditing completion across all 29 delivered arms:
+
+* `d16a d16b d32a d32b` and `p49f` reach `[EOC] retval=0`.
+* **`p09 p20 p50 p66 p78` — every arm, every image — die on `mempool_group_mshr.sv:2269`,**
+  *"MSHR clock gate dropped a resp_buf write: entry=0 slot=0"*. Pre-existing, already an open task,
+  nothing to do with ROB sizing.
+
+**The numbers survive; the word "finishing" does not.** The assertion fires in the **epilogue**,
+after the benchmark region has opened *and closed* — A|p20's fatal is at cycle 63,009 against a
+10,246-cycle benchmark region, and `[FPU FINAL]` reports a definite cycle count for every one of
+them. So the kernel completes and the collector's `execution took N` window is a real workload
+measure. What is not true is that the simulation completed.
+
+**And the p20 result is better stated without completion times at all.** From `[FPU FINAL]`:
+
+| p20 arm | busy lane-cycles (work done) | benchmark cycles | util |
+|---|---:|---:|---:|
+| A — dual-load | 10,350,296 | 10,246 | 24.66% |
+| C — no dual-load | 10,552,752 (2% **more**) | 290,137 (**28x**) | 0.89% |
+
+Identical work, 28x the time. That is a livelock measured directly rather than inferred from a
+ratio of end times — and it does not depend on either run having finished.
+
+**Implementation.** `collect_rob_results.py` now emits a `state` column: `eoc` /
+`epilogue-fatal` / `no-bench` / `unknown`. The distinction that matters is **`no-bench`**
+(`[FPU FINAL] ... never active`) — that is the reading which invalidates an arm's data. The
+presence of `Fatal:` does not, and treating it as though it did would have thrown away every GEMM
+point in the sweep. The dashboard shows the column and states the caveat next to the livelock table.
+
+**How it surfaced.** Not from the audit — from chasing why `D1_p09` and `A_p09` had identical
+counters but 2,026 differing transcript lines. The answer was benign (arm A shows request `id=33`
+on ports 2-3 where D1 shows `id=1`: 33 mod 16, the shallower ROB recycling ids at its own depth,
+not truncation), but grepping for `Fatal:` along the way showed one in **both** arms. Worth
+recording as method: the discrepancy I was chasing was not the defect, and would not have been
+found by looking at any summary table.
+
+**Result unchanged by all of this.** `D1_p09` matches `A_p09` to the digit — 5,172,856 busy
+lane-cycles over 29,253 cycles, `rh=551`, `tmo=74`, identical in both. Shrinking ROB1-3 from 64 to
+16 costs exactly nothing, as the port-0-only burst argument predicted. Note `build_robn16` predates
+A-TRUNC, so the assertion is still untested at runtime; the `D1a_*` arms on `build_robn16a` cover
+that.
+
+**D2 built** once `MemReqIdWidth` landed (`ROB_DEPTH=128 ROBN_DEPTH=16`, tripwire silent) and four
+arms are dispatched.

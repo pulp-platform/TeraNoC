@@ -229,13 +229,13 @@ footer{color:var(--ink-3);font-size:12px;font-family:var(--mono)}
     if ll:
         H.append('<section class="card"><div><h2>Where dual-load stops being an optimisation</h2>'
                  '<p class="sub">On most shapes dual-load buys a few per cent. On the shapes below '
-                 'it decides whether the kernel finishes at all. These are reported apart from the '
-                 'range above because they are a different phenomenon, not the tail of the same '
-                 'one.</p></div>')
+                 'the machine does the <b>same work</b> and takes an order of magnitude longer to '
+                 'do it. Reported apart from the range above because it is a different '
+                 'phenomenon, not the tail of the same one.</p></div>')
         H.append('<div class="tw"><table><tr><th>shape</th><th>image</th>'
                  '<th class="num">cycles</th><th class="num">efficiency</th>'
                  '<th class="num">RH stuck</th><th class="num">MSHR timeouts</th>'
-                 '<th>verdict</th></tr>')
+                 '<th>sim end</th><th>verdict</th></tr>')
         for tag in ll:
             for i, cfg, _ in IMAGES:
                 r = by[tag].get(i)
@@ -246,12 +246,22 @@ footer{color:var(--ink-3);font-size:12px;font-family:var(--mono)}
                          '<td><span class=sub>%s</span></td>'
                          '<td class="num">%s</td><td class="num">%s%%</td>'
                          '<td class="num">%s</td><td class="num">%s</td>'
+                         '<td><span class=sub>%s</span></td>'
                          '<td><span class="chip %s">%s</span></td></tr>'
                          % (tag, html.escape(LABEL.get(tag, tag)), html.escape(cfg),
                             "{:,}".format(int(r["cycles"])), r["eff"],
                             "{:,}".format(int(r.get("rh", 0))), "{:,}".format(int(r.get("tmo", 0))),
+                            html.escape(r.get("state", "?")),
                             "fp16" if bad else "fp32", "livelocked" if bad else "clean"))
         H.append("</table></div>")
+        H.append('<p class="note"><b>Neither arm reaches <code>[EOC]</code>.</b> Every '
+                 '<code>p*</code> arm in this sweep &mdash; all images &mdash; dies in the '
+                 '<b>epilogue</b> on a pre-existing assertion, <code>mempool_group_mshr.sv:2269</code> '
+                 '(&ldquo;MSHR clock gate dropped a resp_buf write&rdquo;), which is an open issue '
+                 'unrelated to ROB sizing. The kernel itself completes: the benchmark region opens '
+                 '<i>and closes</i>, so the cycle counts are real workload measures. But these arms '
+                 'must not be described as having finished &mdash; only the decode shapes and '
+                 '<code>p49f</code> do. The <code>state</code> column says which is which.</p>')
         H.append('<p class="note"><b>The comparison is controlled.</b> Every hold-window, '
                  'serve-timeout and response-hold define is <b>identical</b> across these images '
                  '&mdash; the only differences are <code>SPATZ_VLSU_DUAL_LOAD</code> and '
