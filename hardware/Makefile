@@ -481,6 +481,14 @@ endif
 ifneq ($(strip $(spatz_vlsu_rob_depth)),)
   vlog_defs += -DSPATZ_VLSU_ROB_DEPTH=$(spatz_vlsu_rob_depth)
 endif
+# Per-port ROB depth: ports 1..N-1 only (ROB0 keeps spatz_vlsu_rob_depth). Bursts use ROB0
+# alone -- ParityDrain lands even beats from mem port 0 and odd beats from mem port 1 in ROB0's
+# id range -- so ROBs 1-3 hold no burst data and need not match ROB0's depth. Unset = equal to
+# spatz_vlsu_rob_depth (bit-identical). Shrinking costs NON-burst memory-level parallelism.
+#   "ROB0 deep, rest shallow": spatz_vlsu_rob_depth=128 spatz_vlsu_robn_depth=16
+ifneq ($(strip $(spatz_vlsu_robn_depth)),)
+  vlog_defs += -DSPATZ_VLSU_ROBN_DEPTH=$(spatz_vlsu_robn_depth)
+endif
 # H1 dual-load runahead (validated only with spatz_vlsu_rob_depth=64). Unset = MaxInflight 1
 # (bit-identical). 2 = a 2nd burst-safe load co-resident while the elder drains.
 ifneq ($(strip $(spatz_vlsu_dual_load)),)
