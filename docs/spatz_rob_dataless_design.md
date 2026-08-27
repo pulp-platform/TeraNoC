@@ -317,3 +317,88 @@ The staging in §6 otherwise stands, with one addition:
    until we know whether the ROB read mux is on it. If the VLSU's critical path is elsewhere
    entirely (the VRF banks, the FPU), then shrinking a 64:1 mux buys nothing and the whole exercise
    is an area play, not a timing one. **This should be measured before S0**, not assumed.
+
+---
+
+## 11. Open questions — answers (2026-08-27)
+
+Q5 is left open pending the first backend run. Q1–Q4 are answered from the RTL, and **Q3 changes
+the design again**.
+
+### Q3 — does anything else read `rob_rdata` in order? **YES: stores.**
+
+```systemverilog
+// spatz_vlsu.sv:1835-1838 -- the STORE path
+mem_req_svalid[port] = rob_rvalid[port] && ... && !commit_insn_q.is_load;
+mem_req_data[port]   = data;            // <- rob_rdata[port]
+mem_req_id[port]     = rob_rid[port];
+```
+
+The ROB is **bidirectional**. For a store, VRF-read data is staged *into* it and drained *out* to
+memory. `mem_q` is therefore not only a load reorder buffer but the **store staging buffer**, and
+deleting the data array would break stores outright.
+
+**Consequence:** the two paths must be split, not merged-and-shrunk.
+
+| path | data storage | depth driven by |
+|---|---|---|
+| **loads** | **none** — responses land in the VRF at the tag's offset | n/a |
+| **stores** | **required** — VRF → buffer → memory, there is no VRF write to skip | memory acceptance rate, **not** the outstanding window |
+
+The store buffer can be small and fixed while load tags scale, which preserves the win — but it is
+a structural split of one module per port into two, and that is more work than §4 implied.
+
+### Q2 — how deep must the load-side buffer be? **It is not a rate-match problem.**
+
+The VRF write packs **all `N_FU` ports into one wide word** (`ELEN*lane_idx +: ELEN`), and fires only
+when every pending port has data (`&(rob_rvalid | ~mem_pending)`). So:
+
+* in-rate = 4 words/cycle (4 ports), out-rate = 4 words per VRF write → **1:1. There is no rate
+  mismatch to buffer.**
+* What the buffer actually absorbs is **inter-port skew** — port 0's element arriving before port 3's
+  for the same VRF word.
+
+**So the load-side depth is set by maximum inter-port skew, a measurable quantity, and is expected to
+be far below the tag count.** That should be measured (a skew histogram from a matmul arm) rather
+than assumed, but it reframes the sizing question entirely: not "how many outstanding", but "how far
+apart do the four ports drift".
+
+### Q4 — does the VRF write port saturate at 128+ tags? **No, and that also bounds the win.**
+
+Retirement is already 4 words/cycle through the wide write. More tags do **not** raise that rate —
+they raise **latency tolerance**, which is the actual goal (covering memory latency), but it means
+the payoff is bounded by how much latency is currently exposed, not by bandwidth. Consistent with
+H1's +16.4% on the load-starved `p09` and ~1-3% on compute-bound shapes.
+
+### Q1 — is the element position derivable from the tag? **Yes, for both paths.**
+
+* **Burst (port 0 only):** `burst_elem_idx = commit_counter_q[0] >> clog2(ELENB)`, then
+  `lane = burst_elem_idx[LaneIdxWidth-1:0]`, `word = burst_elem_idx >> clog2(N_FU)`. Ids are
+  allocated contiguously, so `burst_elem_idx == (id - first_id)` and the lane/word split is pure
+  bit-slicing — **no arithmetic beyond the subtract**.
+* **Non-burst (4 ports):** port *p* owns elements *p, p+N_FU, p+2·N_FU, …*, so
+  `element = p + N_FU·(id - first_id_p)` — again a subtract plus a shift.
+
+**Caveats that S0 must prove, not assume:** `vstart != 0` (the `vreg_start_0` correction at `:800`),
+the burst tail phase, and the unaligned-access data rotations at `:1620-1638`, which shift data by
+`rs1[1:0]` *after* the ROB read. The rotation is orthogonal to placement, but it sits on the same
+path and must move with it.
+
+### Q5 — is the ROB read mux on the critical path? **UNANSWERED — pending backend.**
+
+This repo has **no synthesis flow** (only Spyglass lint + `spyglass/sdc/func.sdc`), and the only
+timing reports on this machine are from ManyRVData, a different design (`vlsu=0`, `reorder=0`).
+The first backend run is in progress. **Until it lands, treat this as an AREA proposal
+(−8,192 flops/core, ~5.3 MFF at 1024 cores) with an unproven timing upside.**
+
+---
+
+## 12. Revised scope after §11
+
+The design is now: **split the load and store paths; make the load path dataless; leave the store
+staging buffer alone.** That is a larger structural change than §4 described, and the honest
+sequencing is:
+
+1. Measure inter-port skew (answers the real sizing question, costs one instrumented arm).
+2. S0/S1 assertion stages — prove the tag→element map including `vstart != 0` and the tail phase.
+3. Only then decide whether the split is worth it, with backend timing in hand.
