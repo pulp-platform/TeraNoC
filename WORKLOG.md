@@ -11542,3 +11542,39 @@ identical to a legitimate raw 0.
 real app it met and that break was a two-year-old silent misconfiguration. But an assert that
 cannot fire for any legitimate input is a regression guard, not a correctness guard — worth keeping,
 worth not overselling.
+
+---
+
+## 2026-08-27 — 8x8 decode: merging is worth 3.79x, and it refutes the 49% ceiling
+
+**Result.** First two 8x8 run-3 arms:
+
+| shape | prec | run 1 | run 2 | run 3 | speedup | efficiency |
+|---|---|---:|---:|---:|---:|---|
+| `32x128x16384` | fp16 | 48,825 | — | **12,878** | **3.79x** | 16.8% -> **63.6%** |
+| `32x128x8192` | fp32 | 35,946 | 33,139 | **13,544** | **2.45x** | 22.8% -> **60.5%** |
+
+**The `B = 32` fp16 roofline ceiling of 49% at 8x8 is REFUTED** — measured 63.6%.
+
+The error: that ceiling divided the required bandwidth by a *measured* supply figure
+(~250 B/cyc per core), and that figure was measured on runs whose MSHR merging was off. It
+described the machine **without** the MSHR and was then used to bound the machine **with** it.
+
+The mechanism is the one the user named before any of this data existed: request merge and
+response multicast mean one NoC transaction can serve four cores and carry more than one word
+back. Merging does not merely close an admission-side gap — it lowers the bandwidth *demand*,
+so the ceiling is not a constant. It scales with merge degree.
+
+**Correction to this session's own validation.** Every "result: pass" reported for a decode arm was
+a false positive: the grep pattern `pass` matched **`BankfullBackpressure`** in the MSHR config
+banner. These arms carry **no verification at all** — `MATMUL_VERIFY` is unset and the kernel prints
+no pass/fail. Cycle comparisons remain sound (the UART header confirms identical `M, N, P` and
+identical per-core slice `0,8,0,64` across runs, and the MSHR is transparent to arithmetic), but
+**no decode run in any of the three campaigns establishes numerical correctness.** That is now
+stated in the artifact.
+
+**Status.** 6 of 8 run-3 arms in, mean -39.0%. Two 8x8 D=256 arms still running.
+
+**Lesson.** A substring match is not a check. `pass` inside `BankfullBackpressure` passed silently
+for eight arms and read as validation in four separate reports. Anchor the pattern to its label, and
+confirm the thing being grepped for is actually emitted before treating its presence as evidence.

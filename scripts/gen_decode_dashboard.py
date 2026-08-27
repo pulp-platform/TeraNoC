@@ -401,9 +401,14 @@ footer{color:var(--ink-3);font-size:12px;font-family:var(--mono)}
         H.append('<p class="note"><b>%d of 8 arms in; spread %+.1f%% to %+.1f%%, mean %+.1f%%.</b> '
                  'The measured bottleneck was MSHR <i>entry admission</i> &mdash; <code>REQ_MSHR_IN</code> '
                  'stalled 90.2%% while links ran 9.3%% busy &mdash; so this is where turning merging on '
-                 'should show, and at 4&times;4 it does. The 8&times;8 arms are the real test: there the '
-                 'roofline ceiling for <code>B&nbsp;=&nbsp;32</code> fp16 is 49%%, so merging can close '
-                 'the admission gap but cannot lift the arm past its bandwidth bound.</p>'
+                 'should show &mdash; and it does, at BOTH meshes. <b>The 49%% roofline ceiling quoted here '
+                 'earlier for <code>B&nbsp;=&nbsp;32</code> fp16 at 8&times;8 is refuted:</b> 8&times;8 fp16 '
+                 'reaches <b>63.6%%</b> and fp32 <b>60.5%%</b>. That ceiling was computed from a supply '
+                 'figure measured on a configuration where merging was off, so it described the machine '
+                 'without the MSHR rather than with it. Merging does not just close an admission gap &mdash; '
+                 'it lowers the bandwidth <i>demand</i>, because four cores in a group share one fetch and '
+                 'one multicast response. The ceiling scales with merge degree.</p>'
+                 '<p class="note flag"><b>Caveat:</b> these arms carry no result verification &mdash; <code>MATMUL_VERIFY</code> is not set and the kernel prints no pass/fail. Cycle counts are comparable across runs (identical shape and per-core split, and the MSHR is transparent to arithmetic), but none of these runs establishes numerical correctness.</p>'
                  % (len(r3), min(ds), max(ds), sum(ds)/len(ds)))
         H.append('</section>')
 
