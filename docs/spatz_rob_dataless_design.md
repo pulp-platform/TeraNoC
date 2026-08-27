@@ -230,3 +230,90 @@ the failing relaxed run showed 508. Use the UART verdict and `$fatal`.
 **The honest summary:** the payoff is real but the work is in §5, not §4. The addressing change is
 small; re-establishing chaining safely is not. S0–S2 are cheap and answer whether the premise holds
 before any behaviour changes.
+
+---
+
+## 10. TIMING — added 2026-08-27 after review. This reshapes §4.
+
+The concern raised: does this lengthen the critical path? Auditing the existing RTL says the risk is
+real but **concentrated in three places, none of which is the addressing change** — and the ring we
+were about to discard is precisely what keeps them short today.
+
+### 10.1 What the ring already buys, that a free-list would lose
+
+`reorder_buffer.sv` is deliberately tuned:
+
+* `BlockWords == NumWords/2` is *required* so that `(i - wp) mod NumWords < BlockWords` collapses to
+  **a single msb test** (`:40-42`). A free-list has no such identity — finding `MaxBurstWords`
+  contiguous free ids becomes a search.
+* "Quadrant decomposition of the write pointer and the per-quadrant equality one-hots" (`:118-121`)
+  — an explicit shallow-decode structure.
+* `SPATZ_ROB_CNT_IDVALID` exists to delete "the `NumWords` bitmap flops, their write-pointer decoder
+  and **the two `NumWords`:1 read muxes**" (`:24-29`) — i.e. someone already fought this path.
+
+**Allocation today is `write_pointer + 1`: an incrementer.** Replacing it with a free-list priority
+encoder over 128 ids would be a clear regression, and it is not needed.
+
+### 10.2 Revised proposal: keep the ring, delete only the data
+
+Ids are already allocated **contiguously per instruction**, so the ring is a natural fit. Only
+*consumption* needs to become order-independent.
+
+| | original §4 sketch | **revised** |
+|---|---|---|
+| allocation | free-list | **ring, unchanged** (`write_pointer + 1`) |
+| block reservation | rework | **unchanged** — msb-test identity preserved |
+| tag retirement | out of order | **in order** (`read_pointer` advances on the oldest) |
+| data storage | deleted | **deleted** — this is the whole point |
+| VRF write | at element offset from tag | same |
+
+This keeps every timing trick, deletes the 8,192 data flops, and still decouples *depth in flops*
+from *tag count* — growing the ring now costs `IdWidth` + 2 bits per slot, not 32.
+
+### 10.3 Logic-level estimate, path by path
+
+| path | today | revised | direction |
+|---|---|---|---|
+| **drain data mux** | `mem_q[read_pointer_q]` = **64:1 over 32 b** | 16-entry rate-match FIFO = **16:1** | **shorter** (−2 levels of 4:1) |
+| **VRF write address** | counter → shift/add | `(id − first_id)` → shift/add | +1 subtract, **7-bit, ~2 levels** |
+| **allocation** | `wp + 1` | `wp + 1` | **unchanged** |
+| **block window** | single msb test | single msb test | **unchanged** |
+| **ParityDrain** | `burst_odd_alt[i] = ((i%2)!=0) ^ rob_id[0][0]` | unchanged — **already id-derived** | **unchanged** |
+
+The data mux getting *smaller* is the significant one: the 64:1 read mux over 32 bits, with its
+64-way fan-in, is the likeliest current offender on this path, and the revised design replaces it
+with a 16:1.
+
+The `(id − first_id)` subtract is the only added arithmetic, it is ~7 bits wide, and it sits between
+the response register and the FIFO write — **it can be registered**, so it need not be on any
+existing critical path at all.
+
+### 10.4 The one genuine new risk: the chaining frontier
+
+Out-of-order VRF writes mean "which elements are valid" is no longer implied by a counter. The naive
+form — priority-encode the lowest unset bit of a `NrWordsPerVector`-wide valid mask, every cycle —
+**is a deep structure and must not be built that way.**
+
+Mitigation, and it should be a design constraint rather than an afterthought:
+
+* Keep a **registered frontier** and advance it by a **bounded** amount per cycle (≤ 4, matching
+  `N_FU`). That is a leading-ones count over a 4-bit window — 2 levels — not a full encode.
+* Responses within one burst arrive nearly in order, so a bounded advance loses almost nothing.
+* The consumer's gate becomes `read_index < frontier_q`, a comparator against a **register**, which
+  is shorter than today's `&(~deps | wrote_result_q)` reduction over `NrParallelInstructions`.
+
+### 10.5 Consequence for the plan
+
+**S4 is re-scoped and de-risked**: it no longer introduces a free-list or reworks block reservation.
+The staging in §6 otherwise stands, with one addition:
+
+> **Every stage from S3 must report post-synthesis timing on the VLSU, not just cycle counts.**
+> A stage that is cycle-neutral and 5% slower in `Fmax` is a regression this project would not
+> otherwise notice — nothing in the current flow measures it, and `make lint` does not either.
+
+### 10.6 Open question added
+
+5. **What is the current critical path through the VLSU?** None of the above is worth acting on
+   until we know whether the ROB read mux is on it. If the VLSU's critical path is elsewhere
+   entirely (the VRF banks, the FPU), then shrinking a 64:1 mux buys nothing and the whole exercise
+   is an area play, not a timing one. **This should be measured before S0**, not assumed.
