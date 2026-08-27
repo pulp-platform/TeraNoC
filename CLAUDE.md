@@ -129,6 +129,32 @@ Use `buildpath=build_X` to keep multiple build dirs (e.g. `buildpath=build_1`).
   long-running, so it can never be invalidated by someone else's build.
 
 - **DRAMSys libs are always linked.** QuestaSim is always invoked with `-sv_lib libsystemc -sv_lib libDRAMSys_Simulator`, even with the default SRAM L2. If `make update-deps` (which clones + builds DRAMSys) was skipped, vsim refuses to start with a missing `.so`.
+- **⚠️ Per-hart traces refill node scratch, and only ONE of the two sources has a build knob.**
+  Measured on badile15, 2026-08-27, a few hours after a full reap:
+
+  | file | files | size | controlled by |
+  |---|---:|---:|---|
+  | `trace_spatz_*` | 71,424 | **343 GB** | the SOFTWARE `csr_trace` region — **no build knob** |
+  | `trace_hart_*.dasm` | 23,808 | 188 GB | `snitch_trace` (Makefile:57, default **1**) |
+
+  This filled larain10's `/scratch` to 100%, putting two running arms at risk of losing their
+  results to `tar | zstd`; a one-off reap reclaimed **~6 TB** fleet-wide.
+
+  * **Build sweep/benchmark images with `snitch_trace=0`** — verified with `make -n` to emit
+    `-DSNITCH_TRACE=0`. This removes the `.dasm` share only (~a third):
+    ```bash
+    make compile_vcs_simvopt config=... buildpath=build_X snitch_trace=0
+    ```
+    Keep the default (1) for a **debug** image: `trace_hart_*.dasm` is what the "stuck PC" recipe
+    and the `waveform-analysis` workflow read. The knob is per-build, so both can coexist.
+  * **`spatz_trace=0` is already the default and does NOT turn the Spatz trace off.**
+    `spatz_mempool_cc.sv:591` gates it on "the per-core `csr_trace_q` region **OR** a `SPATZ_TRACE`
+    define", so at 0 it still emits for the whole benchmark region — which is most of a sweep arm.
+    Disabling it would need an RTL force-off (a `SPATZ_TRACE = -1` sentinel or a second define);
+    switching `csr_trace` off instead is NOT an option, because the `[FPU]`/`[BP]` TB counters the
+    dashboards read are gated on the same signal.
+  * Until then `scripts/badist/loops/trace_reap_loop.sh` truncates both hourly above 40 GB/node.
+    Truncation is safe on a live sim (the handle stays valid, blocks free immediately).
 - **Terabool elaboration is slow** (`voptk2` ~7+ min before `run` starts); this is normal, not a hang.
 
 ### Testing
@@ -325,3 +351,26 @@ it from `scripts/gemm_sweep_shapes.txt` with `--shapes ... --elf-template ...`.
 - Commit style: imperative, scope-first — e.g., `mempool_group_mshr: fix false head-beat assertion on DRAIN_RESP transition`
 - Separate RTL, software, and config changes where practical
 - Call out `hardware/deps/` changes explicitly in PRs
+
+## Shared Knowledge Base (Basic Memory)
+
+Durable engineering knowledge for the TeraNoC+Spatz+backend work — decisions
+(with rationale and supersession chains), contracts, experiment results, and
+open tasks — lives in the Basic Memory project **`teranoc-spatz-plus`** at
+`/home/zexifu/knowledge/teranoc_spatz_plus/` (populated 2026-08-23 from this
+repo's docs, WORKLOG, and session history; migration plan:
+`~/knowledge/teranoc-migration-plan.md`).
+
+- **Read** at session start: use the basic-memory plugin (`search_notes`, the
+  session briefing, `memory://` links) to pick up current state and open tasks
+  before substantial work. Query by type — e.g. tasks with `status: active`,
+  decisions with `status: open`.
+- **Write** new durable knowledge THERE, not into new per-repo log files:
+  decisions (rationale + alternatives), measured results with dates, resolved
+  root causes, and changes to contracts (CSR map, knob defaults, probe
+  definitions). Repo-local `docs/*.md` and WORKLOG.md stay the authoritative
+  project artifacts; the KB is the distilled index above them.
+- This file keeps build/usage gotchas. Some facts here can drift faster than
+  the KB — e.g. `group_mshr_bank_hash` modes (now ships 3, field-select),
+  `noc_router_remapping` (terapool now ships 2), hold-window values (burst
+  2047 / single 0). When in doubt, trust `contracts/` notes in the KB.
