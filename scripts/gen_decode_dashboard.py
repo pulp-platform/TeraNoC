@@ -464,6 +464,11 @@ footer{color:var(--ink-3);font-size:12px;font-family:var(--mono)}
         GU = json.load(open(os.path.join(ROOT, "docs/benchmarks/decode_group_util.json")))
     except Exception:
         GU = {}
+    def _shape_of(k):
+        """"run 2|dec8_32x256x16384" -> "32x256x16384"; tolerates the old un-prefixed keys."""
+        a = k.split("|", 1)[1] if "|" in k else k
+        return a.split("_", 1)[1] if "_" in a else a
+
     if GU:
         H.append('<section class="card">')
         H.append('<div><h2>Per-group FPU utilisation over the benchmark</h2>'
@@ -474,10 +479,12 @@ footer{color:var(--ink-3);font-size:12px;font-family:var(--mono)}
                  'to the selected arm, so a 4x4 and an 8x8 arm both render correctly.</p></div>')
         H.append('<div class="mctl">'
                  '<div><label for="marm">arm</label><select id="marm">'
-                 + "".join('<option value="%s">%s &middot; %s &middot; %s</option>'
-                           % (html.escape(a), GU[a]["mesh"], GU[a]["prec"],
-                              html.escape(a.split("_", 1)[1]))
-                           for a in sorted(GU))
+                 + "".join('<option value="%s">%s &middot; %s &middot; %s &middot; %s</option>'
+                           % (html.escape(a), html.escape(GU[a].get("run", "run 1")),
+                              GU[a]["mesh"], GU[a]["prec"], html.escape(_shape_of(a)))
+                           # sort by SHAPE first so the three runs of one shape sit adjacent in the
+                           # list -- the point of carrying runs 2 and 3 here is comparing them.
+                           for a in sorted(GU, key=lambda k: (_shape_of(k), GU[k].get("run", ""))))
                  + '</select></div>'
                  '<div style="flex:1"><label for="mper">benchmark window</label>'
                  '<input type="range" id="mper" min="0" max="0" value="0" step="1"> '
@@ -528,6 +535,47 @@ footer{color:var(--ink-3);font-size:12px;font-family:var(--mono)}
                  'gets an identical tile, and the memory system keeps them fed evenly. For contrast, the 8x8 '
                  'prefill sweep fans out to tens of points between fastest and slowest group.</p>'
                  % (min(gaps), max(gaps)))
+        # PER-RUN breakdown. runs 1-3 differ only in MSHR configuration, so any change in the
+        # finish spread or the window count is that configuration, not the workload.
+        # MATCHED SUBSET ONLY. Runs 1-3 cover different arm sets (8 / 6 / 6), and averaging over
+        # different shapes would compare shapes, not configurations -- the same confound that made a
+        # 'higher util finished slower' claim survive for days in the 8x8 campaign. Restrict to arms
+        # measured in EVERY run, and say how many were dropped.
+        _armsof = {}
+        for k, v in GU.items():
+            _armsof.setdefault(v.get("run", "run 1"), set()).add(_shape_of(k))
+        _common = set.intersection(*_armsof.values()) if _armsof else set()
+        _dropped = len(set().union(*_armsof.values()) - _common) if _armsof else 0
+        byrun = {}
+        for k, v in GU.items():
+            if _shape_of(k) not in _common:
+                continue
+            n = v["groups"]; cum = [0.0] * n
+            for pp in v["periods"]:
+                for g, u in enumerate(pp["u"]):
+                    cum[g] += u / 100 * v["denom"] * v["mac"]
+            pct = [100 * c / v["share"] for c in cum]
+            r = v.get("run", "run 1")
+            byrun.setdefault(r, []).append((max(pct) - min(pct), len(v["periods"])))
+        if len(byrun) > 1:
+            H.append('<p class="sub" style="margin-bottom:10px">Matched on the <b>%d shape(s) measured in '
+                     'every run</b>; %d shape(s) present in only some runs are excluded, so this compares '
+                     'configurations rather than shapes.</p>' % (len(_common), _dropped))
+            H.append('<div class="tw"><table><tr><th>run</th><th>arms</th>'
+                     '<th class="num">mean finish spread</th><th class="num">worst</th>'
+                     '<th class="num">mean windows</th></tr>')
+            for r in sorted(byrun):
+                gg = [x[0] for x in byrun[r]]; ww = [x[1] for x in byrun[r]]
+                H.append('<tr><td>%s</td><td class="num">%d</td><td class="num">%.1f pp</td>'
+                         '<td class="num">%.1f pp</td><td class="num">%.0f</td></tr>'
+                         % (html.escape(r), len(gg), sum(gg) / len(gg), max(gg),
+                            sum(ww) / float(len(ww))))
+            H.append('</table></div>')
+            H.append('<p class="sub" style="margin-bottom:13px">Windows are 1000-cycle probe periods, so '
+                     '<b>mean windows is runtime</b>: run 3 finishing in fewer windows on the same shapes '
+                     'is the merge fix, seen per group rather than as a single cycle count. Spread is the '
+                     'alignment question &mdash; it says whether the speed-up came evenly across the mesh '
+                     'or by pulling a few groups forward.</p>')
         H.append('<div class="mmeta" style="margin-bottom:11px"><dl>'
                  '<dt>leader</dt><dd id="plead">-</dd><dt>laggard</dt><dd id="plag">-</dd>'
                  '<dt>gap</dt><dd id="pgap">-</dd><dt>laggard / leader</dt><dd id="pratio">-</dd>'

@@ -32,9 +32,18 @@ def family(arm):
     return None
 
 
+# RUNS. Run 1 is the original campaign; run 2 (w8k_) re-ran it at hold/serve 8191 with remap 3;
+# run 3 (fix_) is the corrected MSHR merge derivation. All three emit the same [FPUG] probe, so
+# the per-group mesh and progress views can carry all of them and become a comparison rather than
+# a single snapshot. Keys are "<run>|<arm>": the page JS indexes GU by the <option> value, so the
+# key format is free and only the label parses it.
+RUNS = [("dec_", "run 1"), ("w8k_", "run 2"), ("fix_", "run 3")]
+_dirs = [(_d, _p, _r) for _p, _r in RUNS
+         for _d in sorted(glob.glob(os.path.join(ROOT, "hardware", _p + "*")))]
+
 out = {}
-for d in sorted(glob.glob(os.path.join(ROOT, "hardware", "dec_*"))):
-    arm = os.path.basename(d)[4:]
+for d, _pfx, _run in _dirs:
+    arm = os.path.basename(d)[len(_pfx):]
     f = family(arm)
     m = re.search(r"(\d+)x(\d+)x(\d+)$", arm)
     if not f or not m:
@@ -61,7 +70,7 @@ for d in sorted(glob.glob(os.path.join(ROOT, "hardware", "dec_*"))):
                     "u": [round(100.0 * v / den, 1) for v in vals]})
     if not per:
         continue
-    out[arm] = {"groups": ngroups, "denom": den, "mac": mac, "prec": prec,
+    out["%s|%s" % (_run, arm)] = {"run": _run, "groups": ngroups, "denom": den, "mac": mac, "prec": prec,
                 "mesh": "%dx%d" % (int(ngroups ** 0.5), int(ngroups ** 0.5)),
                 "share": B * D * I / ngroups, "periods": per}
 
