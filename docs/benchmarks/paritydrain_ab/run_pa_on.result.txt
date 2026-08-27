@@ -1,0 +1,7 @@
+# snapshot 2026-08-27T04:22:52+02:00 from hardware/run_pa_on/transcript
+# [UART] The execution took 82859 cycles.
+# [UART] The performance is 46975 OP/1000cycle (22%o utilization).
+# --- FPU summary at the benchmark window ---
+# [FPU] bench cyc=96000 util=0.02% cum=6.08% busy=212/1024000 lane-cyc  grp_max=0.3%(g6) grp_min=0.0%(g0)  mshr_timeout=+2 bankfull_bypass=+0  core_spread=13/212(g6)  bar_rel=+0 bar_spread=0.0 bar_max=36  insn_drift_intra=95/152(g1) inter=90 insn_max=45949
+# [FPU] bench cyc=97000 util=0.01% cum=6.00% busy=100/1024000 lane-cyc  grp_max=0.2%(g6) grp_min=0.0%(g0)  mshr_timeout=+0 bankfull_bypass=+0  core_spread=6/100(g6)  bar_rel=+0 bar_spread=0.0 bar_max=36  insn_drift_intra=95/152(g1) inter=90 insn_max=45949
+# [FPU] pre    cyc=98000 util=0.03% cum=5.96% busy=340/1024000 lane-cyc  grp_max=0.5%(g6) grp_min=0.0%(g0)  mshr_timeout=+2 bankfull_bypass=+0  core_spread=21/340(g6)  bar_rel=+0 bar_spread=0.0 bar_max=36  insn_drift_intra=95/152(g1) inter=90 insn_max=45949

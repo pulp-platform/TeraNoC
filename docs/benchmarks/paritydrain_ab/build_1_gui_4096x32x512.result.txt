@@ -1,0 +1,7 @@
+# snapshot 2026-08-27T04:22:52+02:00 from hardware/build_1_gui_4096x32x512/transcript
+# [UART] M, N, P, m_start, m_end, p_start, p_end = 4096, 32, 512, 0, 8, 0, 256
+# [UART] The execution took 48987 cycles.
+# --- FPU summary at the benchmark window ---
+# [FPU] bench cyc=92000 util=1.51% cum=19.41% busy=61732/4096000 lane-cyc  grp_max=96.5%(g30) grp_min=0.0%(g0)  mshr_timeout=+0 bankfull_bypass=+0  core_spread=5/320(g30)  bar_rel=+0 bar_spread=0.0 bar_max=26081  insn_drift_intra=14/33(g55) inter=137 insn_max=22910
+# [FPU] bench cyc=93000 util=1.22% cum=19.03% busy=49820/4096000 lane-cyc  grp_max=77.8%(g30) grp_min=0.0%(g0)  mshr_timeout=+0 bankfull_bypass=+0  core_spread=3/172(g30)  bar_rel=+0 bar_spread=0.0 bar_max=26081  insn_drift_intra=14/33(g55) inter=27 insn_max=22910
+# [FPU] pre    cyc=94000 util=0.04% cum=18.80% busy=1836/4096000 lane-cyc  grp_max=2.9%(g30) grp_min=0.0%(g0)  mshr_timeout=+0 bankfull_bypass=+0  core_spread=1/72(g30)  bar_rel=+0 bar_spread=0.0 bar_max=26081  insn_drift_intra=14/33(g55) inter=3 insn_max=22910
