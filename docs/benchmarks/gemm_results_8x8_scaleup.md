@@ -1,6 +1,6 @@
 # GEMM results — 8×8 mesh, 1024 cores — 248-shape scale-up campaign
 
-Generated 2026-08-27 07:50 by `scripts/gen_8x8_scaleup_doc.py`. **Re-run rather than editing.**
+Generated 2026-08-27 12:43 by `scripts/gen_8x8_scaleup_doc.py`. **Re-run rather than editing.**
 
 `eff = ideal/actual`, `ideal = M·N·P / lanes` (fp16 8192 MAC/cyc, fp32 4096). Rank on `eff`,
 not on the TB `util` column — that counter is lane *occupancy*, is not conserved across runs
@@ -13,11 +13,11 @@ of identical work, and has inverted a real ranking before.
 
 | | count |
 |---|---:|
-| measurements | **172** |
+| measurements | **174** |
 | recorded livelock (failures, excluded below) | **51** |
 | of manifest | 248 |
 
-Efficiency over the 172 measurements: **median 41.7%**, mean 43.2%, range 7.4–89.3%.
+Efficiency over the 174 measurements: **median 41.9%**, mean 43.3%, range 7.4–89.3%.
 
 ## Cohort target × P
 
@@ -29,7 +29,7 @@ on `P`. Mean efficiency by (target, P) over measurements only:
 | **16** | — | 36.5% (7) | 48.3% (14) | 47.3% (13) | 36.7% (4) |
 | **8** | 36.6% (7) | 50.8% (13) | 61.1% (13) | 58.0% (10) | 68.6% (4) |
 | **4** | 38.7% (9) | 53.4% (9) | 65.0% (9) | 62.2% (6) | 66.5% (3) |
-| **1** | 18.7% (20) | 22.4% (16) | 28.8% (12) | 35.5% (3) | — |
+| **1** | 18.7% (20) | 24.5% (17) | 28.8% (12) | 37.8% (4) | — |
 
 Livelock arms are excluded, so the low-target/low-P cells read better here than the
 campaign actually ran — the failures are listed separately below.
