@@ -181,3 +181,44 @@ NoC response could be materially more. Any number quoted before the waveform wou
 3. **Root cause.** Unknown. The early CMS burst then total silence suggests a request that is
    dropped rather than retried, leaving cores blocked forever. Distinct from
    `rh_livelock_root_cause.md`, whose mechanism produces continuous RH episodes.
+
+---
+
+## 2026-08-27 — the class extends to DECODE, to VCS, and to a merge-off config
+
+Two arms from **decode run 2** (`w8kdec-20260826-142811-ddb4`) hit the identical signature and were
+killed after ~22 h. Evidence: `deadlock_evidence/run2_dec8_32x*.probe.log.gz`.
+
+| arm | node | cum util | stopped at | `RH` | `mshr_timeout` |
+|---|---|---:|---:|---:|---:|
+| `dec8_32x128x16384` | badile41 | 0.54% | 1,294,000 | 0 | +0 |
+| `dec8_32x256x16384` | badile15 | 0.95% | 1,461,000 | 0 | +0 |
+
+`[BP]` reads `kind=bank_req, hsk=0, stall=0, idle=16000` on both — 100% idle links, zero handshakes,
+zero stalls. Stopped, not blocked, exactly as documented above.
+
+**Three ways this extends the class:**
+
+1. **First DECODE arms.** All 14 previously recorded are prefill sweep shapes. The failure is not
+   specific to the prefill work split.
+2. **Both VCS.** 13 of the 14 previous are QuestaSim. Not a simulator artifact.
+3. **A configuration nothing else in the campaign runs.** Run 2 is the only arm set with
+   `hold_window_{single,burst} = 8191` **while merging is bypassed** (`hold_subs_single = 1`,
+   `hold_subs_burst` refused, see `decode_config_and_limits.md`). Entries are held for a long window
+   while nothing can ever accumulate subscribers to release them early.
+
+**The strongest evidence that the configuration is implicated**, not the shape: the same two shapes
+complete on the same hardware under both neighbouring configurations.
+
+| shape | run 1 (baseline) | run 2 (8191 + merge OFF) | run 3 (8191 + merge ON) |
+|---|---:|---|---:|
+| `32x128x16384` | 48,825 ✅ | **DEADLOCK** | 12,878 ✅ |
+| `32x256x16384` | 66,868 ✅ | **DEADLOCK** | 21,587 ✅ |
+
+Run 2's remaining 6 arms completed, so the config is not universally fatal — both failures are the
+8x8 fp16 decode cells, the two largest `I` in the set.
+
+**This is a hypothesis, not a root cause.** What is established: the signature matches, the config is
+unique, and the shapes complete either side of it. What is NOT established: the mechanism by which a
+long hold window plus a bypassed merge target stops the machine. The `deadlock_evidence` probe logs
+are kept so that can be chased without re-running 22 h.
