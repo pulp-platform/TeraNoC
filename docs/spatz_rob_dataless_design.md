@@ -402,3 +402,79 @@ sequencing is:
 1. Measure inter-port skew (answers the real sizing question, costs one instrumented arm).
 2. S0/S1 assertion stages — prove the tag→element map including `vstart != 0` and the tail phase.
 3. Only then decide whether the split is worth it, with backend timing in hand.
+
+---
+
+## 13. The VRF is byte-writable — inter-port skew is NOT a sizing driver (2026-08-27)
+
+§11's Q2 concluded the load-side buffer must be deep enough to absorb inter-port skew, because a VRF
+write packs all `N_FU` lanes and fires only when every pending port has data. **That premise was
+wrong about the storage, and the conclusion goes with it.**
+
+### What the VRF actually is
+
+`vregfile.sv` is a **latch-based SCM with a clock gate per byte column**:
+
+```systemverilog
+logic [NrWords-1:0][WordWidth/8-1:0][7:0] mem;              // byte-organised
+
+for (genvar b = 0; b < WordWidth/8; b++)                     // ONE gated clock per byte
+  tc_clk_gating i_wbe_cg (.en_i(wbe_i[b]), .clk_o(col_clk[b]));
+
+tc_clk_and2 i_clk_and (.clk0_i(row_clk[vreg]), .clk1_i(col_clk[b]), .clk_o(clk_latch));
+always_latch if (clk_latch) mem[vreg][b] <= wdata_q[b*8 +: 8];
+```
+
+Consequences:
+
+* **Partial writes are native.** One 32-bit lane = 4 byte-enables; the other 12 columns get no clock.
+* **No read-modify-write.** Latches hold; untouched bytes are simply not clocked.
+* **A narrow write is CHEAPER than a wide one** — fewer column clocks toggle. The structure is
+  power-optimised on the assumption that partial writes are normal.
+
+So writing the full 128-bit word is a **VLSU choice to conserve its single write PORT**, not a
+storage constraint.
+
+### Why that removes the skew problem
+
+The trade is only about port-cycles, and it is self-balancing:
+
+| port arrival rate | coalesced | per-element | better |
+|---|---|---|---|
+| 4/cycle (aligned) | 1 write | 4 writes | **coalesce** — otherwise the port bottlenecks |
+| ~1/cycle (skewed) | 1 write, after waiting | 1 write per element, immediately | **per-element** — matches arrival |
+
+When ports are skewed the data is not arriving at 4/cycle, so writing each element as it lands
+consumes exactly the port-cycles that would have been spent anyway. **Skew costs nothing if you stop
+waiting for it.**
+
+### Revised load path and buffer sizing
+
+> response lands → derive `(lane, word)` from the tag → write that lane with `wbe_i`,
+> **coalescing with any other lane ready in the same cycle**.
+
+The buffer therefore only needs to catch same-cycle and adjacent-cycle arrivals for coalescing:
+**2–4 entries, not 64.** Depth is set by the coalescing window, which is a design choice, not by
+skew, which is a workload property.
+
+**This supersedes §11 Q2 and §12 step 1.** The inter-port skew measurement is no longer a gate on
+the design — worth having as characterisation, but it does not decide anything.
+
+### What does NOT change
+
+* **Stores still need their staging buffer** (§11 Q3). There is no VRF write to fold into; data goes
+  VRF → buffer → memory.
+* **The chaining frontier is still the hard part** (§5.1, §10.4). Per-lane writes make the valid
+  frontier *more* fine-grained, not less — the bounded-advance constraint stands.
+* **Q5 is still open.** Nothing here says whether the ROB read mux is on the critical path.
+
+### Revised expectation
+
+| | today | proposed |
+|---|---|---|
+| load-side data flops/core | 8,192 | **~256–512** (2–4 entries × 4 ports × 32 b) |
+| store staging | shared with loads | small, separate, sized by memory acceptance |
+| sizing driver | outstanding-tag count | coalescing window (a choice) |
+
+The saving is larger than §9 estimated, and the one measurement I had said must come first is no
+longer on the critical path of the decision.
