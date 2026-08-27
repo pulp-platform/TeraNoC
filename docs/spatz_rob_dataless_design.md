@@ -478,3 +478,94 @@ the design — worth having as characterisation, but it does not decide anything
 
 The saving is larger than §9 estimated, and the one measurement I had said must come first is no
 longer on the critical path of the decision.
+
+---
+
+## 14. Asymmetric ROB depth — the cheap 80% of the dataless win (2026-08-27)
+
+§13 removed the blocker on the full dataless rebuild, but that is still a rebuild. This section
+records a change that captures most of the storage saving with a **one-line parameter edit**, and
+is already in the tree behind `SPATZ_VLSU_ROBN_DEPTH`.
+
+### The two measurements that make it obvious
+
+1. **ROB depth is worth +0.0%.** In the A/B/C sweep, arm B (ROB64, no dual-load) and arm C (ROB32,
+   no dual-load) are *identical* on every one of the seven complete triples — not close, equal:
+   13906/13906, 26168/26168, 13962/13962, 34519/34519, 9836/9836, 11886/11886, 14939/14939. All
+   the movement in that sweep comes from dual-load (arm A), never from depth.
+2. **Bursts are port-0 only, and everything is a burst.** `[BURSTWHY]` reports 100% of sampled
+   loads on the burst path. Ports 1–3 fail `burst_addr_aligned` by construction (their first
+   address is `rs1 + port*4`), and ParityDrain lands *both* even beats (mem port 0) and odd beats
+   (mem port 1) into **ROB0's** single contiguous id range.
+
+Together: ROB1–3 hold no burst data at all. They are sized by `NrOutstandingLoads` only because one
+parameter happens to feed all four instances.
+
+### The knob
+
+```systemverilog
+localparam int unsigned RobNDepth =
+  `ifdef SPATZ_VLSU_ROBN_DEPTH `SPATZ_VLSU_ROBN_DEPTH `else NrOutstandingLoads `endif;
+...
+.NumWords  ((port == 0) ? NrOutstandingLoads : RobNDepth),
+```
+
+Unset, it const-folds to `NrOutstandingLoads` for every port — bit-identical elaboration. It
+composes with `SPATZ_VLSU_ROB_DEPTH`, which is what makes the interesting configuration expressible:
+
+| config | ROB0 | ROB1–3 | load-side flops/core | `vl` ceiling |
+|---|---:|---:|---:|---:|
+| baseline (ROB64) | 64 | 64 | 8,192 | 256 B |
+| D1 `robn16` | 64 | 16 | **3,584** (−56%) | 256 B |
+| D2 `rob128_robn16` | 128 | 16 | **5,632** (−31%) | **512 B** (2×) |
+
+D2 is the one that matters: the `vl` ceiling is `NrOutstandingLoads × MemDataWidthB`, and §"the
+ceiling is load-bearing" (`spatz_vlsu_ceiling_analysis.md`) showed it cannot simply be deleted — but
+it *can* be bought, and here it is bought while still spending less storage than today.
+
+### A-TRUNC: the guard this needed
+
+`reorder_buffer` derives **its own** `IdWidth = idx_width(NumWords)`. A 16-deep ROB therefore
+exposes a **4-bit** `.id_i` port while the VLSU drives the shared 6-bit `id_t`
+(`idx_width(NrOutstandingLoads)`). An id ≥ `RobNDepth` would be **silently truncated** and its
+response written into `id % RobNDepth`: wrong data in `vd`, no error raised anywhere.
+
+It holds by construction today — ids on ports 1–3 all originate from that same ROB's `id_o`, so
+they round-trip inside its own range. It is asserted anyway, because the failure mode is silent
+data corruption and because the port-0 burst path *already* computes ids arithmetically; a change
+that extended that to another port would break the invariant with no other symptom.
+
+`gen_robn_width_asserts` is elaborated only when `RobNDepth < NrOutstandingLoads`, so it costs
+nothing in the default configuration. There is deliberately **no** `push2` half: `rob_push2` is
+assigned only for port 0 and defaults to `'0`, so on ports 1–3 the check could never fire, and a
+permanently vacuous assertion reads as coverage it does not provide.
+
+### Relationship to the full dataless design
+
+This is not a substitute for §11–§13. It removes the storage that is provably unused; the dataless
+rebuild removes the storage that is *used but need not be* (ROB0's own 64 × 32 b, by writing straight
+into the VRF). Sequencing them this way means the expensive change can be judged against a baseline
+that has already banked the free saving.
+
+### D2 also needed a second id width
+
+ROB128 is the first configuration where `idx_width(NrOutstandingLoads)` exceeds 6, and
+`spatz_mem_req_t.id` was a **fixed** `logic [$clog2(NRVREG):0]` = 6 bits while
+`spatz_mem_rsp_t.id` already tracked the knob via `MemRspIdWidth`. At ROB64 the two happen to be
+equal (`idx_width(64) = 6 = $clog2(NRVREG)+1`), so the request field was correct by coincidence and
+was never revisited when the response side was widened.
+
+This is caught, not silent: `spatz_mempool_cc.sv:301` is an elaboration tripwire
+(`$bits(spatz_mem_req[0].id) < snitch_pkg::MetaIdWidth`), so ROB128 simply **fails to elaborate**
+until the width follows. `MemReqIdWidth` now takes the max of the derived width and the legacy 6 —
+ROB32 → 6, ROB64 → 6, so every existing image stays bit-identical, and only ROB128+ widens. It is
+fixed in `spatz_pkg.sv.tpl` as well as the generated file.
+
+Worth stating plainly because it changes how the D2 row above should be read: the extra `vl` ceiling
+is not free in *design* terms even though it is cheap in flops — it moves a width that four other
+structures (`meta_id_t`, both FlooNoC flit metas, the MSHR, `tcdm_id_remapper`) are keyed to.
+`snitch_pkg::MetaIdWidth` already derives from `RobDepth`, so those follow automatically; the
+tripwire is what makes that safe to rely on.
+
+**Status.** In the tree, default off. D1/D2 images built and dispatched; A-TRUNC validated by a
+build that both compiles it and, at `RobNDepth=16`, runs it live.

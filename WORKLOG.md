@@ -11622,3 +11622,128 @@ deliver them -- their results need harvesting at the banner.
 file. Absence is only evidence once you have shown the thing would have been present -- the right
 process name, the right path. I had a note saying a zero-result grep is not a finding until the path
 is proven, and I made the same mistake twice in one hour with `simv` and with the shared transcript.
+
+## 2026-08-27 — asymmetric ROB depth: a knob, and the truncation guard it needed
+
+**Purpose.** The A/B/C ROB sweep showed ROB depth 64→32 is worth **+0.0%** — arms B and C are
+identical on all seven complete triples (13906/13906, 26168/26168, 13962/13962, 34519/34519,
+9836/9836, 11886/11886, 14939/14939). Combined with the earlier `[BURSTWHY]` finding that 100% of
+sampled loads take the burst path and bursts are **port-0 only**, that says ROB1–3 are dead
+storage: three quarters of `4 × NumWords × ELEN` (6,144 of 8,192 flops/core at ROB64) exists for a
+non-burst path this workload never uses. This adds a knob to size them separately.
+
+**Implementation.** `spatz_vlsu.sv` gains `RobNDepth` (`SPATZ_VLSU_ROBN_DEPTH`, unset =
+`NrOutstandingLoads`) and passes `.NumWords((port == 0) ? NrOutstandingLoads : RobNDepth)`. It
+composes with `SPATZ_VLSU_ROB_DEPTH`, so "ROB0 deep, the rest shallow" is
+`spatz_vlsu_rob_depth=128 spatz_vlsu_robn_depth=16`. `hardware/Makefile` gains the matching knob.
+
+**The gap the comment exposed.** The comment I wrote claimed the id range was "asserted below" —
+and no such assertion existed. It turned out to be a real hazard, not a bookkeeping slip:
+`reorder_buffer` derives **its own** `IdWidth = idx_width(NumWords)`, so a 16-deep ROB exposes a
+**4-bit** `.id_i` while the VLSU drives the shared 6-bit `id_t`. An id ≥ 16 would be **silently
+truncated** and its response written into `id % 16` — wrong data in `vd`, no error anywhere. It
+holds by construction today (ports 1–3 take their ids from that same ROB's `id_o`), but a future
+change that computes an id arithmetically — as the port-0 burst path already does — would break it
+with no other symptom. Added `gen_robn_width_asserts` (A-TRUNC), live only when
+`RobNDepth < NrOutstandingLoads`. Named, not numbered: this file's `A<n>` labels already run as two
+independent families, so A5/A6/A7 each appear twice. I dropped the `push2` half after checking —
+`rob_push2` is assigned only for port 0 and defaults to `'0`, so on ports 1–3 it could never fire,
+and a permanently vacuous assertion is worse than none.
+
+**Verification.** Knob-unset build is **define-identical** to `build_vcs_r3` (105 defines, empty
+diff) and the expression const-folds to `NrOutstandingLoads` for every port, so elaboration is
+bit-identical by construction; `rob_D0_vbt` re-runs `vector-burst-test` on it to confirm
+empirically. `verible-verilog-syntax` cannot check this file at all — it fails on the pre-existing
+`idx_width(CommitQDepth)'(inflight_q)` cast at HEAD too — so A-TRUNC is validated by a VCS build
+(`build_robn16a`) that both compiles it and, with `RobNDepth=16 < 64`, runs it live.
+
+**Dispatched.** D1 = `build_robn16` (ROB0=64, ROB1–3=16), 9 GEMM shapes + `vector-burst-test`, on
+the fleet. D2 = `build_rob128_robn16` (ROB0=128, ROB1–3=16) building — that is the interesting one:
+it **doubles** the `vl` ceiling to 512 B while using 5,632 flops/core against the baseline's 8,192,
+i.e. 2× the ceiling at 69% of the storage.
+
+**Also confirmed (independent re-derivation).** The `vl` ceiling result recorded in
+`docs/spatz_vlsu_ceiling_analysis.md` reproduces exactly: `build_rob32` vs `build_rob32_noceil`
+differ by **one** define, the former reaches `[EOC] retval=0` + `PASS 15/15` at 121,962 ns, the
+latter dies at 29,706 ns on `$fatal` A4 "Block and single ROB id request asserted together"
+(group 0 / tile 9 / core 0), with 181 group-0 requests still in flight against 26 in the passing
+run. Two greps misfired on the way and are worth repeating as traps: `grep -iE 'PASS'` matches
+**`bypass`** in `BankfullBackpressure=x (0=bypass on full bank...)`, and `BURST DROPPED` /
+`STILL_INFLIGHT` are **not** discriminators — the passing arm has 6,656 and 926 of them.
+
+**Status.** Knob + A-TRUNC in the tree, uncommitted pending the `build_robn16a` compile. D0/D1 arms
+running on the fleet; D2 build in elaboration.
+
+### 2026-08-27 (cont.) — ROB128 needed a second id width, and the tripwire that already knew
+
+**What happened.** Checking D2 (`rob_depth=128`) before trusting its numbers, I found
+`spatz_mem_req_t.id` declared `logic [$clog2(NRVREG):0]` — a **fixed 6 bits** — while
+`spatz_mem_rsp_t.id` is `MemRspIdWidth`, which already tracks `SPATZ_VLSU_ROB_DEPTH`. At ROB128 the
+VLSU's `mem_req_id` is `idx_width(128) = 7` bits, so the request field is one bit short.
+
+**My first reading was wrong and worth recording as such.** I wrote it up as silent corruption —
+truncated tag, response into the wrong ROB slot, no error anywhere — and started correcting docs on
+that basis. It is not silent: `spatz_mempool_cc.sv:301` is an elaboration tripwire,
+`$bits(spatz_mem_req[0].id) < snitch_pkg::MetaIdWidth`, with a sibling at :304 for the response
+side. The real consequence is a **blocked build**: ROB128 cannot elaborate until the width follows.
+Someone had already thought about exactly this failure and left a compile-time guard; I found the
+hole the guard was built for and briefly mistook it for the absence of a guard. The lesson is
+narrow and repeatable — **before reporting a missing check, grep for the check**, especially in a
+file whose comments say the pairing is asserted. The comment said so; I searched
+`spatz_mempool_cc` for `assert` and concluded from *that* absence, when the guard is a bare
+`if (...) $error(...)`.
+
+**Implementation.** `MemReqIdWidth` in `spatz_pkg.sv` **and** `spatz_pkg.sv.tpl` (the generated
+file is not the source of truth). It takes the **max** of the derived width and the legacy 6, so
+ROB32 → max(5,6) = 6 and ROB64 → max(6,6) = 6 — every image built to date is bit-identical, and
+only ROB128+ widens. `snitch_pkg.sv`'s lockstep comment listed only `spatz_mem_rsp_t.id`; it now
+names both fields, which is the omission that let the request side sit un-widened when ROB64
+landed.
+
+**Why it survived until now.** ROB64 is the only depth ever built above the default, and at ROB64
+`idx_width(64) = 6` exactly equals the legacy `$clog2(NRVREG)+1`. The request field was correct by
+coincidence, so widening the response side was sufficient and the request side was never revisited.
+D2 is the first configuration that separates the two.
+
+### 2026-08-27 (cont.) — p20: dual-load is the difference between finishing and livelocking
+
+**Purpose.** Asked why the `p20` B and C arms had not finished. They are two different answers.
+
+**C_p20 had finished; I had not fetched it.** `teranoc_fleet.py fetch` with no argument only looks
+at the **newest** batch. Two newer submissions (D1, D0) had gone out since, so the whole `rob2`
+batch sat as untouched `.tar.zst` files while a bare `fetch` reported `extracted 0, missing 1`
+about the newest batch and said nothing about the twelve waiting arms. With no local transcript and
+no results row, a finished arm is indistinguishable from a running one. Fetching the batch **by
+name** delivered all twelve, including `A_p78`/`C_p78`. Same family as the monitor bugs: the gap
+degraded into silence rather than an error.
+
+**B_p20 is genuinely still running** — cycle ~222,000 at **0.38%** util, with a **154 MB**
+transcript against the 1.2 MB of healthy arms, flooding `[CMS WARN] STUCK_REQ` and `[RH STUCK]`.
+
+**The finding.** `p20` is fp16 2048x64x128 — the RH-livelock shape (cohort target derived from M
+alone, P=128 small). Dual-load is what keeps it out:
+
+| p20 arm | cycles | eff | RH stuck | timeouts |
+|---|---:|---:|---:|---:|
+| A — rob64 + dual-load | 10,669 | 19.20% | 178 | 4 |
+| C — rob32, no dual-load | **290,561** (27x) | 0.70% | **87,277** | **17,499** |
+
+**Why the attribution holds.** Before quoting the RH ratio I define-diffed the two images, because
+my own note says RH episode counts are not comparable across differing windows: every hold /
+serve-timeout / response-hold define is **identical**, and the only differences are
+`SPATZ_VLSU_DUAL_LOAD` and `SPATZ_VLSU_ROB_DEPTH`. ROB depth is worth +0.0% (B = C on all seven
+clean triples), so what remains is dual-load. Control: `p78` has rh=0 / tmo=0 in both arms and they
+finish 7% apart. The other unfinished arm, `B_p78`, is healthy — cyc 45,000 at **92.19%** util,
+zero RH stuck; it is simply a nine-hour shape.
+
+**Reporting.** `gen_rob_dashboard.py` gained a `livelocked()` predicate and a section of its own,
+because a single 27x arm would turn the dual-load summary into "+7.7% to +2624%". The separation is
+not a judgement call — the highest non-livelocked arm in the set is rh=861 / tmo=93, so any
+threshold in the two-orders-of-magnitude gap gives the same partition. The excluded shapes are
+**named** in the summary rather than silently dropped.
+
+**Also confirmed.** The D2 (ROB128) build failed exactly as predicted, which settles the earlier
+correction: `Error-[EEST] $error elaboration system task` /
+`[spatz_mempool_cc] spatz_mem_req_t.id (6) narrower than meta_id_t (7) -- request truncation.`,
+rc=2, no simv. A blocked build, not silent corruption, with the widths exactly as derived. The
+`MemReqIdWidth` fix unblocks it; the rebuild is queued behind the A-TRUNC validation build.

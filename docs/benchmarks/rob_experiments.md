@@ -21,16 +21,19 @@ regression.
 | shape | prec | A cyc | B cyc | C cyc | D0 cyc | D1 cyc | D2 cyc | B vs A | C vs B |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|
 | `d16a` | fp16 | 12,878 | 13,906 | 13,906 | — | — | — | **+8.0%** | +0.0% |
+| `d16b` | fp16 | 21,587 | 26,168 | 26,168 | — | — | — | **+21.2%** | +0.0% |
 | `d32a` | fp32 | 13,544 | 13,962 | 13,962 | — | — | — | **+3.1%** | +0.0% |
+| `d32b` | fp32 | 24,149 | — | — | — | — | — | — | — |
 | `p09` | fp16 | 29,660 | 34,519 | 34,519 | — | — | — | **+16.4%** | +0.0% |
-| `p20` | fp16 | 10,669 | — | — | — | — | — | — | — |
+| `p20` | fp16 | 10,669 | — | 290,561 | — | — | — | — | — |
 | `p50` | fp16 | 10,261 | 11,886 | 11,886 | — | — | — | **+15.8%** | +0.0% |
 | `p49f` | fp32 | 9,441 | 9,836 | 9,836 | — | — | — | **+4.2%** | +0.0% |
 | `p66` | fp16 | 13,865 | 14,939 | 14,939 | — | — | — | **+7.7%** | +0.0% |
+| `p78` | fp16 | 22,941 | — | 24,584 | — | — | — | — | — |
 
-### What the A/B/C set says (6 of 10 triples)
+### What the A/B/C set says (7 of 10 triples)
 
-* **Dual-load is worth +3.1% to +16.4%** (mean +9.2%).
+* **Dual-load is worth +3.1% to +21.2%** (mean +10.9%).
 * **ROB depth alone is worth +0.0% to +0.0%** — B and C are bit-identical on
   every shape where both landed, so 32 vs 64 slots changes nothing by itself.
   All of ROB64's value is that it lets two loads be co-resident.
@@ -39,7 +42,7 @@ regression.
 
 | | loads | share |
 |---|---:|---:|
-| burst path | 466,944 | 100.0% |
+| burst path | 638,976 | 100.0% |
 | non-burst | 0 | 0.0% |
 
 Bursts use **ROB0 only** (requests are port-0; ParityDrain lands even beats from

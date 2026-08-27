@@ -16,7 +16,11 @@ package snitch_pkg;
   // ROB64 root: VLSU ROB depth == meta_id space. SPATZ_VLSU_ROB_DEPTH (default 32) widens
   // MetaIdWidth 5->6 (:17) -> meta_id_t -> every TCDM struct, both FlooNoC flit metas
   // (mempool_pkg.sv:419/:484), the MSHR, tcdm_id_remapper. Keep in lockstep with spatz
-  // NrOutstandingLoads (spatz.sv) and spatz_mem_rsp_t.id (spatz_pkg.sv[.tpl] MemRspIdWidth);
+  // NrOutstandingLoads (spatz.sv) and BOTH spatz id fields -- spatz_mem_rsp_t.id
+  // (MemRspIdWidth) and spatz_mem_req_t.id (MemReqIdWidth), spatz_pkg.sv[.tpl]. This list
+  // named only the rsp side until 2026-08-27; the req field was a fixed 6 bits, exact at ROB64
+  // and one bit short at ROB128 -- caught at elaboration by the spatz_mempool_cc:301 tripwire,
+  // which is why that class of mistake here costs a failed build and not a wrong result;
   // spatz_mempool_cc asserts the pairing. Do NOT decouple MetaIdWidth from RobDepth:
   // snitch.sv zero-extends data_qid_o at [$clog2(RobDepth)-1:3].
   localparam RobDepth                   = `ifdef SPATZ_VLSU_ROB_DEPTH `SPATZ_VLSU_ROB_DEPTH `else 32 `endif;

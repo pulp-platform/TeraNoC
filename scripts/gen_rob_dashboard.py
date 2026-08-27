@@ -33,6 +33,22 @@ def load():
     return rows
 
 
+# An arm is LIVELOCKED, not merely slow, when the response-hold machinery is thrashing.
+# The separation is not marginal: C|p20 shows rh=87,277 / tmo=17,499 while the highest
+# non-livelocked arm in the whole set is rh=861 / tmo=93 -- a 100x gap, so any threshold in
+# between gives the same partition. These arms must be reported separately, never averaged
+# into the dual-load range: a single 27x arm would turn "+7.7% to +16.4%" into
+# "+7.7% to +2624%" and make the summary meaningless.
+RH_LIVELOCK, TMO_LIVELOCK = 10000, 1000
+
+
+def livelocked(r):
+    try:
+        return int(r.get("rh", 0)) >= RH_LIVELOCK or int(r.get("tmo", 0)) >= TMO_LIVELOCK
+    except (TypeError, ValueError):
+        return False
+
+
 def main():
     rows = load()
     by = {}
@@ -192,13 +208,58 @@ footer{color:var(--ink-3);font-size:12px;font-family:var(--mono)}
                      % (tag, html.escape(LABEL[tag]), prec, prec, "".join(cells), dba, dcb))
         H.append("</table></div>")
         done = [t for t in by if all(x in by[t] for x in ("A","B","C"))]
-        if done:
-            dl = [100.0*(int(by[t]["B"]["cycles"])-int(by[t]["A"]["cycles"]))/int(by[t]["A"]["cycles"]) for t in done]
-            H.append('<p class="note"><b>%d of %d triples.</b> Dual-load is worth <b>%+.1f%% to '
-                     '%+.1f%%</b> (mean %+.1f%%). <b>ROB depth alone is worth +0.0%%</b> &mdash; B '
-                     'and C are bit-identical on every shape, so 32 vs 64 slots changes nothing by '
-                     'itself. All of ROB64\'s value is that it lets two loads be co-resident.</p>'
-                     % (len(done), len(LABEL), min(dl), max(dl), sum(dl)/len(dl)))
+        ll   = sorted(t for t in by if any(livelocked(r) for r in by[t].values()))
+        slope = [t for t in done if t not in ll]
+        if slope:
+            dl = [100.0*(int(by[t]["B"]["cycles"])-int(by[t]["A"]["cycles"]))/int(by[t]["A"]["cycles"]) for t in slope]
+            H.append('<p class="note"><b>%d of %d triples complete.</b> On the %d that run cleanly, '
+                     'dual-load is worth <b>%+.1f%% to %+.1f%%</b> (mean %+.1f%%). <b>ROB depth '
+                     'alone is worth +0.0%%</b> &mdash; B and C are identical on every one of them, '
+                     'so 32 vs 64 slots changes nothing by itself. All of ROB64&rsquo;s value is '
+                     'that it lets two loads be co-resident.%s</p>'
+                     % (len(done), len(LABEL), len(slope), min(dl), max(dl), sum(dl)/len(dl),
+                        ('' if not ll else
+                         ' <b>%s excluded</b> from that range as livelocked, not slow &mdash; '
+                         'see below; averaging it in would report a meaningless spread.'
+                         % ", ".join("<code>%s</code>" % t for t in ll))))
+        H.append("</section>")
+
+    # ---- the livelock finding: a cliff, not a slope
+    ll = sorted(t for t in by if any(livelocked(r) for r in by[t].values()))
+    if ll:
+        H.append('<section class="card"><div><h2>Where dual-load stops being an optimisation</h2>'
+                 '<p class="sub">On most shapes dual-load buys a few per cent. On the shapes below '
+                 'it decides whether the kernel finishes at all. These are reported apart from the '
+                 'range above because they are a different phenomenon, not the tail of the same '
+                 'one.</p></div>')
+        H.append('<div class="tw"><table><tr><th>shape</th><th>image</th>'
+                 '<th class="num">cycles</th><th class="num">efficiency</th>'
+                 '<th class="num">RH stuck</th><th class="num">MSHR timeouts</th>'
+                 '<th>verdict</th></tr>')
+        for tag in ll:
+            for i, cfg, _ in IMAGES:
+                r = by[tag].get(i)
+                if not r:
+                    continue
+                bad = livelocked(r)
+                H.append('<tr><td><code>%s</code><br><span class=sub>%s</span></td>'
+                         '<td><span class=sub>%s</span></td>'
+                         '<td class="num">%s</td><td class="num">%s%%</td>'
+                         '<td class="num">%s</td><td class="num">%s</td>'
+                         '<td><span class="chip %s">%s</span></td></tr>'
+                         % (tag, html.escape(LABEL.get(tag, tag)), html.escape(cfg),
+                            "{:,}".format(int(r["cycles"])), r["eff"],
+                            "{:,}".format(int(r.get("rh", 0))), "{:,}".format(int(r.get("tmo", 0))),
+                            "fp16" if bad else "fp32", "livelocked" if bad else "clean"))
+        H.append("</table></div>")
+        H.append('<p class="note"><b>The comparison is controlled.</b> Every hold-window, '
+                 'serve-timeout and response-hold define is <b>identical</b> across these images '
+                 '&mdash; the only differences are <code>SPATZ_VLSU_DUAL_LOAD</code> and '
+                 '<code>SPATZ_VLSU_ROB_DEPTH</code>. That matters because the RH probe counts '
+                 '<i>episodes</i>, so its counts are only comparable when the window is the same. '
+                 'And ROB depth is worth nothing on its own (B = C everywhere), so what is left '
+                 'is dual-load. The control is <code>p78</code>: RH and timeouts are <b>0</b> in '
+                 'both arms there, and they finish 7% apart.</p>')
         H.append("</section>")
 
     # ---- mesh + slider
