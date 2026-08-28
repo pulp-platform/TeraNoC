@@ -576,7 +576,7 @@ tripwire is what makes that safe to rely on.
 | `p49f` 1024×64×256 fp32 | 9,441 | 9,441 | **0** |
 | `p50` 1024×128×256 | 10,261 | 10,261 | **0** |
 
-Extended to seven shapes and three variants: **12 of 12 asymmetric-ROB arms match baseline
+Extended to seven shapes and three variants: **14 of 14 asymmetric-ROB arms match baseline
 exactly** — `d16a`, `d32a`, `p09`, `p20`, `p49f`, `p50`, `p66` for D1, plus `D1a|p20` and
 `D2|p20`/`D2|p49f`. Identical **to the cycle**, not within noise, and `rh`/`tmo` match too (`p09`
 551/74 in both, `p20` 178/4 in both). Load-side storage per core drops 8,192 → 3,584 flops, a 56%

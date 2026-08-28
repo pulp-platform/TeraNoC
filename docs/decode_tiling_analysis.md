@@ -28,8 +28,22 @@ tiled kernel inherits, not toy numbers.
 
 At 8x8 fp16 with KS=8 that is exactly **16384**. Shrink it and the per-core B slice falls under
 the 64 B burst floor, into the livelock regime confirmed directly at 48 B and 32 B
-(`512x512x96` and `512x512x64`: RH ~ 10^5, 2.5% and 1.6% efficiency). Grow it and L1 overflows
-with no gain, because the slice is already at its optimum.
+(`512x512x96` and `512x512x64`). Grow it and L1 overflows with no gain, because the slice is
+already at its optimum.
+
+Those two arms, re-read from the recovered transcripts on 2026-08-28 (the 2.5% / 1.6% figures
+previously quoted here matched neither metric in that order and are corrected):
+
+| arm | RH stuck | occupancy `busy/lane-cyc` | **efficiency `ideal/actual`** |
+|---|---:|---:|---:|
+| `512x512x96` | 71,184 | 3.62% | **0.63%** |
+| `512x512x64` | 64,271 | 2.47% | **0.40%** |
+| `512x512x512` (control) | **0** | — | **22.83%** |
+
+Rank on the efficiency column — occupancy is not conserved across runs of identical work. Same
+`M` and `N` in all three; only `P` changes, and RH goes 0 → 7×10^4 while efficiency falls 36×.
+That is the cohort-target-from-`M`-alone predicate, and it is why the burst floor is a floor and
+not a preference.
 
 ## 4. So the only free axis is D_tile, and it is tight
 

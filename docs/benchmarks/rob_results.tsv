@@ -8,6 +8,7 @@ d16a	fp16	D2	ROB0 128 / ROB1-3 16	12878	63.61	69.86	0	0	0	24576	0	eoc
 d16b	fp16	A	rob64 + dual-load	21587	75.90	82.17	0	0	0	24576	0	eoc
 d16b	fp16	B	rob64, no dual-load	26168	62.61	69.47	0	0	0	24576	0	eoc
 d16b	fp16	C	rob32, no dual-load	26168	62.61	69.47	0	0	0	24576	0	eoc
+d16b	fp16	D1	ROB0 64 / ROB1-3 16	21587	75.90	82.17	0	0	0	24576	0	eoc
 d32a	fp32	A	rob64 + dual-load	13544	60.48	67.90	0	0	0	24576	0	eoc
 d32a	fp32	B	rob64, no dual-load	13962	58.67	70.03	0	0	0	24576	0	eoc
 d32a	fp32	C	rob32, no dual-load	13962	58.67	70.03	0	0	0	24576	0	eoc
@@ -15,6 +16,7 @@ d32a	fp32	D1	ROB0 64 / ROB1-3 16	13544	60.48	67.90	0	0	0	24576	0	eoc
 d32b	fp32	A	rob64 + dual-load	24149	67.85	76.69	0	0	0	24576	0	eoc
 d32b	fp32	B	rob64, no dual-load	26682	61.40	68.40	0	0	0	24576	0	eoc
 d32b	fp32	C	rob32, no dual-load	26682	61.40	68.40	0	0	0	24576	0	eoc
+d32b	fp32	D1	ROB0 64 / ROB1-3 16	24149	67.85	76.69	0	0	0	24576	0	eoc
 p09	fp16	A	rob64 + dual-load	29660	3.45	4.47	551	74	0	24576	0	epilogue-fatal
 p09	fp16	B	rob64, no dual-load	34519	2.97	3.89	861	93	0	24576	0	epilogue-fatal
 p09	fp16	C	rob32, no dual-load	34519	2.97	3.89	861	93	0	24576	0	epilogue-fatal
