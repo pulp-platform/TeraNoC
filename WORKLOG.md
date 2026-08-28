@@ -11795,3 +11795,39 @@ that.
 
 **D2 built** once `MemReqIdWidth` landed (`ROB_DEPTH=128 ROBN_DEPTH=16`, tripwire silent) and four
 arms are dispatched.
+
+### 2026-08-28 — the asymmetric ROB hangs the non-burst path; the GEMM sweep could not see it
+
+**What happened.** A routine liveness check on the last three outstanding arms found all three at
+99.8% CPU and 10–14x past the cycle count at which every previous `vector-burst-test` had finished:
+659,000–866,000 against 61,000, with **no UART output at all**. All three are `ROBN_DEPTH=16`
+images. `D0_vbt` (`ROBN` unset = 64) PASSes at 61,000. A clean pair, three arms of three.
+
+**Mechanism.** The `vl` ceiling at `spatz_vlsu.sv:279` gates only `use_port0_burst_req`. A load
+over that ceiling does not fail — it falls onto the multi-port word-interleaved path, which the
+`BURSTWHY` comment **in this same file** already describes as wedging *"with resp=0"* once a ROB
+fills. My change made that ROB `RobNDepth` deep instead of `NrOutstandingLoads`, moving non-burst
+headroom from 1024 B to 256 B, and **no check moved with it**. `vector-burst-test` issues 384 B and
+512 B loads deliberately over the ceiling, straight onto that path.
+
+**Why the 14 "identical to the cycle" arms are still valid and still blind to it.** Every one is
+`burst=24576, nonburst=0`. Bursts are port-0 only, so those arms never touch ports 1–3. Both
+statements hold: free to the cycle on burst-dominated work, hangs past 256 B of non-burst load.
+The result is not overturned, it is **re-scoped** — and the scope was always in the RTL comment
+("shrinking ports 1–3 costs non-burst MLP; whether that matters is a measurement"). It matters.
+
+**A-TRUNC did not catch it, and that is the lesson.** A-TRUNC checks that an id driven into a
+narrow ROB is in range. Here ids are never *granted* — nothing is pushed, so nothing asserts. I
+wrote a guard for one half of a hazard and then read the passing arms as though the whole hazard
+were covered. A guard for half a hazard reads exactly like a guard for all of it.
+
+**Actions.** (1) `gen_robn_nonburst_capacity` added: a `$warning` when a non-burst load's word
+count exceeds `RobNDepth`. Deliberately not `$fatal` — the exact wedge threshold is between
+`RobNDepth` and `NrOutstandingLoads` words and is unmeasured, so firing fatal on a guessed
+threshold would be worse than the warning. (2) Design doc and dashboard re-scoped; the artifact now
+carries the caveat next to the 14-of-14 table rather than below it. (3) The three hung arms killed
+by verified cwd — note `pgrep -f mempool_simvopt` also matched processes with `cwd=/home/zexifu`
+that were **not** these jobs, which is why the cwd check matters and not the process name.
+
+**Status.** `SPATZ_VLSU_ROBN_DEPTH` stays opt-in and is **not safe as a default**. Verification
+build `build_robn16g` running.

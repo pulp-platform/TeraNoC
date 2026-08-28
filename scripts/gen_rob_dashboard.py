@@ -256,10 +256,17 @@ footer{color:var(--ink-3);font-size:12px;font-family:var(--mono)}
         H.append('<p class="note"><b>%d of %d shapes identical to the cycle.</b> Not "within '
                  'noise" &mdash; the same number. Load-side storage per core falls from '
                  '<b>8,192</b> flops (4 x 64 x 32b) to <b>3,584</b> (ROB0 64 + three ROBs of 16), '
-                 'a <b>56%%</b> cut, for no measured cost. <code>D1a</code> repeats it with the '
-                 'A-TRUNC width guard elaborated and live: also identical, and the assertion '
-                 'never fires &mdash; so ports 1&ndash;3 really do take every id from their own '
-                 'ROB.</p>' % (exact, len(pairs)))
+                 'a <b>56%%</b> cut, for no measured cost on these shapes.</p>' % (exact, len(pairs)))
+        H.append('<p class="note" style="border-left:3px solid #b4553c;padding-left:11px">'
+                 '<b>&#9888; And it hangs on the non-burst path.</b> <code>vector-burst-test</code> '
+                 'PASSes at 61,000 cycles with ROB1&ndash;3 = 64 and <b>hangs</b> at '
+                 '659,000&ndash;866,000 with ROB1&ndash;3 = 16 &mdash; three arms out of three. The '
+                 '<code>vl</code> ceiling gates only the burst path, so an over-ceiling load falls '
+                 'onto the multi-port word-interleaved path, whose headroom just dropped from '
+                 '1024&nbsp;B to 256&nbsp;B with no check following it. <b>Every shape in the table '
+                 'above is 100%% burst</b> (<code>nonburst=0</code>), and bursts are port-0 only, '
+                 'which is exactly why they cannot see this. Both statements are true: free to the '
+                 'cycle on burst-dominated work, and unsafe as a default.</p>')
         H.append("</section>")
 
     # ---- the livelock finding: a cliff, not a slope

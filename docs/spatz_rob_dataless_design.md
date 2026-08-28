@@ -567,7 +567,7 @@ structures (`meta_id_t`, both FlooNoC flit metas, the MSHR, `tcdm_id_remapper`) 
 `snitch_pkg::MetaIdWidth` already derives from `RobDepth`, so those follow automatically; the
 tripwire is what makes that safe to rely on.
 
-### MEASURED 2026-08-28 — it is free
+### MEASURED 2026-08-28 — free on the burst path, and it HANGS on the non-burst path
 
 | shape | A (ROB1–3 = 64) | D1 (ROB1–3 = 16) | delta |
 |---|---:|---:|---:|
@@ -592,6 +592,38 @@ holds under a real workload, not only by construction. Transcript-level, `A|p20`
 89,180 lines each with 2,818 differing, and *every one* is a `STUCK_REQ` line where the shallower
 ROB has recycled an id (A shows `id=33`, D1a shows `id=1` — 33 mod 16). Nothing else differs; the
 files are 16,241,624 and 16,241,625 bytes.
+
+### ⚠️ The limitation the GEMM arms could not see
+
+`vector-burst-test` **hangs** on every `RobNDepth = 16` image. A clean pair:
+
+| image | ROB1–3 | vector-burst-test |
+|---|---:|---|
+| `D0` | 64 | **PASS** at 61,000 cycles |
+| `D1` / `D1a` / `D2` | **16** | **HUNG** at 659,000–866,000 cycles, no UART — three of three |
+
+**Mechanism.** The `vl` ceiling at `spatz_vlsu.sv:279` gates only `use_port0_burst_req`. A load
+that exceeds it does not fail — it falls onto the **multi-port word-interleaved path**, which this
+file's own `BURSTWHY` comment already describes as wedging *"with resp=0"* once a ROB fills. That
+ROB is now `RobNDepth` deep instead of `NrOutstandingLoads`, so the cliff moved from 1024 B of
+non-burst headroom (`64 × 4 × 4`) to 256 B — and **no check moved with it**. `vector-burst-test`
+issues 384 B and 512 B loads deliberately over the burst ceiling, straight onto that path.
+
+**Why the 14 GEMM arms are still valid and still miss it.** Every one is `burst=24576,
+nonburst=0`. Bursts are port-0 only, so those arms never touch ports 1–3 at all. Both statements
+hold together: *free to the cycle on burst-dominated work; hangs past 256 B of non-burst load.*
+
+**A-TRUNC does not cover it.** A-TRUNC checks that an id driven into a narrow ROB is in range.
+Here ids are never **granted** — nothing is pushed, so nothing asserts. Guarding one half of a
+hazard reads like guarding all of it.
+
+**Guard added** (`gen_robn_nonburst_capacity`): a `$warning` when a non-burst load's word count
+exceeds `RobNDepth`. Deliberately not `$fatal` — the exact wedge threshold lies somewhere between
+`RobNDepth` and `NrOutstandingLoads` words and is **unmeasured**; the bound used is the
+conservative one implied by the `BURSTWHY` comment.
+
+**Status of the knob: opt-in only, and not safe as a default** until the non-burst path is either
+bounded properly (split an over-capacity load) or the real threshold is measured.
 
 ⚠️ Read the `state` column with these. Every `p*` arm ends in `epilogue-fatal` — the pre-existing
 `mempool_group_mshr.sv:2269` resp_buf clock-gate assertion, fired *after* the benchmark region
