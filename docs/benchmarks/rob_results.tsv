@@ -4,6 +4,7 @@ d16a	fp16	B	rob64, no dual-load	13906	58.91	67.25	0	0	0	24576	0	eoc
 d16a	fp16	C	rob32, no dual-load	13906	58.91	67.25	0	0	0	24576	0	eoc
 d16a	fp16	D1	ROB0 64 / ROB1-3 16	12878	63.61	69.86	0	0	0	24576	0	eoc
 d16a	fp16	D1a	ROB0 64 / ROB1-3 16 + guards	12878	63.61	69.86	0	0	0	24576	0	eoc
+d16a	fp16	D2	ROB0 128 / ROB1-3 16	12878	63.61	69.86	0	0	0	24576	0	eoc
 d16b	fp16	A	rob64 + dual-load	21587	75.90	82.17	0	0	0	24576	0	eoc
 d16b	fp16	B	rob64, no dual-load	26168	62.61	69.47	0	0	0	24576	0	eoc
 d16b	fp16	C	rob32, no dual-load	26168	62.61	69.47	0	0	0	24576	0	eoc
