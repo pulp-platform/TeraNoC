@@ -576,9 +576,15 @@ tripwire is what makes that safe to rely on.
 | `p49f` 1024×64×256 fp32 | 9,441 | 9,441 | **0** |
 | `p50` 1024×128×256 | 10,261 | 10,261 | **0** |
 
-Four of four identical **to the cycle** — not within noise, the same number — and `rh`/`tmo` match
-too (`p09` 551/74 in both, `p20` 178/4 in both). Load-side storage per core drops 8,192 → 3,584
-flops, a 56% cut, for no measured cost.
+Extended to seven shapes and three variants: **10 of 10 asymmetric-ROB arms match baseline
+exactly** — `d16a`, `d32a`, `p09`, `p20`, `p49f`, `p50`, `p66` for D1, plus `D1a|p20` and
+`D2|p20`/`D2|p49f`. Identical **to the cycle**, not within noise, and `rh`/`tmo` match too (`p09`
+551/74 in both, `p20` 178/4 in both). Load-side storage per core drops 8,192 → 3,584 flops, a 56%
+cut, for no measured cost.
+
+`D2` (ROB0 = 128) is also exactly neutral where it has landed — expected, since neither `p20` nor
+`p49f` has a `vl` anywhere near even the 256 B ceiling. **D2's actual premise is still unmeasured**:
+the arm that tests it is `D2|vbt`, which should show `BURST DROPPED` move from 256 B to 512 B.
 
 `D1a` repeats `p20` with A-TRUNC elaborated and live (`RobNDepth=16 < 64`): also 10,669, and **the
 assertion never fires**. So the invariant it guards — ports 1–3 take every id from their own ROB —
