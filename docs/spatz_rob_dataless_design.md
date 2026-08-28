@@ -567,5 +567,31 @@ structures (`meta_id_t`, both FlooNoC flit metas, the MSHR, `tcdm_id_remapper`) 
 `snitch_pkg::MetaIdWidth` already derives from `RobDepth`, so those follow automatically; the
 tripwire is what makes that safe to rely on.
 
-**Status.** In the tree, default off. D1/D2 images built and dispatched; A-TRUNC validated by a
-build that both compiles it and, at `RobNDepth=16`, runs it live.
+### MEASURED 2026-08-28 — it is free
+
+| shape | A (ROB1–3 = 64) | D1 (ROB1–3 = 16) | delta |
+|---|---:|---:|---:|
+| `p09` 2048×32×128 | 29,660 | 29,660 | **0** |
+| `p20` 2048×64×128 | 10,669 | 10,669 | **0** |
+| `p49f` 1024×64×256 fp32 | 9,441 | 9,441 | **0** |
+| `p50` 1024×128×256 | 10,261 | 10,261 | **0** |
+
+Four of four identical **to the cycle** — not within noise, the same number — and `rh`/`tmo` match
+too (`p09` 551/74 in both, `p20` 178/4 in both). Load-side storage per core drops 8,192 → 3,584
+flops, a 56% cut, for no measured cost.
+
+`D1a` repeats `p20` with A-TRUNC elaborated and live (`RobNDepth=16 < 64`): also 10,669, and **the
+assertion never fires**. So the invariant it guards — ports 1–3 take every id from their own ROB —
+holds under a real workload, not only by construction. Transcript-level, `A|p20` and `D1a|p20` are
+89,180 lines each with 2,818 differing, and *every one* is a `STUCK_REQ` line where the shallower
+ROB has recycled an id (A shows `id=33`, D1a shows `id=1` — 33 mod 16). Nothing else differs; the
+files are 16,241,624 and 16,241,625 bytes.
+
+⚠️ Read the `state` column with these. Every `p*` arm ends in `epilogue-fatal` — the pre-existing
+`mempool_group_mshr.sv:2269` resp_buf clock-gate assertion, fired *after* the benchmark region
+closes. The kernel completes and the cycle counts are valid; the simulation does not reach `[EOC]`.
+Only the decode shapes and `p49f` do.
+
+**Status.** In the tree, default off, and measured free on four shapes. A-TRUNC validated both by
+a build that compiles it and by a live run at `RobNDepth=16` in which it does not fire. D2
+(`ROB0=128`) built once `MemReqIdWidth` landed and is running.

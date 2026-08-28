@@ -40,6 +40,7 @@ IMAGES = [("A", "rob64 + dual-load", "production"),
           ("C", "rob32, no dual-load", "isolates ROB depth"),
           ("D0", "ROB0 64 / ROB1-3 64", "asymmetric control"),
           ("D1", "ROB0 64 / ROB1-3 16", "shrink the idle ROBs"),
+          ("D1a", "ROB0 64 / ROB1-3 16 + guards", "A-TRUNC live"),
           ("D2", "ROB0 128 / ROB1-3 16", "deep burst ROB, vl ceiling 512 B")]
 
 LANES = {16: 8192, 32: 4096}     # MAC/cycle at 8x8
