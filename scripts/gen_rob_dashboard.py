@@ -260,7 +260,7 @@ footer{color:var(--ink-3);font-size:12px;font-family:var(--mono)}
         H.append('<p class="note" style="border-left:3px solid #b4553c;padding-left:11px">'
                  '<b>&#9888; And it hangs on the non-burst path.</b> <code>vector-burst-test</code> '
                  'PASSes at 61,000 cycles with ROB1&ndash;3 = 64 and <b>hangs</b> at '
-                 '659,000&ndash;866,000 with ROB1&ndash;3 = 16 &mdash; three arms out of three. The '
+                 '755,000&ndash;963,000 with ROB1&ndash;3 = 16 &mdash; three arms out of three. The '
                  '<code>vl</code> ceiling gates only the burst path, so an over-ceiling load falls '
                  'onto the multi-port word-interleaved path, whose headroom just dropped from '
                  '1024&nbsp;B to 256&nbsp;B with no check following it. <b>Every shape in the table '

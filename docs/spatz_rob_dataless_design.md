@@ -600,7 +600,7 @@ files are 16,241,624 and 16,241,625 bytes.
 | image | ROB1–3 | vector-burst-test |
 |---|---:|---|
 | `D0` | 64 | **PASS** at 61,000 cycles |
-| `D1` / `D1a` / `D2` | **16** | **HUNG** at 659,000–866,000 cycles, no UART — three of three |
+| `D1` / `D1a` / `D2` | **16** | **HUNG** at 755,000–963,000 cycles, **zero** UART lines — three of three |
 
 **Mechanism.** The `vl` ceiling at `spatz_vlsu.sv:279` gates only `use_port0_burst_req`. A load
 that exceeds it does not fail — it falls onto the **multi-port word-interleaved path**, which this
