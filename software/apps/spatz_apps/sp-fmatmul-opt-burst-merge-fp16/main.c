@@ -713,8 +713,13 @@ int main() {
   // identified rather than merely detected -- the failure mode that actually happens here
   // (a group desynchronising, or a bank-hash mistake concentrating one group's traffic).
   if (cid == 0) {
-    const uint32_t rows_per_group = gemm_l.M / active_groups;
-    for (uint32_t g = 0; g < active_groups; ++g) {
+    // M < active_groups (every decode arm with B < 16) made this 0, so all 16 samples
+    // landed on row 0 -- one row checked 16 times instead of min(M, groups) distinct rows.
+    const uint32_t rows_per_group =
+        (gemm_l.M >= active_groups) ? (gemm_l.M / active_groups) : 1u;
+    const uint32_t nsample =
+        (gemm_l.M >= active_groups) ? active_groups : gemm_l.M;
+    for (uint32_t g = 0; g < nsample; ++g) {
       const uint32_t row = g * rows_per_group;
       const volatile uint32_t *w = (const volatile uint32_t *)(c + row * gemm_l.P);
       printf("[SPOT] g=%2u row=%4u w0=%08x w1=%08x w2=%08x w3=%08x\n",
