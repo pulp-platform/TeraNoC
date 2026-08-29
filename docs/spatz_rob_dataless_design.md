@@ -633,3 +633,58 @@ Only the decode shapes and `p49f` do.
 **Status.** In the tree, default off, and measured free on four shapes. A-TRUNC validated both by
 a build that compiles it and by a live run at `RobNDepth=16` in which it does not fire. D2
 (`ROB0=128`) built once `MemReqIdWidth` landed and is running.
+
+### 14.6 What D2 actually measured (2026-08-29)
+
+Two defects sat between "D2 builds" and "D2 means something", and they are independent.
+
+**14.6.1 The generation tag (fixed).** A shallow ROB carries a generation in the high id bits so
+a late response can be told apart from the current occupant of its entry. It dropped **768**
+legitimate responses per run — exactly 256 cores x 3 shallow ports, one each at the first ring
+wrap. Cause: `spatz_vlsu.sv:1816-1818` makes a **store allocate and push in the SAME cycle**
+(`rob_wid[port] = rob_id[port]` feeds `id_o` straight back into `id_i`), so the stamp is still in
+`entry_gen_d` when the compare reads `entry_gen_q` — the new generation against the previous
+lap's. Loads never hit it; their push arrives many cycles after allocation.
+
+The fix is to compare against the generation the entry *will* hold. **It must not be written as a
+function called from a continuous assign** — the first version was, and it changed nothing (the
+same 768 drops), because a continuous assignment builds its sensitivity from the operands of its
+RHS and the signals the function reads but does not take as arguments (`alloc_fire`,
+`block_fire`, `write_pointer_q`) are not reliably among them. As an `always_comb` bitmap reusing
+the allocator's own `block_mask`: **768 -> 0**, `req` at the stall 359,688 -> 544,942,
+`orphan=0`, `dup_alloc=0`. (spatz `e845ac3`.)
+
+**14.6.2 The ceiling moves, and then the STORE wedges.** With ROB0=128 the burst `vl` ceiling
+becomes `128 * 4 = 512 B`, confirmed directly — `[BURSTWHY]` reads `vl_le_512=1`, and both
+symptom messages (`BURST DROPPED: vl=512 B`, `NON-BURST OVER CAPACITY`) go **41,247 -> 0**. 512 B
+is the `vl` an LMUL=8 load needs, i.e. **KS=2**.
+
+It still wedged, and the reason is structural: `use_port0_burst_req` demands
+`op_mem.is_load` (`spatz_vlsu.sv:269`), so **bursts are LOADS ONLY**. `vector-burst-test`'s m8
+case is a pair —
+
+| | path | per-port words | fits ROBN=16? |
+|---|---|---:|---|
+| `vle32.v v0,(s)` 512 B | burst, ROB0 only | — | n/a (ROB0=128) |
+| `vse32.v v0,(d)` 512 B | word-interleaved over 4 mem ports | **32** | **no** |
+
+— and a store has no burst path to fall back on. Isolation: ROB0=128 with `robn_depth` **unset**
+(every ROB 128, `GenBits = 7-7 = 0`, generation path const-folded away) runs straight past the
+wedge, `req` 544,481 -> 737,646+.
+
+**14.6.3 The guard was watching the wrong half.** `gen_robn_nonburst_capacity` gated on
+`is_load`, i.e. on the only traffic that *has* an escape route. At ROB0=64 the load had no burst
+path, tripped it, and printed 41,247 warnings; at ROB0=128 the load was rescued onto the burst
+path, the guard fell silent, and the store wedged with **nothing said** — every core 100%
+LSU-stalled (`STALLG lsu=16000` on all 16 groups), `inflight=0`, no assertion, no message.
+`use_port0_burst_req` is already 0 for every store, so dropping `is_load` leaves the load-side
+bound unchanged and makes the store side audible (spatz `61141df`).
+
+**14.6.4 What KS=2 costs.** ROB0 `64 -> 128` **and** ROBN `16 -> 32` (the per-port share of a
+512 B op), not ROBN `16 -> 128` — which would hand back the entire area saving §14 exists to buy.
+`build_robn32_rob128` is the measurement.
+
+**Corrections to earlier text in this section.** A-TRUNC has since been **removed** (superseded —
+it compared the full `rob_wid`, which now carries the generation, against `RobNDepth`, and fired
+on the first legal wrap with a self-contradictory message). And "D2 ... is running" was true only
+of the build: no D2 *result* existed until today.
