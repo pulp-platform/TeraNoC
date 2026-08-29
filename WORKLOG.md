@@ -12352,3 +12352,28 @@ validated in both directions against a known-livelocked and a known-good log.
 **Status.** Wave A: 36/36 ELFs built, dispatch held pending the `k4` kernel verdict (the image is
 no longer a concern -- it is provably identical to the baseline). `matmul_1xVL` correctness
 remains the one genuinely open question.
+
+### 2026-08-29 15:00 — correction: the KS=1 hang and the KS=2 livelock are DIFFERENT failures
+
+The 14:30 entry above says "the hang is a pre-existing livelock". That is true of the **KS=2
+256 B** arm and **not** of the KS=1 512 B one. They have opposite signatures:
+
+| | KS=1 @ 512 B | KS=2 @ 256 B |
+|---|---|---|
+| `req` delta, last 5 windows | **0, 0, 0, 0, 0** | 631, 891, 0, 992, 468 |
+| `inflight` | **0** | 7,005 |
+| `mshr_timeout` | **0** | 1,462 |
+| `[RH STUCK]` | **0** | 389 |
+| what it is | **true hang, unexplained** | livelock, pre-existing |
+
+The three-image bisection (byte-identical over 20 windows) was run on the **KS=2** ELF, so it
+exonerates the RTL changes for the livelock only. It carries no information about the KS=1 hang,
+which shows none of the livelock markers: everything drained, nothing retiring, no timeouts.
+
+**So the KS=1 512 B failure is still open.** Fixes 9 (A4 qualified by grant) and 10
+(`group_mshr_bypass_ways`) each got that arm past a fatal assertion; it now stops for a third,
+still-unidentified reason. Blast radius is the 20 KS=1 arms at B >= 8.
+
+Lesson: two failures in the same campaign, both called "the hang", diagnosed as one. The
+discriminator was one line of arithmetic on `req` deltas -- frozen vs creeping -- and I should
+have run it the first time rather than after the bisection.
