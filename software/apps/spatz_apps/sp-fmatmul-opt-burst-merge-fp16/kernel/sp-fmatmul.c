@@ -626,21 +626,56 @@ void matmul_1xVL(elem_t *c, const elem_t *a, const elem_t *b,
       // elements in v0-v3 and the rest in v4-v7 -- exactly two m4 groups. The split MUST land on
       // that 4-register boundary; anywhere else and v4 addresses the wrong elements and C is
       // silently wrong.
-#ifndef SPATZ_1XVL_SPLIT_STORE
-// 1 = split a >256 B store into two 256 B halves (fits ROBN=16); 0 = one long store
-// (needs ROBN>=32). Exists so the two can be A/B'd at FIXED ROBN -- otherwise a
-// split-vs-long comparison also changes the ROB depth and neither effect is separable.
-#define SPATZ_1XVL_SPLIT_STORE 1
+#ifndef SPATZ_1XVL_STORE_LMUL
+// C-store chunk size, as the LMUL of each store. The accumulator is m8; a store's TOTAL word
+// count must fit the SHALLOW ROBs (ROB1-3), and it is the total, NOT the per-port share:
+//     LMUL 8 -> 512 B = 128 words  needs ROBN >= 128
+//     LMUL 4 -> 256 B =  64 words  needs ROBN >=  64
+//     LMUL 2 -> 128 B =  32 words  needs ROBN >=  32
+//     LMUL 1 ->  64 B =  16 words  needs ROBN >=  16
+// Measured 2026-08-29: 2 x 256 B still froze at ROBN=16 (64 > 16), exactly as
+// gen_robn_nonburst_capacity predicts. Splitting needs no data movement -- RVV maps element i to
+// v(base + i/(VLEN/Ee16)) independently of LMUL, so an m8 group at v0 is 8/LMUL adjacent valid
+// groups (v0,v4 at m4; v0,v2,v4,v6 at m2; v0..v7 at m1).
+#define SPATZ_1XVL_STORE_LMUL 4
 #endif
-      if ((SPATZ_1XVL_SPLIT_STORE) && gvl > (size_t)128) {
-        asm volatile("vsetvli zero, %0, e16, m4, ta, ma" ::"r"((size_t)128));
-        asm volatile("vse16.v v0, (%0);" ::"r"(c__));
-        asm volatile("vsetvli zero, %0, e16, m4, ta, ma" ::"r"(gvl - (size_t)128));
-        asm volatile("vse16.v v4, (%0);" ::"r"(c__ + 128));
-        asm volatile("vsetvli zero, %0, e16, m8, ta, ma" ::"r"(gvl));   // restore the m8 view
-      } else {
-        asm volatile("vse16.v v0, (%0);" ::"r"(c__));
-      }
+#define SPATZ_1XVL_CHUNK_ELEMS (32 * (SPATZ_1XVL_STORE_LMUL))
+#if   SPATZ_1XVL_STORE_LMUL == 8
+#  define SPATZ_1XVL_VT "e16, m8"
+#elif SPATZ_1XVL_STORE_LMUL == 4
+#  define SPATZ_1XVL_VT "e16, m4"
+#elif SPATZ_1XVL_STORE_LMUL == 2
+#  define SPATZ_1XVL_VT "e16, m2"
+#else
+#  define SPATZ_1XVL_VT "e16, m1"
+#endif
+#define SPATZ_ST_CHUNK(REG, IDX)                                                          \
+  do {                                                                                    \
+    const size_t _off = (size_t)(IDX) * (size_t)SPATZ_1XVL_CHUNK_ELEMS;                   \
+    if (_off < gvl) {                                                                     \
+      const size_t _rem = gvl - _off;                                                     \
+      const size_t _n   = _rem < (size_t)SPATZ_1XVL_CHUNK_ELEMS                           \
+                            ? _rem : (size_t)SPATZ_1XVL_CHUNK_ELEMS;                      \
+      asm volatile("vsetvli zero, %0, " SPATZ_1XVL_VT ", ta, ma" ::"r"(_n));              \
+      asm volatile("vse16.v " REG ", (%0);" ::"r"(c__ + _off));                             \
+    }                                                                                     \
+  } while (0)
+#if   SPATZ_1XVL_STORE_LMUL == 8
+      SPATZ_ST_CHUNK("v0", 0);
+#elif SPATZ_1XVL_STORE_LMUL == 4
+      SPATZ_ST_CHUNK("v0", 0); SPATZ_ST_CHUNK("v4", 1);
+#elif SPATZ_1XVL_STORE_LMUL == 2
+      SPATZ_ST_CHUNK("v0", 0); SPATZ_ST_CHUNK("v2", 1);
+      SPATZ_ST_CHUNK("v4", 2); SPATZ_ST_CHUNK("v6", 3);
+#else
+      SPATZ_ST_CHUNK("v0", 0); SPATZ_ST_CHUNK("v1", 1);
+      SPATZ_ST_CHUNK("v2", 2); SPATZ_ST_CHUNK("v3", 3);
+      SPATZ_ST_CHUNK("v4", 4); SPATZ_ST_CHUNK("v5", 5);
+      SPATZ_ST_CHUNK("v6", 6); SPATZ_ST_CHUNK("v7", 7);
+#endif
+#if SPATZ_1XVL_STORE_LMUL != 8
+      asm volatile("vsetvli zero, %0, e16, m8, ta, ma" ::"r"(gvl));   // restore the m8 view
+#endif
     }
 
     p += gvl;
