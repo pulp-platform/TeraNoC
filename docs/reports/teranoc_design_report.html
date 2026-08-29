@@ -639,15 +639,75 @@ measured</strong>. The new code is the vector half: normalisations, activations,
 recurrent delta rule. That inverts the usual accelerator-project ordering, where the matrix
 operations come first.</p>
 
-<h3>9.2 &mdash; Nine of eleven prefill projections are one tile</h3>
-<p>After L1 tiling, FFN gate/up, FFN down, attention Q+gate, K+V and O, and GDN QKV, Z and O all
-reduce to the <strong>same shape</strong>. The prefill projection half of Qwen3.8 therefore needs no
-new kernel at all &mdash; it is an already-measured point.</p>
+<h3>9.2 &mdash; Complete kernel status, weighted by compute</h3>
+<p>Every GEMM Qwen3.8-27B needs, with its logical shape, its share of model compute, and the tile and
+measured efficiency at each mesh. Shares are MAC-weighted per token over the real layer schedule
+(64 FFN + 48 GDN + 16 attention, S = 2048) and total <strong>24,752 M MAC/token</strong>.</p>
 <div class="tw"><table>
-<tr><th>Tile</th><th>Covers</th><th class="n">4×4 fp16</th><th class="n">8×8 fp16</th></tr>
-<tr><td><code>512×512×512</code></td><td>nine projections</td><td class="n">71,755 cyc — <strong>91.3%</strong></td><td class="n">34,568 cyc — 47.4%</td></tr>
-<tr><td><code>512×256×512</code></td><td>attention QK</td><td class="n">37,861 cyc — <strong>86.5%</strong></td><td class="n">18,322 cyc — 44.7%</td></tr>
+<tr><th>Operation</th><th class="n">Layers</th><th>Logical shape</th><th class="n">MAC/token</th><th class="n">Share</th>
+    <th>4×4 tile</th><th class="n">4×4</th><th>8×8 tile</th><th class="n">8×8 fp16</th></tr>
+
+<tr><td>FFN gate</td><td class="n">64</td><td><code>[S,5120]×[5120,17408]</code></td><td class="n">5,704 M</td><td class="n"><strong>23.05%</strong></td>
+    <td><code>256×512×512</code></td><td class="n">94.8%</td><td><code>1024×1024×512</code></td><td class="n">86.6%</td></tr>
+<tr><td>FFN up</td><td class="n">64</td><td><code>[S,5120]×[5120,17408]</code></td><td class="n">5,704 M</td><td class="n"><strong>23.05%</strong></td>
+    <td><code>256×512×512</code></td><td class="n">94.8%</td><td><code>1024×1024×512</code></td><td class="n">86.6%</td></tr>
+<tr><td>FFN down</td><td class="n">64</td><td><code>[S,17408]×[17408,5120]</code></td><td class="n">5,704 M</td><td class="n"><strong>23.05%</strong></td>
+    <td><code>256×512×512</code></td><td class="n">94.8%</td><td><code>1024×1024×512</code></td><td class="n">86.6%</td></tr>
+
+<tr><td>GDN QKV</td><td class="n">48</td><td><code>[S,5120]×[5120,10240]</code></td><td class="n">2,517 M</td><td class="n">10.17%</td>
+    <td><code>256×512×512</code></td><td class="n">94.8%</td><td><code>1024×1024×512</code></td><td class="n">86.6%</td></tr>
+<tr><td>GDN Z</td><td class="n">48</td><td><code>[S,5120]×[5120,6144]</code></td><td class="n">1,510 M</td><td class="n">6.10%</td>
+    <td><code>256×512×512</code></td><td class="n">94.8%</td><td><code>1024×1024×512</code></td><td class="n">86.6%</td></tr>
+<tr><td>GDN O</td><td class="n">48</td><td><code>[S,6144]×[6144,5120]</code></td><td class="n">1,510 M</td><td class="n">6.10%</td>
+    <td><code>256×512×512</code></td><td class="n">94.8%</td><td><code>1024×1024×512</code></td><td class="n">86.6%</td></tr>
+
+<tr><td>Attn Q+gate</td><td class="n">16</td><td><code>[S,5120]×[5120,12288]</code></td><td class="n">1,007 M</td><td class="n">4.07%</td>
+    <td><code>256×512×512</code></td><td class="n">94.8%</td><td><code>1024×1024×512</code></td><td class="n">86.6%</td></tr>
+<tr><td>Attn O</td><td class="n">16</td><td><code>[S,6144]×[6144,5120]</code></td><td class="n">503 M</td><td class="n">2.03%</td>
+    <td><code>256×512×512</code></td><td class="n">94.8%</td><td><code>1024×1024×512</code></td><td class="n">86.6%</td></tr>
+<tr><td>Attn K / V</td><td class="n">16</td><td><code>[S,5120]×[5120,1024]</code> each</td><td class="n">84 M ea.</td><td class="n">0.34% ea.</td>
+    <td><code>256×512×512</code></td><td class="n">94.8%</td><td><code>1024×1024×512</code></td><td class="n">86.6%</td></tr>
+
+<tr style="background:var(--warn-bg)"><td><strong>Attn QK</strong> <span class="sub">per head</span></td><td class="n">16</td>
+    <td><code>[S,256]×[256,S]</code> — <b>N fixed 256</b></td><td class="n">200 M</td><td class="n">0.81%</td>
+    <td><code>512×256×512</code></td><td class="n">86.5%</td><td><code>1024×256×512</code></td><td class="n">72.8%</td></tr>
+<tr style="background:var(--bad-bg)"><td><strong>Attn PV</strong> <span class="sub">per head</span></td><td class="n">16</td>
+    <td><code>[S,S]×[S,256]</code> — <b>P fixed 256</b></td><td class="n">201 M</td><td class="n">0.81%</td>
+    <td><code>512×256×256</code></td><td class="n">86.1%</td><td><code>1024×512×256</code></td><td class="n"><strong>48.5%</strong></td></tr>
+<tr style="background:var(--bad-bg)"><td><strong>GDN a+b</strong></td><td class="n">48</td>
+    <td><code>[S,5120]×[5120,96]</code> — <b>P = 96</b></td><td class="n">24 M</td><td class="n">0.10%</td>
+    <td><code>512×512×128</code> <span class="sub">(padded)</span></td><td class="n">74.0%</td>
+    <td><code>1024×512×128</code></td><td class="n"><strong>livelock</strong><span class="sub"> · fp32 42.5%</span></td></tr>
+
+<tr style="background:var(--rule2)"><td><strong>lm_head</strong> <span class="sub">(decode only)</span></td><td class="n">1</td>
+    <td><code>[B,5120]×[5120,248320]</code></td><td class="n">1,271 M<span class="sub"> decode</span></td><td class="n"><strong>5.0%</strong><span class="sub"> of decode</span></td>
+    <td colspan="2" class="n">not in the inventory</td><td><code>1024×1024×2048</code></td><td class="n">75.1%<span class="sub"> (proxy)</span></td></tr>
 </table></div>
+
+<div class="grid">
+  <div class="stat"><div class="k">On one common tile</div><div class="v" style="color:var(--good)">98.28%</div><div class="s">of all model MACs</div></div>
+  <div class="stat"><div class="k">Needs a special tile</div><div class="v" style="color:var(--warn)">1.72%</div><div class="s">QK 0.81 · PV 0.81 · a+b 0.10</div></div>
+  <div class="stat"><div class="k">Weighted util — 4×4</div><div class="v" style="color:var(--good)">94.6%</div><div class="s">MAC-weighted across all ops</div></div>
+  <div class="stat"><div class="k">Weighted util — 8×8</div><div class="v">86.1%</div><div class="s">MAC-weighted across all ops</div></div>
+</div>
+
+<div class="note good"><span class="lab">The headline of the mapping</span>
+<p><strong>98.28% of the model&rsquo;s compute runs on a single tile shape</strong> —
+<code>256×512×512</code> at 4×4 and <code>1024×1024×512</code> at 8×8 — and both are
+already-measured points requiring no new kernel. Weighting every operation by its actual MAC share
+gives an achievable <strong>94.6% at 4×4 and 86.1% at 8×8</strong>. The three awkward operations are
+awkward for structural reasons (a fixed head or gate width) but together are only
+<strong>1.72%</strong> of compute, so even at 8×8 where two of them fail they cost roughly half a
+point of the weighted total.</p></div>
+
+<div class="note warn"><span class="lab">Two caveats on that number</span>
+<p><strong>It counts GEMM only.</strong> RMSNorm, SiLU, softmax, MRoPE, the depthwise conv and the
+DeltaNet delta rule are ~5% of MACs but are <em>serial between GEMMs</em>, unwritten, and unmeasured
+— and the penalty grows with mesh size, since the same serial section sits in front of 4× the lanes
+at 8×8. A whole-layer number will be lower than 86.1% and by an amount nobody has measured.</p>
+<p><strong><code>lm_head</code> is absent from the operation inventory</strong> despite being 5.0% of
+decode compute. It is an ordinary skinny GEMM and the <code>1024×1024×2048</code> point (75.1%) is a
+reasonable proxy, but it has not been mapped or measured as such.</p></div>
 
 <h3>9.3 &mdash; Adopted tiles, 4×4 prefill</h3>
 <p>Chosen against three constraints in order: the <strong>work-split row floor</strong> (M ≥ 128),
