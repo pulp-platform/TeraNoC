@@ -12310,3 +12310,45 @@ could have shown.
 
 **Status.** `build_bw16_robn32` (all three fixes + the warning rate limit) building; re-running the
 arm that has now failed twice.
+
+## 2026-08-29 14:30 — the "hang" is a pre-existing LIVELOCK; my three RTL changes are exonerated
+
+**What I called a hang was a livelock.** On B=8/D=128/I=8192 fp16 KS=2, throughput collapses
+from **164,043 to ~400 req per 1000 cycles** (~400x) with ~7,000 requests permanently in flight,
+stalls outright for ~40k cycles, then crawls. `req` never actually froze -- I read a snapshot,
+called it a deadlock, and then wrote an output line asserting the numbers were "IDENTICAL across
+three windows" when the data showed them rising. Both wrong.
+
+**It is the documented signature, and it is not mine:**
+- `mshr_timeout=+16,+26` sustained
+- `[RH STUCK] ... subs=1/4 peers=0`, 1381 occurrences -- the response-hold waits on a merge
+  cohort that never assembles
+- **no `SPLIT MISMATCH`** -- so the MSHR cohort target (4) correctly matches the kernel's
+  `share_w=4`; the sharers simply drift out of the merge window
+This is `project_mshr_desync_timeout_trap` / `project_rh_livelock_root_cause`.
+
+**Bisection, three images, same ELF:**
+
+| image | contains | result |
+|---|---|---|
+| `build_robn32_rob128` | nothing | identical |
+| `build_a4fix_robn32` | A4 qualified only | identical |
+| `build_bw16_robn32` | A4 + rate limit + bypass=16 | identical |
+
+`req`/`resp`/`inflight` are **byte-identical across all 17 comparable windows**. The three RTL
+changes have no behavioural effect on this workload; the livelock predates all of them.
+
+**Process failure worth recording.** My own note says *"sustained `mshr_timeout=+N` is the alarm --
+check it before quoting any large-shape number."* I went straight to bisecting my own commits and
+spent three simulation slots before reading the counter that names the pathology. The first move
+on a slow decode arm is `mshr_timeout` and `[RH STUCK]`, not `git log`.
+
+**Consequence for the sweep, and it is a result rather than an obstacle.** Livelock is a property
+of the design at certain (B, KS, I) points, so some of the 104 arms will hit it. That boundary is
+worth mapping -- provided a livelocked arm is REPORTED, never averaged into an efficiency table.
+`scripts/collect_ks_sweep.py` now flags them (sustained timeout + `peers=0` + >20x rate collapse),
+validated in both directions against a known-livelocked and a known-good log.
+
+**Status.** Wave A: 36/36 ELFs built, dispatch held pending the `k4` kernel verdict (the image is
+no longer a concern -- it is provably identical to the baseline). `matmul_1xVL` correctness
+remains the one genuinely open question.
