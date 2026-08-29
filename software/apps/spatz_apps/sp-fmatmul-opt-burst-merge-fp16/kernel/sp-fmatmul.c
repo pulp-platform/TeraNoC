@@ -614,7 +614,27 @@ void matmul_1xVL(elem_t *c, const elem_t *a, const elem_t *b,
       }
 
       asm volatile("vfmacc.vf v0, %0, v16" ::"f"(t0));
-      asm volatile("vse16.v v0, (%0);" ::"r"(c__));
+      // SPLIT STORE (SPATZ_1XVL_SPLIT_STORE, default ON).
+      // Bursts are LOADS ONLY (use_port0_burst_req requires is_load), so a vector STORE always
+      // takes the word-interleaved path across NrMemPorts=4 and its per-port share must fit the
+      // SHALLOW ROBs. A 512 B store is 128 words = 32/port, which needs ROBN>=32; splitting it
+      // into two 256 B stores makes it 16/port and fits ROBN=16, keeping the asymmetric-depth
+      // area saving. The LOAD is untouched and keeps its full 512 B burst on ROB0.
+      //
+      // Legal without moving data: RVV maps element i to register v(base + i/(VLEN/Ee16))
+      // independently of LMUL, so at VLEN=512 an m8 group at v0 holds its first 128
+      // elements in v0-v3 and the rest in v4-v7 -- exactly two m4 groups. The split MUST land on
+      // that 4-register boundary; anywhere else and v4 addresses the wrong elements and C is
+      // silently wrong.
+      if (gvl > (size_t)128) {
+        asm volatile("vsetvli zero, %0, e16, m4, ta, ma" ::"r"((size_t)128));
+        asm volatile("vse16.v v0, (%0);" ::"r"(c__));
+        asm volatile("vsetvli zero, %0, e16, m4, ta, ma" ::"r"(gvl - (size_t)128));
+        asm volatile("vse16.v v4, (%0);" ::"r"(c__ + 128));
+        asm volatile("vsetvli zero, %0, e16, m8, ta, ma" ::"r"(gvl));   // restore the m8 view
+      } else {
+        asm volatile("vse16.v v0, (%0);" ::"r"(c__));
+      }
     }
 
     p += gvl;

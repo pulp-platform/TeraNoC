@@ -12460,3 +12460,44 @@ never the actual limit. ROBN restored to 32, since 64 bought nothing.
 **Method note.** Three hypotheses now, each killed by one measurement: ROB0 ceiling (right, but
 insufficient), three-structures (wrong), group MSHR (under test). The cost of each was a ~15 min
 build; the cost of guessing without testing would have been a 104-arm sweep on a wrong premise.
+
+## 2026-08-29 17:10 — split store: two 256 B stores keep ROBN=16 viable at vl=512 B
+
+**The constraint.** Bursts are LOADS ONLY (`use_port0_burst_req` requires `is_load`), so a vector
+STORE always takes the word-interleaved path across `NrMemPorts = 4`, and its per-port share must
+fit the SHALLOW ROBs:
+
+| store `vl` | words | / 4 ports | ROBN=16 |
+|---:|---:|---:|---|
+| 512 B | 128 | 32 | 2x over -- measured wedge, guard fired |
+| 256 B | 64 | **16** | exactly fits |
+
+**The fix (proposed in review).** Split the 512 B store into two 256 B stores. The LOAD is
+untouched and keeps its full 512 B burst on ROB0 -- so the KS=2/KS=1 win survives at ROBN=16 and
+the asymmetric-depth area saving (3/4 of the load-side flops serve a burst-only path) is kept.
+
+**Why it is legal without moving data.** RVV maps element `i` to register
+`v(base + i/(VLEN/EEW))` independently of LMUL. At VLEN=512, e16 gives 32 elements per register,
+so an m8 group at v0 holding 256 elements has its first 128 in **v0-v3** and its second 128 in
+**v4-v7** -- exactly two valid m4 groups, addressable as-is.
+
+**The trap.** The split MUST land on that 4-register boundary: 128 elements at fp16, 64 at fp32
+(both 256 B). Split anywhere else and the second store's `v4` addresses the wrong elements, and C
+is silently wrong -- no fault, no assertion, just bad data.
+
+**Verified in the EMITTED code, not the source:**
+```
+vsetvli zero, s0, e16, m4     <- first half
+vse16.v  v0, (s10)
+vsetvli zero, s7, e16, m4     <- second half
+vse16.v  v4, (a0)             <- v4: the 4-register boundary
+vsetvli zero, s1, e16, m8     <- m8 view restored for the next iteration
+```
+and the loads remain `vle16.v v8/v16` at m8, so the 512 B burst is intact.
+
+Cost: one extra `vse` and two `vsetvli` per column block, off the critical path (the store runs
+once per `p` block after N accumulations).
+
+**Caveat.** 16 words/port is *exactly* ROBN=16's capacity, and "exactly at capacity" has degraded
+three separate times today (ROB0 ids, bypass track, group MSHR). If the config degrades rather
+than wedges, the split is still correct and the remaining margin belongs to the MSHR, not ROBN.
