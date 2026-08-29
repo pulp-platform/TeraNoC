@@ -622,7 +622,13 @@ void matmul_1xVL(float *c, const float *a, const float *b,
       // elements in v0-v3 and the rest in v4-v7 -- exactly two m4 groups. The split MUST land on
       // that 4-register boundary; anywhere else and v4 addresses the wrong elements and C is
       // silently wrong.
-      if (gvl > (size_t)64) {
+#ifndef SPATZ_1XVL_SPLIT_STORE
+// 1 = split a >256 B store into two 256 B halves (fits ROBN=16); 0 = one long store
+// (needs ROBN>=32). Exists so the two can be A/B'd at FIXED ROBN -- otherwise a
+// split-vs-long comparison also changes the ROB depth and neither effect is separable.
+#define SPATZ_1XVL_SPLIT_STORE 1
+#endif
+      if ((SPATZ_1XVL_SPLIT_STORE) && gvl > (size_t)64) {
         asm volatile("vsetvli zero, %0, e32, m4, ta, ma" ::"r"((size_t)64));
         asm volatile("vse32.v v0, (%0);" ::"r"(c__));
         asm volatile("vsetvli zero, %0, e32, m4, ta, ma" ::"r"(gvl - (size_t)64));
