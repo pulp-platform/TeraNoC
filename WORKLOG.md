@@ -12527,3 +12527,43 @@ optimisation: it takes the store's per-port share from 32 words to 16 while leav
 (necessary, not sufficient), three critically-sized structures (wrong), group MSHR (wrong for the
 hang). What finally localised it was not a better theory but a table of what was held constant --
 the freeze point never moved, so nothing I had been varying could be responsible.
+
+## 2026-08-29 18:20 — CORRECTION: the capacity guard's TOTAL-word bound is right; my per-port model was wrong
+
+At 09:10 I wrote that `gen_robn_nonburst_capacity` "tests total words where the hardware
+constraint is per-port, so it over-warns by 4x", and built three experiments on that. **It is the
+other way round.** The guard's bound predicts every observation; my per-port model predicts none.
+
+| ROBN | store | total words | guard fires? | observed |
+|---:|---|---:|---|---|
+| 16 | 512 B | 128 | yes (128>16) | freeze |
+| 32 | 512 B | 128 | yes (128>32) | freeze |
+| 64 | 512 B | 128 | yes (128>64) | freeze |
+| 16 | 2 x 256 B | 64 | yes (64>16) | **freeze** |
+
+The split store DID take effect -- zero `vl=512` warnings, 1984 at `vl=256`, and the emitted code
+carries the two m4 `vse` pairs. It simply was not split far enough: 64 total words still exceed
+ROBN=16.
+
+**Direct evidence, from the stuck PC rather than a fifth hypothesis.** 252 harts sit at `wfi` in
+`mempool_barrier`; **4 sit at `0x80000a64`, the loop branch immediately after the split store**,
+having issued both halves and waiting for them to retire. `inflight=0`, so the stores are stuck
+INSIDE the VLSU, not in the memory system. Four cores never reach the barrier and the other 252
+wait forever.
+
+**The one datum the model does not explain:** `vector-burst-test` PASSES at 512 B with ROBN=32
+(128 > 32 would predict a freeze). So the bound governs SUSTAINED pressure, not a single isolated
+op -- consistent with everything else this week, where directed tests pass and inner loops starve.
+
+**Implication -- the split idea is right, one level further down:**
+
+| ROBN | max store chunk | stores per 512 B vector |
+|---:|---|---:|
+| 16 | 64 B (16 words) | 8 (m1: v0..v7) |
+| 32 | 128 B (32 words) | 4 (m2: v0,v2,v4,v6) |
+| 64 | 256 B (64 words) | 2 (m4: v0,v4)  <- already built |
+
+**Process note.** I called this "fixed" on a single reading that crossed the old freeze point,
+without checking whether it kept moving. It had advanced 377 requests and stopped. That is the
+same error as calling the livelock a "hang" from a snapshot earlier today -- second time in one
+session of declaring a result from one sample instead of a trend.
