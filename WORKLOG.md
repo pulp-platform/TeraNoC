@@ -12197,3 +12197,41 @@ they overwrite each other and every KS arm silently runs the same binary. The sw
 shape — matching `[SPOT]` words prove the new kernel computes what the validated `matmul_2xVL`
 does, and *differing cycles* prove the dispatch really selected a different kernel rather than
 falling through. Both halves are needed; either alone proves nothing.
+
+## 2026-08-29 11:05 — four prerequisite bugs, all "plausible output from a wrong configuration"
+
+Preparing the 104-arm B x KS decode sweep surfaced four defects. None would have thrown; each
+would have produced numbers that looked fine.
+
+| # | defect | how it would have read |
+|---|---|---|
+| 1 | `gen_decode_shape_app.sh` names its ELF by **shape only** | B=8's four KS variants overwrite each other; the sweep reports four KS values for one binary |
+| 2 | `rows_per_group = M / active_groups` is **0** for every B < 16 | the correctness oracle samples row 0 sixteen times and reports healthy |
+| 3 | the FP-free probe printed 16 lines | ~200k simulated cycles against a 65k-cycle measurement — every arm looks slow |
+| 4 | the generator defaults to the **4x4** config flavour | a 256-core binary on 1024-core hardware |
+
+**On #4, the important half.** `make ... num_cores=1024` for a software app **does not change
+`-DNUM_CORES`** — verified with `make -n`, it stays 256. The knob is a config FLAVOUR:
+`config/terapool_spatz4_fpu_8x8.mk` (1024 cores, 64 groups, num_x 8, l2_banks 32). Both
+`gen_decode_shape_app.sh` and `gen_gemm_shape_app.sh` default to `CONFIG=terapool_spatz4_fpu`,
+the 4x4 one.
+
+Caught because the linker region is sized from the config: the largest 8x8 arm died with
+`region 'l1' overflowed by 4,668,416 bytes`. **That is the lucky case.** A smaller 8x8 shape fits
+4 MB, links clean, and runs a 256-core binary on 1024 cores — the silent barrier-chaos failure.
+Every 8x8 arm in this sweep happens to exceed 4 MB, so all would have failed loudly; that is luck,
+not safety, and the build driver now carries `CONFIG` per mesh with the reason written down.
+
+**On #3.** Measured, not guessed: during the probe core 0 retires ~265 instructions per 16,000
+cycles with every other core idle — the printf path is UART-bound at ~60 cycles/instruction, so
+one 70-character line costs ~13,000 simulated cycles. Capped at 4 rows (`MATMUL_SPOT_SAMPLES`).
+
+**Answered by measurement: the 8x8 header is fine.** The largest in the sweep (D=128, I=32768
+fp16, 4.19M elements) generates a **61 MB** `data_gemm.h` and links to an **8.5 MB** ELF,
+quickly. No need to halve D at 8x8 — the concern I raised was unfounded.
+
+Also: L1 usable is `min(GBAR_WINDOW_LO, L1_FULL_BYTES)` (`arch.ld.c:32`), ~3.78 MB of the nominal
+4 MB. The sweep budgets <=50% of nominal, so it clears usable comfortably.
+
+**Status.** Build driver regenerated with `CONFIG` and `OUT_PREFIX` per arm, both documented as
+mandatory. Awaiting the KS=1 vs KS=2 acceptance test, then the go-ahead to build and dispatch.
