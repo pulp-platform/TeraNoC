@@ -12104,3 +12104,48 @@ streams: entries free as data leaves, so all 32 are never resident at once. This
 full PASS (~61,000 cycles). The three fixes this rests on are committed: spatz `e845ac3`
 (generation forwarding as `always_comb`), `61141df` (guard covers stores), and the mesh
 two-pass discipline in the build scripts.
+
+## 2026-08-29 09:10 — CONFIRMED: KS=2 passes at ROB0=128 + ROBN=32
+
+`build_robn32_rob128` / `robn32_run` ran `vbt4_ceiling.elf` to completion:
+
+```
+[EOC] Simulation ended at 72610.00 ns (retval = 0)
+rob drops 0   CMS WARN 0   chimney asserts 0   orphan 0   dup_alloc 0
+final: req=835852 resp=808005
+```
+
+**`retval` is the verdict, not a proxy.** `main()` ends `return (int)g_errors;` and the source
+comment says "(0 = PASS); [UART] detail is opt-in (-DVERDICT_PRINTF)". `vbt4_ceiling.elf` is not
+built with that define, which is why no `vector-burst-test: PASS` line appears — the absence is
+expected, and `retval=0` means every core verified its **own** destination region element by
+element across all 15 tests, the 512 B m8 cases included. So this is correct DATA, not merely the
+absence of a hang.
+
+**The three-way comparison is now complete, one variable at a time:**
+
+| image | ROB0 | ROBN | 512 B load | 512 B store | outcome |
+|---|---:|---:|---|---|---|
+| `ac_robn16` | 64 | 16 | refused burst (ceiling 256 B) | — | **wedge**, 41,247 warnings |
+| `d2c_rob128` | 128 | 16 | burst, fine | 32 words/port vs 16 | **wedge**, silent |
+| `iso2_rob128` | 128 | 128 | burst, fine | 32 vs 128 | past the wedge |
+| **`robn32_rob128`** | **128** | **32** | burst, fine | 32 vs 32 | **PASS, retval=0** |
+
+**The answer to the question that started this.** KS=2 needs
+
+    spatz_vlsu_rob_depth=128   spatz_vlsu_robn_depth=32
+
+and nothing else. Three quarters of the load-side flops still serve the burst-only path; the
+shallow ports move one binary step, not four.
+
+**Guard status.** It fired 358,701 times on this passing run (73,508 at 256 B, 84,741 at 384 B,
+200,452 at 512 B) because it tests total words where the constraint is per-port. That is
+over-warning on a run that is provably correct — the strongest possible evidence its bound is 4x
+too strict, and the cleanest justification for tightening it to
+`vl / MemDataWidthB / NrMemPorts` once the exact-fit case at ROBN=16 is measured. Deliberately
+not tightened on this evidence alone.
+
+**Status.** Goal met. Generation tag fixed (spatz `e845ac3`), store-blind guard fixed
+(`61141df`), KS=2 config measured and verified. Next is a decode A/B on real shapes:
+same shape, `EXTRA_DEFINES=-DKERNEL_SIZE=2` against the default 8, on a
+`rob_depth=128 robn_depth=32` image.
