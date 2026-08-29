@@ -710,42 +710,72 @@ at 8×8. A whole-layer number will be lower than 86.1% and by an amount nobody h
 cost at T=1024. The two operations that fail at 8×8 are therefore <b>prefill problems, not decode
 problems</b>.</p></div>
 
-<h3>9.3 &mdash; Complete kernel status &mdash; <span style="color:var(--accent)">DECODE</span> (B = 32)</h3>
+<h3>9.3 &mdash; Complete kernel status &mdash; <span style="color:var(--accent)">DECODE</span> (B = 32, GQA + MTP)</h3>
 <p>Decode is a different workload on the same hardware. Shares are MAC-weighted per token at batch 1,
-totalling <strong>25,598 M MAC/token = 51.2 GFLOP/token</strong>. Two structural differences from the
-prefill table above:</p>
+totalling <strong>25,598 M MAC/token = 51.2 GFLOP/token</strong>. Three structural differences from
+prefill:</p>
 <ul>
 <li><strong>Attention QK and PV essentially disappear.</strong> They are O(T) per generated token
-&mdash; 0.8% of a token&rsquo;s cost at T=1024. The two operations that fail at 8×8 in prefill are
-not a decode concern.</li>
-<li><strong><code>lm_head</code> appears and is significant</strong> — 5.0%, because the 248,320-wide
-vocabulary projection runs once per token regardless of sequence length.</li>
+&mdash; 0.8% of a token&rsquo;s cost at T=1024. <b>The two operations that fail at 8×8 in prefill are
+not a decode concern.</b></li>
+<li><strong>GQA collapses the KV projections.</strong> 24 query heads against 4 KV heads at head_dim
+256 makes Q+gate <b>12,288 wide</b> but K and V only <b>1,024 each</b> — a 12× asymmetry that turns
+two thirds of the attention projection work into one wide GEMM and leaves the KV side almost free.</li>
+<li><strong><code>lm_head</code> appears and is significant</strong> — 5.0%, because the
+248,320-wide vocabulary projection runs once per token regardless of sequence length.</li>
 </ul>
 <div class="tw"><table>
-<tr><th>Operation class</th><th class="n">Layers</th><th class="n">MAC/token</th><th class="n">Share</th>
+<tr><th>Operation</th><th class="n">Layers</th><th class="n">Width P</th><th class="n">MAC/token</th><th class="n">Share</th>
     <th>Kernel</th><th class="n">4×4 fp16</th><th class="n">8×8 fp16</th></tr>
-<tr><td>FFN (SwiGLU) — gate, up, down</td><td class="n">64</td><td class="n">17,113 M</td><td class="n"><strong>66.9%</strong></td>
+<tr><td>FFN gate / up / down</td><td class="n">64</td><td class="n">17,408 / 17,408 / 5,120</td><td class="n">17,113 M</td><td class="n"><strong>66.9%</strong></td>
     <td>decode GEMM, 128 B slice</td><td class="n">79.2–84.2%</td><td class="n">63.6–75.9%</td></tr>
-<tr><td>DeltaNet projections — QKV, Z, O, a+b</td><td class="n">48</td><td class="n">5,537 M</td><td class="n">21.6%</td>
+<tr><td>DeltaNet QKV / Z / O / a+b</td><td class="n">48</td><td class="n">10,240 / 6,144 / 5,120 / 96</td><td class="n">5,537 M</td><td class="n">21.6%</td>
     <td>decode GEMM, 128 B slice</td><td class="n">79.2–84.2%</td><td class="n">63.6–75.9%</td></tr>
-<tr><td>Attention projections — Q+gate, K, V, O</td><td class="n">16</td><td class="n">1,678 M</td><td class="n">6.6%</td>
-    <td>decode GEMM, 128 B slice</td><td class="n">79.2–84.2%</td><td class="n">63.6–75.9%</td></tr>
-<tr style="background:var(--rule2)"><td><strong>lm_head</strong> <code>[B,5120]×[5120,248320]</code></td><td class="n">1</td><td class="n">1,271 M</td><td class="n"><strong>5.0%</strong></td>
-    <td><b>not in the inventory</b> — skinny GEMM</td><td class="n">—</td><td class="n">75.1% <span class="sub">(shape proxy)</span></td></tr>
-<tr style="background:var(--bad-bg)"><td><strong>DeltaNet state update</strong> (delta rule)</td><td class="n">48</td><td class="n">76 M</td><td class="n">0.3%</td>
-    <td><b>unwritten</b> — recurrent <code>[48,128,128]</code> fp32</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td><strong>Attn Q + output gate</strong> <span class="sub">24 heads</span></td><td class="n">16</td><td class="n"><strong>12,288</strong></td><td class="n">1,006 M</td><td class="n">3.9%</td>
+    <td>decode GEMM</td><td class="n">79.2–84.2%</td><td class="n">63.6–75.9%</td></tr>
+<tr style="background:var(--good-bg)"><td><strong>Attn K + V</strong> <span class="sub">4 KV heads — GQA</span></td><td class="n">16</td><td class="n"><strong>1,024</strong> ea. <span class="sub">(fused 2,048)</span></td><td class="n">168 M</td><td class="n">0.66%</td>
+    <td>decode GEMM, fused K+V</td><td class="n">79.2–84.2%</td><td class="n">63.6–75.9%</td></tr>
+<tr><td>Attn O</td><td class="n">16</td><td class="n">5,120</td><td class="n">503 M</td><td class="n">2.0%</td>
+    <td>decode GEMM</td><td class="n">79.2–84.2%</td><td class="n">63.6–75.9%</td></tr>
+<tr style="background:var(--rule2)"><td><strong>lm_head</strong></td><td class="n">1</td><td class="n"><strong>248,320</strong></td><td class="n">1,271 M</td><td class="n"><strong>5.0%</strong></td>
+    <td><b>not in the inventory</b> — skinny GEMM</td><td class="n">—</td><td class="n">75.1% <span class="sub">proxy</span></td></tr>
+<tr style="background:var(--bad-bg)"><td><strong>DeltaNet state update</strong> (delta rule)</td><td class="n">48</td><td class="n">[48,128,128]</td><td class="n">76 M</td><td class="n">0.3%</td>
+    <td><b>unwritten</b> — recurrent fp32</td><td class="n">—</td><td class="n">—</td></tr>
+<tr style="background:var(--rule2)"><td>KV cache stream <span class="sub">(GQA, not compute)</span></td><td class="n">16</td><td class="n">4 KiB/token/layer</td><td class="n">—</td><td class="n">bandwidth</td>
+    <td>64 KiB/token model-wide</td><td class="n">—</td><td class="n">—</td></tr>
 </table></div>
-<p>The measured decode arms and their tiles are in §9.6. Because <strong>99.7% of decode compute is
-skinny GEMM served by one kernel</strong>, the decode picture is simpler than prefill: there is no
-awkward-shape tail, and the achievable figure is essentially the decode GEMM efficiency itself
-&mdash; <strong>79–84% at 4×4 and 64–76% at 8×8</strong>, depending on <code>D</code>.</p>
+<p><strong>99.7% of decode compute is skinny GEMM served by one kernel</strong>, so unlike prefill
+there is no awkward-shape tail: the achievable figure is essentially the decode GEMM efficiency
+itself, <strong>79–84% at 4×4 and 64–76% at 8×8</strong> depending on <code>D</code>. GQA is a
+straightforward win here — it removes 5/6 of the KV projection work and shrinks the cache that must
+be streamed.</p>
+
+<h4>MTP and speculation are what make 8×8 decode viable</h4>
+<p>The 8×8 work split needs <strong>M ≥ 512</strong> rows. A decode step nominally has M = batch.
+Qwen3.8 ships <strong>native multi-token prediction</strong> (<code>mtp_num_hidden_layers: 1</code>),
+so each forward pass emits 2 tokens; speculative decoding verifies <em>k</em> draft tokens per pass.
+Both multiply the effective row count <strong>for free</strong>:</p>
+<div class="tw"><table>
+<tr><th class="n">Batch</th><th class="n">Speculation</th><th class="n">MTP</th><th class="n">Effective M</th><th>4×4 (M ≥ 128)</th><th>8×8 (M ≥ 512)</th></tr>
+<tr><td class="n">32</td><td class="n">1</td><td class="n">1</td><td class="n">32</td><td><span class="chip c-bad">below floor</span></td><td><span class="chip c-bad">below floor</span></td></tr>
+<tr><td class="n">32</td><td class="n">4</td><td class="n">1</td><td class="n">128</td><td><span class="chip c-good">exactly at floor</span></td><td><span class="chip c-bad">4× short</span></td></tr>
+<tr><td class="n">32</td><td class="n">4</td><td class="n"><strong>2</strong></td><td class="n">256</td><td><span class="chip c-good">OK</span></td><td><span class="chip c-warn">2× short</span></td></tr>
+<tr style="background:var(--good-bg)"><td class="n"><strong>64</strong></td><td class="n"><strong>4</strong></td><td class="n"><strong>2</strong></td><td class="n"><strong>512</strong></td><td><span class="chip c-good">OK</span></td><td><span class="chip c-good">at floor</span></td></tr>
+<tr><td class="n">128</td><td class="n">4</td><td class="n">2</td><td class="n">1024</td><td><span class="chip c-good">OK</span></td><td><span class="chip c-good">comfortable</span></td></tr>
+</table></div>
+<div class="note good"><span class="lab">MTP halves the batch 8×8 needs</span>
+<p>Without MTP, clearing the 8×8 floor takes <strong>batch 128</strong> with 4-way speculation. With
+MTP&rsquo;s 2 tokens per pass it takes <strong>batch 64</strong> — and the model provides that
+natively, at no cost to the serving stack. Combined with §6&rsquo;s independent bandwidth result
+(compute-bound needs B ≥ 8 at 8×8), the picture is consistent: <strong>8×8 decode is viable, but only
+for a serving configuration that supplies real batch</strong>. That is a falsifiable systems claim
+and probably the most transferable result here — scaling a shared-L1 machine out raises the batch
+the serving stack must supply, quantitatively.</p></div>
 <div class="note warn"><span class="lab">What decode is actually waiting on</span>
-<p>Not tiles &mdash; the GEMM kernel covers 99.7% of the compute. The two gaps are
-<strong><code>lm_head</code></strong>, unmapped despite 5.0%, and the <strong>delta rule</strong>,
-which is 0.3% of MACs but is the recurrent state update in 48 of 64 layers and is unwritten, so its
-cost is unknown rather than small. The third constraint is not a kernel at all: the 8×8 work split
-needs <strong>M ≥ 512</strong>, and batch 32 with 4-way speculation supplies an effective M of only
-128.</p></div>
+<p>Not tiles — the GEMM kernel covers 99.7% of the compute. The gaps are
+<strong><code>lm_head</code></strong> (unmapped despite 5.0%) and the <strong>delta rule</strong>
+(0.3% of MACs but the recurrent state update in 48 of 64 layers, unwritten, so its cost is unknown
+rather than small).</p></div>
 
 <h3>9.4 &mdash; Adopted tiles, 4×4 prefill</h3>
 <p>Chosen against three constraints in order: the <strong>work-split row floor</strong> (M ≥ 128),
