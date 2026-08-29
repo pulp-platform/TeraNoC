@@ -511,6 +511,113 @@ void matmul_4xVL(float *c, const float *a, const float *b,
 }
 
 //==========================================================
+// 1xVL: ONE output row per iteration, LMUL=8
+//==========================================================
+// KS x LMUL = 16 registers holds for KS = 8/4/2 (m2/m4/m8). KS=1 would need
+// m16, which RVV does not have, so this variant keeps LMUL=8 and uses ONE
+// accumulator: v0 (v0-v7) plus two m8 B buffers, v8 (v8-v15) and v16 (v16-v23).
+// v24-v31 are deliberately left free -- a single accumulator is the whole point
+// of KS=1, and there is nothing else to put in them.
+//
+// WHY IT EXISTS: kernel_size must divide M (main.c:343), so KS=1 is the ONLY
+// legal kernel at B=1. Without it, decode GEMV cannot run at all.
+//
+// WHAT IT COSTS: arithmetic intensity is KS MACs per B element, so at KS=1
+// every loaded element feeds exactly one FMA -- the one variant that cannot
+// amortise a load. And sharers = M/KS = 1, so the group MSHR has no cohort to
+// merge. Expect bandwidth-bound behaviour, not an FPU-bound one.
+//
+// N MUST BE EVEN. The steady-state loop only tests `n == N` on the even step;
+// this is shared with 2xVL/4xVL/8xVL and every shape in use has N a power of 2.
+//==========================================================
+KERNEL_ATTR
+void matmul_1xVL(float *c, const float *a, const float *b,
+                 const unsigned int m_start, const unsigned int m_end,
+                 const unsigned int N, const unsigned int P,
+                 const unsigned int p_start, const unsigned int p_end) {
+#if GBAR_PLOOP
+  const uint32_t gbar_pl = gbar_base(GBAR_PLOOP_STRUCT);
+#endif
+
+  unsigned int p = p_start;
+  while (p < p_end) {
+    // Group-wide re-alignment at each column block (see GBAR_PLOOP).
+    GBAR_SYNC_PLOOP(gbar_pl);
+    size_t gvl;
+    asm volatile("vsetvli %[gvl], %[vl], e32, m8, ta, ma"
+                 : [gvl] "=r"(gvl)
+                 : [vl] "r"(p_end - p));
+
+    const float *b_ = b + p;
+    float *c_ = c + p;
+
+    KERNEL_NO_UNROLL
+    for (unsigned int m = m_start; m < m_end; m += 1) {
+      const float *a_ = a + m * N;
+      const float *a__ = a_;
+
+      asm volatile("vle32.v v8, (%0);" ::"r"(b_));
+      const float *b__ = b_ + P;
+
+      float *c__ = c_ + m * P;
+
+      float t0;
+
+      t0 = *a__;
+
+      unsigned int n = 0;
+
+      // ---- Peeled first iteration (init with vfmul, kept out of the hot loop) ----
+      ++n;  // n = 1
+      a__ = a_ + n;
+      asm volatile("vle32.v v16, (%0);" ::"r"(b__));
+      b__ += P;
+      asm volatile("vfmul.vf v0, v8, %0" ::"f"(t0));
+      t0 = *a__;
+
+      ++n;  // n = 2
+      a__ = a_ + n;
+      if (n != N) {
+        asm volatile("vle32.v v8, (%0);" ::"r"(b__));
+        b__ += P;
+        asm volatile("vfmacc.vf v0, %0, v16" ::"f"(t0));
+        t0 = *a__;
+      }
+
+      // ---- Steady state: vfmacc only ----
+      KERNEL_NO_UNROLL
+      while (n < N) {
+        ++n;
+        a__ = a_ + n;
+
+        asm volatile("vle32.v v16, (%0);" ::"r"(b__));
+        b__ += P;
+
+        asm volatile("vfmacc.vf v0, %0, v8" ::"f"(t0));
+        t0 = *a__;
+
+        ++n;
+        a__ = a_ + n;
+
+        if (n == N)
+          break;
+
+        asm volatile("vle32.v v8, (%0);" ::"r"(b__));
+        b__ += P;
+
+        asm volatile("vfmacc.vf v0, %0, v16" ::"f"(t0));
+        t0 = *a__;
+      }
+
+      asm volatile("vfmacc.vf v0, %0, v16" ::"f"(t0));
+      asm volatile("vse32.v v0, (%0);" ::"r"(c__));
+    }
+
+    p += gvl;
+  }
+}
+
+//==========================================================
 // 2xVL: Process 2 output rows per iteration, LMUL=2
 //==========================================================
 KERNEL_ATTR

@@ -57,6 +57,30 @@
 // loop run by core 0 alone, each iteration paying an L2 round trip (~32 cyc). At M=2048
 // that is ~65k cycles of a ~102k-cycle run -- most of the simulation -- producing data
 // nothing reads when the verify is off.
+#ifndef MATMUL_REPEAT
+// Run the kernel R times back-to-back INSIDE the timed region, then divide.
+//
+// WHY: total work is B*D*I MACs while the weight tile D*I must fit L1, so the work at B=1 is
+// capped at (L1 in elements) MACs -- about 256 ideal cycles at 4x4. The barrier and I$ fill
+// that bracket it are an order of magnitude larger, so a single pass measures the setup, not
+// the kernel. R = 128/B equalises every arm at ~65k ideal cycles.
+//
+// The reported "The execution took N cycles" stays PER PASS (timer/R) so every existing
+// scraper and dashboard keeps reading the same quantity. The raw total is printed separately
+// on the [REPEAT] line.
+//
+// Safe to repeat: alpha = 0, so each pass OVERWRITES C (vfmul initialises, vfmacc accumulates
+// only within the N loop) -- passes are idempotent, not cumulative. No barrier between passes:
+// cores read a B nobody writes and write only their own C slice, and GBAR_PLOOP already
+// re-aligns the group at every column block.
+#define MATMUL_REPEAT 1
+#endif
+#ifndef MATMUL_SPOTCHECK
+// FP-FREE correctness probe, default ON (ported from the fp16 app 2026-08-29).
+// MATMUL_VERIFY is off because the scalar-FP row-sum wedges core 0 in the epilogue,
+// so without this a perf run has no correctness signal at all.
+#define MATMUL_SPOTCHECK 1
+#endif
 #ifndef MATMUL_VERIFY
 #define MATMUL_VERIFY 0
 #endif
@@ -505,7 +529,9 @@ int main() {
   // Runs before mempool_start_benchmark()/the timer, so it is neither traced nor measured.
   if (is_core_active) {
     const uint32_t warmup_n = MIN(ICACHE_WARMUP_N, gemm_l.N);
-    if (kernel_size == 2) {
+    if (kernel_size == 1) {
+      matmul_1xVL(c, a, b, m_start, m_end, warmup_n, gemm_l.P, p_start, p_end);
+    } else if (kernel_size == 2) {
       matmul_2xVL(c, a, b, m_start, m_end, warmup_n, gemm_l.P, p_start, p_end);
     } else if (kernel_size == 4) {
       matmul_4xVL(c, a, b, m_start, m_end, warmup_n, gemm_l.P, p_start, p_end);
@@ -604,15 +630,19 @@ int main() {
       // if (cid == 0)
         mempool_start_benchmark();
       
-      // Dispatch to appropriate kernel based on kernel_size
-      if (kernel_size == 2) {
-        matmul_2xVL(c, a, b, m_start, m_end, gemm_l.N, gemm_l.P, p_start, p_end);
-      } else if (kernel_size == 4) {
-        matmul_4xVL(c, a, b, m_start, m_end, gemm_l.N, gemm_l.P, p_start, p_end);
-      } else if (kernel_size == 8) {
-        matmul_8xVL(c, a, b, m_start, m_end, gemm_l.N, gemm_l.P, p_start, p_end);
-      } else {
-        return -2;  // Invalid kernel size
+      for (uint32_t rep_i = 0; rep_i < (uint32_t)MATMUL_REPEAT; ++rep_i) {
+        // Dispatch to appropriate kernel based on kernel_size
+        if (kernel_size == 1) {
+          matmul_1xVL(c, a, b, m_start, m_end, gemm_l.N, gemm_l.P, p_start, p_end);
+        } else if (kernel_size == 2) {
+          matmul_2xVL(c, a, b, m_start, m_end, gemm_l.N, gemm_l.P, p_start, p_end);
+        } else if (kernel_size == 4) {
+          matmul_4xVL(c, a, b, m_start, m_end, gemm_l.N, gemm_l.P, p_start, p_end);
+        } else if (kernel_size == 8) {
+          matmul_8xVL(c, a, b, m_start, m_end, gemm_l.N, gemm_l.P, p_start, p_end);
+        } else {
+          return -2;  // Invalid kernel size
+        }
       }
 
       // Wait for all cores to finish computation
@@ -624,7 +654,11 @@ int main() {
 
       // Calculate elapsed time
       timer_end = mempool_get_timer();
-      uint32_t timer_temp = timer_end - timer_start;
+      uint32_t timer_raw  = timer_end - timer_start;
+      uint32_t timer_temp = timer_raw / (uint32_t)MATMUL_REPEAT;  // PER PASS
+      if (cid == 0 && (uint32_t)MATMUL_REPEAT != 1u)
+        printf("[REPEAT] r=%u total=%u per_pass=%u\n",
+               (unsigned)MATMUL_REPEAT, timer_raw, timer_temp);
       
       // Core 0 tracks the minimum time (best core)
       if (cid == 0) {
@@ -652,6 +686,32 @@ int main() {
     printf("The performance is %u OP/1000cycle (%u%%o utilization).\n",
            performance, utilization);
   }
+
+  //========================================================--
+  // STEP 5b: FP-FREE SPOT CHECK
+  //========================================================--
+  // Reads C as raw 32-bit words with an ORDINARY INTEGER LOAD. At fp32 one word IS one
+  // element. Nothing here touches an FP register, the FP-LSU, or the accumulator writeback,
+  // so it cannot reproduce the epilogue wedge that forces MATMUL_VERIFY off. The host
+  // compares the printed words against the golden (scripts/check_fp16_spot.py --prec fp32).
+  //
+  // One sample per GROUP, at the first row that group owns, so a single bad group is
+  // identified rather than merely detected.
+#if MATMUL_SPOTCHECK
+  if (cid == 0) {
+    const uint32_t rows_per_group =
+        (gemm_l.M >= active_groups) ? (gemm_l.M / active_groups) : 1u;
+    const uint32_t nsample =
+        (gemm_l.M >= active_groups) ? active_groups : gemm_l.M;
+    for (uint32_t g = 0; g < nsample; ++g) {
+      const uint32_t row = g * rows_per_group;
+      const volatile uint32_t *w = (const volatile uint32_t *)(c + row * gemm_l.P);
+      printf("[SPOT] g=%2u row=%4u w0=%08x w1=%08x w2=%08x w3=%08x\n",
+             g, row, w[0], w[1], w[2], w[3]);
+    }
+  }
+  mempool_barrier(active_cores);
+#endif
 
   //========================================================--
   // STEP 6: VERIFICATION  (same self-test as sp-fmatmul-opt)

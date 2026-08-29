@@ -12149,3 +12149,51 @@ not tightened on this evidence alone.
 (`61141df`), KS=2 config measured and verified. Next is a decode A/B on real shapes:
 same shape, `EXTRA_DEFINES=-DKERNEL_SIZE=2` against the default 8, on a
 `rob_depth=128 robn_depth=32` image.
+
+## 2026-08-29 10:20 — KS=1 kernel, a real verify path, and a repeat loop for small batch
+
+**Purpose.** Prepare the B x KS decode sweep (B = 1..128, KS = 1/2/4/8, 4x4 and 8x8, fp16 and
+fp32 = 104 arms). Three prerequisites, all in the two SOURCE apps that
+`scripts/gen_decode_shape_app.sh` copies from (`sp-fmatmul-opt-burst-merge{,-fp16}`) — editing a
+generated app would have been silently discarded.
+
+**1. `matmul_1xVL` (option A).** `KS x LMUL = 16` registers holds for KS = 8/4/2 (m2/m4/m8); KS=1
+would need m16, which RVV does not have. So: ONE accumulator `v0` at m8, two m8 B buffers `v8`
+and `v16`, and `v24-v31` deliberately unused. Verified from the **emitted** disassembly, not the
+source — `vsetvli e16, m8`, `vle16.v v8/v16`, `vfmul.vf v0, v8`, `vfmacc.vf v0, .., v8/v16`,
+`vse16.v v0`, and no register outside `v0/v8/v16` touched.
+
+*Why it has to exist:* `kernel_size` must divide `M` (main.c:343), so KS=1 is the **only** legal
+kernel at B=1 — decode GEMV could not run at all before this.
+*What it costs:* arithmetic intensity is KS MACs per B element, so at KS=1 every loaded element
+feeds exactly one FMA, and `sharers = M/KS = 1` leaves the group MSHR with no cohort to merge.
+Bandwidth-bound by construction, not by a bug.
+
+**2. The verify path.** `MATMUL_VERIFY` is off because the scalar-FP row-sum wedges core 0 in the
+epilogue, which left every perf run with **no correctness signal at all** — and a kernel that
+computes garbage twice as fast still wins a sweep. There was already an FP-free probe in the
+fp16 app (reads C as raw 32-bit words with an integer load, so it cannot reproduce the wedge)
+but it was **default off**, and the fp32 app had **none**. Both are now default ON and fp32 has
+the probe ported. Cost is one `printf` per group.
+
+**3. `MATMUL_REPEAT`.** Total work is `B*D*I` MACs while the weight tile `D*I` must fit L1, so
+work at B=1 is capped at (L1 in elements) MACs ~ **256 ideal cycles** at 4x4 — an order of
+magnitude below the barrier and I$ fill that bracket it. A single pass measures the setup, not
+the kernel. `MATMUL_REPEAT=R` runs the kernel R times back-to-back inside the timed region;
+`R = 128/B` equalises all 104 arms at ~65k ideal cycles.
+- **The reported "The execution took N cycles" stays PER PASS** (`timer/R`), so every existing
+  scraper and dashboard keeps reading the same quantity; the raw total is on a new `[REPEAT]`
+  line. Changing that contract would have silently corrupted every dashboard.
+- Repeating is idempotent: alpha = 0 so each pass overwrites C. No inter-pass barrier — cores
+  read a B nobody writes and write only their own C slice, and GBAR_PLOOP re-aligns per column
+  block. Default `1` keeps existing images unchanged.
+
+**A trap found before it cost anything.** `gen_decode_shape_app.sh` names its ELF by **shape
+only** (`dec_<B>x<D>x<I>.elf`). B=8 has four KS variants at one shape, so without `OUT_PREFIX`
+they overwrite each other and every KS arm silently runs the same binary. The sweep sets
+`OUT_PREFIX` per (precision, KS).
+
+**Status.** All three built for both precisions. Acceptance test running: KS=1 vs KS=2 on one
+shape — matching `[SPOT]` words prove the new kernel computes what the validated `matmul_2xVL`
+does, and *differing cycles* prove the dispatch really selected a different kernel rather than
+falling through. Both halves are needed; either alone proves nothing.
