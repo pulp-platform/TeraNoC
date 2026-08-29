@@ -12235,3 +12235,42 @@ Also: L1 usable is `min(GBAR_WINDOW_LO, L1_FULL_BYTES)` (`arch.ld.c:32`), ~3.78 
 
 **Status.** Build driver regenerated with `CONFIG` and `OUT_PREFIX` per arm, both documented as
 mandatory. Awaiting the KS=1 vs KS=2 acceptance test, then the go-ahead to build and dispatch.
+
+## 2026-08-29 12:15 — A4 asserted on the REQUEST, not the GRANT: fatal on every 512 B burst arm
+
+**Found by the KS=1 acceptance test**, which is exactly what it was for. `matmul_1xVL` on a real
+sweep shape (B=8, D=128, I=8192 fp16, `p_span`=256 el = **512 B**) died on
+`spatz_vlsu.sv:2112` — *"Block and single ROB id request asserted together."*
+
+**Mechanism.**
+- `rob_room_block` = `status_cnt <= NumWords - BlockWords` = 112 of 128. A **512 B load is 128
+  words in a 128-entry ROB**, so it drives occupancy past 112 by construction.
+- The block reservation is then **REFUSED**, and the per-beat walk takes over — which
+  `spatz_vlsu.sv:2117` names "the fallback" in its own assertion text, so the path is by design.
+- Both request lines are high. A4 tests `rob_req_block` (the REQUEST) instead of
+  `burst_block_fire` (the GRANT), so a legal fallback is fatal.
+
+**The RTL behaviour is correct; the assertion was wrong.** `reorder_buffer.sv:317` allocates as
+`if (block_fire) ... else if (id_req_i && !full_o)`. With the block refused, `block_fire` is 0,
+the `else if` runs and the single is served normally — nothing is dropped and no phantom id is
+used. The documented hazard ("its requester then uses an id the ROB never handed out") requires
+the block to FIRE. Both A4 assertions, VLSU and ROB side, are now qualified by the grant.
+
+**Why nothing caught it.** `vector-burst-test` issues one m8 load then a store, so ROB0 drains
+between bursts and never sits above 112 when the next block is requested. A GEMM inner loop
+issues back-to-back 512 B loads for N iterations and holds it near-full. The validated
+`robn32_rob128` PASS was real but did not cover this pattern.
+
+**Blast radius: 20 of the 104 sweep arms** — every arm with `vl = 512 B`, which is KS=1 at B>=8
+AND **KS=2 at B>=16**. Not a KS=1-only problem, and it would have looked like "the new kernel
+crashes" rather than "the assertion is mis-specified".
+
+**Also killed the in-flight 8x8 image build**: it had already parsed `spatz_vlsu.sv` (log line
+1706) before the edit, so it carried the old assertion and all its 512 B arms would have died.
+Structurally sound, functionally unusable — cheaper to discard than to discover later.
+
+**Status.** Rebuilding a 4x4 image with the qualified assertions (new path — the old one is mapped
+by two live sims) and re-running the arm that died, so the fallback is proven **correct** (SPOT
+words identical to KS=2's on the same shape) rather than merely un-asserted. `xc2_ks2` at 256 B
+is running clean and is the reference. **If the words do NOT match, the assertion was right and
+the fallback is genuinely unsafe** — that is the test, not a formality.
