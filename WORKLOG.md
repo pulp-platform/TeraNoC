@@ -12413,3 +12413,22 @@ test alone.
 
 **Status.** ROBN=64 image building. `k4` in the benchmark region, no livelock. Baseline control at
 cyc 23,000 of the ~30,000 needed to cover the livelock cliff.
+
+### 2026-08-29 16:10 — livelock exoneration is now exact, not extrapolated
+
+The control (`build_robn32_rob128`, no RTL changes) ran the same ELF through the collapse and is
+**byte-identical to the modified image across all 35 windows**, including the cliff itself:
+
+| cyc | req/1k |
+|---:|---:|
+| 21,000 | 165,261 |
+| 27,000 | 62,499 |
+| 30,000 | **1,259** |
+| 33,000 | **0** |
+| 35,000 | 773 |
+
+The unmodified image livelocks in exactly the same place, at exactly the same rate. The
+generation-tag fix, the A4 qualification and the `bypass_ways` knob are conclusively not
+implicated in the MSHR desync livelock.
+
+Control retired; the question is closed.
