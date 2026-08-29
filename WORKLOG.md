@@ -11831,3 +11831,87 @@ that were **not** these jobs, which is why the cwd check matters and not the pro
 
 **Status.** `SPATZ_VLSU_ROBN_DEPTH` stays opt-in and is **not safe as a default**. Verification
 build `build_robn16g` running.
+
+## 2026-08-29 05:50 — ROB generation tag: the forwarding fix was right, the *coding form* was not
+
+**Purpose.** Unblock `spatz_vlsu_robn_depth < 64`. A shallow ROB needs an id wider than the
+entry index so a late response can be told apart from the current occupant of the same entry
+(the generation tag). Every attempt so far dropped 768 responses — 256 cores x 3 shallow ports,
+exactly one drop each — and wedged `vector-burst-test` with `inflight=0` and no UART.
+
+**Implementation.** Two steps, both needed.
+
+1. *Root cause (confirmed by probe, not by reading).* `spatz_vlsu.sv:1816-1818` makes a STORE
+   allocate and push in the SAME cycle: `rob_wid[port] = rob_id[port]` feeds `id_o` straight
+   back into `id_i`, with `rob_push = rob_req_id = id_req_i`. The stamp for that allocation is
+   in `entry_gen_d` and does not reach `entry_gen_q` until the next edge, so the first store
+   after a ring wrap compared the NEW generation against the PREVIOUS lap's. The allocation
+   trace nails it — adjacent lines, same instance, same edge:
+   `[rob_alloc] t=16888 ... SINGLE entry=1 stamp_gen=1 -> id_o=17 (wp=1 gen=1 cnt=0 full=0)`
+   `[rob_drop]  t=16888 ... id=17 -> entry=1 carried_gen=1 entry_gen=0`
+   Loads never hit it: their push arrives many cycles after allocation.
+
+2. *The fix that did NOT work, and why it matters.* Forwarding the generation being stamped
+   this cycle is the right answer, but the first version expressed the window test as a
+   `function automatic` called from a continuous assign:
+   `assign gen_of_push = in_alloc_window(push_entry) ? gen_q : entry_gen_q[push_entry];`
+   **The drops survived it, unchanged, at the same 768.** A continuous assignment builds its
+   sensitivity from the operands of its RHS; the signals a called function reads but does not
+   take as arguments — here `alloc_fire`, `block_fire`, `write_pointer_q` — are not reliably
+   among them, so `gen_of_push` kept whatever it computed when `push_entry` last changed,
+   which was while `alloc_fire` was still 0. Replaced with an `always_comb` bitmap
+   (`alloc_win_mask`, reusing the allocator's own `block_mask`), which has guaranteed implicit
+   sensitivity to everything it reads and cannot disagree with the allocator by construction.
+
+**Result.** Build `build_ac_robn16` (VCS, 4x4, `spatz_vlsu_robn_depth=16`); run in `ac_run/`.
+Pass criterion is not just `PASS` + `retval=0` — `req` must climb past BOTH freeze points
+(354,568 pre-fix, 359,688 with the function form), and the drop count must be *low but
+explainable*, since zero drops would mean the tag never fires at all.
+
+**Two process notes worth more than the bug.**
+- The drop probe printed `entry_gen_q` (the raw register) rather than the value the comparison
+  actually used, so a working forward and a broken one looked identical in the log. The probe
+  now prints every signal the decision was made from — `alloc_fire`, `block_fire`, `id_req`,
+  `full`, `wp`, `gen_q`, `win`, `gen_of_push`. **Print the operand of the decision, not a
+  proxy for it.**
+- Two debug cycle scripts running in parallel shared one backup dir for `hardware/generated/`,
+  so the second backed up the *first's* 4x4 mesh over the 8x8 snapshot and both then "RESTORED"
+  4x4 while printing success. git HEAD is 4x4 too, so the 8x8 was unrecoverable by copy.
+  **A shared mutable directory cannot be snapshotted by copy from two places** — regenerate
+  with floogen instead, which is authoritative for either mesh.
+
+**Result — the generation tag is FIXED.** `build_ac_robn16` / `ac_run`, ROBN=16, 4x4:
+
+| | pre-fix | function-in-assign | always_comb |
+|---|---:|---:|---:|
+| `[rob_drop]` | 768 | 768 | **0** |
+| `req` at wedge | 354,568 | 359,688 | **544,942** |
+| `inflight` at wedge | 0 (stalled) | 0 (stalled) | **0 (drained)** |
+| `orphan` / `dup_alloc` | 0 / 0 | 0 / 0 | 0 / 0 |
+
+768 is exactly 256 cores x 3 shallow ports, one drop each at the first ring wrap; it is now zero,
+and the run carries 53% more traffic and resolves every outstanding load.
+
+**The residual hang is a DIFFERENT, self-reported limit — not the tag.** The run still stops,
+but the RTL says why, in its own words:
+```
+[spatz_vlsu] BURST DROPPED: vl=512 B exceeds the 256 B burst ceiling (NrOutstandingLoads*4)
+[spatz_vlsu] NON-BURST OVER CAPACITY: vl=512 B needs 128 word slots on the non-burst path
+             but ROB1-3 are only 16 deep (SPATZ_VLSU_ROBN_DEPTH). This path wedges.
+```
+`vector-burst-test` deliberately issues an m8 (512 B) load. At ROB0=64 the burst ceiling is
+NrOutstandingLoads*4 = 256 B, so that load is refused the burst path and falls onto the
+word-interleaved path, which at ROBN=16 has 16 slots for the 128 words it needs. This is the
+limitation `gen_robn_nonburst_capacity` was added to warn about on 2026-08-28. Note the comment
+there predicted the generation tag would resolve the hang; it resolved the *id-reuse* half
+(orphan/dup_alloc are 0 and drops are 0), and this measurement separates the remaining half,
+which is genuine capacity.
+
+**That is exactly what D2 removes,** which makes the next run a single experiment proving both
+halves: `spatz_vlsu_rob_depth=128 spatz_vlsu_robn_depth=16` raises the ceiling to 128*4 = 512 B,
+so the m8 load stays on the BURST path (ROB0 only) and never reaches the shallow ports at all,
+while the shallow ports still run 4 entry bits + 3 generation bits. Acceptance is not the PASS
+alone but `[BURSTWHY] vl=512B ... vl_le_512=1 => burst=1` with zero
+`NON-BURST OVER CAPACITY` warnings. 512 B is the `vl` an LMUL=8 load needs, i.e. **KS=2**.
+
+**Status.** Tag fixed and measured. D2 (ROB0=128) building.
