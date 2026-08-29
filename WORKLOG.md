@@ -11963,3 +11963,59 @@ Rebuilt as `build_d2c_rob128` on a verified-consistent 4x4.
 dir since 08-28 is a 4x4 ROB debug image), so no campaign result is affected. The Makefile
 ordering itself is left unchanged pending review — reordering `--emit-yml` ahead of `floogen`
 is the obvious fix but it touches the shared build flow.
+
+## 2026-08-29 07:05 — ROB0=128 moves the ceiling; the 512 B burst then deadlocks
+
+**Purpose.** With the mesh confound removed, measure what `spatz_vlsu_rob_depth=128
+spatz_vlsu_robn_depth=16` actually does. `build_d2c_rob128` / `d2c_run`, mesh asserted
+consistent 4x4 in **both** `perimeter_map_pkg.sv` and `floo_terapool_noc_pkg.sv`.
+
+**Result — the ceiling moved, exactly as designed.**
+
+| | ac (ROB0=64) | D2C (ROB0=128) |
+|---|---|---|
+| boot | ok | ok (0 chimney assertions) |
+| `[BURSTWHY]` ceiling term | `vl_le_256=1` | **`vl_le_512=1`** |
+| `BURST DROPPED: vl=512 B` | **41,247** | **0** |
+| `NON-BURST OVER CAPACITY` | 41,247 | **0** |
+| `req` at the stall | 544,942 | 544,481 |
+
+512 B is the `vl` an LMUL=8 load needs, i.e. **KS=2**. At ROB0=64 that load was refused the
+burst path and wedged the 16-deep non-burst ROBs; at ROB0=128 it is **admitted** — both
+symptom messages go to zero.
+
+**But it still wedges, in a new place.** Traffic is bit-identical to the ac run through
+cyc 9,000 (`req=387,737` in both), then stops at `req=544,481` with `inflight=0`, `orphan=0`,
+`dup_alloc=0`, `[rob_drop]=0`, and no CMS WARN. `[STALLG]` is unambiguous about who is waiting:
+
+```
+lsu = 16000,16000,16000,16000,16000,16000,16000,16000,16000,16000,16000,16000,16000,16000,16000,16000
+raw = 0,...   acc = 0,...   fen = 0,...      [INSNG] insn = 0,... (nothing retiring)
+```
+
+Every core in every group is 100% blocked in the LSU with **nothing outstanding** — the 512 B
+load is accepted and then never issued. So `ROB0=128` is necessary for KS=2 but not sufficient.
+
+**Do not read the gated counters here.** `mshr_timeout=+0 bankfull_bypass=+0` in this run means
+nothing: those sit behind `csr_trace_any_global`, and `vector-burst-test` never enables tracing
+(`[FPU]` stays in the `pre` phase for the whole run, `busy=0/1024000`). I nearly used them as
+evidence that the MSHR was healthy. **A probe that is structurally disabled reads exactly like a
+probe reporting zero.**
+
+**Leading hypothesis, and why.** The test's active cores are `cid 0..15`, which at 4x4 is *all of
+group 0* (`hartid = (group<<4)|tile`), and the group MSHR is **source-side**. So:
+
+* old ceiling 256 B = 4 bursts/core x 16 cores = **64** == `group_mshr_num` — exactly sized
+* new ceiling 512 B = 8 bursts/core x 16 cores = **128** — 2x over
+
+i.e. the burst `vl` ceiling and the group MSHR were implicitly matched, and raising one without
+the other overruns it. If so, KS=2 costs MSHR entries as well as ROB depth, which is an area
+number the design needs to carry.
+
+**Next, in order.** (1) `build_iso2_rob128` — `rob_depth=128` with `robn_depth` UNSET, so every
+ROB is 128 deep, `GenBits = 0`, and the generation path const-folds away entirely: it separates
+"the burst path cannot carry 512 B" from "the shallow ports are involved". (2) chained behind it,
+`group_mshr_num=128`, which only runs if ISO2 also wedges.
+
+**Status.** Generation tag fixed and committed. Ceiling confirmed at 512 B. KS=2 blocked on a
+new, separate 512 B burst deadlock, under bisection.
