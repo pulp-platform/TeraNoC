@@ -12019,3 +12019,43 @@ ROB is 128 deep, `GenBits = 0`, and the generation path const-folds away entirel
 
 **Status.** Generation tag fixed and committed. Ceiling confirmed at 512 B. KS=2 blocked on a
 new, separate 512 B burst deadlock, under bisection.
+
+## 2026-08-29 07:30 — the 512 B wedge is the STORE, and the capacity guard only watches loads
+
+**Purpose.** Separate "the burst path cannot carry 512 B" from "the shallow ports are involved".
+`build_iso2_rob128`: `spatz_vlsu_rob_depth=128` with `spatz_vlsu_robn_depth` **unset**, so every
+ROB is 128 deep, `GenBits = IdWidth - EntryAw = 7 - 7 = 0`, and the whole generation path
+const-folds away.
+
+**Result.** ISO2 sails straight past the wedge — `req` 544,481 (D2C, wedged) -> **695,792 and
+climbing**, `inflight` non-zero throughout. So the 512 B **burst** is fine at ROB0=128. The
+deadlock lives on the **shallow ports**.
+
+**Mechanism, and it is a real hole.** `use_port0_burst_req` demands
+`mem_spatz_req.op_mem.is_load` (`spatz_vlsu.sv:269`) — **bursts are LOADS ONLY**. The m8 case of
+`vector-burst-test` is a load/store pair:
+
+```
+vle32.v v0, (s)   512 B load  -> burst path, ROB0 only          fine at ROB0=128
+vse32.v v0, (d)   512 B store -> word-interleaved over 4 ports  32 words per port
+```
+
+and a 16-deep ROB cannot hold 32 words. Meanwhile `gen_robn_nonburst_capacity`
+(`spatz_vlsu.sv:2033`) gates its warning on `mem_spatz_req.op_mem.is_load`, so it watches only
+the half of the traffic that has an escape route. That is exactly why the run was silent: at
+ROB0=64 the *load* had no burst path, tripped the guard, and printed 41,247 warnings; at
+ROB0=128 the load was rescued onto the burst path, the guard fell silent, and the **store**
+wedged with nothing said. `use_port0_burst_req` is already false for every store, so dropping
+the `is_load` term from the warning covers stores without changing the bound for loads.
+
+**Consequence for KS=2.** ROB0=128 is necessary but the shallow ports must also hold the
+per-port share of a 512 B op. Predicted requirement is 32 words/port, i.e. **ROBN >= 32**, so
+KS=2 should cost `ROB0 64->128` and `ROBN 16->32` — not `ROBN 16->128`, which would give back the
+entire area saving. `build_robn32_rob128` is the measurement.
+
+**Where this leaves the generation tag.** Untouched and still correct: ISO2 runs with `GenBits=0`
+(no generation logic at all) and D2C ran with `GenBits=3` and **zero** drops. The tag fix and the
+store-capacity limit are independent, and neither caused the other.
+
+**Status.** Burst path cleared. KS=2 blocked only on shallow-port depth for the store, now under
+measurement at ROBN=32.
