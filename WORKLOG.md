@@ -12059,3 +12059,48 @@ store-capacity limit are independent, and neither caused the other.
 
 **Status.** Burst path cleared. KS=2 blocked only on shallow-port depth for the store, now under
 measurement at ROBN=32.
+
+## 2026-08-29 08:05 — KS=2 unlocked: ROB0=128 + ROBN=32, and the guard's bound is 4x too strict
+
+**Purpose.** Test the prediction that KS=2 costs `ROB0 64->128` **and** `ROBN 16->32` — not
+`ROBN 16->128`, which would return the whole area saving §14 exists to buy.
+
+**Controlled to one variable.** The full `+define+` diff between `build_robn32_rob128` and the
+wedging `build_d2c_rob128` is a single line:
+```
+< +define+SPATZ_VLSU_ROBN_DEPTH=16
+> +define+SPATZ_VLSU_ROBN_DEPTH=32
+```
+
+**Result — it clears the wedge.** `req` 544,481 (D2C, frozen, all cores LSU-stalled) ->
+**674,314 and climbing**, `drops=0`. The newly store-aware guard shows all three over-ceiling
+stores were issued and survived:
+
+| store `vl` | words | per port (/4) | fits ROBN=32? | warned | wedged |
+|---:|---:|---:|---|---:|---|
+| 256 B | 64 | 16 | yes | 73,508 | no |
+| 384 B | 96 | 24 | yes | 69,542 | no |
+| **512 B** | **128** | **32** | **exactly** | 151,928 | **no** |
+
+512 B is the `vl` of an LMUL=8 load, i.e. **KS=2**. So the KS=2 hardware requirement is
+`ROB0=128, ROBN=32`.
+
+**The guard's bound is per-TOTAL where the hardware is per-PORT.** `gen_robn_nonburst_capacity`
+tests `(vl / MemDataWidthB) > RobNDepth` — 128 > 32 for the 512 B store — and its own comment
+concedes "the exact wedge threshold is somewhere between RobNDepth and NrOutstandingLoads words
+and has NOT been measured". It is now measured: the VLSU word-interleaves the non-burst path over
+`NrMemPorts` = 4, so the real bound is `vl / MemDataWidthB / NrMemPorts`, i.e. **4x smaller**.
+Evidence at both ends — 32 words/port works at ROBN=32, and the same 32 words/port wedges at
+ROBN=16. Not yet tested: 256 B at ROBN=16 (16 words/port, an exact fit), which is the point that
+would distinguish "non-strict per-port" from "needs one spare". Leaving the conservative bound in
+place until that is measured; over-warning costs noise, under-warning costs a silent wedge.
+
+**Note the exact fit did NOT need a spare slot.** `id_valid_o` is `status_cnt_q <= NumWords-2`,
+so a 32-deep ROB can only reach 31 by that path — yet 32 words/port works, because the store
+streams: entries free as data leaves, so all 32 are never resident at once. This is the same
+"tags are already recycled mid-instruction" property the `NoVlCeiling` comment describes.
+
+**Status.** Past the m8 wedge with all three over-ceiling stores clean; run continuing to the
+full PASS (~61,000 cycles). The three fixes this rests on are committed: spatz `e845ac3`
+(generation forwarding as `always_comb`), `61141df` (guard covers stores), and the mesh
+two-pass discipline in the build scripts.
