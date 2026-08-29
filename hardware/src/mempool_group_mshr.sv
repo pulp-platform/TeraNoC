@@ -459,8 +459,23 @@ module mempool_group_mshr
   // assert $fatals. Bound: outstanding bypass ways <= floor(RobDepth/MaxBurstWords), because any
   // 16-id grant implies the oldest 16 ROB pops completed, and in-order pops retire the oldest
   // tracked burst completely. max(2, ...) keeps today's shape at ROB32.
-  localparam int unsigned BypassTrackWays =
+  //
+  // OVERRIDE (GROUP_MSHR_BYPASS_WAYS, 2026-08-29). The derived bound above is exact only while
+  // vl < RobDepth words. At vl == RobDepth it is critically sized with ZERO margin: a 512 B load
+  // at ROB128 is 128 words = 8 bursts = all 8 ways, so ONE instruction fills the track and a
+  // back-to-back second one overflows it. Measured on a GEMM inner loop (KS=1, 512 B loads);
+  // vector-burst-test never showed it because it issues isolated loads that retire in between.
+  // Overflow is NOT a correctness bug -- :1067 leaves the burst untracked and it degrades to
+  // 1-wide, correct but without ParityDrain's 2-wide drain -- but the assert $fatals, and the
+  // degradation lands exactly where bandwidth matters most.
+  //
+  // Left as an explicit knob rather than doubling the formula: doubling would take ROB32 from
+  // 2 -> 4 ways and ROB64 from 4 -> 8, perturbing every validated baseline for a case they
+  // cannot reach. Unset = bit-identical.
+  localparam int unsigned BypassTrackWaysDerived =
     (2 > (snitch_pkg::RobDepth / MaxBurstWords)) ? 2 : (snitch_pkg::RobDepth / MaxBurstWords);
+  localparam int unsigned BypassTrackWays =
+    `ifdef GROUP_MSHR_BYPASS_WAYS `GROUP_MSHR_BYPASS_WAYS `else BypassTrackWaysDerived `endif;
   // Way-index width for the match->retire path. MUST track BypassTrackWays: at 4 ways a 1-bit
   // index aliases ways 2/3 onto 0/1, leaking them (allocated, never retired) until the overflow
   // assert fires (observed on 512x256x512 fmatmul, the first geometry with >2 concurrent bypasses).
@@ -4496,6 +4511,12 @@ module mempool_group_mshr
         $display("[%0t] %m MSHR cfg: MshrFullBurstWords=%0d EnableSingle=%0d EnableNonFullBurst=%0d EnableFullBurst=%0d",
                  $time, MshrFullBurstWords, EnableMshrSingleReq, EnableMshrNonFullBurstReq,
                  EnableMshrFullBurstReq);
+        // Print the EFFECTIVE policy bit, not the localparam: with MshrCfgRuntime=1 the value in
+        // force comes from CSR 11, and an ELF that predates that CSR leaves the reset value
+        // standing. Printing the localparam would have shown 1 while the design ran with 0 --
+        // exactly the silent mismatch that wasted a GUI elaboration on 2026-08-21.
+        $display("[%0t] %m MSHR cfg: BankfullBackpressure=%0d (0=bypass on full bank, 1=stall)",
+                 $time, cfg_bankfull_bp);
         $display("[%0t] %m MSHR cfg: SpillReqIn=%0d SpillReqOut=%0d SpillRespIn=%0d SpillRespOut=%0d",
                  $time, SpillReqIn, SpillReqOut, SpillRespIn, SpillRespOut);
       end

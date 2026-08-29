@@ -347,6 +347,13 @@ vlog_defs += -DGROUP_MSHR_NUM=$(group_mshr_num)
 ifneq ($(strip $(group_mshr_ways_per_bank)),)
   vlog_defs += -DGROUP_MSHR_WAYS_PER_BANK=$(group_mshr_ways_per_bank)
 endif
+# ParityDrain bypass-track depth. Unset = derived max(2, RobDepth/MaxBurstWords) -- bit-identical.
+# That bound is exact only while vl < RobDepth words; at vl == RobDepth (a 512 B load at ROB128)
+# one instruction fills the whole track and a back-to-back second overflows it, degrading the
+# burst to 1-wide. Set 16 for ROB128 sweeps that issue sustained 512 B loads.
+ifneq ($(strip $(group_mshr_bypass_ways)),)
+  vlog_defs += -DGROUP_MSHR_BYPASS_WAYS=$(group_mshr_bypass_ways)
+endif
 vlog_defs += -DGROUP_MSHR_MERGE_REQS=$(group_mshr_merge_reqs)
 vlog_defs += -DGROUP_MSHR_ENABLE_SINGLE=$(group_mshr_enable_single)
 vlog_defs += -DGROUP_MSHR_ENABLE_STATS=$(group_mshr_enable_stats)

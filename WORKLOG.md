@@ -12274,3 +12274,39 @@ by two live sims) and re-running the arm that died, so the fallback is proven **
 words identical to KS=2's on the same shape) rather than merely un-asserted. `xc2_ks2` at 256 B
 is running clean and is the reference. **If the words do NOT match, the assertion was right and
 the fallback is genuinely unsafe** — that is the test, not a formality.
+
+## 2026-08-29 13:00 — the 512 B design point needs THREE RTL fixes, not one
+
+The KS=1 acceptance test forced out three RTL defects in sequence, each hidden behind the one
+before it. **None is reachable by `vector-burst-test`**, because all three need a *sustained*
+burst stream -- a GEMM inner loop -- where that test issues isolated loads that retire in between.
+
+| # | defect | symptom | fix |
+|---|---|---|---|
+| 1 | generation tag compared against the registered stamp on a same-cycle allocate+push | 768 dropped responses, wedge | spatz `e845ac3` |
+| 2 | A4 asserted on the block REQUEST, not the GRANT | `$fatal` on every refused-block fallback | spatz `9b9d0bb` |
+| 3 | ParityDrain bypass track critically sized at `vl == RobDepth` | `$fatal`, else 1-wide degradation | `group_mshr_bypass_ways` |
+
+**On #3.** `BypassTrackWays = max(2, RobDepth/MaxBurstWords)` = 8 at ROB128, and a 512 B load is
+128 words = **exactly 8 bursts**. One instruction fills the entire per-tile track; a back-to-back
+second overflows it. The sufficiency argument in the comment ("any 16-id grant implies the oldest
+16 ROB pops completed") holds only while `vl < RobDepth` words and breaks exactly at equality.
+
+Overflow is **not** a correctness bug -- `mempool_group_mshr.sv:1067` leaves the burst untracked
+and it "degrades to 1-wide, correct". But the assert `$fatal`s, and the degradation lands exactly
+where bandwidth is the binding constraint.
+
+Added as an **opt-in knob**, not a formula change: doubling the derived value would take ROB32
+from 2 -> 4 ways and ROB64 from 4 -> 8, perturbing every validated baseline for a case they
+cannot reach. Unset emits no define at all (checked with `make -n` both ways), so existing images
+are bit-identical.
+
+**Correction to the 2026-08-29 09:10 entry.** "KS=2 passes at ROB0=128 + ROBN=32" stands -- the
+data is verified correct. But that was measured on `vector-burst-test`, which issues ISOLATED
+512 B loads. Under the sustained stream every decode arm produces, the bypass track overflows and
+the burst degrades to 1-wide: still correct, but without ParityDrain's 2-wide drain. The unlock is
+real; running it at the *intended* design point needed fix #3, which no single functional test
+could have shown.
+
+**Status.** `build_bw16_robn32` (all three fixes + the warning rate limit) building; re-running the
+arm that has now failed twice.
