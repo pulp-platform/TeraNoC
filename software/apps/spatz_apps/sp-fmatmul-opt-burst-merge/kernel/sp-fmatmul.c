@@ -510,6 +510,31 @@ void matmul_4xVL(float *c, const float *a, const float *b,
   }
 }
 
+#ifndef SPATZ_1XVL_LOAD_LMUL
+// B-vector load chunking, mirroring SPATZ_1XVL_STORE_LMUL. A vl=512 B load is 128 words =
+// EXACTLY all 128 ROB0 ids at rob_depth=128; every 512 B run to date has issued one. Splitting it
+// into two m4 halves keeps both on the burst path (256 B is above the 64 B floor) while halving
+// the ids one load reserves at a time. Loading v8 as v8+v12 (and v16 as v16+v20) fills the same
+// m8 group, so the vfmacc consuming it is unchanged -- same register-mapping argument as the
+// store split. 8 = single full-length load (previous behaviour).
+#define SPATZ_1XVL_LOAD_LMUL 8
+#endif
+#if SPATZ_1XVL_LOAD_LMUL == 4
+#  define SPATZ_LD(REGLO, REGHI, ADDR)                                                    \
+     do {                                                                                 \
+       const size_t _h = (size_t)64;                                              \
+       const size_t _n2 = gvl > _h ? gvl - _h : 0;                                         \
+       asm volatile("vsetvli zero, %0, e32, m4, ta, ma" ::"r"(gvl < _h ? gvl : _h));        \
+       asm volatile("vle32.v " REGLO ", (%0);" ::"r"(ADDR));                                 \
+       if (_n2) {                                                                          \
+         asm volatile("vsetvli zero, %0, e32, m4, ta, ma" ::"r"(_n2));                       \
+         asm volatile("vle32.v " REGHI ", (%0);" ::"r"((ADDR) + 64));                 \
+       }                                                                                    \
+       asm volatile("vsetvli zero, %0, e32, m8, ta, ma" ::"r"(gvl));                          \
+     } while (0)
+#else
+#  define SPATZ_LD(REGLO, REGHI, ADDR) asm volatile("vle32.v " REGLO ", (%0);" ::"r"(ADDR))
+#endif
 //==========================================================
 // 1xVL: ONE output row per iteration, LMUL=8
 //==========================================================
@@ -556,7 +581,7 @@ void matmul_1xVL(float *c, const float *a, const float *b,
       const float *a_ = a + m * N;
       const float *a__ = a_;
 
-      asm volatile("vle32.v v8, (%0);" ::"r"(b_));
+      SPATZ_LD("v8", "v12", (b_));
       const float *b__ = b_ + P;
 
       float *c__ = c_ + m * P;
@@ -570,7 +595,7 @@ void matmul_1xVL(float *c, const float *a, const float *b,
       // ---- Peeled first iteration (init with vfmul, kept out of the hot loop) ----
       ++n;  // n = 1
       a__ = a_ + n;
-      asm volatile("vle32.v v16, (%0);" ::"r"(b__));
+      SPATZ_LD("v16", "v20", (b__));
       b__ += P;
       asm volatile("vfmul.vf v0, v8, %0" ::"f"(t0));
       t0 = *a__;
@@ -578,7 +603,7 @@ void matmul_1xVL(float *c, const float *a, const float *b,
       ++n;  // n = 2
       a__ = a_ + n;
       if (n != N) {
-        asm volatile("vle32.v v8, (%0);" ::"r"(b__));
+        SPATZ_LD("v8", "v12", (b__));
         b__ += P;
         asm volatile("vfmacc.vf v0, %0, v16" ::"f"(t0));
         t0 = *a__;
@@ -590,7 +615,7 @@ void matmul_1xVL(float *c, const float *a, const float *b,
         ++n;
         a__ = a_ + n;
 
-        asm volatile("vle32.v v16, (%0);" ::"r"(b__));
+        SPATZ_LD("v16", "v20", (b__));
         b__ += P;
 
         asm volatile("vfmacc.vf v0, %0, v8" ::"f"(t0));
@@ -602,7 +627,7 @@ void matmul_1xVL(float *c, const float *a, const float *b,
         if (n == N)
           break;
 
-        asm volatile("vle32.v v8, (%0);" ::"r"(b__));
+        SPATZ_LD("v8", "v12", (b__));
         b__ += P;
 
         asm volatile("vfmacc.vf v0, %0, v16" ::"f"(t0));
