@@ -12567,3 +12567,36 @@ op -- consistent with everything else this week, where directed tests pass and i
 without checking whether it kept moving. It had advanced 377 requests and stopped. That is the
 same error as calling the livelock a "hang" from a snapshot earlier today -- second time in one
 session of declaring a result from one sample instead of a trend.
+
+## 2026-08-29 19:30 — ROOT CAUSE: the vl ceiling permits a load that consumes EVERY ROB0 id
+
+`build_rob256` (ROB0=**256**) runs the 512 B KS=1 arm **into the benchmark region** -- the first
+512 B configuration ever to get there. `req` 251,181 and rising, last seven deltas
+`65, 74, 345, 75732, 132645, 36091, 1055`: a sustained traffic burst, not a threshold blip.
+
+**Single-variable control:**
+
+| image | bypass_ways | group_mshr_num | ROBN | ROB0 | result |
+|---|---:|---:|---:|---:|---|
+| `build_robn16_split` | 16 | 128 | 16 | **128** | froze at 241,349 |
+| `build_rob256` | 16 | 128 | 16 | **256** | **clears, reaches bench** |
+
+Only ROB0 differs. **A 512 B load is 128 words = exactly all 128 ROB0 ids at rob_depth=128.**
+
+**The defect is in the ceiling formula.** `use_port0_burst_req` admits a burst when
+`vl <= NrOutstandingLoads * MemDataWidthB`, i.e. it permits a load that reserves *every* id in
+ROB0, leaving nothing for anything else that needs one. It should reserve headroom --
+`vl <= (NrOutstandingLoads - k) * MemDataWidthB` for some k -- or the load must be split.
+
+**Why five hypotheses failed.** Every one targeted a structure DOWNSTREAM of the load: ROBN
+(shallow ROBs, 32 and 64), `group_mshr_num` (64 and 128), the store (512 B, 2x256 B, 8x64 B), and
+the scalar port (structurally refuted). The freeze point moved 240,972 -> 245,665 across all of
+them, about 2%. The load was the only thing never varied, and the cause was the thing that never
+moved. **Tabulating what is held CONSTANT is what localised this, not another theory.**
+
+**Two fixes, and the cheaper one is still open.** ROB0 128->256 doubles the deepest ROB. The
+alternative is `SPATZ_1XVL_LOAD_LMUL=4` -- two 256 B loads, 64 ids each, at the original
+rob_depth=128 (proposed in review alongside the store split). That test is queued; if it works,
+KS=1 costs no extra ROB0 at all.
+
+**Status.** Awaiting a cycle count from rob256, and the short-load result.
