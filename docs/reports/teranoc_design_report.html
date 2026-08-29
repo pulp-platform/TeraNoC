@@ -639,10 +639,12 @@ measured</strong>. The new code is the vector half: normalisations, activations,
 recurrent delta rule. That inverts the usual accelerator-project ordering, where the matrix
 operations come first.</p>
 
-<h3>9.2 &mdash; Complete kernel status, weighted by compute</h3>
-<p>Every GEMM Qwen3.8-27B needs, with its logical shape, its share of model compute, and the tile and
-measured efficiency at each mesh. Shares are MAC-weighted per token over the real layer schedule
-(64 FFN + 48 GDN + 16 attention, S = 2048) and total <strong>24,752 M MAC/token</strong>.</p>
+<h3>9.2 &mdash; Complete kernel status &mdash; <span style="color:var(--accent)">PREFILL</span> (S = 2048)</h3>
+<p>Every GEMM Qwen3.8-27B needs at <strong>prefill</strong>, with its logical shape, its share of
+prefill compute, and the tile and measured efficiency at each mesh. Shares are MAC-weighted per token
+over the real layer schedule (64 FFN + 48 GDN + 16 attention, <strong>S = 2048</strong>), totalling
+<strong>24,752 M MAC/token</strong>. <strong>Decode has a different operation mix and different
+tiles &mdash; see §9.3.</strong></p>
 <div class="tw"><table>
 <tr><th>Operation</th><th class="n">Layers</th><th>Logical shape</th><th class="n">MAC/token</th><th class="n">Share</th>
     <th>4×4 tile</th><th class="n">4×4</th><th>8×8 tile</th><th class="n">8×8 fp16</th></tr>
@@ -679,9 +681,6 @@ measured efficiency at each mesh. Shares are MAC-weighted per token over the rea
     <td><code>512×512×128</code> <span class="sub">(padded)</span></td><td class="n">74.0%</td>
     <td><code>1024×512×128</code></td><td class="n"><strong>livelock</strong><span class="sub"> · fp32 42.5%</span></td></tr>
 
-<tr style="background:var(--rule2)"><td><strong>lm_head</strong> <span class="sub">(decode only)</span></td><td class="n">1</td>
-    <td><code>[B,5120]×[5120,248320]</code></td><td class="n">1,271 M<span class="sub"> decode</span></td><td class="n"><strong>5.0%</strong><span class="sub"> of decode</span></td>
-    <td colspan="2" class="n">not in the inventory</td><td><code>1024×1024×2048</code></td><td class="n">75.1%<span class="sub"> (proxy)</span></td></tr>
 </table></div>
 
 <div class="grid">
@@ -705,11 +704,50 @@ point of the weighted total.</p></div>
 DeltaNet delta rule are ~5% of MACs but are <em>serial between GEMMs</em>, unwritten, and unmeasured
 — and the penalty grows with mesh size, since the same serial section sits in front of 4× the lanes
 at 8×8. A whole-layer number will be lower than 86.1% and by an amount nobody has measured.</p>
-<p><strong><code>lm_head</code> is absent from the operation inventory</strong> despite being 5.0% of
-decode compute. It is an ordinary skinny GEMM and the <code>1024×1024×2048</code> point (75.1%) is a
-reasonable proxy, but it has not been mapped or measured as such.</p></div>
+<p><strong>This is a prefill table.</strong> At decode the operation mix changes materially:
+<code>lm_head</code> appears (5.0% of decode compute, and absent from the operation inventory), and
+<b>attention QK and PV essentially vanish</b> — they are O(T) per token, so 0.8% of a token&rsquo;s
+cost at T=1024. The two operations that fail at 8×8 are therefore <b>prefill problems, not decode
+problems</b>.</p></div>
 
-<h3>9.3 &mdash; Adopted tiles, 4×4 prefill</h3>
+<h3>9.3 &mdash; Complete kernel status &mdash; <span style="color:var(--accent)">DECODE</span> (B = 32)</h3>
+<p>Decode is a different workload on the same hardware. Shares are MAC-weighted per token at batch 1,
+totalling <strong>25,598 M MAC/token = 51.2 GFLOP/token</strong>. Two structural differences from the
+prefill table above:</p>
+<ul>
+<li><strong>Attention QK and PV essentially disappear.</strong> They are O(T) per generated token
+&mdash; 0.8% of a token&rsquo;s cost at T=1024. The two operations that fail at 8×8 in prefill are
+not a decode concern.</li>
+<li><strong><code>lm_head</code> appears and is significant</strong> — 5.0%, because the 248,320-wide
+vocabulary projection runs once per token regardless of sequence length.</li>
+</ul>
+<div class="tw"><table>
+<tr><th>Operation class</th><th class="n">Layers</th><th class="n">MAC/token</th><th class="n">Share</th>
+    <th>Kernel</th><th class="n">4×4 fp16</th><th class="n">8×8 fp16</th></tr>
+<tr><td>FFN (SwiGLU) — gate, up, down</td><td class="n">64</td><td class="n">17,113 M</td><td class="n"><strong>66.9%</strong></td>
+    <td>decode GEMM, 128 B slice</td><td class="n">79.2–84.2%</td><td class="n">63.6–75.9%</td></tr>
+<tr><td>DeltaNet projections — QKV, Z, O, a+b</td><td class="n">48</td><td class="n">5,537 M</td><td class="n">21.6%</td>
+    <td>decode GEMM, 128 B slice</td><td class="n">79.2–84.2%</td><td class="n">63.6–75.9%</td></tr>
+<tr><td>Attention projections — Q+gate, K, V, O</td><td class="n">16</td><td class="n">1,678 M</td><td class="n">6.6%</td>
+    <td>decode GEMM, 128 B slice</td><td class="n">79.2–84.2%</td><td class="n">63.6–75.9%</td></tr>
+<tr style="background:var(--rule2)"><td><strong>lm_head</strong> <code>[B,5120]×[5120,248320]</code></td><td class="n">1</td><td class="n">1,271 M</td><td class="n"><strong>5.0%</strong></td>
+    <td><b>not in the inventory</b> — skinny GEMM</td><td class="n">—</td><td class="n">75.1% <span class="sub">(shape proxy)</span></td></tr>
+<tr style="background:var(--bad-bg)"><td><strong>DeltaNet state update</strong> (delta rule)</td><td class="n">48</td><td class="n">76 M</td><td class="n">0.3%</td>
+    <td><b>unwritten</b> — recurrent <code>[48,128,128]</code> fp32</td><td class="n">—</td><td class="n">—</td></tr>
+</table></div>
+<p>The measured decode arms and their tiles are in §9.6. Because <strong>99.7% of decode compute is
+skinny GEMM served by one kernel</strong>, the decode picture is simpler than prefill: there is no
+awkward-shape tail, and the achievable figure is essentially the decode GEMM efficiency itself
+&mdash; <strong>79–84% at 4×4 and 64–76% at 8×8</strong>, depending on <code>D</code>.</p>
+<div class="note warn"><span class="lab">What decode is actually waiting on</span>
+<p>Not tiles &mdash; the GEMM kernel covers 99.7% of the compute. The two gaps are
+<strong><code>lm_head</code></strong>, unmapped despite 5.0%, and the <strong>delta rule</strong>,
+which is 0.3% of MACs but is the recurrent state update in 48 of 64 layers and is unwritten, so its
+cost is unknown rather than small. The third constraint is not a kernel at all: the 8×8 work split
+needs <strong>M ≥ 512</strong>, and batch 32 with 4-way speculation supplies an effective M of only
+128.</p></div>
+
+<h3>9.4 &mdash; Adopted tiles, 4×4 prefill</h3>
 <p>Chosen against three constraints in order: the <strong>work-split row floor</strong> (M ≥ 128),
 the <strong>L1 footprint with double buffering</strong>, then measured efficiency. Because
 <code>efficiency = ideal/actual</code>, total cycles for fixed work are just
@@ -733,7 +771,7 @@ best fp16 point. Two operations need a different aspect ratio, and in both the <
 tile wins: QK has its contraction fixed at the 256-wide head dimension, PV has its output fixed
 there, so neither can tile up in that axis.</p>
 
-<h3>9.4 &mdash; Adopted tile, 8×8 prefill</h3>
+<h3>9.5 &mdash; Adopted tile, 8×8 prefill</h3>
 <div class="note good"><span class="lab">Adopted 2026-08-26 — <code>1024×1024×512</code></span>
 <p><strong>86.6% efficiency, 8.00 MiB fully double-buffered, 6.86 MiB spare</strong>, and
 <code>N = 1024</code> divides the 5,120 contraction into exactly 5 tiles. Whole prefill pass
@@ -763,7 +801,7 @@ in either direction</strong> — and the win is not monotonic in <code>N</code> 
 an <code>M</code> trend off a comparison that varied <code>N</code> and <code>P</code> too, and so
 credited to <code>M</code> an effect belonging to <code>P</code>.</p></div>
 
-<h3>9.5 &mdash; Decode tiles</h3>
+<h3>9.6 &mdash; Decode tiles, measured</h3>
 <p>Decode uses <code>B = 32</code> and a fixed <strong>128 B per-core slice</strong>, which is what
 keeps every load on the burst path. The slice follows
 <code>I × elem_bytes × B / (cores × KERNEL_SIZE)</code>, with a hard floor of 64 B — below it the
@@ -785,7 +823,7 @@ burst ceiling pushes it up (≥ 4), and the merge share wants 8. With
 <code>KS × LMUL = 16</code> vector registers, <strong>KS = 8 is the only value satisfying all
 three</strong> at these shapes.</p>
 
-<h3>9.6 &mdash; Where optimisation effort should go</h3>
+<h3>9.7 &mdash; Where optimisation effort should go</h3>
 <div class="tw"><table>
 <tr><th>Class</th><th class="n">MACs/token</th><th class="n">Share</th><th>Implication</th></tr>
 <tr><td>FFN (64 × 267.4 M)</td><td class="n">17,114 M</td><td class="n"><strong>69.1%</strong></td><td>reduces to the one adopted tile — nearly free</td></tr>
