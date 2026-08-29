@@ -1,0 +1,912 @@
+<title>TeraNoC Design Report</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+:root{--ground:#f6f8fa;--panel:#fff;--ink:#141d28;--ink2:#41505f;--ink3:#6b7a8a;--rule:#dde4ea;--rule2:#eef2f6;
+ --accent:#0b6e8f;--accent-soft:#e2f0f5;--good:#2f7d5c;--warn:#a8761f;--bad:#a83a30;
+ --good-bg:#e8f3ed;--warn-bg:#faf1e0;--bad-bg:#f9e9e7;
+ --mono:'IBM Plex Mono',ui-monospace,Menlo,monospace;--sans:'IBM Plex Sans',system-ui,sans-serif}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--ground:#0e141b;--panel:#151d26;--ink:#e6edf3;
+ --ink2:#a9b6c2;--ink3:#7d8b99;--rule:#26313d;--rule2:#1c2530;--accent:#5fb8d6;--accent-soft:#12303c;
+ --good:#63c39a;--warn:#dcae5f;--bad:#e2807a;--good-bg:#152b23;--warn-bg:#2c2416;--bad-bg:#2e1c1a}}
+:root[data-theme="dark"]{--ground:#0e141b;--panel:#151d26;--ink:#e6edf3;--ink2:#a9b6c2;--ink3:#7d8b99;
+ --rule:#26313d;--rule2:#1c2530;--accent:#5fb8d6;--accent-soft:#12303c;--good:#63c39a;--warn:#dcae5f;
+ --bad:#e2807a;--good-bg:#152b23;--warn-bg:#2c2416;--bad-bg:#2e1c1a}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--ink);font-family:var(--sans);font-size:16px;line-height:1.62;-webkit-font-smoothing:antialiased}
+.wrap{max-width:1110px;margin:0 auto;padding:0 24px 96px}
+header.top{border-bottom:1px solid var(--rule);padding:58px 0 30px}
+.eyebrow{font-family:var(--mono);font-size:11.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);font-weight:600;margin-bottom:13px}
+h1{font-size:clamp(29px,4.4vw,44px);line-height:1.08;margin:0 0 15px;font-weight:700;letter-spacing:-.022em;text-wrap:balance}
+.lede{font-size:18.5px;color:var(--ink2);max-width:70ch;margin:0}
+.meta{font-family:var(--mono);font-size:12px;color:var(--ink3);margin-top:20px;line-height:1.7}
+nav.toc{background:var(--panel);border:1px solid var(--rule);border-radius:10px;padding:15px 20px;margin:28px 0 6px;
+ display:grid;grid-template-columns:repeat(auto-fit,minmax(196px,1fr));gap:3px 22px}
+nav.toc a{color:var(--ink2);text-decoration:none;font-size:13.3px;padding:3px 0;display:block}
+nav.toc a:hover{color:var(--accent)}
+nav.toc a b{font-family:var(--mono);color:var(--accent);font-size:11.5px;margin-right:8px}
+h2{font-size:25px;font-weight:650;letter-spacing:-.014em;margin:54px 0 6px;text-wrap:balance;padding-top:22px;border-top:1px solid var(--rule)}
+h2 .num{font-family:var(--mono);font-size:13px;color:var(--accent);display:block;margin-bottom:8px;letter-spacing:.09em;font-weight:600}
+h3{font-size:17.5px;font-weight:650;margin:30px 0 8px;letter-spacing:-.008em}
+h4{font-size:14.6px;font-weight:650;margin:20px 0 6px;color:var(--ink2)}
+p{margin:0 0 15px;max-width:74ch}ul,ol{max-width:74ch;padding-left:22px;margin:0 0 15px}li{margin:0 0 7px}
+code{font-family:var(--mono);font-size:.885em;background:var(--rule2);padding:1.5px 5px;border-radius:3px}
+strong{font-weight:650}
+.tw{overflow-x:auto;margin:18px 0 22px;border:1px solid var(--rule);border-radius:9px;background:var(--panel)}
+table{border-collapse:collapse;width:100%;font-size:13.8px}
+th{text-align:left;font-family:var(--mono);font-size:10.6px;letter-spacing:.075em;text-transform:uppercase;color:var(--ink3);font-weight:600;padding:10px 13px;border-bottom:1px solid var(--rule);white-space:nowrap;background:var(--rule2)}
+td{padding:8.5px 13px;border-bottom:1px solid var(--rule2);vertical-align:top}
+tr:last-child td{border-bottom:none}
+td.n,th.n{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums;white-space:nowrap}
+.chip{display:inline-block;font-family:var(--mono);font-size:10.6px;font-weight:600;padding:2px 8px;border-radius:20px;white-space:nowrap}
+.c-good{background:var(--good-bg);color:var(--good)}.c-warn{background:var(--warn-bg);color:var(--warn)}.c-bad{background:var(--bad-bg);color:var(--bad)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(168px,1fr));gap:11px;margin:20px 0 24px}
+.stat{background:var(--panel);border:1px solid var(--rule);border-radius:9px;padding:14px 15px}
+.stat .k{font-family:var(--mono);font-size:10.2px;letter-spacing:.085em;text-transform:uppercase;color:var(--ink3);margin-bottom:6px}
+.stat .v{font-size:24px;font-weight:680;font-variant-numeric:tabular-nums;letter-spacing:-.02em;line-height:1.12}
+.stat .s{font-size:12.2px;color:var(--ink3);margin-top:4px}
+.note{border-left:3px solid var(--accent);background:var(--accent-soft);padding:13px 17px;border-radius:0 7px 7px 0;margin:18px 0;max-width:80ch}
+.note.bad{border-left-color:var(--bad);background:var(--bad-bg)}.note.warn{border-left-color:var(--warn);background:var(--warn-bg)}
+.note.good{border-left-color:var(--good);background:var(--good-bg)}
+.note p:last-child{margin-bottom:0}
+.note .lab{font-family:var(--mono);font-size:10.2px;letter-spacing:.09em;text-transform:uppercase;font-weight:600;color:var(--accent);display:block;margin-bottom:5px}
+.note.bad .lab{color:var(--bad)}.note.warn .lab{color:var(--warn)}.note.good .lab{color:var(--good)}
+pre{background:var(--panel);border:1px solid var(--rule);border-radius:8px;padding:13px 15px;overflow-x:auto;font-family:var(--mono);font-size:12.4px;line-height:1.55;margin:16px 0}
+.bar{height:7px;background:var(--rule2);border-radius:4px;overflow:hidden;min-width:66px;display:block}
+.bar i{display:block;height:100%;background:var(--accent);border-radius:4px}
+.bar i.w{background:var(--warn)}.bar i.b{background:var(--bad)}.bar i.g{background:var(--good)}
+.sub{color:var(--ink3);font-size:12.4px}
+.mer{background:var(--panel);border:1px solid var(--rule);border-radius:9px;padding:16px;margin:18px 0;overflow-x:auto}
+.figcap{font-size:12.6px;color:var(--ink3);margin:-8px 0 22px;max-width:74ch}
+.figcap b{color:var(--ink2);font-weight:600}
+dl.gloss{display:grid;grid-template-columns:max-content 1fr;gap:7px 18px;margin:16px 0 24px;max-width:none;font-size:14.4px}
+dl.gloss dt{font-family:var(--mono);font-weight:600;color:var(--accent);white-space:nowrap}
+dl.gloss dd{margin:0;color:var(--ink2)}
+footer{margin-top:58px;padding-top:22px;border-top:1px solid var(--rule);font-family:var(--mono);font-size:12px;color:var(--ink3);line-height:1.75}
+</style>
+
+<div class="wrap">
+<header class="top">
+  <div class="eyebrow">Engineering report &middot; 2026-08-29</div>
+  <h1>TeraNoC + Spatz</h1>
+  <p class="lede">A shared-L1 RISC-V manycore scaled to 1024 cores: the hybrid interconnect that
+  makes it possible, the two coalescing mechanisms it depends on, the LLM workload it targets,
+  everything measured so far, and the defects currently bounding it. <strong>Every abbreviation is defined in the glossary (§11).</strong></p>
+  <div class="meta">
+    terapool_spatz4_fpu_8x8 &middot; branch <code>zexin/teranoc_spatz_mshr</code><br>
+    Compiled from <code>ARCHITECTURE.md</code>, <code>teranoc_architecture.md</code>,
+    <code>qwen38_workload_analysis.md</code>, the RTL, and 299 measured arms
+  </div>
+</header>
+
+<nav class="toc">
+  <a href="#s1"><b>01</b>Design goals</a>
+  <a href="#s2"><b>02</b>Interconnect</a>
+  <a href="#s3"><b>03</b>Memory &amp; addressing</a>
+  <a href="#s4"><b>04</b>Group MSHR</a>
+  <a href="#s5"><b>05</b>Spatz VLSU bursts</a>
+  <a href="#s6"><b>06</b>Bandwidth</a>
+  <a href="#s7"><b>07</b>Target workload</a>
+  <a href="#s8"><b>08</b>Results</a>
+  <a href="#s9"><b>09</b>Kernel mapping &amp; tiles</a>
+  <a href="#s10"><b>10</b>Limitations</a>
+  <a href="#s11"><b>11</b>Unknowns</a>
+  <a href="#s12"><b>12</b>Glossary</a>
+</nav>
+
+<h2 id="s1"><span class="num">01</span>Design goals and the three pillars</h2>
+<p>TeraNoC branches from MemPool and targets a <strong>shared-L1 manycore</strong> that keeps
+MemPool&rsquo;s low-latency, all-to-all TCDM programming model while scaling past the point where a
+single flat crossbar is physically realisable. One tension drives the design &mdash; a flat
+logarithmic crossbar does not reach 1000 cores &mdash; and three mechanisms resolve it.</p>
+<div class="tw"><table>
+<tr><th style="width:30px"></th><th>Pillar</th><th>Mechanism</th><th>Status</th></tr>
+<tr><td class="n">1</td><td><strong>Hybrid interconnect</strong></td><td>Combinational logarithmic crossbar <em>inside</em> a group; 32-bit FlooNoC mesh <em>between</em> groups.</td><td><span class="chip c-good">shipped</span></td></tr>
+<tr><td class="n">2</td><td><strong>Group MSHR</strong></td><td>Per-group coalescer: merges outstanding remote loads to the same line, multicasts the one returned response to every requester.</td><td><span class="chip c-warn">active dev</span></td></tr>
+<tr><td class="n">3</td><td><strong>Spatz VLSU bursts</strong></td><td>Auto-splits aligned unit-stride loads into 16-word bursts &mdash; few coarse requests instead of many single-word ones.</td><td><span class="chip c-warn">active dev</span></td></tr>
+</table></div>
+<p>Pillars 2 and 3 are inseparable: bursts create the coarse requests, the MSHR merges them. How
+tightly, one measurement shows starkly &mdash; with merging accidentally disabled, decode at 8&times;8
+ran at 16.8% efficiency; with it enabled the same kernel reaches <strong>63.6%</strong> (§8.3).</p>
+<div class="grid">
+  <div class="stat"><div class="k">Cores</div><div class="v">1024</div><div class="s">64 groups × 16 tiles</div></div>
+  <div class="stat"><div class="k">FP lanes</div><div class="v">4096</div><div class="s">4 FPU + 4 IPU/core</div></div>
+  <div class="stat"><div class="k">fp16 peak</div><div class="v">16,384</div><div class="s">flop/cycle (8,192 fp32)</div></div>
+  <div class="stat"><div class="k">L1 TCDM</div><div class="v">16 MiB</div><div class="s">16,384 banks × 1 KiB</div></div>
+  <div class="stat"><div class="k">L1 usable</div><div class="v">14.86</div><div class="s">MiB after autotune</div></div>
+  <div class="stat"><div class="k">L2</div><div class="v">32 MiB</div><div class="s">32 banks, 2,048 B/cyc</div></div>
+</div>
+
+<h2 id="s2"><span class="num">02</span>The two-tier interconnect</h2>
+<div class="mer"><pre class="mermaid">
+graph TD
+  SYS["mempool_system<br/>L2 banks · bootrom · peripherals · host chimney"]
+  CL["terapool_cluster_floonoc_wrapper<br/>NumX x NumY grid of groups (8x8 = 64)"]
+  GW["mempool_group_floonoc_wrapper  x64<br/><b>remote-traffic hub</b><br/>req/resp remapping · per-tile crossbar · FlooNoC routers"]
+  GR["mempool_group<br/>intra-group logarithmic crossbar (LIC)"]
+  MSHR["mempool_group_mshr<br/><b>remote-load coalescer</b><br/>64 entries · 4 ways/bank"]
+  TILE["mempool_tile  x16<br/>16 SPM banks each"]
+  CC["spatz_mempool_cc<br/>Snitch scalar core + Spatz vector unit + FPU sequencer"]
+  VLSU["spatz_vlsu<br/>4 memory ports, 4x reorder_buffer"]
+  SYS --> CL --> GW --> GR
+  GR --> TILE --> CC --> VLSU
+  GR --> MSHR
+  MSHR -.->|"coalesced remote requests"| GW
+</pre></div>
+<p class="figcap"><b>Figure 1 — Instantiation hierarchy.</b> Each arrow is a real instantiation site.
+The group wrapper is where the two interconnect tiers meet; the MSHR sits beside the tiles inside the
+group, intercepting remote traffic before it reaches the routers.</p>
+<div class="tw"><table>
+<tr><th></th><th>Intra-group</th><th>Inter-group</th></tr>
+<tr><td>Topology</td><td>logarithmic crossbar (LIC)</td><td>2D mesh (default) or torus</td></tr>
+<tr><td>Width</td><td>full TCDM word</td><td>32-bit FlooNoC flits</td></tr>
+<tr><td>Latency</td><td>combinational, no pipeline regs</td><td>per-hop, FIFO-buffered</td></tr>
+<tr><td>Routing</td><td>&mdash;</td><td>XY dimension-order (0), OddEven (1), O1 (2); torus uses precomputed tables</td></tr>
+</table></div>
+
+<h3>The interconnect hierarchy, stage by stage</h3>
+<div class="mer"><pre class="mermaid">
+graph TD
+  subgraph T["ONE TILE — 1 core complex, 16 SPM banks"]
+    CORE["Snitch + Spatz<br/><b>5 memory ports</b><br/>1 scalar + 4 VLSU · 32 b each"]
+    DEMUX["rw-demux + stream_xbar<br/>5 in → 3 out<br/>splits LOCAL vs REMOTE by addr[11:8]"]
+    BXB["tile bank crossbar<br/>(5 + remote-in) → <b>16 banks</b><br/>combinational"]
+    BANKS[("16 SPM banks<br/>1 KiB each")]
+    CORE --> DEMUX
+    DEMUX -->|"port 0 — LOCAL"| BXB --> BANKS
+  end
+  DEMUX -->|"<b>2 remote req ports</b><br/>2 x 32 b = 64 bit/cyc"| LIC
+  subgraph G["ONE GROUP — 16 tiles, 256 banks"]
+    LIC["intra-group crossbar (LIC)<br/>16 tiles + 1 barrier port<br/><b>combinational, 1 cycle, no pipeline regs</b>"]
+    MSHR["<b>group MSHR</b><br/>64 entries · 4 ways/bank<br/>coalesce out · multicast back"]
+    REMAP["floo_remapper<br/>rotates channel selection<br/>each cycle — breaks hotspots"]
+    LIC -->|"same group,<br/>different tile"| LIC
+    LIC -->|"different group"| MSHR --> REMAP
+  end
+  REMAP --> RT["floo_router<br/>per tile, per channel<br/>FIFO depth 2"]
+  RT --> MESH(["<b>FlooNoC 8x8 mesh</b><br/>32-bit flits · XY routing<br/>per-hop buffered · up to 14 hops"])
+  MESH --> RT2["remote group's router"] --> BXB2["its tile bank crossbar"] --> BK2[("its SPM banks")]
+</pre></div>
+<p class="figcap"><b>Figure 2 — The three interconnect tiers.</b> A memory request is classified once,
+at the tile, by the group field of its address. <b>Same tile</b> never leaves the bank crossbar.
+<b>Same group, different tile</b> crosses the combinational LIC and is back in one cycle.
+<b>Different group</b> leaves through the tile&rsquo;s two remote request ports, is coalesced by the
+group MSHR, spread across channels by the remapper, and travels the mesh — the only tier that costs
+more than a cycle.</p>
+
+<h3>Latency and bandwidth per tier</h3>
+<div class="tw"><table>
+<tr><th>Tier</th><th>Structure</th><th class="n">Latency</th><th class="n">Bandwidth</th><th>Scope</th></tr>
+<tr><td><strong>Intra-tile</strong></td><td>bank crossbar, combinational</td><td class="n">1 cycle</td><td class="n">16 banks × 32 b = <strong>512 bit/cyc</strong></td><td>the tile&rsquo;s own 16 banks</td></tr>
+<tr><td><strong>Intra-group</strong></td><td>logarithmic crossbar (LIC), no pipeline registers</td><td class="n">1 cycle</td><td class="n">16 tiles × 5 ports × 32 b = <strong>2,560 bit/cyc</strong></td><td>any of the group&rsquo;s 256 banks</td></tr>
+<tr><td><strong>Inter-group</strong></td><td>MSHR → remapper → mesh routers, FIFO-buffered per hop</td><td class="n"><strong>multi-cycle</strong>, grows with Manhattan distance (≤ 14 hops at 8×8)</td><td class="n">2 req + 2 resp ports × 32 b = <strong>64 bit/cyc each way, per tile</strong></td><td>any of the machine&rsquo;s 16,384 banks</td></tr>
+</table></div>
+<div class="note"><span class="lab">The number that shapes every kernel</span>
+<p>A core can issue <strong>128 bit/cycle</strong> of vector demand (4 VLSU ports) but can only pull
+<strong>64 bit/cycle</strong> from another group (2 remote response ports). <strong>Remote bandwidth
+is half of local consumption rate</strong> — independently confirmed by the measured per-core
+burst-response ceiling of ~2 words/cycle, set by the MSHR&rsquo;s one-beat-per-entry drain across
+those 2 usable response ports.</p>
+<p>This is why the tiling policy in §9 exists: a tile must be sized so that operands are re-used
+enough times locally to hide a remote path that is 2× narrower and many cycles further away. It is
+also why coalescing pays — the MSHR does not widen this port, but it removes redundant traffic from
+it.</p></div>
+
+<h3>Configurable request and response channels</h3>
+<p>The request and response channel counts are <strong>set independently</strong>, so the network can
+be deliberately asymmetric. Each is a separate router family per tile:</p>
+<div class="tw"><table>
+<tr><th>Family</th><th>Flit type</th><th>Carries</th><th>Payload</th><th>Count</th></tr>
+<tr><td>wide-req</td><td><code>floo_tcdm_rdwr_req_t</code></td><td>reads <em>and</em> writes</td><td>header + <strong>data</strong></td><td><code>noc_req_rdwr_channel_num</code></td></tr>
+<tr><td><strong>narrow-req</strong></td><td><code>floo_tcdm_rd_req_t</code></td><td><strong>reads only</strong></td><td><strong>header only — no data payload</strong></td><td><code>noc_req_rd_channel_num</code></td></tr>
+<tr><td>write-req</td><td>&mdash;</td><td>writes only</td><td>header + data</td><td><code>noc_req_wr_channel_num</code></td></tr>
+<tr><td>resp</td><td><code>floo_tcdm_resp_t</code></td><td>all responses</td><td>header + data</td><td><code>noc_resp_channel_num</code></td></tr>
+</table></div>
+<p>The <strong>read-only channel is the interesting one</strong>: a load request carries no write
+data, so its flit needs only the header — address, source, target, <code>meta_id</code>,
+<code>mshr_tag</code>. Giving reads their own narrow channel means a read no longer occupies a link
+sized for a full write payload, which matters because GEMM traffic is overwhelmingly reads.</p>
+<div class="tw"><table>
+<tr><th>Mode</th><th class="n">narrow-rd</th><th class="n">wide-rdwr</th><th class="n">resp</th><th>Ports per tile (req / resp)</th><th>Rationale</th></tr>
+<tr><td><strong>baseline</strong> <span class="sub">(8×8 shipped)</span></td><td class="n">0</td><td class="n">2</td><td class="n">2</td><td>2 / 2 <span class="sub">(+1 local each)</span></td><td>symmetric; simplest</td></tr>
+<tr><td><strong>narrow</strong></td><td class="n">1</td><td class="n">1</td><td class="n">3</td><td>2 / 3</td><td>splits reads onto a payload-free link and buys a third response channel</td></tr>
+<tr><td><strong>enhanced</strong></td><td class="n">0</td><td class="n">2</td><td class="n">3</td><td>2 / 3</td><td>response-biased — responses carry data, requests often do not</td></tr>
+</table></div>
+<p>The asymmetry is deliberate: <strong>a read request is small and its response is large</strong>, so
+a balanced channel count over-provisions the request direction. Both <code>narrow</code> and
+<code>enhanced</code> shift a channel to the response side, and the measured per-core receive ceiling
+above says that is the side that binds. Raising <code>noc_resp_channel_num</code> to 4 is the
+identified route to a 4× lift in per-core burst-response bandwidth &mdash; not VLSU or port-select
+changes, which have been measured and do not move it.</p>
+<p>AXI traffic for L2 and DMA rides a <strong>separate</strong> FlooNoC narrow-wide network — one
+chimney and one router per group, source-routed — so bulk weight streaming does not contend with
+TCDM requests for the same links.</p>
+
+<h3>Load-balancing knobs</h3>
+<ul>
+<li><strong><code>noc_router_remapping</code></strong> (0/1/2/3 = off/req/resp/both) inserts
+<code>floo_remapper</code> permutation stages that rotate a crossbar selection each cycle, spreading
+traffic across router input ports to break hotspots. <strong>The shipped operating point uses
+req+resp remapping</strong>, worth a measurable step in the MSHR sizing study.</li>
+<li><strong><code>noc_port_hash</code></strong> (bitmask): bit 0 request-port round-robin, bit 1
+response temporal RR, bit 2 response spatial RR.</li>
+<li><strong>Router FIFO depth</strong> (default 2) &mdash; the first lever when router backpressure
+appears.</li>
+</ul>
+<div class="note warn"><span class="lab">Virtual channels are a placeholder</span>
+<p><code>noc_virtual_channel_num</code> compiles to a define but is <strong>not consumed</strong>;
+every <code>floo_router</code> hardwires <code>NumVirtChannels=1</code>. VC-capable routers exist in
+deps and are never instantiated. Consequence: XY on a single-VC mesh cannot <em>routing</em>-deadlock
+&mdash; but the protocol can, and does (§9.1).</p></div>
+
+<h2 id="s3"><span class="num">03</span>Memory hierarchy and addressing</h2>
+<p>Two L1 regions resolved by <code>address_scrambler.sv</code>. <strong>Sequential</strong> swaps
+bits so consecutive addresses land on different tiles &mdash; software sees a per-tile contiguous
+block while physical accesses interleave; used for stacks and <code>domain_malloc</code>.
+<strong>Interleaved (SPM)</strong> is word-interleaved across banks for bandwidth.</p>
+<pre>byte address:  31 ........ 12 | 11 10 9 8 | 7 6 5 4 | 3 2 | 1 0
+field:         bank_row        |   GROUP   |  TILE   | bank | byte</pre>
+<p>Consecutive words round-robin bank → tile → group over a full 1024-word sweep. The
+<strong>target NoC group is <code>addr[11:8]</code></strong>. Every field&rsquo;s position depends on
+the widths below it, so a software constant encoding a field offset is valid only for the mesh it was
+written for: a hardcoded <code>&lt;&lt;14</code> word stride (16 groups) silently made every group
+barrier a no-op at 64 groups, which needs <code>&lt;&lt;16</code>. L2 sits at
+<code>0x8000_0000</code>, 1 KiB-interleaved across banks by <code>axi_L2_interleaver.sv</code>.</p>
+
+<h2 id="s4"><span class="num">04</span>Group MSHR &mdash; coalescing and multicast</h2>
+<p>Under matmul traffic many cores in a group load the <strong>same</strong> lines (the shared B
+operand). Without coalescing each becomes an independent request and response crossing the mesh. The
+MSHR merges same-line requests into one outstanding NoC request and multicasts the single returned
+line to every merged requester &mdash; cutting request pressure and redundant response bandwidth.</p>
+<div class="note"><span class="lab">The structural constraint</span>
+<p>The MSHR is <strong>source-side</strong>: a request enters the MSHR of the group its <em>core</em>
+lives in, not the group the address targets. Coalescing therefore only happens among the 16 cores of
+one group, which caps achievable merge degree &mdash; for a matmul B-share it is degree 2 &mdash; and
+is why shipped <code>merge_reqs</code> is a small number rather than 64.</p></div>
+
+<div class="mer"><pre class="mermaid">
+graph TD
+  subgraph G["one group — 16 cores"]
+    C0["core 3<br/>load line X"]
+    C1["core 7<br/>load line X"]
+    C2["core 11<br/>load line X"]
+  end
+  C0 --> E["MSHR entry<br/>base_addr = X<br/>sub_reqs[0..2] = {3,7,11}"]
+  C1 --> E
+  C2 --> E
+  E -->|"ONE request onto the mesh"| N(["FlooNoC"])
+  N -->|"ONE response returns"| E2["same entry<br/>beat_pending set for<br/>every sub-requester"]
+  E2 --> O0["core 3"]
+  E2 --> O1["core 7"]
+  E2 --> O2["core 11"]
+</pre></div>
+<p class="figcap"><b>Figure 3 — Coalescing and multicast.</b> Three cores in one group load the same
+line. Without the MSHR that is three requests and three responses across the mesh; with it, one of
+each. The fan-out on the return side — setting <code>beat_pending</code> for every valid sub-requester
+— <i>is</i> the multicast. Because the MSHR is source-side, the cores that can merge are always the 16
+in one group, never across groups.</p>
+
+<h3>Entry array and banking</h3>
+<ul>
+<li><strong>64 entries</strong> in banks of <strong>4 ways</strong>. A <code>(tgt_group, addr)</code>
+key hashes to a bank by folding address bits above the burst-align boundary with the group id
+&mdash; folding <em>above</em> that boundary keeps all beats of one burst in a single bank.</li>
+<li>Each entry holds the merge key, <code>sub_reqs[]</code> per-requester records (index 0 = owner),
+out-of-order beat tracking (<code>beat_pending / beats_left / beat_seen / beat_done</code>), a small
+<code>resp_buf</code> FIFO and a 2-bit state.</li>
+<li><strong>Response routing is O(1)</strong>: the <code>mshr_tag</code> stamped at allocation
+(<code>entry_id + 1</code>; tag 0 = bypass sentinel) directly indexes the table on return &mdash; no
+CAM, no associative search.</li>
+</ul>
+
+<h3>Admission rules</h3>
+<ul>
+<li><strong>No-late-join.</strong> A burst merge is accepted <em>only before the first response beat
+arrives</em>. Once a response is seen, further merges are blocked and a same-address request
+allocates a <strong>second entry</strong> with a distinct <code>meta_id</code> range. Two entries per
+address is legitimate &mdash; responses route by <code>(tile_id, core_id, meta_id range)</code>, not
+by address.</li>
+<li><strong>Stall-and-merge.</strong> A mergeable miss that loses its bank&rsquo;s allocation slot
+stalls and retries rather than bypassing, so next cycle it either wins the slot or merges into the
+entry the winner created: full coalescing, no extra entry, no bypass.</li>
+<li>Merge tiers are independently gated: single-word, non-full burst, full burst.</li>
+</ul>
+
+<h3>Response FSM and the multicast</h3>
+<div class="mer"><pre class="mermaid">
+stateDiagram-v2
+  [*] --> IDLE
+  IDLE --> WAIT_RESP: allocate<br/>(miss · mergeable · bank free)
+  WAIT_RESP --> WAIT_RESP: merge another requester<br/>(only before first beat)
+  WAIT_RESP --> DRAIN_RESP: first response beat captured
+  DRAIN_RESP --> WAIT_RESP: beat drained, more beats left
+  DRAIN_RESP --> CACHED: single-word beat drained<br/>(response cache enabled)
+  DRAIN_RESP --> IDLE: last beat drained
+  CACHED --> DRAIN_RESP: same-address hit<br/>re-serve cached data
+  CACHED --> IDLE: reallocated / AMO invalidate
+</pre></div>
+<p class="figcap"><b>Figure 4 — MSHR entry state machine.</b> The self-loop on
+<code>WAIT_RESP</code> is coalescing; the <code>CACHED</code> state is a best-effort single-word reuse
+cache. The one-way door is <code>WAIT_RESP → DRAIN_RESP</code>: once the first beat arrives no further
+requester may join (the no-late-join rule), which is why a late same-address request allocates a
+second entry instead.</p>
+<p>At the head of each drain the entry sets <code>beat_pending</code> for <em>every valid
+sub-requester</em> &mdash; <strong>that fan-out is the multicast</strong>. With multi-port drain
+enabled, up to N response ports each drain one sub-request per cycle; the next head beat&rsquo;s
+<code>beat_pending</code> only initialises once the current one is fully cleared, giving roughly one
+beat per entry per cycle. <code>EnableRespCache</code> keeps the last drained single-word line as a
+best-effort cache for future same-address hits; any AMO invalidates all cached entries.
+<strong>Three independent free-running round-robin counters</strong> (allocation priority per bank,
+entry scan, sub-request scan) advance unconditionally so priority can never freeze.</p>
+
+<h3>Sizing study</h3>
+<div class="tw"><table>
+<tr><th>Version</th><th>Change</th><th class="n">Overflow</th><th class="n">From MSHR</th><th>Verdict</th></tr>
+<tr><td>v3</td><td>16 → 32 entries</td><td class="n">49%</td><td class="n">24%</td><td>under-sized</td></tr>
+<tr><td>v4</td><td>32 → 64</td><td class="n">17%</td><td class="n">74%</td><td>&mdash;</td></tr>
+<tr><td>v5</td><td>→ 128</td><td class="n">0.1%</td><td class="n">97%</td><td>over-sized (62% util)</td></tr>
+<tr><td><strong>v6</strong></td><td>64 + req&amp;resp remapping</td><td class="n">5%</td><td class="n">&mdash;</td><td><span class="chip c-good">shipped</span></td></tr>
+</table></div>
+<p class="sub">The MSHR has since grown a much larger knob surface than the design doc records &mdash;
+field-select bank hashing, separate hold windows for single and burst traffic, serve timeout,
+bank-full backpressure, a self-invalidating response cache, and runtime CSR configuration. Several
+were added chasing the livelock in §9.2.</p>
+
+<h2 id="s5"><span class="num">05</span>Spatz VLSU and burst splitting</h2>
+<p>The vector LSU auto-splits a unit-stride load into <strong>16-word bursts</strong> when it clears
+five predicates. When <em>any</em> fails, the load leaves the burst path <strong>silently</strong> and
+degenerates into <code>vl/4</code> single-word requests &mdash; which is why a dedicated
+<code>[BURSTWHY]</code> probe reports each conjunct separately.</p>
+<div class="tw"><table>
+<tr><th>Predicate</th><th>Meaning</th><th>Failure mode observed</th></tr>
+<tr><td><code>!strided</code>, <code>!indexed</code></td><td>unit-stride access only</td><td>&mdash;</td></tr>
+<tr><td><code>ew_ok</code></td><td>element width acceptable</td><td>burst path was <code>EW_32</code>-gated; fp16 needed <code>BurstSubWord</code></td></tr>
+<tr><td><code>vl &ge; FullBurstBytes</code></td><td>at least one full 64 B burst</td><td><strong>the §9.2 livelock</strong> — small P drops <code>vl</code> to 48/32 B</td></tr>
+<tr><td><code>vl &le; NrOutstandingLoads×4 B</code></td><td>fits the ROB tag budget</td><td>load-bearing — removing it fires assertion A4</td></tr>
+<tr><td><code>align64(rs1)</code></td><td>64-byte-aligned base</td><td>at P=96 the 48 B row stride aligns only 25% of the time</td></tr>
+</table></div>
+
+<div class="mer"><pre class="mermaid">
+graph LR
+  V["vector load<br/>vl = 128 B, unit stride<br/>64 B-aligned base"] --> P{"all 5 burst<br/>predicates pass?"}
+  P -->|"yes"| B["<b>burst path</b><br/>2 x 16-word bursts on port 0<br/>+ single-word tail if unaligned"]
+  P -->|"no — any conjunct fails"| S["<b>non-burst path</b><br/>vl/4 = 32 single-word requests<br/>spread over ports 0-3"]
+  B --> M1["MSHR merges<br/>few coarse requests"]
+  S --> M2["MSHR sees<br/>many fine requests<br/>+ single-only response hold"]
+  M2 -.->|"at small P this is<br/>the §9.2 livelock"| L(["thrash"])
+</pre></div>
+<p class="figcap"><b>Figure 5 — Burst splitting, and why failing it is expensive.</b> The fall-back is
+silent — the load still returns correct data, so nothing reports it except the <code>[BURSTWHY]</code>
+probe. But it converts one coarse request into <code>vl/4</code> fine ones <i>and</i> routes them
+through the response-hold mechanism, which is sized for single stragglers. That is the mechanism
+behind the 29 livelocked campaign arms.</p>
+
+<h3>Reorder buffers</h3>
+<p>Four ROBs, one per memory port, 64 entries × 32 bits each &mdash; <strong>8,192 flops per core</strong>
+of load-side storage. Three structural facts drive the recent work:</p>
+<ul>
+<li><strong>Bursts use ROB0 only.</strong> Ports 1&ndash;3 fail <code>burst_addr_aligned</code> by
+construction (their first address is <code>rs1 + port×4</code>), and ParityDrain lands even beats
+from memory port 0 and odd beats from port 1 into ROB0&rsquo;s contiguous id range.</li>
+<li><strong>The ROB id <em>is</em> the ring pointer and the memory response tag</strong>, so id space
+and entry count are the same quantity by construction. That coupling is the root of §9.3.</li>
+<li><strong>The <code>vl</code> ceiling is load-bearing.</strong> Removing it is not conservative
+housekeeping: a directed test with the check disabled fires assertion A4 (&ldquo;block and single ROB
+id request asserted together&rdquo;) and dies, while the identical image with the check passes 15/15.</li>
+</ul>
+
+<h3>Two contracts that bite</h3>
+<ul>
+<li><code>vle</code> after <code>vse</code> stalls until every store response is acked &mdash; the
+VLSU cannot accept a load in <code>RunningStore</code>, and the transition needs the ROB drained
+<em>and</em> <code>store_count_q == 0</code>. Never use a <code>vle</code> as a store drain.</li>
+<li>A barrier does <strong>not</strong> fence VLSU stores. <code>mempool_barrier</code> is a scalar
+AMO; a plain <code>fence</code> waits only on the integer LSU. Cross-core readers need a real
+store-completion guarantee.</li>
+</ul>
+
+<h2 id="s6"><span class="num">06</span>Where the bandwidth actually is</h2>
+<p>The L1 has 16,384 banks, which looks like enormous bandwidth. It is the wrong number: banking
+factor 4 gives four banks per port for <strong>conflict avoidance</strong>, not width. The PE-side
+port count is the constraint.</p>
+<div class="tw"><table>
+<tr><th>Level</th><th class="n">Banks</th><th class="n">Bank-side</th><th class="n">PE ports</th><th class="n">PE-side bandwidth</th></tr>
+<tr><td>Core</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">4 VLSU + 1 scalar</td><td class="n"><strong>128 bit/cyc</strong> vector</td></tr>
+<tr><td>Tile</td><td class="n">16</td><td class="n">512 bit/cyc</td><td class="n">5</td><td class="n">160 bit/cyc</td></tr>
+<tr><td>Group</td><td class="n">256</td><td class="n">8,192 bit/cyc</td><td class="n">64</td><td class="n"><strong>2,048 bit/cyc</strong></td></tr>
+<tr><td>Machine</td><td class="n">16,384</td><td class="n">524,288 bit/cyc</td><td class="n">4,096</td><td class="n"><strong>131,072 bit/cyc</strong></td></tr>
+</table></div>
+
+<h3>The scaling asymmetry</h3>
+<div class="tw"><table>
+<tr><th></th><th class="n">4×4</th><th class="n">8×8</th><th class="n">ratio</th></tr>
+<tr><td>cores / groups</td><td class="n">256 / 16</td><td class="n">1,024 / 64</td><td class="n">4×</td></tr>
+<tr><td>fp16 peak flop/cyc</td><td class="n">4,096</td><td class="n">16,384</td><td class="n">4×</td></tr>
+<tr><td>L1 usable</td><td class="n">3.61 MiB</td><td class="n">14.86 MiB</td><td class="n">4×</td></tr>
+<tr><td>L1 bandwidth</td><td class="n">16 KiB/cyc</td><td class="n">64 KiB/cyc</td><td class="n">4×</td></tr>
+<tr><td><strong>L2 bandwidth</strong></td><td class="n">1,024 B/cyc</td><td class="n">2,048 B/cyc</td><td class="n"><strong>2×</strong></td></tr>
+<tr><td>kernel work-split floor</td><td class="n">M ≥ 128</td><td class="n">M ≥ 512</td><td class="n">4×</td></tr>
+</table></div>
+<p><strong>Compute and L1 scale 4×; L2 bandwidth only 2×.</strong> Decode arithmetic intensity is
+just the batch size, so the batch needed to stay compute-bound is <strong>B ≥ 4 at 4×4 and B ≥ 8 at
+8×8</strong>. Scaling the mesh 4× doubles the batch you must supply merely to keep the machine fed.</p>
+<div class="note"><span class="lab">Cost of a matrix accelerator, in the currency that binds</span>
+<p>This machine spends <strong>32 bit/cycle of L1 port per FPU</strong>. A 32×16 systolic array feeds
+512 MACs from 48 operands &mdash; <strong>1.5 bit/cycle per MAC</strong>, about <strong>21× less
+interconnect per unit of compute</strong>, because reuse happens spatially between PEs rather than
+through memory. So adding one costs <strong>crossbar ports</strong>, not MAC area: ~768 bit/cyc is
+<strong>37.5% of a group&rsquo;s PE-side bandwidth</strong> and <strong>24 extra 32-bit masters</strong>
+against a tile crossbar with 5 local inputs. Per-tile attachment is impossible (768 &gt; 512 even
+bank-side); a 512-bit wide path already exists as the DMA superbank port.</p></div>
+
+<h2 id="s7"><span class="num">07</span>Target workload &mdash; Qwen3.8-27B</h2>
+<div class="note bad"><span class="lab">Not a normal transformer</span>
+<p><strong>48 of its 64 layers are Gated DeltaNet</strong> &mdash; linear attention with a recurrent
+state &mdash; and only 16 are ordinary attention. &ldquo;Extract the usual LLM kernels&rdquo; is
+therefore the wrong starting list, and the memory behaviour of three layers in four is unlike any
+GEMM.</p></div>
+<div class="tw"><table>
+<tr><th>Property</th><th>Value</th><th>Property</th><th>Value</th></tr>
+<tr><td>Layers</td><td>64 &mdash; pattern <code>[DeltaNet→FFN]×3 → [GatedAttn→FFN]</code>, ×16</td><td>Hidden</td><td>5120</td></tr>
+<tr><td>FFN intermediate</td><td>17,408, SwiGLU</td><td>Vocab</td><td>248,320 (untied)</td></tr>
+<tr><td>Gated attention</td><td>GQA, 24 Q heads, 4 KV heads, head_dim 256</td><td>Weights</td><td><strong>bfloat16</strong></td></tr>
+<tr><td>DeltaNet heads</td><td>16 key / 48 value, head dim 128</td><td>Context</td><td>262,144 native</td></tr>
+</table></div>
+
+<h3>Where the time goes &mdash; decode, batch 1, per token</h3>
+<div class="tw"><table>
+<tr><th>Kernel</th><th class="n">MACs</th><th class="n">Share</th><th style="width:150px"></th></tr>
+<tr><td>FFN (SwiGLU) ×64</td><td class="n">17,113 M</td><td class="n"><strong>66.9%</strong></td><td><span class="bar"><i style="width:100%"></i></span></td></tr>
+<tr><td>DeltaNet projections ×48</td><td class="n">5,537 M</td><td class="n">21.6%</td><td><span class="bar"><i style="width:32%"></i></span></td></tr>
+<tr><td>Attention projections ×16</td><td class="n">1,678 M</td><td class="n">6.6%</td><td><span class="bar"><i style="width:10%"></i></span></td></tr>
+<tr><td>lm_head</td><td class="n">1,271 M</td><td class="n">5.0%</td><td><span class="bar"><i style="width:7%"></i></span></td></tr>
+<tr><td>DeltaNet state update ×48</td><td class="n">76 M</td><td class="n">0.3%</td><td><span class="bar"><i style="width:1%"></i></span></td></tr>
+<tr><td><strong>Total</strong></td><td class="n"><strong>25,598 M</strong></td><td class="n">51.2 GFLOP/token</td><td></td></tr>
+</table></div>
+<p><strong>~95% of decode work is plain GEMM</strong> &mdash; which the existing kernel already runs
+at 84&ndash;96% of roofline at 4×4. The exotic parts of the model are cheap in flops and expensive in
+memory behaviour, which is precisely the regime this machine exists to study.</p>
+
+<h3>Capacity &mdash; nothing fits, at either mesh</h3>
+<div class="tw"><table>
+<tr><th>Object</th><th class="n">fp16 size</th><th class="n">vs 4×4 L1</th><th class="n">vs 8×8 L1</th></tr>
+<tr><td>one FFN matrix (5120×17408)</td><td class="n">170 MiB</td><td class="n">47×</td><td class="n">11×</td></tr>
+<tr><td>one full FFN</td><td class="n">510 MiB</td><td class="n">141×</td><td class="n">34×</td></tr>
+<tr><td>one DeltaNet layer&rsquo;s weights</td><td class="n">220 MiB</td><td class="n">61×</td><td class="n">15×</td></tr>
+<tr><td>whole model</td><td class="n">53.7 GB</td><td class="n">15,000×</td><td class="n">3,700×</td></tr>
+</table></div>
+<p>Every kernel is therefore a <em>tile</em> of a layer at both meshes, and the honest framing is that
+<strong>we measure the on-chip tile</strong>. A real deployment streams DRAM → L2 → DMA → L1.</p>
+
+<h3>The DeltaNet state wall &mdash; and why 8×8 exists</h3>
+<p>The recurrent state is <code>48 value heads × 128 × 128 × 4 B = <strong>3.00 MiB per sequence per
+layer</strong></code> in fp32 (1.50 MiB fp16). As a percentage of <em>usable</em> L1:</p>
+<div class="tw"><table>
+<tr><th>Mesh</th><th>dtype</th><th class="n">B=1</th><th class="n">B=2</th><th class="n">B=4</th><th class="n">B=8</th></tr>
+<tr><td>4×4</td><td>fp32</td><td class="n"><span class="chip c-warn">83%</span></td><td class="n">166%</td><td class="n">332%</td><td class="n">665%</td></tr>
+<tr><td>4×4</td><td>fp16</td><td class="n">42%</td><td class="n">83%</td><td class="n">166%</td><td class="n">332%</td></tr>
+<tr><td>8×8</td><td>fp32</td><td class="n">20%</td><td class="n">40%</td><td class="n">81%</td><td class="n">162%</td></tr>
+<tr><td><strong>8×8</strong></td><td><strong>fp16</strong></td><td class="n">10%</td><td class="n">20%</td><td class="n">40%</td><td class="n"><span class="chip c-good">81%</span></td></tr>
+</table></div>
+<div class="note good"><span class="lab">The scaling argument the GEMM campaign could not produce</span>
+<p><strong>At 4×4 the state and the batch are in direct conflict.</strong> Compute-boundness needs
+B ≥ 4; the state does not fit past B=1 in fp32 or B=2 in fp16. <em>No batch satisfies both.</em>
+<strong>At 8×8 they line up:</strong> B=8 in fp16 puts the state at 81% of L1, and B ≥ 8 is exactly
+the compute-bound threshold. The mesh that makes the bandwidth problem harder is the mesh that makes
+the capacity problem solvable, and the two land on the same number. <strong>8×8 is what makes this
+model&rsquo;s dominant layer type viable at all.</strong></p></div>
+<p><strong>Head-parallel tiling.</strong> Splitting 48 value heads across groups gives exactly 3
+heads/group at 4×4 and 0.75 at 8×8 (so 16 groups idle unless a head&rsquo;s state is split or batch
+≥ 2 supplies 96 head-instances). Precisely: L1 is one shared pool, so head-parallelism does
+<strong>not</strong> reduce the aggregate footprint &mdash; it makes each group&rsquo;s state live in
+its <em>own</em> banks, so the per-token read-modify-write generates <strong>zero NoC traffic</strong>.
+The state is touched twice per token per layer, so this is a large win and the natural mapping.</p>
+<div class="note warn"><span class="lab">Decide before writing kernels</span>
+<p>The model ships in <strong>bfloat16 and this hardware has bf16 switched off</strong> &mdash; one
+masked-off bit in the fpnew configuration. IEEE fp16 works and is 2× fp32 for <code>vfmacc</code>
+(but <strong>1×</strong> for <code>vfwmacc</code>, verified). KV cache for the 16 attention layers is
+64 KiB/token model-wide &mdash; 256 MiB at T=4096, 17× the 8×8 L1. The hybrid design is what keeps
+that from dominating.</p></div>
+
+<h2 id="s8"><span class="num">08</span>Results</h2>
+
+<h3>8.1 &mdash; 4×4 GEMM sweep</h3>
+<p>The mature configuration. Best shapes reach <strong>87&ndash;97% of roofline</strong>, and fp16
+delivers <strong>1.13&ndash;1.32×</strong> over fp32 on the same shape.</p>
+<div class="tw"><table>
+<tr><th>Shape</th><th class="n">Ideal</th><th class="n">fp16 cyc</th><th class="n">fp16 eff</th><th class="n">fp32 eff</th><th class="n">fp16 speedup</th></tr>
+<tr><td><code>128x1024x512</code></td><td class="n">65,536</td><td class="n">67,693</td><td class="n"><strong>96.8%</strong></td><td class="n">75.4%</td><td class="n">1.28×</td></tr>
+<tr><td><code>256x1024x256</code></td><td class="n">65,536</td><td class="n">68,253</td><td class="n"><strong>96.0%</strong></td><td class="n">73.9%</td><td class="n">1.30×</td></tr>
+<tr><td><code>128x512x512</code></td><td class="n">32,768</td><td class="n">34,489</td><td class="n"><strong>95.0%</strong></td><td class="n">74.0%</td><td class="n">1.28×</td></tr>
+<tr><td><code>256x512x512</code></td><td class="n">65,536</td><td class="n">71,218</td><td class="n">92.0%</td><td class="n">69.7%</td><td class="n">1.32×</td></tr>
+<tr><td><code>256x256x256</code></td><td class="n">16,384</td><td class="n">18,177</td><td class="n">90.1%</td><td class="n">78.8%</td><td class="n">1.14×</td></tr>
+</table></div>
+
+<h3>8.2 &mdash; 8×8 GEMM campaign</h3>
+<div class="grid">
+  <div class="stat"><div class="k">Completed</div><div class="v" style="color:var(--good)">184</div><div class="s">of 248 arms</div></div>
+  <div class="stat"><div class="k">Livelocked</div><div class="v" style="color:var(--warn)">29</div><div class="s">§9.2</div></div>
+  <div class="stat"><div class="k">Deadlocked</div><div class="v" style="color:var(--bad)">22</div><div class="s">uncategorised</div></div>
+  <div class="stat"><div class="k">Median eff.</div><div class="v">42.3%</div><div class="s">mean 44.2%</div></div>
+  <div class="stat"><div class="k">Best</div><div class="v">89.3%</div><div class="s">fp16 1024×2048×512</div></div>
+  <div class="stat"><div class="k">Worst</div><div class="v">7.4%</div><div class="s">fp16 2048×32×128</div></div>
+</div>
+<p><strong>51 of 235 delivered arms produced no result &mdash; a 21% failure rate</strong>, and among
+those that did, efficiency spans a factor of twelve. Both say the limiter is not compute but whether
+a shape keeps the memory system coherent. Note the drop from 4×4&rsquo;s 87&ndash;97% peak to
+8×8&rsquo;s 89.3% peak and much lower median: <strong>scale-up loss is real and is the campaign&rsquo;s
+central finding.</strong></p>
+
+<h4>The cohort target dominates &mdash; a software parameter beats every hardware knob</h4>
+<div class="tw"><table>
+<tr><th>Cohort target</th><th class="n">Arms</th><th class="n">Median efficiency</th><th style="width:180px"></th></tr>
+<tr><td><strong>4</strong></td><td class="n">39</td><td class="n"><strong>59.9%</strong></td><td><span class="bar"><i class="g" style="width:100%"></i></span></td></tr>
+<tr><td><strong>8</strong></td><td class="n">51</td><td class="n"><strong>55.6%</strong></td><td><span class="bar"><i class="g" style="width:93%"></i></span></td></tr>
+<tr><td>16</td><td class="n">40</td><td class="n">39.9%</td><td><span class="bar"><i style="width:67%"></i></span></td></tr>
+<tr><td>2</td><td class="n">35</td><td class="n">26.2%</td><td><span class="bar"><i class="w" style="width:44%"></i></span></td></tr>
+<tr><td>1</td><td class="n">19</td><td class="n">15.5%</td><td><span class="bar"><i class="b" style="width:26%"></i></span></td></tr>
+</table></div>
+<p>Targets 4&ndash;8 are the operating band; target 1 is catastrophic and 16 is worse than 8 &mdash; a
+cohort too large cannot assemble before the no-late-join window closes. <strong>A 4× swing in median
+efficiency sits behind a software constant</strong>, larger than any hardware knob measured here.</p>
+
+<h3>8.3 &mdash; Decode, and the value of coalescing</h3>
+<p>Decode is the workload this machine is argued on, and it is where pillar 2 pays. The table below
+is an A/B on <strong>MSHR request merging</strong> alone, same kernel and same shapes, across both
+meshes &mdash; the most direct measurement of what coalescing is worth on the target workload.</p>
+<div class="tw"><table>
+<tr><th>Mesh</th><th>Prec</th><th class="n">D</th><th class="n">Merge OFF</th><th class="n">Merge ON</th><th class="n">Change</th><th class="n">Efficiency</th></tr>
+<tr><td>8×8</td><td>fp16</td><td class="n">128</td><td class="n">48,825</td><td class="n">12,878</td><td class="n"><strong>−73.6%</strong></td><td class="n">16.8% → <strong>63.6%</strong></td></tr>
+<tr><td>8×8</td><td>fp16</td><td class="n">256</td><td class="n">66,868</td><td class="n">21,587</td><td class="n"><strong>−67.7%</strong></td><td class="n">24.5% → <strong>75.9%</strong></td></tr>
+<tr><td>8×8</td><td>fp32</td><td class="n">128</td><td class="n">35,946</td><td class="n">13,544</td><td class="n">−59.1%</td><td class="n">22.8% → <strong>60.5%</strong></td></tr>
+<tr><td>8×8</td><td>fp32</td><td class="n">256</td><td class="n">50,747</td><td class="n">24,149</td><td class="n">−50.3%</td><td class="n">32.3% → <strong>67.8%</strong></td></tr>
+<tr><td>4×4</td><td>fp16</td><td class="n">128</td><td class="n">15,697</td><td class="n">10,344</td><td class="n">−34.4%</td><td class="n">52.2% → <strong>79.2%</strong></td></tr>
+<tr><td>4×4</td><td>fp16</td><td class="n">256</td><td class="n">24,867</td><td class="n">19,458</td><td class="n">−23.5%</td><td class="n">65.9% → <strong>84.2%</strong></td></tr>
+<tr><td>4×4</td><td>fp32</td><td class="n">128</td><td class="n">13,291</td><td class="n">10,755</td><td class="n">−18.6%</td><td class="n">61.6% → <strong>76.2%</strong></td></tr>
+<tr><td>4×4</td><td>fp32</td><td class="n">256</td><td class="n">25,768</td><td class="n">19,169</td><td class="n">−24.7%</td><td class="n">63.6% → <strong>85.5%</strong></td></tr>
+</table></div>
+<p><strong>Coalescing is worth up to 3.8× on decode</strong>, and it matters most where the machine is
+largest: the 8×8 gain (&minus;50% to &minus;74%) is roughly triple the 4×4 gain (&minus;19% to
+&minus;34%). That is the expected shape &mdash; more groups means more cores contending for the same
+weight lines, so more to merge &mdash; and it is the clearest quantitative case for pillar 2.</p>
+<p>Without merging, 8×8 decode reaches only 16.8&ndash;32.3% and the achieved weight-streaming
+bandwidth converges at a level that looks like a hard architectural ceiling. With it, the same
+kernels reach <strong>60.5&ndash;75.9%</strong>. <strong>A coalescing mechanism is therefore not an
+optimisation on this machine &mdash; it is what makes the large mesh worth building.</strong></p>
+
+<h3>8.4 &mdash; VLSU reorder-buffer sizing</h3>
+<div class="tw"><table>
+<tr><th>Shape</th><th class="n">A: rob64+dual</th><th class="n">B: rob64 no dual</th><th class="n">Cost of removing dual-load</th><th style="width:130px"></th></tr>
+<tr><td><code>d16b</code></td><td class="n">21,587</td><td class="n">26,168</td><td class="n">+21.2%</td><td><span class="bar"><i style="width:100%"></i></span></td></tr>
+<tr><td><code>p09</code></td><td class="n">29,660</td><td class="n">34,519</td><td class="n">+16.4%</td><td><span class="bar"><i style="width:77%"></i></span></td></tr>
+<tr><td><code>p50</code></td><td class="n">10,261</td><td class="n">11,886</td><td class="n">+15.8%</td><td><span class="bar"><i style="width:75%"></i></span></td></tr>
+<tr><td><code>d32b</code></td><td class="n">24,149</td><td class="n">26,682</td><td class="n">+10.5%</td><td><span class="bar"><i style="width:50%"></i></span></td></tr>
+<tr><td><code>d16a</code></td><td class="n">12,878</td><td class="n">13,906</td><td class="n">+8.0%</td><td><span class="bar"><i style="width:38%"></i></span></td></tr>
+<tr><td><code>p66</code></td><td class="n">13,865</td><td class="n">14,939</td><td class="n">+7.7%</td><td><span class="bar"><i style="width:36%"></i></span></td></tr>
+<tr><td><code>p78</code></td><td class="n">22,941</td><td class="n">24,584</td><td class="n">+7.2%</td><td><span class="bar"><i style="width:34%"></i></span></td></tr>
+<tr><td><code>p49f</code></td><td class="n">9,441</td><td class="n">9,836</td><td class="n">+4.2%</td><td><span class="bar"><i style="width:20%"></i></span></td></tr>
+<tr><td><code>d32a</code></td><td class="n">13,544</td><td class="n">13,962</td><td class="n">+3.1%</td><td><span class="bar"><i style="width:15%"></i></span></td></tr>
+</table></div>
+<p class="sub">The <code>d*</code> shapes are the Qwen decode kernels from §8.3 — the two campaigns
+measure the same arms.</p>
+<div class="note warn"><span class="lab">Reported separately, on purpose</span>
+<p><code>p20</code> (fp16 2048×64×128) costs <strong>27.2×</strong>, not a percentage: 10,669 cycles
+against 290,561. Averaging it in turns &ldquo;+3.1% to +21.2%&rdquo; into &ldquo;+3.1% to
++2623%&rdquo;. It is the §9.2 livelock, and the clean statement uses work not time: <strong>both arms
+perform the same 10.4M busy lane-cycles</strong>, one in 10,246 cycles and the other in 290,137.</p></div>
+<ul>
+<li><strong>ROB depth alone is worth exactly nothing.</strong> Arms B (64-deep) and C (32-deep) are
+identical <em>to the cycle</em> on all ten shapes. Every gain credited to depth is really dual-load,
+which depth merely permits.</li>
+<li><strong>100% of sampled loads take the burst path, and bursts use ROB0 only</strong> &mdash; three
+quarters of the 8,192 load-side flops serve a path these workloads never take.</li>
+<li><strong>Shrinking ROB1&ndash;3 to 16 entries is free on burst work</strong> (14 of 14 arms
+identical to the cycle, −56% storage) <strong>and hangs the non-burst path</strong> (§9.3). Both
+halves are true; quoting either alone misleads.</li>
+</ul>
+
+<h2 id="s9"><span class="num">09</span>Kernel mapping and chosen tile sizes</h2>
+<p>Every operation runs on Spatz; Snitch does address generation, tile scheduling, DMA issue and
+barriers. There is no engine map, no port-width constraint and no padding to an accelerator minimum
+&mdash; which is the practical consequence of choosing vector cores over a matrix engine.</p>
+
+<h3>9.1 &mdash; Operation inventory</h3>
+<p><strong>have</strong> = an existing kernel covers it; <strong>write</strong> = new code.
+Tranches order the work so each produces a quotable result without blocking the next.</p>
+<div class="tw"><table>
+<tr><th>Block</th><th>Operation</th><th>Logical shape</th><th>Status</th><th>Tranche</th></tr>
+<tr><td rowspan="4"><strong>FFN</strong><br><span class="sub">64 layers · 69.1% of MACs</span></td>
+    <td>gate / up GEMM</td><td><code>[S,5120]×[5120,17408]</code></td><td><span class="chip c-good">have</span></td><td>T0</td></tr>
+<tr><td>down GEMM</td><td><code>[S,17408]×[17408,5120]</code></td><td><span class="chip c-good">have</span></td><td>T0</td></tr>
+<tr><td>RMSNorm</td><td><code>[S,5120]</code> offset</td><td><span class="chip c-warn">write</span> — needs rsqrt</td><td>T1</td></tr>
+<tr><td>SiLU · mul</td><td><code>[S,17408]</code></td><td><span class="chip c-warn">write</span> — needs sigmoid</td><td>T1</td></tr>
+<tr><td rowspan="5"><strong>Gated attention</strong><br><span class="sub">16 layers · 8.4%</span></td>
+    <td>Q+gate GEMM</td><td><code>[S,5120]×[5120,12288]</code></td><td><span class="chip c-good">have</span></td><td>T0</td></tr>
+<tr><td>K / V GEMM</td><td><code>[S,5120]×[5120,1024]</code> each</td><td><span class="chip c-good">have</span></td><td>T0</td></tr>
+<tr><td>QK / PV GEMM</td><td>per head, <code>[S,256]×[256,S]</code> / <code>[S,S]×[S,256]</code></td><td><span class="chip c-good">have</span></td><td>T0</td></tr>
+<tr><td>softmax · scale · mask</td><td>online row softmax, fp32 accumulators</td><td><span class="chip c-warn">write</span></td><td>T1</td></tr>
+<tr><td>partial MRoPE · QK-norm · output gate</td><td>dims <code>[0:64]</code>, sections 11/11/10</td><td><span class="chip c-warn">write</span></td><td>T1</td></tr>
+<tr><td rowspan="5"><strong>Gated DeltaNet</strong><br><span class="sub">48 layers · 22.5%</span></td>
+    <td>QKV / Z / O GEMM</td><td><code>[S,5120]×[5120,10240]</code> etc.</td><td><span class="chip c-good">have</span></td><td>T0</td></tr>
+<tr><td>a+b fused GEMM</td><td><code>[S,5120]×[5120,96]</code></td><td><span class="chip c-good">have</span> — <code>P&lt;128</code> is the hard regime</td><td>T0</td></tr>
+<tr><td>causal depthwise conv1d</td><td>10,240 channels, K=4</td><td><span class="chip c-warn">write</span> — <code>vfslide1up</code></td><td>T1</td></tr>
+<tr><td>L2-norm · β sigmoid · decay softplus</td><td>over 16 Q/K and 48 v heads</td><td><span class="chip c-warn">write</span></td><td>T1</td></tr>
+<tr><td><strong>delta rule</strong></td><td><strong>recurrent <code>[48,128,128]</code> fp32 state update</strong></td><td><span class="chip c-bad">write — the differentiator</span></td><td>T2</td></tr>
+</table></div>
+<p>The GEMM half &mdash; roughly 95% of decode FLOPs &mdash; is <strong>already built and
+measured</strong>. The new code is the vector half: normalisations, activations, the conv, and the
+recurrent delta rule. That inverts the usual accelerator-project ordering, where the matrix
+operations come first.</p>
+
+<h3>9.2 &mdash; Nine of eleven prefill projections are one tile</h3>
+<p>After L1 tiling, FFN gate/up, FFN down, attention Q+gate, K+V and O, and GDN QKV, Z and O all
+reduce to the <strong>same shape</strong>. The prefill projection half of Qwen3.8 therefore needs no
+new kernel at all &mdash; it is an already-measured point.</p>
+<div class="tw"><table>
+<tr><th>Tile</th><th>Covers</th><th class="n">4×4 fp16</th><th class="n">8×8 fp16</th></tr>
+<tr><td><code>512×512×512</code></td><td>nine projections</td><td class="n">71,755 cyc — <strong>91.3%</strong></td><td class="n">34,568 cyc — 47.4%</td></tr>
+<tr><td><code>512×256×512</code></td><td>attention QK</td><td class="n">37,861 cyc — <strong>86.5%</strong></td><td class="n">18,322 cyc — 44.7%</td></tr>
+</table></div>
+
+<h3>9.3 &mdash; Adopted tiles, 4×4 prefill</h3>
+<p>Chosen against three constraints in order: the <strong>work-split row floor</strong> (M ≥ 128),
+the <strong>L1 footprint with double buffering</strong>, then measured efficiency. Because
+<code>efficiency = ideal/actual</code>, total cycles for fixed work are just
+<code>ideal ÷ efficiency</code> &mdash; so the best legal tile is simply the most efficient one.</p>
+<div class="tw"><table>
+<tr><th>Operation</th><th>Tile M×N×P</th><th class="n">Efficiency</th><th class="n">Tiles</th><th class="n">L1 (2× buf)</th><th class="n">Mcyc/model</th></tr>
+<tr><td>FFN gate+up (fused)</td><td><code>256×512×512</code></td><td class="n">94.8%</td><td class="n">5,440</td><td class="n">2.00 MiB</td><td class="n">12,034</td></tr>
+<tr><td>FFN down</td><td><code>256×512×512</code></td><td class="n">94.8%</td><td class="n">2,720</td><td class="n">2.00 MiB</td><td class="n">6,017</td></tr>
+<tr><td>GDN QKV</td><td><code>256×512×512</code></td><td class="n">94.8%</td><td class="n">1,600</td><td class="n">2.00 MiB</td><td class="n">2,655</td></tr>
+<tr><td>GDN Z / GDN O</td><td><code>256×512×512</code></td><td class="n">94.8%</td><td class="n">960 ea.</td><td class="n">2.00 MiB</td><td class="n">1,593 ea.</td></tr>
+<tr><td>Attention Q+gate</td><td><code>256×512×512</code></td><td class="n">94.8%</td><td class="n">1,920</td><td class="n">2.00 MiB</td><td class="n">1,062</td></tr>
+<tr><td>Attention O</td><td><code>256×512×512</code></td><td class="n">94.8%</td><td class="n">960</td><td class="n">2.00 MiB</td><td class="n">531</td></tr>
+<tr><td>Attention K+V (fused)</td><td><code>256×512×512</code></td><td class="n">94.8%</td><td class="n">320</td><td class="n">2.00 MiB</td><td class="n">177</td></tr>
+<tr><td><strong>Attention QK</strong> (per head)</td><td><code>512×256×512</code></td><td class="n">86.5%</td><td class="n">384</td><td class="n">2.00 MiB</td><td class="n">233</td></tr>
+<tr><td><strong>Attention PV</strong> (per head)</td><td><code>512×256×256</code></td><td class="n">86.1%</td><td class="n">768</td><td class="n">1.25 MiB</td><td class="n">234</td></tr>
+<tr><td><strong>GDN a+b</strong> (P=96→128)</td><td><code>512×512×128</code></td><td class="n">74.0%</td><td class="n">40</td><td class="n">1.50 MiB</td><td class="n">43</td></tr>
+<tr><td colspan="5"><strong>Whole-model prefill pass</strong></td><td class="n"><strong>26,170</strong></td></tr>
+</table></div>
+<p><strong>One tile does nine of eleven: <code>256×512×512</code> at 94.8%</strong>, the campaign&rsquo;s
+best fp16 point. Two operations need a different aspect ratio, and in both the <em>larger</em> row
+tile wins: QK has its contraction fixed at the 256-wide head dimension, PV has its output fixed
+there, so neither can tile up in that axis.</p>
+
+<h3>9.4 &mdash; Adopted tile, 8×8 prefill</h3>
+<div class="note good"><span class="lab">Adopted 2026-08-26 — <code>1024×1024×512</code></span>
+<p><strong>86.6% efficiency, 8.00 MiB fully double-buffered, 6.86 MiB spare</strong>, and
+<code>N = 1024</code> divides the 5,120 contraction into exactly 5 tiles. Whole prefill pass
+<strong>8,453 → 7,175 Mcyc, −15.1%</strong>. It dominates every alternative — more efficient
+<em>and</em> smaller.</p></div>
+<div class="tw"><table>
+<tr><th>Tile</th><th class="n">Efficiency</th><th class="n">L1 (2× buf)</th><th class="n">Spare</th><th>N divides 5120</th><th>Usable</th></tr>
+<tr><td><code>1024×2048×512</code></td><td class="n">89.3%</td><td class="n">14.00 MiB</td><td class="n">0.86</td><td>no — ragged 2.5 tiles</td><td><span class="chip c-bad">no</span></td></tr>
+<tr><td><code>2048×2048×256</code></td><td class="n">89.1%</td><td class="n">—</td><td class="n">—</td><td>no</td><td><span class="chip c-bad">no</span></td></tr>
+<tr><td><strong><code>1024×1024×512</code></strong></td><td class="n"><strong>86.6%</strong></td><td class="n"><strong>8.00 MiB</strong></td><td class="n"><strong>6.86</strong></td><td>yes (5)</td><td><span class="chip c-good">ADOPTED</span></td></tr>
+<tr><td><code>2048×1024×512</code></td><td class="n">86.3%</td><td class="n">14.00 MiB</td><td class="n">0.86</td><td>yes (5)</td><td><span class="chip c-warn">at the ceiling</span></td></tr>
+<tr><td><code>2048×1024×256</code></td><td class="n">83.6%</td><td class="n">11.00 MiB</td><td class="n">3.86</td><td>yes (5)</td><td>yes</td></tr>
+<tr><td><code>2048×256×512</code> <span class="sub">(previous)</span></td><td class="n">73.5%</td><td class="n">6.50 MiB</td><td class="n">8.36</td><td>yes (20)</td><td>superseded</td></tr>
+</table></div>
+<p><strong>The two highest raw efficiencies in the whole campaign are both unusable</strong> — one on
+L1 footprint, both on ragged tiling of the 5,120 contraction. A tile is only a candidate if
+<code>N</code> divides 5120 exactly and it double-buffers inside 14.86 MiB.</p>
+<p><strong>fp16 is worth 2.58× at this tile</strong> (fp32 measures 195,195 cyc = 67.1%) — 2× from
+the extra lanes and the rest from higher efficiency, a better return than the previous tile&rsquo;s
+2.11×.</p>
+<div class="note warn"><span class="lab">P = 512 is a peak, not a trend</span>
+<p>At fixed <code>M=1024, N=1024</code>: <code>P=256</code> → 50.9%, <strong><code>P=512</code> →
+86.6%</strong>, <code>P=1024</code> → 71.8%. Seven of the top eight fp16 tiles have
+<code>P = 512</code>. Both neighbours are substantially worse, so <strong>do not extrapolate past 512
+in either direction</strong> — and the win is not monotonic in <code>N</code> either
+(<code>1024×2048×128</code> falls to 48.9%). An earlier revision adopted a different tile by reading
+an <code>M</code> trend off a comparison that varied <code>N</code> and <code>P</code> too, and so
+credited to <code>M</code> an effect belonging to <code>P</code>.</p></div>
+
+<h3>9.5 &mdash; Decode tiles</h3>
+<p>Decode uses <code>B = 32</code> and a fixed <strong>128 B per-core slice</strong>, which is what
+keeps every load on the burst path. The slice follows
+<code>I × elem_bytes × B / (cores × KERNEL_SIZE)</code>, with a hard floor of 64 B — below it the
+burst path collapses. <code>KERNEL_SIZE = 8</code> is confirmed from the runtime print, not the
+source default.</p>
+<div class="tw"><table>
+<tr><th>Mesh</th><th>Prec</th><th>Shape B×D×I</th><th class="n">Slice</th><th class="n">Cycles</th><th class="n">Ideal</th><th class="n">Efficiency</th></tr>
+<tr><td>4×4</td><td>fp16</td><td><code>32×128×4096</code></td><td class="n">128 B</td><td class="n">10,344</td><td class="n">8,192</td><td class="n"><strong>79.2%</strong></td></tr>
+<tr><td>4×4</td><td>fp16</td><td><code>32×256×4096</code></td><td class="n">128 B</td><td class="n">19,458</td><td class="n">16,384</td><td class="n"><strong>84.2%</strong></td></tr>
+<tr><td>4×4</td><td>fp32</td><td><code>32×128×2048</code></td><td class="n">128 B</td><td class="n">10,755</td><td class="n">8,192</td><td class="n"><strong>76.2%</strong></td></tr>
+<tr><td>4×4</td><td>fp32</td><td><code>32×256×2048</code></td><td class="n">128 B</td><td class="n">19,169</td><td class="n">16,384</td><td class="n"><strong>85.5%</strong></td></tr>
+<tr><td>8×8</td><td>fp16</td><td><code>32×128×16384</code></td><td class="n">128 B</td><td class="n">12,878</td><td class="n">8,192</td><td class="n"><strong>63.6%</strong></td></tr>
+<tr><td>8×8</td><td>fp16</td><td><code>32×256×16384</code></td><td class="n">128 B</td><td class="n">21,587</td><td class="n">16,384</td><td class="n"><strong>75.9%</strong></td></tr>
+<tr><td>8×8</td><td>fp32</td><td><code>32×128×8192</code></td><td class="n">128 B</td><td class="n">13,544</td><td class="n">8,192</td><td class="n"><strong>60.5%</strong></td></tr>
+<tr><td>8×8</td><td>fp32</td><td><code>32×256×8192</code></td><td class="n">128 B</td><td class="n">24,149</td><td class="n">16,384</td><td class="n"><strong>67.8%</strong></td></tr>
+</table></div>
+<p><code>KERNEL_SIZE</code> is squeezed from three sides: the 64 B slice floor pushes it down, the
+burst ceiling pushes it up (≥ 4), and the merge share wants 8. With
+<code>KS × LMUL = 16</code> vector registers, <strong>KS = 8 is the only value satisfying all
+three</strong> at these shapes.</p>
+
+<h3>9.6 &mdash; Where optimisation effort should go</h3>
+<div class="tw"><table>
+<tr><th>Class</th><th class="n">MACs/token</th><th class="n">Share</th><th>Implication</th></tr>
+<tr><td>FFN (64 × 267.4 M)</td><td class="n">17,114 M</td><td class="n"><strong>69.1%</strong></td><td>reduces to the one adopted tile — nearly free</td></tr>
+<tr><td>GDN (48 × 115.8 M)</td><td class="n">5,560 M</td><td class="n">22.5%</td><td>projections are GEMM; the delta rule is new code</td></tr>
+<tr><td>Attention (16 × 130.0 M)</td><td class="n">2,080 M</td><td class="n">8.4%</td><td>needs its own QK/PV tiles</td></tr>
+<tr><td>— of which attention PV</td><td class="n">201 M</td><td class="n">0.81%</td><td>not worth tuning</td></tr>
+<tr><td>— of which GDN a/b (<code>P=96</code>)</td><td class="n">23.6 M</td><td class="n"><strong>0.095%</strong></td><td>worth <em>measuring</em> (nothing covers P&lt;128), never <em>tuning</em></td></tr>
+</table></div>
+<p><strong>Optimise by this table, not by operation count.</strong> The FFN is 69% of the work and
+collapses to one tile, which is why the prefill claim is nearly free; the GDN a/b projection is
+0.095% and its awkward shape is a curiosity, not a target.</p>
+
+<h2 id="s10"><span class="num">10</span>Current limitations</h2>
+<p>Open items that bound what can be claimed today. Resolved defects and intermediate debugging are
+deliberately omitted.</p>
+
+<h3>10.1 &mdash; NoC response head-of-line deadlock <span class="chip c-bad">dominant correctness risk</span></h3>
+<div class="mer"><pre class="mermaid">
+graph TD
+  A["core stalled in-order,<br/>awaiting a load"] --> B["MSHR response-ready deasserted"]
+  B --> C["depth-1 output spill fills"]
+  C --> D["back-pressures the<br/><b>SHARED</b> response channel"]
+  D --> E["head-of-line block:<br/>responses for OTHER cores<br/>freeze behind it"]
+  E --> F["one of those IS the load<br/>the stalled core awaits"]
+  F -->|"circular wait"| A
+</pre></div>
+<p class="figcap"><b>Figure 6 — The response-channel deadlock.</b> A <i>message-dependent</i> cycle,
+not a routing cycle: the network never loops, but consumer back-pressure propagates into a shared
+channel carrying traffic for unrelated cores.</p>
+<p>Because it is message-dependent, <strong>virtual channels and a deeper response buffer do not fix
+it</strong>. The specified cure is a <strong>guaranteed response sink</strong> — a deep
+per-(tile, response-port) FIFO so the MSHR accepts every network response unconditionally and never
+back-pressures the network. Estimated cost ≈ 806k flip-flops chip-wide ≈ 6.9 MGE: a localised price
+for a hard correctness property. <strong>Specified, not yet built</strong>; the RTL still ships
+output spill registers. This is the leading explanation for the 22 deadlocked campaign arms.</p>
+
+<h3>10.2 &mdash; Small-P livelock <span class="chip c-bad">29 arms</span></h3>
+<div class="tw"><table>
+<tr><th>Shape</th><th class="n">P</th><th class="n">Efficiency</th><th class="n">RH stuck</th><th>Burst path</th></tr>
+<tr><td><code>512×512×512</code></td><td class="n">512</td><td class="n">22.8%</td><td class="n">0</td><td><span class="chip c-good">100% burst</span></td></tr>
+<tr><td><code>512×512×96</code></td><td class="n">96</td><td class="n">0.63%</td><td class="n">71,184</td><td><span class="chip c-bad">0% burst</span></td></tr>
+<tr><td><code>512×512×64</code></td><td class="n">64</td><td class="n">0.40%</td><td class="n">64,271</td><td><span class="chip c-bad">0% burst</span></td></tr>
+</table></div>
+<p>Same M and N, only P varies. A software cohort target derived from <code>M</code> alone becomes
+unreachable as <code>P</code> shrinks, and the response-hold machinery thrashes. The mechanism is
+Figure 5: <code>vl</code> falls to 48 B and 32 B, under the 64 B burst floor, so every load takes the
+non-burst path and lands in a response-hold mechanism sized for single stragglers.</p>
+<p><strong>It cannot be fixed by a knob.</strong> At <code>P = 96</code> the row stride is 48 B, so
+the base is 64 B-aligned only 25% of the time — lowering the burst floor would not help because
+alignment fails independently. The fix is tiling, and §9.6 says the affected operation is 0.095% of
+the model.</p>
+
+<h3>10.3 &mdash; fp16 <code>M = 128</code> wedge at 4×4 <span class="chip c-warn">blocks a claim</span></h3>
+<p>The four 4×4 fp16 <code>M = 128</code> shapes measure 3–12% efficiency with thousands of
+response-hazard episodes, and bank-full backpressure does not reliably clear it. <code>M = 128</code>
+is a <em>legal</em> prefill row tile at 4×4, so this blocks quoting an M=128 prefill number there.
+The adopted 4×4 tile uses <code>M = 256</code> and is unaffected.</p>
+
+<h3>10.4 &mdash; Compute density against matrix engines <span class="chip c-warn">architectural</span></h3>
+<p>Prefill is compute-bound and nine of eleven projections collapse to a single well-shaped tile —
+precisely the systolic sweet spot. <strong>We will lose prefill FLOP/mm² to a matrix engine and
+should not claim otherwise.</strong> The defensible ground is decode, where bandwidth binds rather
+than compute, and the DeltaNet recurrence, where head-parallel placement generates zero NoC traffic.
+§6 prices a matrix unit in the currency that actually binds here: crossbar ports, not MAC area.</p>
+
+<h3>10.5 &mdash; Number format <span class="chip c-warn">decision pending</span></h3>
+<p>The model ships in <strong>bfloat16 and this hardware has bf16 masked off</strong> — one bit in the
+fpnew configuration. IEEE fp16 works and is 2× fp32 for <code>vfmacc</code> (but <strong>1× for
+<code>vfwmacc</code></strong>, verified). Every measured number in §8–§9 is fp16 or fp32. This
+decision gates all kernel work and has not been made.</p>
+
+<h3>Latent, lower priority</h3>
+<ul>
+<li><strong>Virtual channels are a parameter, not an implementation</strong> — every router hardwires
+one channel. Irrelevant to §10.1, which VCs would not fix anyway.</li>
+<li><strong>MSHR audit items</strong> — misaligned-burst length not clamped; store-to-cached
+write-through ignoring byte enables. Latent under the current configuration; blocking for misaligned
+bursts or remote sub-word stores.</li>
+<li><strong>Accelerator writeback contract</strong> — only a response carrying a scalar-register
+writeback is ever acknowledged. Any accelerator response without one wedges that register&rsquo;s
+scoreboard bit permanently; route float→int conversions through memory rather than a move
+instruction.</li>
+<li><strong>Measurement caveat</strong> — most GEMM arms end on an epilogue assertion after the
+benchmark region closes. Cycle counts stay valid; the completion flag does not. Results tables carry
+a state column for this reason.</li>
+<li><strong>Asymmetric ROB depth</strong> — an in-progress experiment showing ROB1–3 can be shrunk
+56% at zero cost on burst-dominated work. Not yet safe on the non-burst path; opt-in only.</li>
+</ul>
+
+<h2 id="s11"><span class="num">11</span>What is not yet known</h2>
+<ul>
+<li><strong>No silicon area or timing.</strong> The first backend run has not reported, so every
+density figure in §6 is arithmetic against published work rather than measurement.</li>
+<li><strong>The 22 deadlocked arms are counted, not individually attributed.</strong> §10.1 is the
+leading hypothesis.</li>
+<li><strong>The response sink is specified, not built</strong>, and its 6.9 MGE estimate predates the
+current MSHR.</li>
+<li><strong>Large-M 8×8 rungs have not landed.</strong> The campaign is 96 of 248 arms at the shapes
+Qwen prefill actually wants, so the 47.4% figure for <code>512×512×512</code> at 8×8 is not the
+final 8×8 answer.</li>
+<li><strong>The L1 footprint model is analytic and unvalidated</strong> — which is why the adopted
+8×8 tile was chosen with 6.86 MiB of margin rather than the one at the ceiling.</li>
+<li><strong>DeltaNet at 8×8 needs head-splitting or batch ≥ 2</strong> — 48 heads over 64 groups
+leaves 16 idle, and that mapping is unwritten.</li>
+<li><strong>Cohort target is the strongest lever measured and is not auto-tuned.</strong></li>
+</ul>
+
+<h2 id="s12"><span class="num">12</span>Glossary</h2>
+<p>Every abbreviation used in this report. Terms marked &dagger; also appear in the TeraNoC paper
+with the same meaning.</p>
+
+<h3>Machine and interconnect</h3>
+<dl class="gloss">
+<dt>TCDM&dagger;</dt><dd>Tightly-Coupled Data Memory — the shared, banked L1 scratchpad every core can address. Not a cache: no tags, no coherence, explicit addressing.</dd>
+<dt>SPM</dt><dd>Scratch-Pad Memory — used interchangeably with TCDM here; &ldquo;the SPM region&rdquo; specifically means the word-interleaved address region (as opposed to the sequential one).</dd>
+<dt>NoC&dagger;</dt><dd>Network-on-Chip — the inter-group packet network. Here specifically FlooNoC.</dd>
+<dt>FlooNoC&dagger;</dt><dd>The open-source NoC IP this design uses for inter-group traffic: narrow 32-bit links, per-hop FIFO buffering.</dd>
+<dt>LIC</dt><dd>Logarithmic InterConnect — the combinational crossbar inside a group. &ldquo;Logarithmic&rdquo; refers to its tree depth, not its latency, which is a single cycle.</dd>
+<dt>flit</dt><dd>FLow control unIT — the smallest unit the NoC moves in one cycle; a request or response is one or more flits.</dd>
+<dt>XY routing&dagger;</dt><dd>Dimension-order routing: travel in X to the destination column, then in Y. Deadlock-free by construction on a mesh.</dd>
+<dt>VC</dt><dd>Virtual Channel — independent buffer queues sharing one physical link, normally used to break routing deadlock. <b>Present as a parameter here but not implemented</b> (§2).</dd>
+<dt>HoL</dt><dd>Head-of-Line blocking — one blocked item at the front of a shared queue stalls everything behind it, including traffic for unrelated destinations. The mechanism of §9.1.</dd>
+<dt>AXI&dagger;</dt><dd>ARM&rsquo;s bus protocol, used here for the L2 and DMA path on a separate FlooNoC network.</dd>
+<dt>DMA</dt><dd>Direct Memory Access engine — bulk copy between L2 and L1 without core involvement. One per group, 512-bit wide.</dd>
+<dt>PE</dt><dd>Processing Element — a generic compute unit. Used in §6 when comparing our cores against systolic-array cells.</dd>
+<dt>RR</dt><dd>Round-Robin — the arbitration policy used for MSHR allocation priority, entry scan and sub-request scan.</dd>
+<dt>AMO</dt><dd>Atomic Memory Operation — read-modify-write instructions. Any AMO invalidates the MSHR response cache.</dd>
+</dl>
+
+<h3>Cores and vector unit</h3>
+<dl class="gloss">
+<dt>Snitch&dagger;</dt><dd>The small in-order RISC-V scalar core at the heart of each core complex.</dd>
+<dt>Spatz&dagger;</dt><dd>The RISC-V vector extension unit attached to each Snitch. Provides the FPUs and the vector load-store unit.</dd>
+<dt>FPU / IPU</dt><dd>Floating-Point Unit / Integer Processing Unit — 4 of each per core. &ldquo;Lanes&rdquo; in this report means FPUs: 1024 cores × 4 = 4096.</dd>
+<dt>VLSU</dt><dd>Vector Load-Store Unit — the part of Spatz that issues memory requests. Owns the burst-splitting logic and the reorder buffers.</dd>
+<dt>ROB</dt><dd>Reorder Buffer — per-memory-port storage that collects out-of-order responses and releases them in order. Four per core, 64 entries × 32 bits each.</dd>
+<dt>VLEN / LMUL / vl</dt><dd>Vector register width in bits (512 here) / length multiplier grouping 1–8 registers / the <i>active</i> vector length of one instruction, in bytes in this report.</dd>
+<dt>EW</dt><dd>Element Width — <code>EW_8/16/32</code>. The burst path was originally gated to <code>EW_32</code>; fp16 support required lifting that.</dd>
+<dt>MSHR&dagger;</dt><dd>Miss-Status Holding Register — classically, a cache structure tracking outstanding misses so later requests to the same line can merge. Here it is a standalone per-group unit doing the same job for remote loads (§4).</dd>
+<dt>CSR</dt><dd>Control and Status Register — used to configure MSHR behaviour at runtime rather than at elaboration.</dd>
+<dt>acc</dt><dd>The accelerator interface between Snitch and Spatz. <code>acc_pwrite</code> indicates a scalar register writeback; responses without it are never acknowledged (§9, latent issues).</dd>
+</dl>
+
+<h3>Workload and model</h3>
+<dl class="gloss">
+<dt>GEMM / GEMV</dt><dd>GEneral Matrix-Matrix multiply / matrix-vector multiply. Shapes are written <code>M×N×P</code>: an M×N matrix times an N×P matrix.</dd>
+<dt>MAC / FLOP</dt><dd>Multiply-ACcumulate (one multiply plus one add) / FLoating-point OPeration. One MAC = 2 FLOP.</dd>
+<dt>AI</dt><dd>Arithmetic Intensity — FLOP performed per byte moved. For decode it equals the batch size, which is why batching is the lever (§6).</dd>
+<dt>fp32 / fp16 / bf16</dt><dd>IEEE single / IEEE half / bfloat16. The model ships in bf16; this hardware supports fp32 and fp16 and has <b>bf16 masked off</b>.</dd>
+<dt>FFN</dt><dd>Feed-Forward Network — the per-layer MLP block. 66.9% of decode MACs.</dd>
+<dt>SwiGLU</dt><dd>The gated activation used by the FFN: a SiLU-gated linear unit, requiring gate and up projections plus a down projection.</dd>
+<dt>GQA</dt><dd>Grouped-Query Attention — fewer key/value heads than query heads (24 Q vs 4 KV here), shrinking the KV cache.</dd>
+<dt>GDN / DeltaNet</dt><dd>Gated DeltaNet — linear attention with a <i>recurrent state</i> instead of a growing KV cache. 48 of Qwen3.8&rsquo;s 64 layers. Its 3 MiB-per-sequence-per-layer state is the capacity wall of §7.</dd>
+<dt>KV cache</dt><dd>Cached key and value tensors for previously generated tokens, used by the 16 ordinary attention layers. Grows linearly with sequence length.</dd>
+<dt>RMSNorm / RoPE / MRoPE</dt><dd>Root-Mean-Square normalisation / Rotary Position Embedding / its multimodal variant. The &ldquo;serial half&rdquo; kernels that run between GEMMs.</dd>
+<dt>lm_head</dt><dd>The final projection from hidden size to vocabulary (5120 → 248,320), 5.0% of decode MACs.</dd>
+<dt>prefill / decode</dt><dd>Processing the whole input prompt at once (compute-bound, large GEMMs) versus generating one token at a time (memory-bound, tall-thin GEMMs). This machine targets decode.</dd>
+<dt>B / D / I</dt><dd>Decode shape parameters: batch, model dimension, and inner dimension. Decode arms are labelled <code>B×D×I</code>.</dd>
+</dl>
+
+<h3>Measurement and tooling</h3>
+<dl class="gloss">
+<dt>efficiency</dt><dd>In this report always <code>ideal / actual</code> cycles, where <code>ideal = M·N·P / lanes</code>. Derived from the data size — <b>never</b> from a utilisation counter, which is not conserved across runs of identical work.</dd>
+<dt>utilisation</dt><dd>The testbench&rsquo;s lane-occupancy counter (busy lane-cycles ÷ total). Reported alongside efficiency but not ranked on.</dd>
+<dt>arm</dt><dd>One simulation run of one shape in one configuration. The campaign is 248 arms.</dd>
+<dt>roofline</dt><dd>The performance ceiling set by whichever of compute or bandwidth binds first.</dd>
+<dt>RH</dt><dd>Response Hold — the MSHR mechanism that briefly withholds a response to allow more requesters to merge. <code>RH stuck</code> counts episodes where it thrashes (§9.2). Counts hold <i>episodes</i>, so they compare only within one window setting.</dd>
+<dt>EOC</dt><dd>End-Of-Computation — the testbench signal that a run finished cleanly. Most GEMM arms never reach it (§9.4) despite producing valid cycle counts.</dd>
+<dt>CMS / BP / LP</dt><dd>Core-Memory Scoreboard (tracks every in-flight request; reports orphan responses and duplicate-id allocations) / Bottleneck Profiling / Link Profiling — the three main testbench probes.</dd>
+<dt>[BURSTWHY]</dt><dd>A probe that prints each of the five burst predicates per load, so a silent fall-back to the non-burst path is visible rather than inferred.</dd>
+<dt>bankfull / tmo</dt><dd>Bank-full bypass events / MSHR timeouts. Both are per-period counters; <b>a reading of zero can mean starvation rather than health</b> (§8.3).</dd>
+<dt>FF / MGE</dt><dd>Flip-Flop / Mega Gate Equivalent — the area units used for the response-sink cost estimate.</dd>
+<dt>RTL</dt><dd>Register-Transfer Level — the synthesisable SystemVerilog source.</dd>
+</dl>
+
+<footer>
+Compiled 2026-08-29 from <code>hardware/ARCHITECTURE.md</code>, <code>docs/teranoc_architecture.md</code>,
+<code>docs/qwen38_workload_analysis.md</code>, <code>docs/benchmarks/</code>, the RTL under
+<code>hardware/src/</code> and <code>working_dir/spatz/</code>, and the campaign TSVs
+(235 GEMM arms, 44 ROB arms, 20 decode arms).<br>
+Efficiency is ideal/actual from the data size, never an occupancy counter. Cycle counts are
+benchmark-region measures; see §9.4. Claims anchored to <code>file:line</code> drift as RTL changes.
+</footer>
+</div>
