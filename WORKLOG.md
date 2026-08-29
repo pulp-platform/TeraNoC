@@ -12377,3 +12377,39 @@ still-unidentified reason. Blast radius is the 20 KS=1 arms at B >= 8.
 Lesson: two failures in the same campaign, both called "the hang", diagnosed as one. The
 discriminator was one line of arithmetic on `req` deltas -- frozen vs creeping -- and I should
 have run it the first time rather than after the bisection.
+
+## 2026-08-29 15:45 — the 512 B design point sits at the EXACT capacity of three structures
+
+Chasing the KS=1 512 B failure produced a pattern rather than a bug. Every structure a burst load
+touches is sized from `RobDepth / MaxBurstWords` arithmetic, so a `vl` equal to the full ROB depth
+lands on **all** their limits at once, with zero slack:
+
+| structure | capacity at ROB128 | what a 512 B op needs | status |
+|---|---:|---:|---|
+| ROB0 ids | 128 | 128 words | exact -- this IS the vl ceiling |
+| ParityDrain bypass track | 8 ways | 8 bursts | exact -> overflowed; knob to 16 |
+| ROBN per mem port | 32 | 128 words / 4 ports = 32 | exact -> **under test at 64** |
+
+Each is fine for an ISOLATED 512 B op, which is exactly why `vector-burst-test` passes at
+ROB0=128/ROBN=32: it issues one m8 load, then a store, and everything drains in between. A GEMM
+inner loop issues them back-to-back for N iterations and holds every one of these at its limit
+simultaneously. **A directed functional test cannot reach this regime by construction.**
+
+**New evidence that located it.** The KS=1 512 B run never reached the benchmark region at all --
+`[STALLG]` prints `pre` 68 times and `bench` never. It dies in the **I$ warm-up**, which runs the
+same kernel at `warmup_n = 6` but with the FULL `p_span`, so it issues 512 B loads and stores
+before the timer starts. `warmup_n` is even (6, deliberately: ">= 6 covers peel + both
+steady-state halves + epilogue") and hand-tracing `matmul_1xVL` at N=6 gives 6 terms and 6 loads,
+correct -- so the kernel handles it and the capacity does not.
+
+**The contrast that exonerates the kernel.** `k4` runs the SAME kernel at KS=1 with `vl = 256 B`
+(B=4) and reaches the benchmark region -- 13 windows and climbing, `req` 877,451 and rising. Same
+kernel, same KS, only `vl` differs. So `matmul_1xVL` is sound and the 512 B failure is capacity.
+
+**If ROBN=64 clears it**, the cost of KS=2/KS=1 becomes `ROB0 64->128`, `ROBN 16->64`,
+`bypass_ways 8->16` -- still far short of full depth everywhere, and a much more precise answer
+than "ROB0=128 unlocks KS=2", which is what the 09:10 entry claimed on the strength of a directed
+test alone.
+
+**Status.** ROBN=64 image building. `k4` in the benchmark region, no livelock. Baseline control at
+cyc 23,000 of the ~30,000 needed to cover the livelock cliff.
