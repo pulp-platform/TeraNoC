@@ -12432,3 +12432,31 @@ generation-tag fix, the A4 qualification and the `bypass_ways` knob are conclusi
 implicated in the MSHR desync livelock.
 
 Control retired; the question is closed.
+
+### 2026-08-29 16:35 — ROBN=64 REFUTES the three-structures hypothesis; the group MSHR fits better
+
+`build_robn64_rob128` (ROB0=128, **ROBN=64**, bypass=16) on the 512 B ELF froze at
+**req=240,972** -- byte-identical to ROBN=32 across all 20 comparable windows, and never reached
+the benchmark region. **ROBN depth has no bearing on this failure.** The 15:45 entry predicted it
+would; that prediction was wrong.
+
+**A simpler hypothesis fits BOTH failures with ONE cause.** Outstanding bursts per group against
+`group_mshr_num = 64`:
+
+| arm | bursts/group | vs 64 entries | observed |
+|---|---:|---|---|
+| KS=2 @ 256 B | 16 cores x 4 = **64** | *exactly* at capacity | livelock: cohorts never assemble, ~400x collapse |
+| KS=1 @ 512 B | 16 cores x 8 = **128** | **2x over** | hard hang, never reaches the benchmark region |
+
+One saturating structure, two symptoms by distance past the limit: degrade at capacity, stop dead
+at 2x. This also retro-explains the livelock filed at 14:30 as "pre-existing and unrelated" -- it
+IS pre-existing (the control proved that exactly), but it is probably the same root cause rather
+than a separate phenomenon.
+
+Testing `group_mshr_num=128` against **both** ELFs. If both clear, the A4 qualification, the
+bypass-ways knob and the ROBN work were all incidental -- necessary to get past assertions, but
+never the actual limit. ROBN restored to 32, since 64 bought nothing.
+
+**Method note.** Three hypotheses now, each killed by one measurement: ROB0 ceiling (right, but
+insufficient), three-structures (wrong), group MSHR (under test). The cost of each was a ~15 min
+build; the cost of guessing without testing would have been a 104-arm sweep on a wrong premise.
