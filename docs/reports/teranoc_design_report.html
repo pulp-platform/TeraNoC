@@ -724,25 +724,51 @@ two thirds of the attention projection work into one wide GEMM and leaves the KV
 <li><strong><code>lm_head</code> appears and is significant</strong> — 5.0%, because the
 248,320-wide vocabulary projection runs once per token regardless of sequence length.</li>
 </ul>
+<div class="note"><span class="lab">The decode tile is derived, not swept</span>
+<p>This is the structural difference from prefill. There, a tile is <em>chosen</em> by sweeping and
+picking the most efficient legal shape. In decode two of the three dimensions are forced:</p>
+<pre>M = B                                    the batch — fixed by the serving stack
+N = D_tile                               the ONLY free axis (128 or 256)
+P = I_tile = n_p_blocks x (128 / elem_bytes),   n_p_blocks = cores x KERNEL_SIZE / B</pre>
+<p><code>I_tile</code> falls out of holding the per-core slice at <strong>128 B</strong>, which is
+what keeps every load on the burst path. The formula reproduces all eight measured arms exactly:</p>
+</div>
 <div class="tw"><table>
-<tr><th>Operation</th><th class="n">Layers</th><th class="n">Width P</th><th class="n">MAC/token</th><th class="n">Share</th>
-    <th>Kernel</th><th class="n">4×4 fp16</th><th class="n">8×8 fp16</th></tr>
+<tr><th>Mesh</th><th>Prec</th><th class="n">cores</th><th class="n">n_p_blocks</th><th class="n">I_tile</th><th>Tile</th><th class="n">Cycles</th><th class="n">Efficiency</th></tr>
+<tr><td>4×4</td><td>fp16</td><td class="n">256</td><td class="n">64</td><td class="n">4,096</td><td><code>32×128×4096</code></td><td class="n">10,344</td><td class="n">79.2%</td></tr>
+<tr style="background:var(--good-bg)"><td>4×4</td><td>fp16</td><td class="n">256</td><td class="n">64</td><td class="n">4,096</td><td><strong><code>32×256×4096</code></strong></td><td class="n">19,458</td><td class="n"><strong>84.2%</strong></td></tr>
+<tr><td>4×4</td><td>fp32</td><td class="n">256</td><td class="n">64</td><td class="n">2,048</td><td><code>32×128×2048</code></td><td class="n">10,755</td><td class="n">76.2%</td></tr>
+<tr style="background:var(--good-bg)"><td>4×4</td><td>fp32</td><td class="n">256</td><td class="n">64</td><td class="n">2,048</td><td><strong><code>32×256×2048</code></strong></td><td class="n">19,169</td><td class="n"><strong>85.5%</strong></td></tr>
+<tr><td>8×8</td><td>fp16</td><td class="n">1024</td><td class="n">256</td><td class="n">16,384</td><td><code>32×128×16384</code></td><td class="n">12,878</td><td class="n">63.6%</td></tr>
+<tr style="background:var(--good-bg)"><td>8×8</td><td>fp16</td><td class="n">1024</td><td class="n">256</td><td class="n">16,384</td><td><strong><code>32×256×16384</code></strong></td><td class="n">21,587</td><td class="n"><strong>75.9%</strong></td></tr>
+<tr><td>8×8</td><td>fp32</td><td class="n">1024</td><td class="n">256</td><td class="n">8,192</td><td><code>32×128×8192</code></td><td class="n">13,544</td><td class="n">60.5%</td></tr>
+<tr style="background:var(--good-bg)"><td>8×8</td><td>fp32</td><td class="n">1024</td><td class="n">256</td><td class="n">8,192</td><td><strong><code>32×256×8192</code></strong></td><td class="n">24,149</td><td class="n"><strong>67.8%</strong></td></tr>
+</table></div>
+<p><strong><code>D = 256</code> wins on every mesh and both precisions</strong> — by 5.0 pp at 4×4
+fp16 and 12.3 pp at 8×8 fp16 — so it is the adopted decode tile. <code>I_tile</code> scales exactly
+with core count (4,096 → 16,384 across the 4× mesh step) because it is derived from
+<code>cores</code>, which is also why the 8×8 decode tile is four times deeper in the contraction
+than 4×4&rsquo;s.</p>
+
+<div class="tw"><table>
+<tr><th>Operation</th><th class="n">Layers</th><th class="n">Logical P</th><th class="n">MAC/token</th><th class="n">Share</th>
+    <th>4×4 tile M×N×P</th><th class="n">4×4</th><th>8×8 tile M×N×P</th><th class="n">8×8</th></tr>
 <tr><td>FFN gate / up / down</td><td class="n">64</td><td class="n">17,408 / 17,408 / 5,120</td><td class="n">17,113 M</td><td class="n"><strong>66.9%</strong></td>
-    <td>decode GEMM, 128 B slice</td><td class="n">79.2–84.2%</td><td class="n">63.6–75.9%</td></tr>
+    <td><code>32×256×4096</code></td><td class="n">84.2%</td><td><code>32×256×16384</code></td><td class="n">75.9%</td></tr>
 <tr><td>DeltaNet QKV / Z / O / a+b</td><td class="n">48</td><td class="n">10,240 / 6,144 / 5,120 / 96</td><td class="n">5,537 M</td><td class="n">21.6%</td>
-    <td>decode GEMM, 128 B slice</td><td class="n">79.2–84.2%</td><td class="n">63.6–75.9%</td></tr>
+    <td><code>32×256×4096</code></td><td class="n">84.2%</td><td><code>32×256×16384</code></td><td class="n">75.9%</td></tr>
 <tr><td><strong>Attn Q + output gate</strong> <span class="sub">24 heads</span></td><td class="n">16</td><td class="n"><strong>12,288</strong></td><td class="n">1,006 M</td><td class="n">3.9%</td>
-    <td>decode GEMM</td><td class="n">79.2–84.2%</td><td class="n">63.6–75.9%</td></tr>
+    <td><code>32×256×4096</code></td><td class="n">84.2%</td><td><code>32×256×16384</code></td><td class="n">75.9%</td></tr>
 <tr style="background:var(--good-bg)"><td><strong>Attn K + V</strong> <span class="sub">4 KV heads — GQA</span></td><td class="n">16</td><td class="n"><strong>1,024</strong> ea. <span class="sub">(fused 2,048)</span></td><td class="n">168 M</td><td class="n">0.66%</td>
-    <td>decode GEMM, fused K+V</td><td class="n">79.2–84.2%</td><td class="n">63.6–75.9%</td></tr>
+    <td><code>32×256×4096</code> <span class="sub">fused</span></td><td class="n">84.2%</td><td><code>32×256×16384</code> <span class="sub">fused</span></td><td class="n">75.9%</td></tr>
 <tr><td>Attn O</td><td class="n">16</td><td class="n">5,120</td><td class="n">503 M</td><td class="n">2.0%</td>
-    <td>decode GEMM</td><td class="n">79.2–84.2%</td><td class="n">63.6–75.9%</td></tr>
+    <td><code>32×256×4096</code></td><td class="n">84.2%</td><td><code>32×256×16384</code></td><td class="n">75.9%</td></tr>
 <tr style="background:var(--rule2)"><td><strong>lm_head</strong></td><td class="n">1</td><td class="n"><strong>248,320</strong></td><td class="n">1,271 M</td><td class="n"><strong>5.0%</strong></td>
-    <td><b>not in the inventory</b> — skinny GEMM</td><td class="n">—</td><td class="n">75.1% <span class="sub">proxy</span></td></tr>
+    <td colspan="2" class="n"><b>not in the inventory</b></td><td><code>1024×1024×2048</code> <span class="sub">proxy</span></td><td class="n">75.1%</td></tr>
 <tr style="background:var(--bad-bg)"><td><strong>DeltaNet state update</strong> (delta rule)</td><td class="n">48</td><td class="n">[48,128,128]</td><td class="n">76 M</td><td class="n">0.3%</td>
-    <td><b>unwritten</b> — recurrent fp32</td><td class="n">—</td><td class="n">—</td></tr>
+    <td colspan="4" class="n"><b>unwritten</b> — recurrent, not a GEMM</td></tr>
 <tr style="background:var(--rule2)"><td>KV cache stream <span class="sub">(GQA, not compute)</span></td><td class="n">16</td><td class="n">4 KiB/token/layer</td><td class="n">—</td><td class="n">bandwidth</td>
-    <td>64 KiB/token model-wide</td><td class="n">—</td><td class="n">—</td></tr>
+    <td colspan="4" class="n">64 KiB/token model-wide — bandwidth, not compute</td></tr>
 </table></div>
 <p><strong>99.7% of decode compute is skinny GEMM served by one kernel</strong>, so unlike prefill
 there is no awkward-shape tail: the achievable figure is essentially the decode GEMM efficiency
