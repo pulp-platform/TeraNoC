@@ -11915,3 +11915,51 @@ alone but `[BURSTWHY] vl=512B ... vl_le_512=1 => burst=1` with zero
 `NON-BURST OVER CAPACITY` warnings. 512 B is the `vl` an LMUL=8 load needs, i.e. **KS=2**.
 
 **Status.** Tag fixed and measured. D2 (ROB0=128) building.
+
+## 2026-08-29 06:35 — the ROB0=128 "boot failure" was a stale mesh, and floogen needs two passes
+
+**Purpose.** D2 (`spatz_vlsu_rob_depth=128 spatz_vlsu_robn_depth=16`) is the configuration that
+lifts the burst `vl` ceiling to 512 B and so makes KS=2 legal. Built on the freshly-fixed
+generation tag, it produced **zero memory requests for the entire run** — every `period_summary`
+`req=0 resp=0` — with **13,009 `NoWideMgrPortRResponse`** assertion failures on cluster AXI
+chimney[6], starting at t=182,000 ps (~cycle 91). It read as "ROB128 is broken".
+
+**It was not.** A full `+define+` diff against the booting ac image showed exactly ONE
+difference, `SPATZ_VLSU_ROB_DEPTH` 64 -> 128, which pointed at ROB128 — and that was the trap.
+The real variable was outside the define set:
+
+**`make update-floogen` is not idempotent across a mesh change.** `Makefile:286-291` runs
+`floogen --only-pkg` on `$(FLOO_CFG)` FIRST and rewrites that same yml LAST
+(`gen_perimeter_map.py --emit-yml`). So the first pass after a mesh switch emits
+`floo_terapool_noc_pkg.sv` for the **previous** mesh while `perimeter_map_pkg.sv` and the route
+table are the new one. Verified directly: after the 8x8 restore, a 4x4 pass left
+`NumMeshX = 4` **and** `GroupX1Y0 = 8`; a second pass moved `GroupX1Y0` to 4.
+
+Every mesh check written so far — mine and the ones in CLAUDE.md — greps `NumMeshX` in
+`perimeter_map_pkg.sv`, which is written by the LAST step and is therefore always right. The
+stale file is the one nobody checks, and it is the untracked one, so `git status` is silent too.
+D2's cycle was the first 4x4 generation after an 8x8 restore; the ac cycle was not, which is the
+whole difference between an image that boots and one that does not.
+
+**Note the mismatch is not reliably fatal.** `build_dbg_robn16` was built on the same
+8x8-pkg/4x4-map pair and ran fine, producing the allocation traces that root-caused the
+generation bug. **A run completing is not evidence the mesh pair was consistent.**
+
+**ROB128 itself was already known good.** `rob_D2_d16a` (`build_rob128_robn16`, the exact
+`ROB_DEPTH=128 ROBN_DEPTH=16` pair) ran `fixdec8_32x128x16384.elf` to `[EOC] retval = 0` with
+6,114,788 requests, 24,576 loads all `burst=1`, zero chimney assertions — and `vl_le_512=1`,
+i.e. **the 512 B ceiling is already demonstrated in a completing image**. Caveat against
+over-reading it: that image predates the `[rob_drop]` probe, so its zero drop count means "no
+probe", not "no drops".
+
+**Implementation.** Scripts now assert BOTH files and generate twice:
+```bash
+mesh_is(){ grep -qE "NumMeshX *= *$1" generated/perimeter_map_pkg.sv \
+        && grep -qE "GroupX1Y0 = $1," generated/floo_terapool_noc_pkg.sv; }
+```
+Rebuilt as `build_d2c_rob128` on a verified-consistent 4x4.
+
+**Status.** No 8x8 campaign image was built inside the mesh-switch window (checked: every build
+dir since 08-28 is a 4x4 ROB debug image), so no campaign result is affected. The Makefile
+ordering itself is left unchanged pending review — reordering `--emit-yml` ahead of `floogen`
+is the obvious fix but it touches the shared build flow.
