@@ -75,6 +75,14 @@
 // re-aligns the group at every column block.
 #define MATMUL_REPEAT 1
 #endif
+#ifndef MATMUL_SPOT_SAMPLES
+// How many rows the FP-free probe prints. Each printf is UART-bound: core 0 retires ~265
+// instructions per 16k cycles while it runs, so ONE 70-char line costs ~13,000 simulated
+// cycles. Sixteen of them is ~200k cycles -- more than the 65k-cycle measurement they are
+// attached to, i.e. the correctness probe would dominate the benchmark it is checking.
+// Four distinct rows is ample for an oracle: a broken kernel corrupts everything, not one row.
+#define MATMUL_SPOT_SAMPLES 4
+#endif
 #ifndef MATMUL_SPOTCHECK
 // FP-FREE correctness probe. DEFAULT ON since 2026-08-29: MATMUL_VERIFY is off
 // because the scalar-FP row-sum wedges core 0, which left perf runs with NO
@@ -719,7 +727,9 @@ int main() {
         (gemm_l.M >= active_groups) ? (gemm_l.M / active_groups) : 1u;
     const uint32_t nsample =
         (gemm_l.M >= active_groups) ? active_groups : gemm_l.M;
-    for (uint32_t g = 0; g < nsample; ++g) {
+    const uint32_t nsample_cap =
+        (nsample < (uint32_t)MATMUL_SPOT_SAMPLES) ? nsample : (uint32_t)MATMUL_SPOT_SAMPLES;
+    for (uint32_t g = 0; g < nsample_cap; ++g) {
       const uint32_t row = g * rows_per_group;
       const volatile uint32_t *w = (const volatile uint32_t *)(c + row * gemm_l.P);
       printf("[SPOT] g=%2u row=%4u w0=%08x w1=%08x w2=%08x w3=%08x\n",
