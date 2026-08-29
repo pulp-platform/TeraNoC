@@ -606,6 +606,47 @@ identical to the cycle, −56% storage) <strong>and hangs the non-burst path</st
 halves are true; quoting either alone misleads.</li>
 </ul>
 
+<h3>Why the shallow ROBs hang, and what it costs to unlock KS=2 <span class="chip c-good">measured 2026-08-29</span></h3>
+<p>The hang has a single structural cause: <code>use_port0_burst_req</code> requires
+<code>is_load</code>, so <strong>bursts are loads only</strong>. A vector <em>store</em> can never
+leave the word-interleaved path, and that path spreads <code>vl</code> over the four memory ports.
+The per-port share is what must fit a shallow ROB:</p>
+<table>
+<thead><tr><th>store <code>vl</code></th><th>words</th><th>per port (&divide;4)</th><th>ROBN=16</th><th>ROBN=32</th></tr></thead>
+<tbody>
+<tr><td>256 B</td><td>64</td><td>16</td><td>exact fit</td><td>fits</td></tr>
+<tr><td>384 B</td><td>96</td><td>24</td><td><strong>wedges</strong></td><td>fits</td></tr>
+<tr><td>512 B <span class="chip c-good">KS=2</span></td><td>128</td><td>32</td><td><strong>wedges</strong></td><td>exact fit, <strong>works</strong></td></tr>
+</tbody>
+</table>
+<p>512 B is the <code>vl</code> of an LMUL=8 load, i.e. <strong>KS=2</strong>. Raising ROB0 to 128
+moves the burst ceiling from 256 B to 512 B &mdash; confirmed directly, <code>[BURSTWHY]</code>
+reads <code>vl_le_512=1</code> and both symptom messages fall from 41,247 to zero &mdash; but that
+only rescues the <em>load</em>. The store still needs shallow-ROB depth. Measured on a one-define
+diff (<code>ROBN 16&nbsp;&rarr;&nbsp;32</code>, everything else identical), the wedge clears:
+<code>req</code> 544,481 frozen &rarr; 674,314 and climbing, with the 256 B, 384 B and 512 B stores
+all issued and surviving.</p>
+<div class="note good"><span class="lab">The cost of KS=2</span>
+<p><strong><code>ROB0 64&rarr;128</code> and <code>ROBN 16&rarr;32</code></strong> &mdash; not
+<code>ROBN 16&rarr;128</code>, which would hand back the entire asymmetric-depth saving. Three
+quarters of the load-side flops still serve the burst-only path; the shallow ports grow by one
+binary step, not four.</p></div>
+<div class="note bad"><span class="lab">Two silent failures, both now audible</span>
+<p>The generation tag that
+lets a shallow ROB reuse ids dropped 768 legitimate responses per run (256 cores &times; 3 shallow
+ports, one each at the first ring wrap) because a store allocates and pushes in the <em>same</em>
+cycle, so the compare read the previous lap's stamp. And
+<code>gen_robn_nonburst_capacity</code> gated its warning on <code>is_load</code> &mdash; watching
+only the half of the traffic that <em>has</em> an escape route &mdash; so at ROB0=128 the load was
+rescued onto the burst path, the guard fell silent, and the store wedged the machine with no
+assertion and no message. Both are fixed.</p></div>
+<p>One caveat on the guard: it tests total words (<code>vl/4 &gt; RobNDepth</code>) where the
+hardware constraint is per-port, so it over-warns by 4&times;. Its own comment conceded the exact
+threshold was never measured; it is now, at both ends &mdash; 32&nbsp;words/port works at ROBN=32
+and the same 32&nbsp;words/port wedges at ROBN=16. The conservative bound is deliberately left in
+place until the exact-fit case is measured: over-warning costs noise, under-warning costs a silent
+wedge.</p>
+
 <h2 id="s9"><span class="num">09</span>Kernel mapping and chosen tile sizes</h2>
 <p>Every operation runs on Spatz; Snitch does address generation, tile scheduling, DMA issue and
 barriers. There is no engine map, no port-width constraint and no padding to an accelerator minimum
