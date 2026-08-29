@@ -12501,3 +12501,29 @@ once per `p` block after N accumulations).
 **Caveat.** 16 words/port is *exactly* ROBN=16's capacity, and "exactly at capacity" has degraded
 three separate times today (ROB0 ids, bypass track, group MSHR). If the config degrades rather
 than wedges, the split is still correct and the remaining margin belongs to the MSHR, not ROBN.
+
+## 2026-08-29 17:40 — the 512 B hang is the STORE: three configs, one freeze point
+
+Every 512 B run so far, with the **single** 512 B store:
+
+| ROBN | group_mshr_num | bypass_ways | store | froze at |
+|---:|---:|---:|---|---:|
+| 32 | 64 | 16 | single 512 B | **req = 240,972** |
+| 64 | 64 | 16 | single 512 B | **req = 240,972** |
+| 32 | 128 | 16 | single 512 B | **req = 240,972** |
+
+Identical freeze point, to the request, across a 2x change in ROBN and a 2x change in
+`group_mshr_num`. **Neither structure has any bearing on this failure.** Both of my hypotheses
+(15:45 three-structures, 16:35 group MSHR) are refuted for the hang -- the MSHR one survives only
+as an explanation for the separate 256 B *livelock*, which the control already showed is
+pre-existing.
+
+**By elimination the store is the cause**, and it is the one variable never yet changed. The
+split store (two 256 B halves, proposed in review) is now the decisive test rather than an
+optimisation: it takes the store's per-port share from 32 words to 16 while leaving the LOAD's
+512 B burst on ROB0 untouched.
+
+**Method note.** Three hypotheses, three refutations, each costing one ~15 min build: ROB0 ceiling
+(necessary, not sufficient), three critically-sized structures (wrong), group MSHR (wrong for the
+hang). What finally localised it was not a better theory but a table of what was held constant --
+the freeze point never moved, so nothing I had been varying could be responsible.
