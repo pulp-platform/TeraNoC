@@ -36,14 +36,23 @@ def scrape(path):
                 rh0    = len(re.findall(rb"\[RH STUCK\][^\n]*peers=0", b)))
 
 RES = {}
-# NOTE the prefix here must match `--run-prefix` on the submit, or finished results are
-# INVISIBLE and their arms read as "not dispatched". Wave C used `--run-prefix wc4`, so
-# looking only for "wc" hid 7 completed arms and led to 4 of them being re-dispatched.
-for pref in ("wa1", "wa2", "wb", "wc", "wc4", "wc8", "run2"):
-    for t in glob.glob(os.path.join(ROOT, "hardware", pref + "_sw_*", "transcript")):
-        arm = os.path.basename(os.path.dirname(t))[len(pref) + 1:]
-        s = scrape(t)
-        if s: RES.setdefault(arm, {})[pref] = s
+# DERIVE the prefixes from disk instead of hardcoding them. A result dir is named
+# "<run-prefix>_<arm>", and the run-prefix is chosen at submit time -- so any hardcoded list
+# goes stale the moment a new wave is dispatched under a new prefix, and its finished arms
+# become INVISIBLE (they read as "not dispatched"). That happened three times today: `wc4`,
+# `wc8` and `s8k8`, the last of which hid the first 8x8 result in the campaign, and `wc4`
+# caused four completed arms to be re-dispatched.
+RES = {}
+_PREF_RANK = ["wc8", "wc4", "wc", "wa8", "s8k8", "wb", "run2", "wa2"]   # wa1 = superseded wave
+for _d in sorted(glob.glob(os.path.join(ROOT, "hardware", "*_sw_*"))):
+    _b = os.path.basename(_d)
+    _m = re.match(r"^(.+?)_(sw_[48]x[48]_.+)$", _b)
+    if not _m: continue
+    pref, arm = _m.group(1), _m.group(2)
+    t = os.path.join(_d, "transcript")
+    if not os.path.exists(t): continue
+    s_ = scrape(t)
+    if s_: RES.setdefault(arm, {})[pref] = s_
 
 # Local diagnostic runs that measure a matrix cell. The ROB0=256 arm needed a non-default
 # ROB depth to run at all, so its cell is flagged rather than presented as a stock result.
@@ -108,8 +117,9 @@ def status(r):
     # runs, or is still `running` in badist while its kernel has already completed.
     # Excluding it stranded fp32_ks4_32x256x1024 (20,875 cyc, tmo=0) as "running".
     # wa1 stays excluded: that is the superseded stock-config wave.
-    best = (got.get("wc4") or got.get("wc8") or got.get("wc") or got.get("wb")
-            or got.get("run2") or got.get("wa2"))
+    # follow _PREF_RANK so a new wave prefix is picked up automatically; wa1 is the
+    # superseded stock-config wave and is deliberately never used as `best`.
+    best = next((got[k] for k in _PREF_RANK if k in got), None)
     if best and best["cycles"]:
         # A run that printed a cycle count FINISHED -- it is a measurement, not a livelock.
         # This used to relabel any completed arm with `tmo > 0 and rh0 > 0` as "livelocked",

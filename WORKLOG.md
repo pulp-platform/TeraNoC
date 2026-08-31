@@ -13752,3 +13752,32 @@ not rebuildable artifacts -- worth checking against `docs/benchmarks/` before re
 
 Note the filesystem went 88% -> 43% used, far more than my 92 GB: two very large waveforms under
 `manyRVData/` (620 GB and 344 GB) are **gone**, and that was not me -- I only touched `hardware/`.
+
+## 2026-08-31 -- first 8x8 result, and the prefix list stops being hardcoded
+
+**Answers.** The asterisked 4x4 arm `fp16_ks1_8x128x8192` **has not finished** -- its cell is still
+`24.5%*` from the ROB0=256 diagnostic, and its target-config run is still `running`. And **all 52
+8x8 arms are now out** (51 running, 1 done).
+
+**The first 8x8 measurement of the campaign:**
+
+    sw_8x8_fp32_ks8_8x128x16384   11,924 cyc   190 windows   tmo=16   util 38.29%   -> 34.4%
+
+**It was invisible when found.** It landed under `--run-prefix s8k8`, and the generator's prefix list
+was `("wa1","wa2","wb","wc","wc4","wc8","run2")`. Third prefix miss of the day: `wc4` hid 7 finished
+Wave C arms and caused 4 to be re-dispatched, `wc8` was added pre-emptively, and now `s8k8` hid the
+first 8x8 result.
+
+**Root-caused rather than patched again.** A result dir is `<run-prefix>_<arm>`, and the prefix is
+chosen at submit time -- so *any* hardcoded list goes stale the moment a wave is dispatched under a
+new one. The generator now **derives prefixes from disk**
+(`glob("hardware/*_sw_*")`, split on `^(.+?)_(sw_[48]x[48]_.+)$`), and `best` walks a declared
+`_PREF_RANK` so a new wave is picked up automatically. `wa1` remains excluded as the superseded
+stock-config wave.
+
+**And `fleet_status.tsv` staleness is now scripted.** It had gone stale twice -- 17 hours once,
+40 minutes the second time, hiding the whole waveC8x8 batch. `scripts/refresh_fleet_status.sh`
+rebuilds it from live badist and **refuses to install a file less than half the size of the one it
+replaces**, so a partial read cannot re-create the staleness it exists to prevent.
+
+**Campaign now: 4x4** 38 measured / 12 degraded / 2 running; **8x8** 1 measured / 51 running.
