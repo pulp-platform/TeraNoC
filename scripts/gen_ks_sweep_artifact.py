@@ -88,8 +88,17 @@ def status(r):
             return ("bad", "no data", "finished with the benchmark region never activated")
     loc  = LOCAL.get((r["mesh"], r["prec"], r["KS"], r["B"], r["D"], r["I"]))
     if loc:
-        c = _local_cycles(loc[0])
-        if c: return ("done", "%.1f%%*" % (100.0 * r["ideal"] / c), "measured locally (%s)" % loc[1])
+        # A LOCAL entry is a DIAGNOSTIC run at a non-default config (here ROB0=256, against the
+        # target's 128). It must never shadow a real target-config result -- so only fall back to
+        # it when no campaign transcript has cycles. Without this, the moment the real Wave C arm
+        # finishes, the asterisked ROB0=256 number would keep winning and the page would report a
+        # config nobody is running.
+        _rr = RES.get(name, {})
+        _real = _rr.get("run2") or _rr.get("wc") or _rr.get("wb") or _rr.get("wa2")
+        if not (_real and _real["cycles"]):
+            c = _local_cycles(loc[0])
+            if c: return ("done", "%.1f%%*" % (100.0 * r["ideal"] / c),
+                          "measured locally (%s) \u2014 no target-config run yet" % loc[1])
     got  = RES.get(name, {})
     # `run2` IS the target config, so its transcript is authoritative when the probe file
     # carries no cycle count -- which happens whenever an arm finishes before the harvest

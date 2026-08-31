@@ -13669,3 +13669,24 @@ target the ranking as the thing worth reproducing.
 
 Final state: **33 measured**, 9 matched-B ladders (6 of them three-point or better), and the page
 states the non-monotonicity as a correction rather than quietly changing the numbers.
+
+## 2026-08-31 -- the asterisked arm: no, its target-config run has NOT finished
+
+`sw_4x4_fp16_ks1_8x128x8192` carries an asterisk because it is a **local diagnostic at ROB0=256**
+(`hardware/r256_run_ks1`, 16,748 cyc) -- a non-default depth, against the campaign's ROB0=128. It
+exists because KS=1 needed a wider ROB to run at all before the split-load fix.
+
+Its real arm is **Wave C job 0000 on badile17, still running**: 311 windows, **no** `execution took`,
+retiring 666,121 instructions across its last two windows, `tmo=533`. Healthy and well past the
+~100-window horizon -- simply not finished.
+
+**Latent bug found and fixed while answering.** `status()` consulted `LOCAL` *before* the `RES`
+transcript fallback, so the instant the Wave C arm completes, the ROB0=256 diagnostic would have
+kept winning and the page would have reported **a configuration nobody is running**. The LOCAL entry
+is now used only when no campaign transcript has cycles, and its label says so explicitly:
+`measured locally (ROB0=256) -- no target-config run yet`.
+
+That is the third shadowing bug of the same shape today: an empty probe shadowing a transcript, a
+`run2` transcript excluded from the fallback, and now a diagnostic shadowing a real run. In each
+case a lower-quality source silently outranked a better one -- worth checking any place the page
+picks between sources.
