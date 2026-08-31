@@ -13715,3 +13715,40 @@ Submitted with `--disk-gb 50` (the guard that would have saved the larain6 arm) 
 **The grid is now fully in flight: 0 arms undispatched.** 33 measured, 12 degraded, 59 running.
 Every one of the 14 is `sharers >= 8`, so the predicate calls them all healthy -- the 10 at 8x8
 extend the healthy-half test to the larger mesh, where it has not been checked at all.
+
+## 2026-08-31 -- hardware/ cleanup, and a duplicate dispatch caused by a prefix mismatch
+
+**ROOT CAUSE of the duplicate dispatch.** Wave C submits with `--run-prefix wc4`, so its results land
+in `hardware/wc4_sw_*`. The artifact generator scanned only
+`("wa1", "wa2", "wb", "wc", "run2")` -- **`wc4` was not in the list**, so **7 completed Wave C arms
+were invisible**, read as "not dispatched", and I re-dispatched 4 of them. Fixed by adding `wc4`/`wc8`
+to both the scan list and the transcript fallback. **Measured jumped 33 -> 38.**
+
+The rule this breaks: *the result prefix must match `--run-prefix` on the submit, or finished work is
+silently invisible.* Same family as every other shadowing bug today -- a real result outranked by
+nothing at all.
+
+**The 4 duplicates killed** after verifying each original was complete and local:
+
+    fp16_ks1_32x256x2048   62,772 cyc      fp32_ks1_32x256x1024   63,781 cyc
+    fp32_ks1_16x128x2048   44,492 cyc      fp32_ks1_64x512x512    90,139 cyc
+
+Controller stopped **first** (otherwise it re-dispatches what you kill), batch cancelled, then killed
+by `/proc/<pid>/cwd` match -- `badist cancel` marks the job but leaves the simv running.
+
+**hardware/ build-dir cleanup: 42 dirs, 92 GB.** Kept 7, each verified live:
+`build_tgt8x8` (53 live processes fleet-wide), `build_waveA2` (10), `build_tgt4x4` (7),
+`build_vcs_8x8` (5), `build_genfix3_robn16` (1), plus the two local GUI dirs.
+
+**`build_genfix3_robn16` was on the delete list until a FLEET-WIDE sweep found its live process** --
+checking `cwd` on this machine alone would have missed it, because the process is on a remote node.
+Every candidate then got a final local-process *and* fleet-image guard immediately before removal;
+0 refused.
+
+**Still large, deliberately untouched:** `run4_*` 494 GB and `run32_*` 134 GB (old sweep *results*,
+not rebuildable artifacts -- worth checking against `docs/benchmarks/` before removing),
+`build_2_gui_4096x32x512` 375 GB (held by the idle GUI session), `spyglass` 60 GB (regenerable),
+`s8_*` 55 GB (the live campaign).
+
+Note the filesystem went 88% -> 43% used, far more than my 92 GB: two very large waveforms under
+`manyRVData/` (620 GB and 344 GB) are **gone**, and that was not me -- I only touched `hardware/`.

@@ -36,7 +36,10 @@ def scrape(path):
                 rh0    = len(re.findall(rb"\[RH STUCK\][^\n]*peers=0", b)))
 
 RES = {}
-for pref in ("wa1", "wa2", "wb", "wc", "run2"):
+# NOTE the prefix here must match `--run-prefix` on the submit, or finished results are
+# INVISIBLE and their arms read as "not dispatched". Wave C used `--run-prefix wc4`, so
+# looking only for "wc" hid 7 completed arms and led to 4 of them being re-dispatched.
+for pref in ("wa1", "wa2", "wb", "wc", "wc4", "wc8", "run2"):
     for t in glob.glob(os.path.join(ROOT, "hardware", pref + "_sw_*", "transcript")):
         arm = os.path.basename(os.path.dirname(t))[len(pref) + 1:]
         s = scrape(t)
@@ -105,7 +108,8 @@ def status(r):
     # runs, or is still `running` in badist while its kernel has already completed.
     # Excluding it stranded fp32_ks4_32x256x1024 (20,875 cyc, tmo=0) as "running".
     # wa1 stays excluded: that is the superseded stock-config wave.
-    best = got.get("wc") or got.get("wb") or got.get("run2") or got.get("wa2")
+    best = (got.get("wc4") or got.get("wc8") or got.get("wc") or got.get("wb")
+            or got.get("run2") or got.get("wa2"))
     if best and best["cycles"]:
         # A run that printed a cycle count FINISHED -- it is a measurement, not a livelock.
         # This used to relabel any completed arm with `tmo > 0 and rh0 > 0` as "livelocked",
