@@ -13093,3 +13093,23 @@ current cross-tab. Completing would falsify it.
 **Not dispatched:** VCS is at exactly 20 free, which is the floor for other users, so these wait on
 the user's decision. Offered to the peer to run model-side first, which is the better order -- their
 number would then be a prediction rather than a match.
+
+**Dispatch held 2026-08-31 (user decision): the peer runs the model side first.** Their result is
+then a prediction rather than a match, which is the only order that makes it evidence. My prediction
+is committed in advance, in this file and in the message.
+
+**The controlled pair** -- one variable moved across the boundary, B and sharers held:
+
+| | KS | B | D | I | sharers | vl | W | outcome |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| CONTROL | 8 | 32 | 256 | 2048 | 4 | 64 | 1.00 MB | **RTL measured HEALTHY, 11,877 cyc** |
+| TEST | 8 | 32 | 32 | 4096 | 4 | 128 | 0.25 MB | **predicted DEGRADE** |
+| TEST2 | 2 | 4 | 32 | 8192 | 2 | 128 | 0.50 MB | **predicted DEGRADE** (D=128 twin is a confirmed livelock) |
+
+I alone doubles, carrying vl across the threshold; D only shrinks the peer's weight matrix and is in
+neither predicate variable. Caveat sent with it: W is *not* matched between control and test
+(1.00 vs 0.25 MB), so a W-sensitive model would confound it -- offered to build a W-matched variant
+if they need one.
+
+`hardware/sw_4x4_fp16_ks8_32x32x4096.elf`, `hardware/sw_4x4_fp16_ks2_4x32x8192.elf`, both
+world-readable on the automounted share.
