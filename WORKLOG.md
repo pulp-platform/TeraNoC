@@ -13047,3 +13047,49 @@ the predicate says all ten complete -- a second independent test.
 **Limits.** 31 points, **no mechanism**, and two corners are structurally absent from the grid:
 `sharers <= 1` occurs only at `vl=64`, and `sharers in {2,4}` never occurs at `vl=512`. So this is a
 fitted boundary that predicts well, not an explanation.
+
+## 2026-08-31 -- the predicate survives the small-B confound; the band cannot reach large B
+
+**Challenge (GVSoC peer).** The livelock band `sharers in {2,4} AND vl >= 128` falls entirely in
+small B, which are also the arms their model is slowest to simulate -- so their 0-for-8 on the
+predicted-livelock arms is uninformative, and they declined to report it as support. Correct of
+them. It also raises the question on our side: **is the predicate just "small B" relabelled?**
+
+**No. Scored on the same 31 4x4 arms:**
+
+| predictor | correct |
+|---|---|
+| `B <= 16` | 21/31 (10 false alarms) |
+| `B <= 8` | 23/31 |
+| `vl >= 128` alone | 22/31 |
+| `sharers in {2,4}` alone | 27/31 |
+| **`sharers in {2,4}` AND `vl >= 128`** | **31/31** |
+
+B in {2,4,8,16} appears in **both** outcomes -- ten small-B arms are healthy (six at
+`sharers=1/vl=64`, two at `sharers=2/vl=64`, two at `sharers=8/vl=256`). So B does not separate
+them and the conjunction is not a relabelling.
+
+**But the band genuinely cannot reach large B.** `sharers = B/KS` and KS <= 8 is a hard register
+limit (`KS * LMUL = 16`), so `B = sharers * KS <= 32`:
+
+    sharers=2 -> B in {2,4,8,16}    sharers=4 -> B in {4,8,16,32}
+
+This is a property of the kernel family, not of the arm selection. No grid we can express puts the
+livelock condition at large B, so that test is unavailable to either side.
+
+**The way around it: D is free.** `vl = I * sharers * elem / cores` depends on I and sharers only,
+while the peer's simulation cost is the weight matrix `W = D * I * elem`. **D moves their cost
+without moving either predicate variable.** Two ELFs built and verified:
+
+    sw_4x4_fp16_ks8_32x32x4096.elf   KS=8 B=32 D=32 I=4096  sharers=4 vl=128  W=0.25 MB (8x cheaper)
+    sw_4x4_fp16_ks2_4x32x8192.elf    KS=2 B=4  D=32 I=8192  sharers=2 vl=128  W=0.50 MB (4x cheaper)
+
+The first is the strong test **for us**, not just for them: B=32 is the largest B the band can
+reach, and our existing `KS=8 B=32` arm sits at `vl=64` and is **healthy**. Moving only I
+(1024 -> 4096) carries it into the band at constant B. Degrading there would be the predicate
+holding at its own boundary against a matched healthy arm -- better evidence than anything in the
+current cross-tab. Completing would falsify it.
+
+**Not dispatched:** VCS is at exactly 20 free, which is the floor for other users, so these wait on
+the user's decision. Offered to the peer to run model-side first, which is the better order -- their
+number would then be a prediction rather than a match.
