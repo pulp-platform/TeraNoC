@@ -13194,3 +13194,66 @@ already prescribes for floogen. Use it if analysis scripts start failing the sam
 
 **Dispatch still held** per the user's decision; the peer offered to release it and that is not a
 substitute for asking. It costs nothing -- VCS is pinned at exactly 20 free.
+
+## 2026-08-31 -- badist licence reserve FAILED OPEN; patched our copy
+
+**Root cause of the 4-seat floor breach**, and it is not the overshoot I first blamed (that fix is
+already present in `acquire()`). In `~/badist/badist/license.py`:
+
+```python
+if entry:  self._server_free = issued - in_use
+else:      self._server_free = None            # a failed lmstat
+...
+if self._server_free is not None and self._server_free - n < self.reserve_others:
+    return False                               # <-- SKIPPED when None
+```
+
+A failed licence query set `_server_free = None`, and the reserve check was guarded on
+`is not None`, so it was **skipped entirely** and every request was granted up to `max`. **The
+safety limit failed open.**
+
+**Evidence from the controller's own log** -- a successful poll always logs a line, so the missing
+one is the `else` branch:
+
+    11:20:25  license VCS-Base-Runtime-Pkg: 80/100 in use, 20 free   <- at the reserve; should refuse
+    11:21:27  dispatch 0022 -> badile19                              <- no poll logged in between
+    11:21:28  dispatch 0023 / 0024 / 0025
+              VCS 80 -> 84 in use, 16 free
+
+Corroborated independently: the fleet monitor emitted `QUERY FAILED (badist unreadable)` in the same
+window, and a manual retry showed 1 of 3 `badist status` calls failing, alongside
+`/usr/local/anaconda3` throwing `Remote I/O error`. **The "4" was not a tuning artifact -- it was
+however many jobs happened to be queued when a poll failed.** Ten queued would have breached by ten.
+
+**`~/badist` is our own copy** (owned by `zexifu`, all 267 state dirs and 31 processes ours, no other
+user), verified before touching it. Backup at `license.py.bak-20260831-failopen`.
+
+**Two changes, because the first was not sufficient:**
+
+1. `_refresh()` no longer overwrites a good reading with `None` -- it keeps the last known value
+   (stale but real; `acquire()` decrements per grant so it still converges onto the reserve while
+   blind) and now **logs the failure**, which previously produced no output at all.
+2. `acquire()` no longer skips the check when there is no reading:
+   `free = self._server_free if self._server_free is not None else 0`.
+   **My own first patch was incomplete** -- a test showed the `is not None` guard also skips
+   whenever `_refresh()` early-returns because the poll interval has not elapsed. Fixing only the
+   `else` branch left the fail-open reachable by a second path.
+
+**Tested, 5/5:**
+
+| scenario | granted | expected |
+|---|---:|---:|
+| 30 free, reserve 20 | 10 | 10 |
+| 20 free, exactly at reserve | 0 | 0 |
+| unreadable from the start | 0 | 0 |
+| **25 free once, then blind (today's case)** | **5** | **5** |
+| plenty free, capped by `max=26` | 26 | 26 |
+
+**No restart needed:** every live controller has `submitted=0`, so nothing can be dispatched by the
+old in-memory code. Python reads a module at import, so editing is safe for running processes --
+unlike bash, where patching a live script by byte offset has cost us an arm before. The fix takes
+effect for the next `submit`.
+
+Fourth instance today of *a failed read treated as data*: monitor `done=0` -> FLEET IDLE; empty
+bucket -> `0`; `|| echo 0` -> "0 with mesh data"; and this one, which removed a limit rather than
+producing a wrong number. See [[reference-license-governor-fails-open]].
