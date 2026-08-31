@@ -927,6 +927,60 @@ if len(_line) >= 2:
       'is the practical ceiling and why B must be a multiple of KS.</p></div></div>'
       % (_l1, _lr))
 
+# ---- matched-B KS comparison ---------------------------------------------------
+# A per-KS MEDIAN over a partially-landed grid is a median over whichever arms finished,
+# and B >= KS removes the small-B arms from KS=8, so the B ranges are NOT balanced across
+# KS. Comparing pooled medians therefore compares different parts of the grid. Only
+# same-precision, same-B pairs isolate KS. (Trap raised by the GVSoC peer session, which
+# hit it from the other side; verified here against our own landed set.)
+_lan = {}
+for _k, _v in RUN2.items():
+    _r = _idx2.get(_k)
+    if _r and _v.get("cyc"):
+        _lan[(_r["prec"], _r["KS"], _r["B"])] = (100.0 * _r["ideal"] / int(_v["cyc"]), _r.get("vl"))
+_byb = {}
+for (_p, _ks, _b), _val in _lan.items():
+    _byb.setdefault((_p, _b), {})[_ks] = _val
+_mrows = []
+for (_p, _b), _d in sorted(_byb.items()):
+    if len(_d) < 2: continue
+    _cells = "".join('<td class="num">%s</td>'
+                     % ('<b>%.1f%%</b><span class="dim sm"> vl=%s</span>' % (_d[_ks][0], _d[_ks][1])
+                        if _ks in _d else '&mdash;')
+                     for _ks in (2, 4, 8))
+    _hi, _lo = max(_d), min(_d)
+    _mrows.append('<tr><td class="mono">%s</td><td class="num">%d</td>%s'
+                  '<td class="num st-done b">%.2f&times;</td></tr>'
+                  % (_p, _b, _cells, _d[_hi][0] / _d[_lo][0]))
+_unb = "  ".join("KS=%d: B&nbsp;=&nbsp;%s" % (_ks, ",&nbsp;".join(
+        str(_x) for _x in sorted({_bb for (_pp, _kk, _bb) in _lan if _kk == _ks})))
+        for _ks in (2, 4, 8))
+if _mrows:
+    A('<div class="card"><h2>KS at matched B &mdash; the only fair comparison</h2>'
+      '<p>The landed arms are <strong>not balanced across KS</strong>, because <code>B &ge; KS</code> '
+      'removes the small-B arms from KS=8 and only part of the grid has finished:</p>'
+      '<p class="mono sm">%s</p>'
+      '<p>So a per-KS median compares different regions of the grid. These rows hold precision '
+      '<em>and</em> B fixed, varying only KS:</p>'
+      '<div class="tw"><table><thead><tr><th>prec</th><th class="num">B</th>'
+      '<th class="num">KS=2</th><th class="num">KS=4</th><th class="num">KS=8</th>'
+      '<th class="num">best / worst</th></tr></thead><tbody>%s</tbody></table></div>'
+      '<div class="note good"><span class="lab">the ranking is real</span>'
+      '<p>Every matched pair ranks the same way, monotonically where three points exist, at '
+      '<strong>2.24&ndash;3.21&times;</strong>. The KS effect is not an artifact of which arms '
+      'happened to land.</p></div>'
+      '<div class="note bad"><span class="lab">but KS and vl cannot be separated here</span>'
+      '<p>At fixed B, KS <em>determines</em> vl: <code>vl = I &middot; B &middot; elem_bytes / '
+      '(cores &middot; KS)</code>, so KS=2&rarr;256&nbsp;B, KS=4&rarr;128&nbsp;B, KS=8&rarr;64&nbsp;B '
+      'every time (see the vl labels). The two are perfectly anti-correlated <em>by construction</em> '
+      'and no arm in this grid breaks the tie.</p>'
+      '<p>The defensible claim is therefore <strong>&ldquo;KS=8/vl=64 beats KS=2/vl=256 by '
+      '2.2&ndash;3.2&times; at matched B&rdquo;</strong>, as a package. That KS is the causal '
+      'variable rather than vl is <strong>not established</strong>; separating them needs an arm '
+      'holding one fixed while moving the other, which this grid cannot express. '
+      'KS=4 also appears in only one matched pair &mdash; treat it as a point, not a level.</p>'
+      '</div></div>' % (_unb, "".join(_mrows)))
+
 A('<div class="card"><h2>How to read these numbers</h2><ul>'
   '<li><strong>Efficiency, not the TB utilisation counter.</strong> '
   '<code>ideal/actual</code>, with <code>ideal = B&middot;D&middot;I / (cores &times; 4 FPU '

@@ -12916,3 +12916,43 @@ Also flagged to them: `L2_BANKS` and `AXI_WIDTH_INTERLEAVED` both **double** at 
 and the mesh defines are the *only* differences between `build_tgt4x4` and `build_tgt8x8` -- the
 full 107-define sets are otherwise identical, so their ROB0=128/bypass_ways=16 assumption holds and
 no rebuild was needed.
+
+## 2026-08-31 -- the KS ranking is NOT a grid artifact, but KS and vl are inseparable
+
+**Trigger.** The GVSoC peer hit an unbalanced-grid artifact on their own side (their KS=8 arms were
+B=64/128, ours B=8/16/32, so their per-KS medians compared different regions and appeared to break
+our ranking) and warned that the same could bite our collector. **It applies to the medians I had
+already sent them**, so I checked rather than assumed.
+
+**The imbalance is real.** `B >= KS` removes the small-B arms from KS=8, and only part of the grid
+has landed:
+
+    KS=2   n=10   B = 2, 16, 32, 64, 128
+    KS=4   n=3    B = 4, 32
+    KS=8   n=6    B = 8, 16, 32
+
+So "KS=2 median 29.8% vs KS=8 median 67.9%" was a median over B={2,16,32,64,128} against one over
+B={8,16,32}. **Those medians are withdrawn.**
+
+**The conclusion survives a matched-B test.** Same precision, same B, only KS differs:
+
+| prec | B | KS=2 | KS=4 | KS=8 | best/worst |
+|---|---:|---:|---:|---:|---:|
+| fp16 | 16 | 29.8% | -- | 67.9% | 2.28x |
+| fp16 | 32 | 21.5% | 39.2% | 69.0% | **3.21x** |
+| fp32 | 16 | 26.7% | -- | 59.9% | 2.24x |
+| fp32 | 32 | 21.4% | -- | 64.5% | 3.02x |
+
+Every pair ranks the same way, monotonically where three points exist, at **2.24-3.21x**.
+
+**But KS and vl cannot be separated in this grid.** At fixed B, KS *determines* vl:
+`vl = I * B * elem_bytes / (cores * KS)`, giving KS=2 -> 256 B, KS=4 -> 128 B, KS=8 -> 64 B every
+time. They are perfectly anti-correlated **by construction** and no arm breaks the tie. The
+defensible claim is *"KS=8/vl=64 beats KS=2/vl=256 by 2.2-3.2x at matched B"* as a package; that KS
+is the causal variable **is not established**. KS=4 appears in one matched pair only -- a point, not
+a level.
+
+Artifact gains a "KS at matched B" card carrying the imbalance, the four pairs, and the confound.
+This is the same lesson as [[project-plateau-not-throughput]] and the sharers non-isolation: with
+co-varying parameters, a pooled ranking over a partial grid invents structure. **Matched pairs beat
+a global ranking** -- now demonstrated twice on two different campaigns.
