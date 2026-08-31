@@ -13501,3 +13501,50 @@ whether the ROB is sized for the sum -- if not, the bug is admission policy, not
 Caveat sent with it: this is a structural reading of RTL against a model, and one-in-flight costs
 memory-level parallelism, which is why the runahead option exists. It says what the reference does,
 not that their code is wrong.
+
+## 2026-08-31 -- ROB config confirmed; the ROBN capacity guard is a FALSE ALARM here
+
+**Answer: yes.** Both campaign images (`build_tgt4x4`, `build_tgt8x8`) carry, verified from the
+build scripts rather than a cached extract:
+
+    SPATZ_VLSU_ROB_DEPTH=128   SPATZ_VLSU_ROBN_DEPTH=16
+    SPATZ_VLSU_DUAL_LOAD=2     GROUP_MSHR_BYPASS_WAYS=16
+
+**I had told the peer dual-load was OFF. It is ON.** The error was grepping the define sets for
+`MAX_INFLIGHT` when the define is `SPATZ_VLSU_DUAL_LOAD`, then reporting the empty result as fact --
+the "a zero-result grep is not a finding" trap again. Corrected to them unprompted; they had already
+drafted "set dual_load=1 to match the RTL default" as their leading fix, which would have diverged
+from the reference while believing it matched.
+
+**The ROBN=16 concern, checked rather than assumed.**
+[[project-robn-depth-hangs-nonburst]] predicts `ROBN >= 32` for KS=2, because a 512 B store goes
+word-interleaved at 32 words/port and cannot fit a 16-deep ROB. We run ROBN=16, so this was worth
+testing against the arms actually in flight.
+
+The guard **does** fire: on Wave C (all `vl=512`) it emits **2,048 warnings** -- saturated, being 8
+reports/core x 256 cores -- and its text says literally *"This path wedges."*
+
+**They do not wedge.** Those arms are at **277-595 benchmark windows**, retiring 600k-1.2M
+instructions per window, LSU stalls at or near zero across groups. Not the documented wedge
+signature (`lsu=16000` on all 16 groups, `inflight=0`).
+
+And the guard does not discriminate: **0 warnings** on the degraded 4x4 arms *and* 0 on the healthy
+measured ones. It fires only where `vl=512`, which is exactly where the arms are fine. So for this
+kernel the condition is necessary-not-sufficient and the "wedges" wording is too strong -- the ROB
+streams rather than having to hold the whole op resident.
+
+**The result that matters more.** Wave C is 10 arms, all `sharers >= 8`, which the livelock predicate
+says should complete. Nine of them are now at **277-595 windows -- three to six times past the ~100
+-window point where the 4x4 failures collapsed** -- and all are healthy. That is the predicate's
+**second independent test, and the first one to produce real evidence**; Wave A's band arms are still
+short of the horizon.
+
+**Peer's ROB is 8.** They corrected an earlier claim: their per-port load ROB is **8 entries (7
+usable)**, not the 128 implied by "matched image config" -- a knob they had never touched, so every
+number they have sent was taken at ROB=8. Told them it does not invalidate the measurements but does
+mean the 5,614 vs 11,269 comparison was never same-ROB. It also lands on the sizing argument: our
+dual-load was only safe because ROB0=64 holds two e32,m2 loads exactly; 7 usable entries cannot hold
+two slots except for the smallest instructions, which makes their wedged state reachable at once
+rather than as a rare race -- and reframes their vl=64 trigger as *fastest to admit a second slot*
+rather than *desynchronises the ports*. Their probe separates the two: ROB at cap with two slots
+resident means capacity; heads on different slots with the ROB not full means desynchronisation.
