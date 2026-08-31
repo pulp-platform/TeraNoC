@@ -13402,3 +13402,36 @@ They decline the 52 8x8 arms; that is their user's call and I am not pushing it.
 right and I had under-weighted it: if low-sharers arms cost 8.3 h and return "did not complete", much
 of the triangle produces rows rather than data -- so **the sharers=2 defect is a blocker to sequence
 before the bulk run**, not something to filter afterwards.
+
+## 2026-08-31 -- badist offered to the GVSoC side; "node up" is not "node usable"
+
+**Requeue held** (user): the 3 arms lost to the outage stay parked. Only **1 of the 11** recovered
+nodes is genuinely usable.
+
+**`badist nodes` "up" is a weaker signal than usability.** All 11 outage nodes left the `down` list,
+but 10 of them still refuse `ssh` and have no writable `/scratch`; only **badile46** -- the node that
+killed our three arms -- actually came back. Placement made off that flag would put jobs on machines
+that cannot run them. The recovery monitor now probes `ssh + test -w /scratch` instead of reading the
+flag, and reports only when the *usable set* changes -- the previous one re-fired its headline on
+every VCS free-seat tick, which is change-detection keyed on the wrong thing.
+
+**Told the peer they can use badist, and why it helps them more than us.** We are capped by **VCS
+seats, not machines** -- 100 department-wide, one per arm for its whole life -- so distributing buys
+us a dedicated core per arm and never more arms. GVSoC takes **no licence**, so for them the cap is
+the machine count: 51 nodes up, 21 idle, 2,556 threads. At 3-8 h per decode arm over 52 arms that is
+weeks against about a day.
+
+Sent with it the operational traps that cost time here today:
+
+* omit the `license` block (or set only `{"max": N}`) -- with no feature/server the governor becomes
+  a plain concurrency cap, which is what an unlicensed backend wants;
+* declare `mem_gb` from **measurement** -- our VCS default of 4 GB came from a 4x4 run while 8x8 arms
+  peak at 8.99 GB, which would pack ~15 arms onto a node that fits 6;
+* `/usr/scratch/fenga1` and `/home` are automounted, `/scratch` and `/tmp` are node-local;
+* `badist batches` shows ~20 of 265 without `--limit`; the job key is `job`, not `id`; `cancel` does
+  not kill the simulator; and the licence governor in the shared copy **fails open** on an
+  unreadable lmstat (patched here today) -- irrelevant if they run without one, but not a pattern to
+  copy.
+
+Also asked for campaign status: the two band probes, their matched control, whether the sharers=2
+hang has a mechanism yet, and whether it is blocking their 4x4 bulk run.
