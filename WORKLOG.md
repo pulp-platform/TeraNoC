@@ -13912,3 +13912,20 @@ page as an open question, with the ratio and the contrast stated plainly.
 or any 8x8 band arm completing. A completion would refute the predicate at 8x8 outright.
 
 Status: 40 measured, 12 livelocked, 54 running. 11 Wave A arms past the horizon, 3 of them in band.
+
+## 2026-08-31 -- 8x8 scale-up: fp32_2048x512x1024 lands clean at 81.43%
+
+**193 done** / 30 livelock / 22 deadlock; 3 arms still running.
+
+    fp32 2048x512x1024   349,592 cyc   81.43% FPU util   349 windows   tmo=0   RH=0
+
+Unlike the previous arrival (`fp16_4096x1024x512`, flagged as a desync suspect on tmo=34,497) this
+one is **clean**: zero timeouts, zero RH-stuck episodes across 349 windows. It ranks **22nd of 193**
+completed arms by utilisation and is the **5th-best fp32 arm** in the campaign.
+
+Its fp16 twin at the same shape is `2048x512x1024` at 158,268 cyc / **87.37%**, so both precisions of
+this shape sit near the top of their respective ranges -- 87.37% is 8th overall.
+
+Worth noting the shape of the leaderboard: the top 8 are **all fp16** and all at N (the D dimension)
+of 1024 or 2048 -- `2048x2048x512` leads at 92.17%. Large-N shapes dominate, which is the opposite
+end of the space from the M=8192 family that tops out near 30%.
