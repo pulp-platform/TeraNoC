@@ -981,6 +981,63 @@ if _mrows:
       'KS=4 also appears in only one matched pair &mdash; treat it as a point, not a level.</p>'
       '</div></div>' % (_unb, "".join(_mrows)))
 
+# ---- livelock predicate ---------------------------------------------------------
+# Neither sharers nor vl alone separates the degraded arms; the CONJUNCTION does.
+# Scored over every 4x4 arm with a known outcome. The degraded labels come from the
+# peak-retire-rate test, which uses neither sharers nor vl, so this is not circular.
+def _pred(r): return r["sh"] in (2, 4) and (r.get("vl") or 0) >= 128
+_cells, _sc = {}, [0, 0, 0, 0]      # tp, fp, fn, tn
+for _k, _r in _idx2.items():
+    if _r["mesh"] != "4x4": continue
+    _c = (RUN2.get(_k) or {}).get("cyc") or (RUN1.get(_k) or {}).get("cyc")
+    if _k in DEGRADED: _o = True
+    elif _c: _o = False
+    else: continue
+    _cells.setdefault((_r["sh"], _r.get("vl")), []).append(_o)
+    _p = _pred(_r)
+    _sc[0 if (_p and _o) else 1 if _p else 2 if _o else 3] += 1
+_crows = []
+for (_sh, _vl), _v in sorted(_cells.items()):
+    _bad = all(_v); _good = not any(_v)
+    _crows.append('<tr><td class="num">%s</td><td class="num">%s</td><td class="num">%d</td>'
+                  '<td class="%s">%s</td></tr>'
+                  % (_sh, _vl, len(_v),
+                     "st-bad b" if _bad else ("st-done" if _good else "num"),
+                     "all degraded" if _bad else ("all completed" if _good else "MIXED")))
+_fut = sorted(_k for _k, _r in _idx2.items()
+              if _r["mesh"] == "8x8" and _r["KS"] in (2, 4) and _pred(_r))
+if _crows:
+    A('<div class="card"><h2>What separates the livelocked arms &mdash; a conjunction, not a variable</h2>'
+      '<p>Neither <em>sharers</em> nor <em>vl</em> predicts failure on its own. Two arms with '
+      '<code>sharers=2</code> complete; one with <code>sharers=8</code> and <code>vl=128</code> '
+      'completes; arms at <code>vl=256</code> complete at every cohort size from 8 up. Every cell '
+      'of the grid, by outcome:</p>'
+      '<div class="tw"><table><thead><tr><th class="num">sharers</th><th class="num">vl (B)</th>'
+      '<th class="num">arms</th><th>outcome</th></tr></thead><tbody>%s</tbody></table></div>'
+      '<div class="note bad"><span class="lab">the predicate</span>'
+      '<p><strong><code>sharers &isin; {2,4}</code> AND <code>vl &ge; 128&nbsp;B</code></strong> '
+      '&rarr; livelock. Scored over every 4x4 arm with a known outcome: '
+      '<strong>%d/%d correct</strong> &mdash; %d true positives, %d true negatives, '
+      '<strong>0 false alarms, 0 misses</strong>.</p>'
+      '<p>A cohort large enough to be worth assembling but too small to assemble quickly, carrying '
+      'bursts big enough to matter. Either condition alone is survivable; together they are not. '
+      'The degraded labels come from the peak-retire-rate test, which uses neither variable &mdash; '
+      'so the separation is not circular.</p></div>'
+      '<div class="note"><span class="lab">stated before the data lands</span>'
+      '<p>The predicate says <strong>%d of the 26 running 8&times;8 Wave&nbsp;A arms will '
+      'degrade</strong> and the other %d will complete:</p><p class="mono sm">%s</p>'
+      '<p>These arms were dispatched before this analysis existed and are running now, so this is a '
+      'test rather than a fit. <strong>Any completion in that list falsifies the predicate.</strong>'
+      '</p></div>'
+      '<p class="sub">Untested cells: <code>sharers&nbsp;&le;&nbsp;1</code> exists only at '
+      '<code>vl=64</code>, and <code>sharers&nbsp;&isin;&nbsp;{2,4}</code> never occurs at '
+      '<code>vl=512</code> anywhere in the grid &mdash; so neither corner is covered, and the '
+      'predicate is a boundary fitted on 31 points with <strong>no mechanism yet</strong>.</p>'
+      '</div>'
+      % ("".join(_crows), _sc[0] + _sc[3], sum(_sc), _sc[0], _sc[3],
+         len(_fut), 26 - len(_fut),
+         "<br>".join(_x.replace("sw_8x8_", "") for _x in _fut)))
+
 A('<div class="card"><h2>How to read these numbers</h2><ul>'
   '<li><strong>Efficiency, not the TB utilisation counter.</strong> '
   '<code>ideal/actual</code>, with <code>ideal = B&middot;D&middot;I / (cores &times; 4 FPU '

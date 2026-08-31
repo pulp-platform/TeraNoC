@@ -12992,3 +12992,58 @@ all-zero is a query failure whatever its cause.
 
 Generalises [[feedback-monitors-fail-silent]]: the question is not only "would this emit anything if
 it died", but **"can a broken read satisfy my stop condition?"** Here it could, and did.
+
+## 2026-08-31 -- the livelock predicate: sharers in {2,4} AND vl >= 128, 31/31 on 4x4
+
+**Trigger.** `sw_4x4_fp16_ks1_1x128x8192` landed (3,559 cyc, util 18.78%, **tmo=4**, efficiency
+14.4%) -- the only Wave B arm to complete. Its siblings at B=2 and B=4 are both degraded, which
+looked like "any merging kills KS=1". Tabulating every 4x4 arm shows something sharper.
+
+**Neither variable predicts alone.** Both single-variable stories have real counterexamples:
+
+* *"small cohorts livelock"* -- refuted: `sharers=2, vl=64` completes (2 arms, KS=8 B=16),
+  `sharers=4, vl=64` completes (2 arms, KS=8 B=32).
+* *"large vl livelocks"* -- refuted: `sharers=8, vl=128` completes; `vl=256` completes at
+  sharers 8, 16, 32 and 64 (7 arms).
+
+**The conjunction separates them perfectly.**
+
+| sharers | vl | n | outcome |
+|---:|---:|---:|---|
+| 1 | 64 | 6 | all completed |
+| 2 | 64 | 2 | all completed |
+| **2** | **128** | **6** | **all degraded** |
+| 4 | 64 | 2 | all completed |
+| **4** | **128** | **2** | **all degraded** |
+| **4** | **256** | **4** | **all degraded** |
+| 8 | 128 | 1 | all completed |
+| 8 | 256 | 2 | all completed |
+| 16 | 256 | 2 | all completed |
+| 32 | 256 | 2 | all completed |
+| 64 | 256 | 2 | all completed |
+
+    PREDICATE:  sharers in {2,4}  AND  vl >= 128 B  ->  livelock
+    12 true positives, 19 true negatives, 0 false alarms, 0 misses = 31/31
+
+Reading: a cohort **large enough to be worth waiting for but too small to assemble quickly**,
+carrying bursts **big enough that waiting costs**. Either alone is survivable. This is consistent
+with the RH-livelock root cause (a cohort target that cannot be met) but is a different and sharper
+predicate; see [[project-rh-livelock-root-cause]].
+
+**Not circular:** the degraded labels come from the peak-retire-rate test, which uses neither
+sharers nor vl.
+
+**Stated in advance, as a test rather than a fit.** The 26 8x8 Wave A arms were dispatched hours
+before this analysis existed. The predicate says **8 will degrade** and 18 will complete:
+
+    fp16_ks2_4x128x32768   sh=2 vl=128       fp32_ks2_4x128x16384   sh=2 vl=128
+    fp16_ks2_8x128x32768   sh=4 vl=256       fp32_ks2_8x128x16384   sh=4 vl=256
+    fp16_ks4_8x128x32768   sh=2 vl=128       fp32_ks4_8x128x16384   sh=2 vl=128
+    fp16_ks4_16x128x16384  sh=4 vl=128       fp32_ks4_16x128x8192   sh=4 vl=128
+
+**Any completion in that list falsifies it.** Wave C (4x4 KS=1, vl=512) is all `sharers >= 8`, so
+the predicate says all ten complete -- a second independent test.
+
+**Limits.** 31 points, **no mechanism**, and two corners are structurally absent from the grid:
+`sharers <= 1` occurs only at `vl=64`, and `sharers in {2,4}` never occurs at `vl=512`. So this is a
+fitted boundary that predicts well, not an explanation.
