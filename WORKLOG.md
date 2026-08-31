@@ -13781,3 +13781,34 @@ rebuilds it from live badist and **refuses to install a file less than half the 
 replaces**, so a partial read cannot re-create the staleness it exists to prevent.
 
 **Campaign now: 4x4** 38 measured / 12 degraded / 2 running; **8x8** 1 measured / 51 running.
+
+## 2026-08-31 -- 3 live 4x4 runs (user was right), and an 8x8 counter table that did not exist
+
+**Q1: yes, 3 -- I had said 2.** Five 4x4 arms have a live simulator, but two of them are already
+measured and merely epilogue-stuck (`fp16_ks8_128x1024x512` 99,242 cyc on badile46,
+`fp32_ks4_128x1024x256` 75,606 cyc on badile06). Both were skipped by the earlier kill sweep because
+**their nodes were down at the time**. The three doing real work are:
+
+    fp16_ks1_64x512x1024   badile15   unmeasured
+    fp32_ks1_8x128x4096    badile29   unmeasured
+    fp16_ks1_8x128x8192    badile17   still only the ROB0=256 asterisk
+
+My "2" counted arms the page calls unmeasured; the user's "3" counted arms still doing useful work,
+which is the more useful reading -- the asterisked arm's target-config run is exactly the third.
+
+**Q2: nowhere. There was no 8x8 counter table at all.** `perf_detail()` feeds only the 4x4 KS=1
+ladder, and the 8x8 mesh card shows shape, vl and sharers with a run/measured marker -- no tmo, no
+RH, no bypass. Built one: counters read **live** off all 52 running transcripts (52/52 harvested).
+
+**And it separates on the predicate, before anything has finished:**
+
+    in band   n=13   median tmo  3,234   median RH  714
+    outside   n=39   median tmo      0   median RH    0
+
+The out-of-band arms are not merely lower, they are at **exactly zero** on both. Worst offenders are
+all in band: `fp16_ks1_4x128x32768` (sh=4, vl=256) at tmo=24,649 / RH=10,332, and
+`fp32_ks1_4x128x16384` at 20,447 / 8,885.
+
+**Stated on the card as NOT a verdict**, and the reason is worth keeping: timeouts are the mechanism
+the predicate is *about*, so a band arm accumulating them is closer to a restatement than to
+independent evidence. The verdict still needs completion, or its absence, past ~100 windows.

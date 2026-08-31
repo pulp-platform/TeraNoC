@@ -1168,6 +1168,58 @@ if _HZ:
       % (_wcp, len(_wc), format(max(h["win"] for h in _wc), ","),
          _bdp, format(max((h["win"] for h in _bd), default=0), ","), _rows))
 
+# ---- 8x8 live counters -------------------------------------------------------------
+# The 8x8 half of the grid had NO counter table at all: its mesh card shows only shape, vl and
+# sharers. These are read live off the running transcripts, so the band can be watched while the
+# arms are still in flight rather than only after they finish.
+try:
+    _P8 = json.load(open("/tmp/claude-620771/perf8x8.json"))
+except Exception:
+    _P8 = []
+if _P8:
+    _b8 = [x for x in _P8 if x["band"]]
+    _o8 = [x for x in _P8 if not x["band"]]
+    def _med(v):
+        v = sorted(v)
+        return v[len(v) // 2] if v else 0
+    _rows8 = "".join(
+        '<tr class="%s"><td class="mono">%s</td><td class="num">%s</td><td class="num">%s</td>'
+        '<td class="num">%s</td><td class="num %s">%s</td><td class="num %s">%s</td>'
+        '<td class="num">%s</td><td class="num">%s</td><td>%s</td></tr>'
+        % ("bandrow" if x["band"] else "", x["arm"].replace("sw_8x8_", ""),
+           x["sh"], x["vl"], format(x["win"], ","),
+           "st-bad b" if x["tmo"] else "dim", format(x["tmo"], ","),
+           "st-bad" if x["rh"] else "dim", format(x["rh"], ","),
+           format(x["byp"], ","), ("%.1f%%" % x["util"]) if x["util"] else "&mdash;",
+           ('<span class="st-bad">in band</span>' if x["band"] else '<span class="dim">outside</span>'))
+        for x in sorted(_P8, key=lambda z: (-z["band"], -z["tmo"])))
+    A('<div class="card"><h2>8&times;8 counters, read live</h2>'
+      '<p>The 8&times;8 arms carry no completed results yet, so these are read from the running '
+      'transcripts: merge-cohort timeouts, RH-stuck episodes, bank-full bypasses and cumulative FPU '
+      'utilisation as they stand right now.</p>'
+      '<div class="note bad"><span class="lab">the band separates on counters alone</span>'
+      '<p>Splitting these 52 live arms by the livelock predicate, before any of them has finished '
+      'or crossed the ~100-window horizon:</p>'
+      '<div class="formula">'
+      'in band&nbsp;&nbsp;&nbsp;&nbsp;n=%d&nbsp;&nbsp; median tmo <b>%s</b>&nbsp;&nbsp; median RH <b>%s</b><br>'
+      'outside&nbsp;&nbsp;&nbsp;&nbsp; n=%d&nbsp;&nbsp; median tmo <b>%s</b>&nbsp;&nbsp; median RH <b>%s</b>'
+      '</div>'
+      '<p>The out-of-band arms are not merely lower &mdash; they are at <strong>exactly zero</strong> '
+      'on both counters. This is consistent with the predicate but is <em>not</em> a verdict: '
+      'timeouts are the mechanism the predicate is about, so a band arm accumulating them is closer '
+      'to a restatement than to independent evidence. The verdict still needs completion, or the '
+      'absence of it, past ~100 windows.</p></div>'
+      '<div class="tw"><table><thead><tr><th>arm</th><th class="num">sharers</th>'
+      '<th class="num">vl</th><th class="num">windows</th><th class="num">tmo</th>'
+      '<th class="num">RH stuck</th><th class="num">bypass</th><th class="num">FPU util</th>'
+      '<th>predicate</th></tr></thead><tbody>%s</tbody></table></div>'
+      '<p class="sub">Counters are cumulative from the start of the run and include the warm-up '
+      'region, so they are comparable between arms of similar age but not across very different '
+      'window counts.</p></div>'
+      % (len(_b8), format(_med([x["tmo"] for x in _b8]), ","), format(_med([x["rh"] for x in _b8]), ","),
+         len(_o8), format(_med([x["tmo"] for x in _o8]), ","), format(_med([x["rh"] for x in _o8]), ","),
+         _rows8))
+
 A('<div class="card"><h2>How to read these numbers</h2><ul>'
   '<li><strong>Efficiency, not the TB utilisation counter.</strong> '
   '<code>ideal/actual</code>, with <code>ideal = B&middot;D&middot;I / (cores &times; 4 FPU '
