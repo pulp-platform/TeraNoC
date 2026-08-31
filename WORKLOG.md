@@ -13843,3 +13843,35 @@ filters to its left, so no combination dead-ends into an empty table.
 Verified after: 15 sections and 15 card divs (balanced), `<div>` open/close 78/78, the perf JS
 executes under a DOM shim rendering 104/104 rows with all five filters populated, and the
 utilisation explorer still holds its 73 arms.
+
+## 2026-08-31 -- monitoring armed; first two 8x8 results in
+
+**Standing instruction (user):** on a new result, update the result doc *and* the artifact, and
+report the number back. Armed and scripted so the sequence cannot drift:
+
+* `watch_new_results.sh` (persistent monitor) emits one line per arm that **newly** reaches `done`,
+  seeded from the 39 already measured so it reports only new work. An unreadable `badist status` is
+  reported as **state-unknown**, never as "nothing new" -- the failure mode that once produced a
+  FLEET IDLE claim while 72 arms ran.
+* `scripts/build_perf_all.py` -- rebuilds the unified counter table (both meshes).
+* `scripts/build_ks_plan.py` -- rebuilds the plan artifact's data from the same `status()`.
+* `/tmp/claude-620771/on_new_result.sh` -- the 5-step chain: fleet state -> counters -> plan data
+  -> both artifacts. The fleet-state refresh is **first** because it has gone stale twice and hidden
+  whole batches.
+
+**Two 8x8 results, the first of the campaign:**
+
+| arm | cycles | eff | sharers | vl | tmo | RH |
+|---|---:|---:|---:|---:|---:|---:|
+| `fp32_ks8_8x128x16384` | 11,924 | 34.4% | 1 | 64 | 16 | 16 |
+| `fp32_ks8_128x1024x1024` | **97,494** | 33.6% | 16 | 64 | **0** | **0** |
+
+Both `vl=64`, both **outside** the failure band, both completed -- two more true negatives for the
+predicate at the larger mesh, where its healthy half had not been tested at all. The second is
+perfectly clean (zero timeouts, zero RH over 195 windows, 42.90% FPU utilisation).
+
+Their efficiencies (34.4%, 33.6%) sit well below the 4x4 KS=8 range of 58.7-69.4%, which is the
+**scale-up loss** the campaign exists to quantify -- but with 2 of 52 arms in, that is an
+observation, not a number to quote.
+
+**Campaign: 40 measured** (38 -> 40), 12 livelocked, 52 running; matched-B ladders now 9.
