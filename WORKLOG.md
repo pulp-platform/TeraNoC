@@ -13154,3 +13154,43 @@ a zero measurement.**
 retiring normally, so **the icache-warmup wedge does not reproduce on the decode app at 8x8**. That
 settles the app-vs-shape question for the peer: the wedge belongs to the GEMM app, not to 8x8 and
 not to warmup in general.
+
+## 2026-08-31 -- band-probe test made single-variable (peer catch), REPEAT normalisation verified
+
+**My pair was confounded and the peer caught it.** My control (D=256, I=2048) against my test
+(D=32, I=4096) moves **both** D and I. They built and suggested the missing rung, and I have now
+built it here:
+
+| arm | D | I | sharers | vl | cell |
+|---|---:|---:|---:|---:|---|
+| `sw_4x4_fp16_ks8_32x32x2048` | 32 | 2048 | 4 | 64 | healthy |
+| `sw_4x4_fp16_ks8_32x32x4096` | 32 | 4096 | 4 | **128** | **IN-BAND** |
+| `sw_4x4_fp16_ks8_32x256x2048` | 256 | 2048 | 4 | 64 | healthy -- **RTL measured 11,877 cyc** |
+
+Same D, B, KS, sharers and `MATMUL_REPEAT=8` across the first two, so **only I moves, hence only
+vl**. Both verified 256-core (`log_barrier=4096`). The D=256 arm stays as the tie to the measured
+set. This is now a genuine single-variable crossing of the predicate boundary.
+
+**`MATMUL_REPEAT` normalisation verified in source, not taken on trust.**
+`sp-fmatmul-opt-burst-merge-fp16/main.c:674`:
+
+    uint32_t timer_temp = timer_raw / (uint32_t)MATMUL_REPEAT;  // PER PASS
+
+Reported cycles are **per pass**, so arms at REPEAT 1, 8 and 32 compare directly with no scaling.
+REPEAT changes only total simulated work (and therefore wall-clock), not the reported number.
+
+**Competing predictions on record, both before any result:**
+
+* mine -- both in-band arms **degrade**; the vl=64 control completes.
+* peer -- **all three complete with no cliff**, because their MSHR's `hold_subs` target is always
+  released by `serve_timeout`, so no cohort can wait forever. If the RTL degrades where their model
+  does not, that timeout release is the first mechanism to compare.
+
+**Toolchain note.** The system `python3` (`/usr/local/anaconda3-2022.05`) began failing with
+`ImportError: ... array.cpython-39...so: cannot open shared object file: Remote I/O error` -- an NFS
+fault on `/usr/local`, not a code problem. The build succeeds under the conda env
+(`/home/dishen/.conda/envs/terapool_noc/bin`, Python 3.12.9), which is the toolchain CLAUDE.md
+already prescribes for floogen. Use it if analysis scripts start failing the same way.
+
+**Dispatch still held** per the user's decision; the peer offered to release it and that is not a
+substitute for asking. It costs nothing -- VCS is pinned at exactly 20 free.
