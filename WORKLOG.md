@@ -13690,3 +13690,28 @@ That is the third shadowing bug of the same shape today: an empty probe shadowin
 `run2` transcript excluded from the fallback, and now a diagnostic shadowing a real run. In each
 case a lower-quality source silently outranked a better one -- worth checking any place the page
 picks between sources.
+
+## 2026-08-31 -- all 14 remaining arms dispatched; the "43 pending" was a stale-file artifact
+
+**The count was wrong, and finding out why mattered more than the dispatch.** The page reported
+**43 not-dispatched**; the true number was **14**. `status()` reads live fleet state from
+`/tmp/claude-620771/fleet_status.tsv`, and that file was from **00:17 -- seventeen hours stale**,
+containing **zero** 8x8 Wave A rows because Wave A was dispatched at 02:39. So all 26 Wave A arms,
+which had been running all day, were being rendered as *not dispatched* -- including in the plan
+artifact handed to the GVSoC side. Rebuilt it from live badist across all 11 batches (58 rows ->
+94), preferring the best state per arm when an arm appears in several batches.
+
+**Dispatched, in two batches:**
+
+* `waveC4rest-20260831-170908-f050` -- the 4 remaining **4x4 KS=1** arms whose ELFs already existed
+  (`sh` 16-64, `vl=512`). All four running within minutes.
+* `waveC8x8-20260831-171742-219a` -- the **10 8x8 KS=1** arms, ELFs built fresh with
+  `CONFIG=terapool_spatz4_fpu_8x8` and every one verified 1024-core via `log_barrier=16384`.
+  All ten dispatched.
+
+Submitted with `--disk-gb 50` (the guard that would have saved the larain6 arm) and
+`--reserve-licenses 20`. **VCS 64/36 -> 77/23**, still above the floor with room to spare.
+
+**The grid is now fully in flight: 0 arms undispatched.** 33 measured, 12 degraded, 59 running.
+Every one of the 14 is `sharers >= 8`, so the predicate calls them all healthy -- the 10 at 8x8
+extend the healthy-half test to the larger mesh, where it has not been checked at all.
