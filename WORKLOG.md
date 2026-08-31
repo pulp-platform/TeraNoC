@@ -12819,3 +12819,42 @@ healthy week-old 8x8 arms. Cause: **`badist batches` returns only ~20 of 265 bat
 different windowed views burned this session: this one and `j["id"]` vs `j["job"]`. Both failed the
 same way -- a join whose left side is silently incomplete reports *absence*, which reads as a
 finding rather than as a broken query.
+
+## 2026-08-31 -- 8x8 Wave A dispatched (26 arms, KS=2 and KS=4)
+
+**Purpose.** Extend the B x KS decode sweep to the 8x8 / 1024-core mesh at KS=2 and KS=4, the two
+kernel splits the ROB0 fix unlocked.
+
+**The blocker was neither licence.** `arms_8x8_p2_ks24.txt` was an empty file and **zero ELFs
+existed** for 8x8 KS=2/4. Built all 26 with `CONFIG=terapool_spatz4_fpu_8x8` -- mandatory, because
+`gen_decode_shape_app.sh` defaults to the 4x4 flavour and `num_cores=1024` on the make command line
+is silently ignored, which would link a 256-core runtime against a 1024-core mesh with no error.
+`MATMUL_REPEAT` was taken from the campaign grid rather than re-derived; total work is constant per
+precision (fp16 536,870,912 / fp32 268,435,456 MACs), matching the KS=8 set exactly.
+
+**Verified 1024-core, not silently 4x4:** `nm -S` on `log_barrier` reads **16384** on all 26,
+against **4096** on a 4x4 build -- exactly 4x, i.e. 1024 vs 256 cores. A build that had fallen back
+to the 4x4 flavour would have produced a valid ELF and a plausible run.
+
+**Config parity.** `build_tgt4x4` and `build_tgt8x8` are knob-identical (ROB0=128, ROBN=16,
+BYPASS_WAYS=16, hold/serve 8191, PRESCALE_W=6, REMAPPING=3, MERGE_REQS=16, SNITCH_TRACE=0), so 4x4
+and 8x8 arms are directly comparable. ROBN=16 is safe here: the store wedge needs a 512 B store and
+Wave A tops out at `vl=256 B` -- that risk belongs to Wave C (KS=1, `vl=512 B`).
+
+**Questa was not usable, and not for licence reasons.** `mtiverification` had **170 seats free**
+(200 issued, 30 in use) -- it is not capped at 20. But the only 8x8 Questa image, `build_q_8x8`
+(2026-08-22), carries `ROB_DEPTH=64` (vs 128), `HOLD_WINDOW_BURST=2047` (vs 8191) and
+`NOC_ROUTER_REMAPPING=2` (vs 3). ROB0=64 is the exact admission ceiling that blocks KS=2, so those
+arms would have reproduced the original failure and read as a result. A comparable Questa arm needs
+a fresh ~4 h elaboration.
+
+**Resources corrected before dispatch.** The client's VCS defaults are documented from a 4x4
+measurement (`mem_gb 4`, "measured 2.0 GB"). A running 8x8 arm measures **8.99 GB peak RSS** and
+**3.2 GB of scratch after 14 h**; submitted with `--mem-gb 12 --disk-gb 20`. At the default a 62 GB
+node would have been packed with ~15 arms where ~6 fit.
+
+**Result.** `waveA8x8-20260831-023909-89fc`, 26 arms, `--max-parallel 26 --reserve-licenses 20`
+(the cap set to the batch size so the reserve is the only binding constraint). **17 dispatched
+immediately, 9 held by the governor; VCS 80/100 with exactly 20 free.** Expect **2-3 days per arm**:
+the 8x8 KS=8 set is 14.3 h in at only 24-88 benchmark windows, against ~100-170 windows for a
+completed 4x4 arm.
