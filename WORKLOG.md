@@ -13296,3 +13296,32 @@ have deleted any future completed-but-imperfect arm the same way.
 
 Artifact republished. Tally now: 21 measured, 24 running, 26 not dispatched, 12 degraded,
 2 no-data, 1 borderline.
+
+## 2026-08-31 -- 11 badile nodes down; 3 arms lost, predicate test intact
+
+**Fleet event, not an arm failure.** `badist nodes` reports 11 down -- badile02, 03, 06, 09, 11, 16,
+23, 27, 28, 33, 46 -- and ssh/ping to badile46 time out.
+
+**Lost (3), with 2 more on dead nodes yet to time out:**
+
+| arm | wave | sharers | vl | predicate |
+|---|---|---:|---:|---|
+| `sw_8x8_fp16_ks2_2x128x32768` | Wave A | 1 | 64 | healthy |
+| `sw_4x4_fp16_ks1_64x512x1024` | Wave C | 64 | 512 | healthy |
+| `sw_8x8_fp32_ks1_1x128x16384` | Wave B | 1 | 64 | healthy |
+
+**All eight predicted-degrade arms survived** (badile49/41/35/17/20/07/19, larain3), so the predicate
+test is untouched. Every lost arm is a predicted-**healthy** one -- coverage lost, but nothing that
+could confirm or falsify. That is luck, not design: had the outage taken badile41 or badile35 the
+test would have lost a band arm.
+
+**A dead node does NOT release its licences.** VCS read `87 in use, 13 free, ours 85` *after* the
+losses -- FlexLM holds a checkout until its reclaim timeout, so ~5 of our seats are stranded on
+hardware that is gone. Free also fell because two other users took seats. So an outage makes the
+licence position worse, not better, which is the opposite of the intuition.
+
+**User decision: do not requeue now**; revisit when the nodes return. The three arms and their
+(still-present) ELFs are recorded in `/tmp/claude-620771/lost_arms_requeue.txt`, so a requeue needs
+no rebuild. A persistent monitor now watches for the nodes coming back and reports VCS headroom with
+them; like the Wave A watch it treats an unreadable `badist nodes` as **state-unknown, never
+"recovered"** -- a failed read must not be able to satisfy the condition being waited on.
