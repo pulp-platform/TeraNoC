@@ -13929,3 +13929,24 @@ this shape sit near the top of their respective ranges -- 87.37% is 8th overall.
 Worth noting the shape of the leaderboard: the top 8 are **all fp16** and all at N (the D dimension)
 of 1024 or 2048 -- `2048x2048x512` leads at 92.17%. Large-N shapes dominate, which is the opposite
 end of the space from the M=8192 family that tops out near 30%.
+
+## 2026-09-01 -- the 3 lost arms recovered themselves; VCS pool now 99/100 with 30 seats held by others
+
+**The requeue we held is no longer needed.** badist retried all three arms lost to the badile46
+outage, on its own, and they are running again:
+
+    sw_8x8_fp16_ks2_2x128x32768   attempt=2  larain5
+    sw_4x4_fp16_ks1_64x512x1024   attempt=2  badile15
+    sw_8x8_fp32_ks1_1x128x16384   attempt=3  badile01
+
+`max_retries` in the job spec did the work. The decision to *wait* rather than requeue was therefore
+the right one twice over: the fleet was degraded at the time, and the arms came back without
+spending a seat on a duplicate. `lost_arms_requeue.txt` retired to `.DONE`.
+
+**Licence pressure has moved, and it is not us.** VCS reads **99 in use, 1 free -- of which we hold
+69**, so **other users now hold 30 seats**, up from 0 earlier today. Our 5 queued arms will not
+dispatch until the pool loosens, which is the governor behaving correctly rather than a fault. No
+arm of ours has been killed by a refused seat: every retry in flight traces to the node outage, not
+to licensing.
+
+No new results since the two 8x8 KS=8 arms (4.8 h and 5.6 h ago). Scale-up sweep steady at 193 done.
