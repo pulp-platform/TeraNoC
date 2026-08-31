@@ -12956,3 +12956,39 @@ Artifact gains a "KS at matched B" card carrying the imbalance, the four pairs, 
 This is the same lesson as [[project-plateau-not-throughput]] and the sharers non-isolation: with
 co-varying parameters, a pooled ranking over a partial grid invents structure. **Matched pairs beat
 a global ranking** -- now demonstrated twice on two different campaigns.
+
+## 2026-08-31 -- a monitor reported FLEET IDLE and exited 0 while 72 arms were running
+
+**What happened.** The wave-A monitor went from `running=19 submitted=12 done=20 failed=6` on one
+poll to `running=0 submitted=0 done=0 failed=0` on the next, printed **`FLEET IDLE`**, and **exited
+0**. Ground truth at that moment, checked directly: **72 running**, 25 submitted, 39 done across
+eight batches; the arm batch it was watching still read `done=20 failed=6 running=7`.
+
+**The defect is that the failure mode impersonates success.** A query returning nothing was counted
+as *zero arms*, and zero arms satisfied the monitor's own **idle stop condition** -- so a broken
+poll cleanly terminated the watch with a success code. Nothing distinguishes "the query returned
+nothing" from "nothing exists". `done=0` was the tell: a batch that had already recorded 20
+completions cannot drop to zero completions, so the reading was arithmetically impossible, not
+merely surprising.
+
+**A hypothesis I had to discard.** My first theory was the windowed-view trap -- that dispatching
+`waveC4` and `waveA8x8` pushed the three wave-A batches out of `badist batches`' default 20 rows.
+**Tested and refuted:** all three are still inside the default window (20 rows shown of 266 total).
+The cause is a transient unreadable `badist status`, most likely contention -- the all-zero poll
+coincided with the results collector and several of my own concurrent status queries. Worth writing
+down that the tempting explanation was wrong; an abrupt one-poll transition from fully-populated to
+all-zero is a query failure whatever its cause.
+
+**Replacement monitor** (`waveA8x8`, persistent) fixes the class, not the instance:
+
+* a poll that returns empty or non-list JSON is reported as **`QUERY FAILED ... NOT idle, state
+  unknown`**, never counted as zero, and never satisfies the stop condition;
+* only a *successful* reading showing `running=0 submitted=0` may end the watch;
+* repeated failures are rate-limited to one message per six polls, and recovery is announced, so a
+  long outage is visible without flooding;
+* it also carries the warmup-wedge test the campaign now needs -- any arm past 60 windows with zero
+  retirement across its last three windows is flagged `WEDGE SUSPECT`, which is exactly the
+  signature `iw1` showed.
+
+Generalises [[feedback-monitors-fail-silent]]: the question is not only "would this emit anything if
+it died", but **"can a broken read satisfy my stop condition?"** Here it could, and did.
