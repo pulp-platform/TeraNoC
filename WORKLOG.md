@@ -13361,3 +13361,44 @@ grid -- so it regenerates rather than being hand-maintained.
 **Tiering note.** The attempt to split 4x4 into "arms that test the claims" and a remainder returned
 **52 and 0** -- at 4x4 every arm participates in either the ladder or the boundary. The real split
 is by mesh, and by cost: 72 MB against 288 MB.
+
+## 2026-08-31 -- the GVSoC model hangs on our two FASTEST arms
+
+**Their finding, and it is well controlled.** Six model arms ran 8.3 h without completing, all at
+low sharers. Small B is the obvious cost confound, but two pairs hold B, D, I and W identical and
+move only KS:
+
+| shape (W=1.0 MB) | KS | sharers | vl | GVSoC | **ours (RTL)** |
+|---|---:|---:|---:|---|---|
+| fp16 B=16 D=128 I=4096 | 2 | 8 | 256 | 18,526 cyc | 13,728 cyc (29.8%) |
+| fp16 B=16 D=128 I=4096 | **8** | **2** | 64 | **TIMEOUT 8.3 h** | **6,031 cyc (67.9%)** |
+| fp32 B=16 D=128 I=2048 | 2 | 8 | 256 | 12,293 cyc | 15,344 cyc (26.7%) |
+| fp32 B=16 D=128 I=2048 | **8** | **2** | 64 | **TIMEOUT 8.3 h** | **6,835 cyc (59.9%)** |
+
+Same weight matrix, same data volume, same simulator cost -- one completes, one does not. So the
+defect is at **sharers=2**, the *opposite* corner from our livelock band, in a region the hardware is
+healthiest in. `fp16_ks8_16x128x4096` at **67.9% is the best arm in the whole 104-arm grid**, and
+their model cannot finish it; its KS=2 sibling, 2.3x slower on hardware, completes for them in
+minutes. **The ranking is inverted at the top**, which makes it a defect rather than a closable
+fidelity gap.
+
+Also flagged to them: the KS=2 rows disagree in *direction* between precisions (they are 35% slower
+on fp16, 20% faster on fp32), which may be a second symptom of the same cause rather than an
+independent error.
+
+**Our ks2 band probe was confounded and is replaced.** `sw_4x4_fp16_ks2_4x32x8192` is sharers=2 --
+inside their hang region -- so a non-completion there could not distinguish our predicate from their
+defect. They were right to say they would report it as ambiguous. Replacement built and verified:
+
+    hardware/sw_4x4_fp16_ks4_16x32x4096.elf
+    KS=4 B=16 D=32 I=4096  ->  sharers=4  vl=128  W=0.25 MB
+
+`sharers=4` is outside their hang region and inside our band, and its D=128 twin
+(`fp16_ks4_16x128x4096`) is a **confirmed livelock** here -- a cheap stand-in for a known failure
+rather than a new cell. That gives two clean sharers=4 probes at different KS and B.
+
+**Scope agreed:** they take the 4x4 half, band arms plus `vl=64` neighbours first, then B=16/B=32.
+They decline the 52 8x8 arms; that is their user's call and I am not pushing it. Their yield point is
+right and I had under-weighted it: if low-sharers arms cost 8.3 h and return "did not complete", much
+of the triangle produces rows rather than data -- so **the sharers=2 defect is a blocker to sequence
+before the bulk run**, not something to filter afterwards.
