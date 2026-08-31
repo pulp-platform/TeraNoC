@@ -13875,3 +13875,40 @@ Their efficiencies (34.4%, 33.6%) sit well below the 4x4 KS=8 range of 58.7-69.4
 observation, not a number to quote.
 
 **Campaign: 40 measured** (38 -> 40), 12 livelocked, 52 running; matched-B ladders now 9.
+
+## 2026-08-31 -- the livelock predicate does NOT reproduce at 8x8 (first disconfirming evidence)
+
+Three band arms have now passed the ~100-window mark at which **every** 4x4 failure had already
+collapsed, and they are **not degrading**:
+
+| arm | sharers | vl | windows | insn/window | tmo |
+|---|---:|---:|---:|---:|---:|
+| `fp32_ks2_4x128x16384` | 2 | 128 | 152 | 213,125 | 3,964 |
+| `fp16_ks4_16x128x16384` | 4 | 128 | 143 | 189,815 | 11,207 |
+| `fp32_ks2_8x128x16384` | 4 | 256 | 143 | 205,450 | 4,942 |
+
+Against the eight out-of-band arms past the same point:
+
+    in band   median 205,450 insn/window        outside  median 210,500      ratio 0.98
+
+**No gap at all.** At 4x4 the failures fell to 92-514 per window -- a ~40x drop from ~16,000. Here
+the band arms retire at the same rate as everything else.
+
+**The mechanism is present but not lethal.** Those three carry `tmo` 3,964-11,207 while *every*
+out-of-band arm past the horizon sits at **0**. So the timeouts the predicate is about are really
+happening, and really confined to the band -- they are simply **not producing livelock at 8x8**.
+
+**Two readings, and the data does not separate them:**
+
+1. the predicate is **4x4-specific**;
+2. the ~100-window horizon does not transfer -- the 4x4 failures collapsed at roughly **2% of their
+   eventual length** (w100 of ~5,000), so w150 on a much longer 8x8 arm could still be early.
+
+Reading 2 is *available*, which is exactly why it must not be asserted: adopting it would be
+explaining away a disconfirming result with a rescaling invented after the fact. Recorded on the
+page as an open question, with the ratio and the contrast stated plainly.
+
+**What would settle it:** the remaining 5 band arms crossing the horizon (2 are still at window 0),
+or any 8x8 band arm completing. A completion would refute the predicate at 8x8 outright.
+
+Status: 40 measured, 12 livelocked, 54 running. 11 Wave A arms past the horizon, 3 of them in band.
