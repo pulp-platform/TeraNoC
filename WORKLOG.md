@@ -13548,3 +13548,45 @@ two slots except for the smallest instructions, which makes their wedged state r
 rather than as a rare race -- and reframes their vl=64 trigger as *fastest to admit a second slot*
 rather than *desynchronises the ports*. Their probe separates the two: ROB at cap with two slots
 resident means capacity; heads on different slots with the ROB not full means desynchronisation.
+
+## 2026-08-31 -- "no data" was a bug: an empty probe shadowed two of the best arms
+
+Asked why two arms read "no data", the answer was not that anything happened to them. **They
+completed.**
+
+    sw_4x4_fp16_ks8_8x128x8192    5,898 cyc   94 bench windows   ->  69.4% efficiency
+    sw_4x4_fp16_ks8_32x256x2048  11,877 cyc   94 bench windows   ->  69.0% efficiency
+
+Both have `[UART] The execution took ...`, full spotcheck output and 94 `[STALLG] bench` windows in
+their local transcripts. They are the campaign's two **highest-efficiency** arms and the page was
+discarding them.
+
+**Cause.** The fleet harvest returns nothing for an arm that has already FINISHED -- its node-local
+data is gone by the time the probe runs -- so `probe/run2__<arm>.txt` is **0 bytes**. The parser
+turns an empty file into `bench = 0`, and `status()` early-returned on `r2["bench"] == 0` with
+"finished with the benchmark region never activated" **before** reaching the `RES` fallback that
+holds the real transcript. An empty file and an inactive benchmark region produce identical records.
+
+Sixth instance today of *a missing measurement rendering as a zero measurement*: monitor `done=0` ->
+FLEET IDLE; empty bucket -> `0`; `|| echo 0` -> "0 with mesh data"; failed lmstat -> reserve
+disabled; my own ssh sweep counting unreachable nodes as zero; and now this.
+
+**Fix:** before declaring "no data", consult `RES` for an actual transcript; if one shows cycles,
+report it as measured and mark the provenance `[from transcript; probe empty]`.
+
+**Consequences beyond two cells.** `measured` goes 20 -> 22, and a **fifth matched-B pair** appears
+-- the widest KS span we have:
+
+    fp16 B=8    KS=1 24.5%   KS=8 69.4%   -> 2.83x
+    fp16 B=16   KS=2 29.8%   KS=8 67.9%   -> 2.28x
+    fp16 B=32   KS=2 21.5%   KS=4 39.2%   KS=8 69.0%  -> 3.21x
+    fp32 B=16   KS=2 26.7%   KS=8 59.9%   -> 2.24x
+    fp32 B=32   KS=2 21.4%   KS=8 64.5%   -> 3.01x
+
+KS=1 also gains a third measured arm (n=2 -> 3, range 8.8-24.5%). Verified afterwards that every
+card now derives its efficiency from `status()`, so no two cards can disagree.
+
+**Also published: the horizon card.** Wave C is 9 of 10 arms past the ~100-window mark, furthest at
+**651 windows** -- six times beyond where the 4x4 failures collapsed -- with none stopping. Wave A's
+8 band arms are at 0-91 windows, so the failure half of the predicate is still untested and the page
+says so explicitly rather than implying a verdict.

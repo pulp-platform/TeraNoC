@@ -72,6 +72,19 @@ def status(r):
                     "measured on the target config (%s cyc, tmo=%d)"
                     % (format(r2["cyc"], ","), r2["tmo"]))
         if r2["bench"] == 0:
+            # An EMPTY probe file yields bench==0 too, which is indistinguishable from "the
+            # benchmark region never activated" unless we check for an actual transcript. The
+            # fleet harvest returns nothing for an arm that has already FINISHED (its node-local
+            # data is gone), so two completed arms -- fp16_ks8_8x128x8192 at 5,898 cyc and
+            # fp16_ks8_32x256x2048 at 11,876 -- were being reported as "no data" while their
+            # local transcripts held the result. A missing measurement must not render as a
+            # zero measurement.
+            _r = RES.get(name, {})
+            _t = _r.get("run2") or _r.get("wc") or _r.get("wb") or _r.get("wa2") or _r.get("wa1")
+            if _t and _t["cycles"]:
+                return ("done", "%.1f%%" % (100.0 * r["ideal"] / _t["cycles"]),
+                        "measured on the target config (%s cyc, tmo=%d) [from transcript; probe empty]"
+                        % (format(_t["cycles"], ","), _t["tmo"]))
             return ("bad", "no data", "finished with the benchmark region never activated")
     loc  = LOCAL.get((r["mesh"], r["prec"], r["KS"], r["B"], r["D"], r["I"]))
     if loc:
@@ -1053,6 +1066,50 @@ if _crows:
       % ("".join(_crows), _sc[0] + _sc[3], sum(_sc), _sc[0], _sc[3],
          len(_fut), 26 - len(_fut),
          "<br>".join(_x.replace("sw_8x8_", "") for _x in _fut)))
+
+# ---- live predicate test: horizon progress ---------------------------------------
+# An arm cannot be judged before ~100 benchmark windows -- the 4x4 failures retired
+# normally until then. This card reports how far the live arms have got, so the page
+# never implies a verdict the data cannot yet support.
+try:
+    _HZ = json.load(open("/tmp/claude-620771/horizon.json"))
+except Exception:
+    _HZ = []
+if _HZ:
+    _wc = [h for h in _HZ if h["wave"] == "waveC"]
+    _wa = [h for h in _HZ if h["wave"] == "waveA"]
+    _wcp = sum(1 for h in _wc if h["win"] >= 100)
+    _bd  = [h for h in _wa if h["band"]]
+    _bdp = sum(1 for h in _bd if h["win"] >= 100)
+    _rows = "".join(
+        '<tr><td class="mono">%s</td><td class="num">%s</td><td class="num">%s</td>'
+        '<td class="num b">%s</td><td class="num">%s</td><td>%s</td></tr>'
+        % (h["arm"].replace("sw_", ""), h["sh"], h["vl"], format(h["win"], ","),
+           format(h["insn"], ","),
+           ('<span class="st-bad">in band &mdash; predicted to fail</span>' if h["band"]
+            else '<span class="dim">predicted healthy</span>'))
+        for h in sorted(_HZ, key=lambda x: (-x["win"],)))
+    A('<div class="card"><h2>The predicate under test &mdash; how far the live arms have got</h2>'
+      '<p>An arm cannot be judged before about <strong>100 benchmark windows</strong>: every 4x4 '
+      'failure retired 6,600&ndash;20,800 instructions per window, indistinguishable from a healthy '
+      'arm, until roughly that point and only then collapsed. Progress against that horizon:</p>'
+      '<div class="note good"><span class="lab">Wave&nbsp;C &mdash; first test to return a result</span>'
+      '<p>All ten arms are <code>sharers&nbsp;&ge;&nbsp;8</code>, which the predicate says should '
+      'complete. <strong>%d of %d are past the horizon</strong>, the furthest at '
+      '<strong>%s windows</strong> &mdash; six times beyond the point where the 4x4 failures '
+      'collapsed &mdash; and none has stopped retiring. The healthy half of the prediction '
+      'holds.</p></div>'
+      '<div class="note"><span class="lab">Wave&nbsp;A &mdash; the failure half, still pending</span>'
+      '<p>%d of the 8 band arms have reached the horizon (furthest %s windows). '
+      '<strong>Nothing is confirmed or refuted yet</strong>, and their current health is not '
+      'evidence: a doomed arm looks exactly like this before window 100.</p></div>'
+      '<div class="tw"><table><thead><tr><th>arm</th><th class="num">sharers</th>'
+      '<th class="num">vl</th><th class="num">windows</th><th class="num">recent insn</th>'
+      '<th>prediction</th></tr></thead><tbody>%s</tbody></table></div>'
+      '<p class="sub">Live arms only; completed and livelocked arms appear in the tables above.</p>'
+      '</div>'
+      % (_wcp, len(_wc), format(max(h["win"] for h in _wc), ","),
+         _bdp, format(max((h["win"] for h in _bd), default=0), ","), _rows))
 
 A('<div class="card"><h2>How to read these numbers</h2><ul>'
   '<li><strong>Efficiency, not the TB utilisation counter.</strong> '
