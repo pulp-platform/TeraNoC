@@ -13617,3 +13617,39 @@ desynchronised *run*, not the shape. `spotcheck=MISSING` is a second, weaker fla
 
 To settle it the shape needs a re-run; a bimodal shape can land on either mode from the same image.
 Published either way, since the row belongs in the record -- but flagged rather than averaged in.
+
+## 2026-08-31 -- 18 FINISHED arms were holding VCS seats for up to 47 hours
+
+**Prompted by the right question from the user** ("are the finished runs still holding the
+licences?") after a sweep found arms whose kernel had completed while badist still reported
+`running`. The answer was yes, and it explains why the pool had been pinned at ~80/20 all day.
+
+**The sweep.** Checking every `running` arm for `execution took` in its transcript found **19 hits
+across 11 distinct arms** -- kernels finished, results valid, `tmo=0` throughout, 128-332 benchmark
+windows each. The duplicate copies across batches agree **to the cycle** (40,204 on two nodes),
+which is a free determinism check.
+
+**The seats.** 18 of those 19 still had a live `mempool_simvopt`, the oldest **47 hours** past its
+own completion. This is the known "kernel completes but the sim never reaches EOC" pattern: the
+process lives on and keeps its VCS checkout, and badist keeps calling it `running`.
+
+**Harvest first, then kill.** All 11 transcripts pulled locally and verified against the node's
+cycle count before anything was killed; each kill then re-checked, on the node and immediately
+before signalling, that *that job's* transcript showed a completed kernel and refused otherwise.
+
+    killed 18, skipped 1 (already gone)
+    VCS  80 in use / 20 free  ->  64 in use / 36 free   (ours 80 -> 63)
+    the queued reissue dispatched immediately, onto badile46
+
+**Measured arms: 20 -> 33.** KS=1 n=5, KS=2 n=10, KS=4 n=8, KS=8 n=10, and the matched-B ladder
+count goes 5 -> 9, of which **six are three-point**.
+
+**And the KS ranking is NOT monotonic.** At B=128 it inverts, consistently in both precisions:
+
+    fp16 B=128   KS=1 19.7%   KS=2 39.0%   KS=4 44.0%   KS=8 33.0%
+    fp32 B=128   KS=1 19.8%   KS=2 38.7%   KS=4 43.3%   KS=8 33.5%
+
+KS=8 falls **below** KS=4 -- an 11 pp drop in fp16, 9.8 pp in fp32, from arms with `tmo=0` and
+identical `ideal`. Every earlier statement of a monotonic KS ranking was drawn from B <= 64, where
+it does hold. **This needs correcting in the artifact and to the GVSoC side**, who were told to
+target the ranking as the thing worth reproducing.

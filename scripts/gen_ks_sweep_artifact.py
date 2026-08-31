@@ -91,7 +91,12 @@ def status(r):
         c = _local_cycles(loc[0])
         if c: return ("done", "%.1f%%*" % (100.0 * r["ideal"] / c), "measured locally (%s)" % loc[1])
     got  = RES.get(name, {})
-    best = got.get("wc") or got.get("wb") or got.get("wa2")   # current-wave results only
+    # `run2` IS the target config, so its transcript is authoritative when the probe file
+    # carries no cycle count -- which happens whenever an arm finishes before the harvest
+    # runs, or is still `running` in badist while its kernel has already completed.
+    # Excluding it stranded fp32_ks4_32x256x1024 (20,875 cyc, tmo=0) as "running".
+    # wa1 stays excluded: that is the superseded stock-config wave.
+    best = got.get("wc") or got.get("wb") or got.get("run2") or got.get("wa2")
     if best and best["cycles"]:
         # A run that printed a cycle count FINISHED -- it is a measurement, not a livelock.
         # This used to relabel any completed arm with `tmo > 0 and rh0 > 0` as "livelocked",
@@ -178,7 +183,11 @@ except IOError:
     pass
 # one borderline arm was deliberately left running (tmo=0, few windows) -- it is degraded but
 # NOT killed, and the headline count must not imply otherwise.
-KEPT_ALIVE = {"sw_4x4_fp32_ks4_32x256x1024"}
+# sw_4x4_fp32_ks4_32x256x1024 was held here as "degraded but still running -- borderline".
+# It has since COMPLETED: 20,875 cycles, 166 windows, tmo=0. What looked like a collapse was
+# the wind-down of a finishing run -- a healthy arm also retires less in its final windows,
+# so a declining tail is not sufficient evidence of livelock. Completion is.
+KEPT_ALIVE = set()
 KILLED = DEGRADED - KEPT_ALIVE
 
 TALLY = {}
