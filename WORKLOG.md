@@ -13113,3 +13113,44 @@ if they need one.
 
 `hardware/sw_4x4_fp16_ks8_32x32x4096.elf`, `hardware/sw_4x4_fp16_ks2_4x32x8192.elf`, both
 world-readable on the automounted share.
+
+## 2026-08-31 -- CORRECTION: the degraded arms DID have a healthy phase (~100 windows)
+
+**What I got wrong.** I wrote that the degraded arms "never had a healthy phase -- they did not
+collapse from a peak, they never reached one." **That is false.** Retirement per window, by window
+index, over the six confirmed 4x4 KS=2/4 livelocks:
+
+| arm | nwin | w1-10 | w31-60 | w61-100 | w101+ |
+|---|---:|---:|---:|---:|---:|
+| fp16_ks2_4x128x8192 | 5085 | 13,880 | 13,167 | 13,207 | **347** |
+| fp16_ks4_8x128x8192 | 5072 | 20,776 | 16,787 | 16,596 | **142** |
+| fp32_ks4_8x128x4096 | 3759 | 19,797 | 13,431 | 13,647 | **99** |
+| fp32_ks2_8x128x4096 | 2019 | 7,558 | 6,640 | 6,749 | **147** |
+| fp32_ks4_16x128x2048 | 5825 | 16,060 | 12,116 | 12,068 | **92** |
+| fp16_ks2_8x128x8192 | 4307 | 9,536 | 6,524 | 6,630 | **116** |
+
+They retire **normally through ~window 100** at rates indistinguishable from arms that finish, then
+fall off a cliff. The 90th-percentile statistic reads near zero because the dead tail runs for
+thousands of windows and swamps the healthy opening -- **not** because the opening is absent.
+
+**The classifier still works** (the tail dominates the distribution, so the populations still
+separate with no cutoff). Only the *explanation* was wrong. But the consequence is operational:
+
+> **DETECTION HORIZON: an arm cannot be judged before ~100 benchmark windows.**
+
+**This immediately governs the predicate test.** The 26 8x8 Wave A arms are at **4-62 windows** --
+entirely inside the phase where a doomed arm still looks healthy. Their present health is **not**
+evidence for or against the predicate, and I will not read it either way until they pass ~100.
+Six of the eight predicted-degrade arms are live and retiring 297k-420k per window right now; so are
+the predicted-healthy ones. Nothing follows from that yet.
+
+**Second display bug found and fixed in the same pass:** the first version of the bucket table
+averaged empty window ranges to `0`, making "this arm has only 20 windows" render identically to
+"this arm is dead". It briefly made healthy 8x8 KS=8 arms look like they had died. Empty buckets now
+print `-`. Same family as the earlier all-zero monitor: **a missing measurement must never render as
+a zero measurement.**
+
+**One real signal that survives, unrelated to the horizon:** all 20 Wave A arms past time 0 are
+retiring normally, so **the icache-warmup wedge does not reproduce on the decode app at 8x8**. That
+settles the app-vs-shape question for the peer: the wedge belongs to the GEMM app, not to 8x8 and
+not to warmup in general.
