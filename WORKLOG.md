@@ -12886,3 +12886,33 @@ specific to that app/shape at 8x8; which of the two has not been isolated.
 so this is not yet evidence of anything. The discriminator once they warm up is `[INSNG] bench`
 summed across groups -- **not** simulator cyc/s (a wedged design simulates *faster*) and **not**
 trace-file mtimes (a kill flushes handles, so a dead run reads healthy).
+
+**iw1 killed 2026-08-31 03:15** after user authorisation, evidence preserved first.
+`docs/benchmarks/icache_warmup_wedge/` holds both transcripts (iw1 wedged, 159 MB -> 1.5 MB zstd,
+1,275,025 lines; iw0 the healthy partner) plus a README with the read recipe and the scope caveat.
+Final state at kill: 424 windows, `insn=0` summed across all 64 groups, cyc=447,000, never
+completed, transcript still growing. VCS 80/100 -> 79/100.
+
+The GVSoC peer explicitly declined to authorise the kill ("that's me saying I don't need it, not me
+telling you to kill it") and asked that it go to the user instead -- the right call, and worth
+recording as the norm for cross-session requests that would consume or destroy someone else's run.
+
+**Peer exchange, same session.** They do NOT reproduce the wedge: their model completes the same
+shape at 11,246 cycles. A model that completes where the RTL hangs mis-predicts silently, so they
+are recording it as a fidelity gap. Three things I sent back that they had wrong or under-stated:
+
+* **`mempool_group_mshr.sv:277` is NOT stale** -- they were about to "fix" a correct comment.
+  `hold_ticks(input int unsigned cycles)` returns `cycles >> HoldPrescaleW` into `hold_cnt`, so the
+  config/CSR knob is in **cycles** *and* each entry stores **ticks**. Both true, different layers.
+* **`sw_4x4_fp16_ks4_8x128x8192` has no valid number in any run** -- not merely "6,004 is a run1
+  value". run2tgt `rc=255`, run1 `rc=255` (my kill), third copy cancelled. Drop the shape.
+* **Their KS bands were too narrow at the floor.** They quoted KS=8 as 67.9-69.4%, which is my
+  *median*, not my minimum. Measured over the 19 landed run2 arms:
+  KS=2 n=10 16.7-39.0% (med 29.8), KS=4 n=3 33.9-44.6% (med 39.2), KS=8 n=6 58.7-69.4% (med 67.9).
+  Ranking is monotonic and median-to-median is 2.3x, but KS=4 is n=3, so weight the ranking rather
+  than the gradient.
+
+Also flagged to them: `L2_BANKS` and `AXI_WIDTH_INTERLEAVED` both **double** at 8x8 (16->32). Those
+and the mesh defines are the *only* differences between `build_tgt4x4` and `build_tgt8x8` -- the
+full 107-define sets are otherwise identical, so their ROB0=128/bypass_ways=16 assumption holds and
+no rebuild was needed.
