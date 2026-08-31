@@ -13590,3 +13590,30 @@ card now derives its efficiency from `status()`, so no two cards can disagree.
 **651 windows** -- six times beyond where the 4x4 failures collapsed -- with none stopping. Wave A's
 8 band arms are at 0-91 windows, so the failure half of the predicate is still untested and the page
 says so explicitly rather than implying a verdict.
+
+## 2026-08-31 -- 8x8: fp16_4096x1024x512 lands at 1,302,289 cyc, but read it as SUSPECT
+
+Recovered from the epilogue wedge on larain3 after 8 days. **192 done / 30 livelock / 22 deadlock.**
+
+    4096x1024x512  fp16  1,302,289 cyc  ~22.35% util  RH=0  tmo=34,497  spotcheck MISSING
+
+**Do not quote this as the shape's performance.** Its own N=1024 sub-family says otherwise:
+
+| shape | cycles | util | tmo |
+|---|---:|---:|---:|
+| 4096x1024x128 | 126,211 | **58.44%** | 0 |
+| 4096x1024x256 | 226,263 | **64.76%** | 0 |
+| 4096x1024x512 | **1,302,289** | **22.35%** | **34,497** |
+
+P 128->256 doubles the work for **1.79x** the cycles and utilisation *rises*. P 256->512 doubles the
+work for **5.76x** the cycles and utilisation collapses to a third. The timeout count is **3.7x the
+next-highest in the entire M=4096 fp16 family** (9,343) and its two siblings are at zero.
+
+That is the [[project-mshr-desync-timeout-trap]] signature: a desynchronised group loses its
+intra-group merge partners, so every remote load times out instead of merging, which is
+self-reinforcing and makes large shapes bimodal on identical config. The arm most likely measures a
+desynchronised *run*, not the shape. `spotcheck=MISSING` is a second, weaker flag -- weaker because
+`4096x512x1024` is also MISSING at tmo=0 and 52.5% util, so it does not on its own indicate trouble.
+
+To settle it the shape needs a re-run; a bimodal shape can land on either mode from the same image.
+Published either way, since the row belongs in the record -- but flagged rather than averaged in.
