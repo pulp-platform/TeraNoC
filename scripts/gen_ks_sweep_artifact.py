@@ -80,8 +80,18 @@ def status(r):
     got  = RES.get(name, {})
     best = got.get("wc") or got.get("wb") or got.get("wa2")   # current-wave results only
     if best and best["cycles"]:
-        if best["tmo"] > 0 and best["rh0"] > 0: return ("bad", "livelock", "livelocked")
-        return ("done", "%.1f%%" % (100.0 * r["ideal"] / best["cycles"]), "measured")
+        # A run that printed a cycle count FINISHED -- it is a measurement, not a livelock.
+        # This used to relabel any completed arm with `tmo > 0 and rh0 > 0` as "livelocked",
+        # which discarded two real results: fp16/fp32 KS=1 B=1, completed in 3,559 / 5,810
+        # cycles with tmo=4 and rh0=4. Arms that genuinely livelock never print a cycle count
+        # at all and carry timeouts in the thousands (2,612-97,556), so completion separates
+        # them with no threshold to invent. Keep the number; surface the counters beside it.
+        _eff = "%.1f%%" % (100.0 * r["ideal"] / best["cycles"])
+        if best["tmo"] > 0 or best["rh0"] > 0:
+            return ("done", _eff,
+                    "measured (%s cyc; %d merge timeouts, %d RH-stuck episodes)"
+                    % (format(best["cycles"], ","), best["tmo"], best["rh0"]))
+        return ("done", _eff, "measured (%s cyc)" % format(best["cycles"], ","))
     if best and best["bypass"]: return ("bad", "bypass", "bypass-track overflow")
     if best and best["fatal"]:  return ("bad", "fatal",  "fatal")
     if name in KILLED:

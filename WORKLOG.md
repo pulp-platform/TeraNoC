@@ -13257,3 +13257,42 @@ effect for the next `submit`.
 Fourth instance today of *a failed read treated as data*: monitor `done=0` -> FLEET IDLE; empty
 bucket -> `0`; `|| echo 0` -> "0 with mesh data"; and this one, which removed a limit rather than
 producing a wrong number. See [[reference-license-governor-fails-open]].
+
+## 2026-08-31 -- classifier bug: two COMPLETED arms were being shown as livelocked
+
+Asked whether the artifact carried the new results, I found it did not -- and the reason was a bug,
+not a stale refresh.
+
+**`status()` relabelled a finished run as a failure:**
+
+```python
+if best and best["cycles"]:
+    if best["tmo"] > 0 and best["rh0"] > 0: return ("bad", "livelock", "livelocked")
+```
+
+Any arm that **completed** was discarded as "livelocked" if it had *any* merge timeout and *any*
+RH-stuck episode. It caught exactly two arms, both real measurements:
+
+| arm | cycles | tmo | rh0 | efficiency |
+|---|---:|---:|---:|---:|
+| `fp16_ks1_1x128x8192` | 3,559 | 4 | 4 | 14.4% |
+| `fp32_ks1_1x128x4096` | 5,810 | 4 | 4 | 8.8% |
+
+Four timeouts in a run that *finished* in 3,559 cycles, against 2,612-97,556 in the arms that never
+finished at all. **Completion separates the two populations with no threshold to invent**, so the
+fix keeps the number and surfaces the counters beside it rather than reclassifying:
+
+    measured (3,559 cyc; 4 merge timeouts, 4 RH-stuck episodes)
+
+**Why it matters beyond two cells.** Both are `sharers=1`, i.e. predicate true-negatives. The bug
+was deleting evidence *for* the livelock predicate from the very page that presents it, and it would
+have deleted any future completed-but-imperfect arm the same way.
+
+**Two debugging notes, both my own errors:**
+* I first reported "the scraper isn't extracting cycles" -- wrong. `scrape()` returns the key
+  `cycles`; my probe read `took`. The generator was fine.
+* The first patch attempt failed its own assertion because I guessed the indentation. Matching the
+  real text (via `cat -A`) rather than a reconstruction is the reliable route.
+
+Artifact republished. Tally now: 21 measured, 24 running, 26 not dispatched, 12 degraded,
+2 no-data, 1 borderline.
