@@ -13464,3 +13464,40 @@ It is **queued, not running, and that is correct**: with VCS at 19 free and a re
 ordinary behaviour rather than a demonstration of today's fail-open patch -- the patch only changes
 what happens when the licence query *fails*; here the reading is valid and the old code would have
 refused too.
+
+## 2026-08-31 -- the GVSoC wedge, answered from the RTL: one slot, so no same-slot check
+
+The peer took our "issue-side pool upstream of memory" lead to a concrete candidate: their VLSU
+retires loads **in-order AND cross-port synchronised**, requiring every active port's head entry to
+belong to the same instruction slot (`entry.req->slot != &slot` -> `break`; `nb_ready != group_size`
+-> nothing retires). If the ports' heads ever land on different slots, nothing retires, the ROB
+fills, admission refuses new loads, the core stops issuing, memory goes quiet and the MSHR is idle --
+every symptom they reported, with zero timeouts because nothing waits on a cohort.
+
+They asked implicitly whether relaxing that check is safe. **Checked our RTL, and the answer is that
+the constraint does not exist there** (`working_dir/spatz/hw/ip/spatz/src/spatz_vlsu.sv`):
+
+* `commit_metadata_t commit_insn_q;` (:556) is a **scalar** -- one committing instruction, not an
+  array, not per-port;
+* ROB entries carry **no instruction/slot id at all**; retirement is per-port and independent, the
+  only shared term being the VRF write handshake:
+  `rob_pop[port] = rob_rvalid[port] && ((!mem_pending[port]) || (vrf_req_valid_d && vrf_req_ready_d && commit_counter_en[port]))`;
+* `MaxInflight = 1` by default (:184-185, `SPATZ_VLSU_DUAL_LOAD` overrides), and **our images do not
+  define the override**.
+
+So the hardware guarantees in-order commit by **never having two instructions resident**, not by
+making the ports agree. Their check is a symptom of multi-slot occupancy, not the mechanism -- which
+means the safe fix is to make the condition unreachable, not to permit retirement when ports
+disagree. Their fear that relaxing it would corrupt results rather than wedge is well founded.
+
+**The sharper lead:** the RTL's runahead mode (`SPATZ_VLSU_DUAL_LOAD`, MaxInflight=2) was only made
+safe by sizing the ROB so both instructions fit at once -- `NrOutstandingLoads=64`, because two
+e32,m2 loads are exactly 2x32 ids. If their model admits a second slot into a ROB that cannot hold
+both, uneven port loading is the expected steady state rather than a rare race, and their vl=64
+trigger fits: fewest bursts per instruction means the second slot is entered soonest. Suggested
+order: confirm misaligned heads from the probe, then check whether >1 slot can be resident and
+whether the ROB is sized for the sum -- if not, the bug is admission policy, not the retirement gate.
+
+Caveat sent with it: this is a structural reading of RTL against a model, and one-in-flight costs
+memory-level parallelism, which is why the runahead option exists. It says what the reference does,
+not that their code is wrong.
