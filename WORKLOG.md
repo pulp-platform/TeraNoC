@@ -12600,3 +12600,222 @@ rob_depth=128 (proposed in review alongside the store split). That test is queue
 KS=1 costs no extra ROB0 at all.
 
 **Status.** Awaiting a cycle count from rob256, and the short-load result.
+
+## 2026-08-29 -- short-load KS=1: the cheap fix clears the ROB0 ceiling (PROVISIONAL)
+
+**Purpose.** Close the question the previous entry left open: does splitting the 512 B load remove
+the need for ROB0=256?
+
+**Implementation.** `both_8x128x8192.elf` = `SPATZ_1XVL_LOAD_LMUL=4` (two 256 B loads, 64 ids
+each) on the *target* image `build_robn16_split` (ROB0=**128**, ROBN=16). Same shape as the
+rob256 control, so the ladder is matched.
+
+**The comparison is properly controlled.** The two images differ by exactly one define line out of
+107 (`SPATZ_VLSU_ROB_DEPTH` 256 vs 128; `diff` of the full `+define+` sets). The two ELFs differ
+by exactly one software knob -- 30 `vle16.v` vs 23, and an identical 24 `vse16.v`, so the store is
+held constant and only the load split varies.
+
+| arm | ROB0 | 512 B load | outcome |
+|---|---:|---|---|
+| earlier control | 128 | unsplit | **froze** at req 241,349, never reached bench |
+| `r256` | 256 | unsplit | reaches bench, clean |
+| `both` | **128** | **split 2x256 B** | **reaches bench** (2 window(s)), clean |
+
+**Result.** `both` crossed the threshold the identical-but-unsplit control never crossed:
+`tmo=0`, `peers0=0`, no assertion, all 16 groups retiring. **Bursting is preserved**, and the `[BURSTWHY]` probe says so directly: 6139 burst *grants*,
+each reading `vl=256B | strided=0 indexed=0 ew_ok=1 vl_ge_64=1 vl_le_512=1 align6=1 => burst=1`.
+The `vl=256B` field also confirms the split is actually in effect at the hardware, not
+merely in the source. This was the standing requirement ("keep burst for all of them"):
+256 B still satisfies `vl >= FullBurstBytes` and the chunk offset is 64 B-aligned, so
+splitting the load costs no bursting.
+
+**Caveat on the config.** Both images carry `GROUP_MSHR_BYPASS_WAYS=16`, not the stock 4. The
+working KS=1 configuration is ROB0=128 + ROBN=16 **+ a widened bypass track**, not pure stock.
+
+**Status: PROVISIONAL.** 2 bench window(s). Twice this session a single threshold crossing
+was called as a result and later stopped advancing (the split store advanced 377 requests, then
+stopped). Not promoting `SPATZ_1XVL_LOAD_LMUL` to the default, and not rebuilding the 20 blocked
+KS=1 arms, until this accumulates windows or completes.
+
+**Side finding -- B=4/KS=1 WEDGES. (This entry was revised twice; read the instrument note.)**
+The `k4r16` cross-KS oracle stops doing work. Over 14 consecutive windows (cyc 45,000-58,000) it
+retired **~230 instructions in total across 256 cores** -- per window
+`0, 0, 12, 31, 0, 0, 118, 29, 3, 0, 0, 37, 0, 0`, with 0-4 of 16 groups retiring at all --
+against `both`'s 14,000-25,000 per window at 16/16 groups. That is a **>1000x collapse**, so the
+documented livelock criterion (sustained `mshr_timeout` + `peers=0` + >20x rate collapse) is met.
+Supporting signature: `mshr_timeout` cum 202, `peers=0` seen 71 times, `acc` at 96,000 against the
+healthy arms' 230-240k (neither retiring nor stalled on a local resource -- the TB's decode table
+reads that as waiting on a barrier release). At `sharers = B/KS = 4` the merge cohort is small
+enough to strand permanently.
+
+**INSTRUMENT NOTE -- two wrong readings, both from using the wrong counter.**
+1. I first retracted the livelock call because k4r16 was advancing 40 simulated cyc/s while the
+   healthy arms managed 0-10. **Simulator wall-clock rate measures RTL activity cost, not design
+   throughput**: a busy design simulates *slower*. A wedged design is FAST in cyc/s precisely
+   because there is nothing to evaluate. It is an anti-correlated proxy -- never use it for health.
+2. I then read `[STALLG] ins=` as retired instructions. It is **icache-starvation stall cycles**
+   (`tb_fpu_util.svh:519` and the decode table above it); `ins=0` is *good* news. Retired
+   instructions are `[INSNG] insn=`. Reading the probe definition, rather than inferring from the
+   field name, is what settled this -- and it should have been the first step, not the third.
+
+**Consequence.** B=4 cannot serve as the cross-KS correctness oracle. Check KS=1 against KS=2 at
+**B=8**, where `both` and `r256` are both clean and both kernels are legal. `k4r16` is being
+killed: it holds a VCS seat and will never emit `[SPOT]`.
+
+## 2026-08-29 -- run2: the B x KS sweep re-dispatched on the TARGET config
+
+**Purpose.** Run 1 measured a configuration we are not shipping. All 36 arms used `build_waveA2`
+(ROB0=64, ROBN unset -> 64, mshr=64, bypass_ways=8) while the design target is ROB0=128 / ROBN=16 /
+mshr=64. Worse, **10 of the 36 arms -- every KS=2 arm -- sat exactly on the ROB0 admission ceiling**:
+at ROB0=64 the ceiling is 64*4 = 256 B and those arms have `vl = 256 B`, so one load reserves every
+ROB0 id and dual-load runahead is defeated. Their KS=2 column would have read pessimistic.
+
+**Implementation.** New image `build_tgt4x4`:
+
+    ROB0=128  ROBN=16  mshr_num=64  bypass_ways=16  merge_reqs=16  snitch_trace=0
+    config=terapool_spatz4_fpu (NUM_CORES=256, NUM_GROUPS=16, NUM_X=4)
+
+Define-diffed against `build_waveA2`: **exactly four differences and nothing else** (ROB_DEPTH
+64->128, ROBN_DEPTH added=16, BYPASS_WAYS 8->16, SNITCH_TRACE 1->0).
+
+**`bypass_ways=16` is explicit, not derived.** `BypassTrackWaysDerived = max(2, RobDepth/16)` gives
+8 at ROB0=128, and two overlapping 256 B loads consume exactly 8 ways -- zero margin, which is the
+same condition that produced the original overflow. 16 buys headroom for a handful of FFs.
+
+**`mshr_num` restored to the shipped 64.** The KS=1 debug images carry 128, which is **residue from
+a refuted hypothesis** (it was one of five candidate causes of the 512 B freeze; the cause was the
+ROB0 ceiling). Measured worth of 64->128: **0.07%** (173,949 -> 173,828).
+
+**Smoke test before committing 36 arms.** Ran the exact case that killed 9 arms in run 1 -- KS=2 at
+`vl=256 B`. Reached the benchmark region at cyc 17,000 with **6,064 burst grants / 0 refusals**,
+zero bypass overflow, `tmo=0`, 16/16 groups retiring.
+
+**Dispatch.** 36 arms, prefix `run2`, `--max-parallel 31 --reserve-licenses 20` (31 concurrent keeps
+>=20 VCS seats free alongside run 1). Controller given a **24 h timeout**: run 1 lost 12 arms to a
+controller that exited, leaving them `submitted` forever with nothing to dispatch them.
+
+**Run 1 is left alive as a stock-ROB baseline** -- 5 h in, 30 clean / 5 degraded / 1 livelocked
+(`ks4_16x128x4096`, tmo=5,938), no completions. The degraded set is entirely small-B/small-sharer
+shapes, the same regime that wedged the B=4 oracle in both KS=1 and KS=2.
+
+**KS=1 decision (waves B/C, not yet built).** ROB0=128 **with the split load**
+(`SPATZ_1XVL_LOAD_LMUL=4`). Measured cost 4.5% (17,503 vs 16,748 at ROB0=256) to keep the deepest
+ROB at 128. Only the 20 arms at `vl=512 B` need it; the other 12 KS=1 arms (B=1,2,4 -> vl<=256 B)
+run unsplit at ROB0=128 with headroom.
+
+**Two self-inflicted defects worth recording.**
+1. A guard blocked the correct build for ~40 min: `grep -oE 'GroupX1Y0 *= *[0-9]+' | grep -oE
+   '[0-9]+' | head -1` extracts the **"1" from the identifier name**, not the value. floogen had
+   produced a correct 4x4 mesh both times and its own placement gate said so. Match the whole
+   `name = value` and parse the RHS.
+2. A per-arm progress sweep read the FIRST transcript on each node, but nodes host several arms, so
+   two different arms reported identical figures. Resolve a job's transcript through its own
+   `/proc/<pid>/cwd`, never by picking a file off the node.
+
+## 2026-08-30 -- OPEN: is bypass_ways=16 actually needed, or would 8 do?
+
+**Why it matters.** `bypass_ways` is a flop array `bypass_track_q[NumTilesPerGroup][BypassTrackWays]`
+of ~18-bit entries (`valid` + `meta_base` + `len` + `beats_left`), 16 tiles per group:
+
+| ways | per group | 4x4 (16 grp) | 8x8 (64 grp) |
+|---:|---:|---:|---:|
+| 4 (stock, ROB0=64 derived) | 1,152 FF | 18,432 | 73,728 |
+| 8 (ROB0=128 derived) | 2,304 FF | 36,864 | 147,456 |
+| **16 (what run2 and the 8x8 image use)** | 4,608 FF | 73,728 | **294,912** |
+
+Choosing 16 over the derived 8 costs **~37k FF at 4x4 and ~147k FF at 8x8**. Flops only, no SRAM,
+and the per-way write enable is already gated (`bypass_track_we[t][w]`) so dynamic power tracks
+activity -- but ~295k FF at 8x8 is area a backend flow will notice.
+
+**Why 16 was chosen.** The derived bound is `max(2, RobDepth/MaxBurstWords)` = 8 at ROB0=128, and a
+256 B load is 4 bursts, so **two overlapping loads consume exactly 8 -- zero margin**, which is the
+same condition that killed nine 4x4 arms at the stock 4. 16 buys headroom.
+
+**Why it may be unnecessary.** Nothing has shown occupancy actually exceeding 8. The stock failure
+was at 4 ways, not 8.
+
+**The RTL cannot currently answer this.** `[BYP]` prints `fwd`/`rsp`/`orphan` counts
+(`mempool_group_mshr.sv:2654`), NOT track occupancy, and there is no high-water probe. Two ways to
+settle it:
+1. **Add a high-water probe** -- per-group max concurrent valid ways, printed with the `[BYP]`
+   summary. A few lines, answers it permanently for every future run.
+2. **Rebuild at `group_mshr_bypass_ways=8` and rerun** -- the overflow assertion fires iff 8 is
+   insufficient. Definitive, but costs a full image build plus arm time.
+
+**Status: tracked, not blocking.** run2 (4x4) and the 8x8 image both ship 16. Settle before any
+backend/PPA run, where the area is real; the sweep results themselves are unaffected either way
+(overflow is a fatal assert, not a correctness bug -- `:1067` leaves the burst untracked and it
+degrades to a 1-wide drain).
+
+## 2026-08-31 -- 12 livelocked B x KS arms harvested, then killed; how they were identified
+
+**Purpose.** Reclaim VCS seats from arms that were making no progress, without discarding the
+partial data they had already produced, and settle *by evidence* which arms were actually degraded
+-- an earlier pass called 7 degraded and one of them turned out to be healthy.
+
+**Identification -- peak retire rate, not a tuned threshold.** Three cuts were tried and two were
+wrong:
+
+| criterion | why it fails |
+|---|---|
+| `groups < 8` retiring | fires on healthy arms between bursts |
+| recent `insn/win < N` | N had to be re-tuned 13 -> 9 -> 2 to stop misclassifying; a fitted cut is not a finding |
+| **90th-pct `insn/win` over the arm's own windows** | **two populations, 9x gap, nothing between** |
+
+Over 4x4 arms the peak retire rate is bimodal: healthy arms peak at **18,815-51,345** instructions
+per window, the degraded set peaks at **20-2,107**. Nothing lands in between, so this needs no
+cutoff at all. It also explains why the self-normalised "collapsed vs its own peak" test missed
+them -- **most never had a healthy phase**, so there is no peak to collapse from.
+
+`tmo` alone would mis-rank them: it spans 2,321-97,556 within this set, and healthy arms elsewhere
+in the campaign carry high timeout counts while still retiring normally.
+
+**Procedure applied** (this is now the standard for degraded runs):
+1. harvest every arm's `[FPUG]` per-group utilisation + partial probe data into the artifact,
+   namespaced per batch (`deg-<batch>__<arm>`) -- an un-namespaced `probe/<arm>.txt` had already
+   caused run2's harvest to overwrite run1's;
+2. re-verify, then kill and release the seats;
+3. clean up node-local job dirs **only after explicit confirmation**.
+
+**Result.** 12 arms marked degraded in the artifact with their partial data intact (6 from run1,
+6 from run2/waveB). The 6 run1 kills each passed a four-condition gate before dying (probe >100 KB,
+fpug >100 KB, peak in the low population, process alive in its own verified job dir) and were killed
+by matching `/proc/<pid>/cwd` to the exact batch/job -- `pkill` by name is not safe here.
+
+    fp16_ks2_4x128x8192   badile42     fp32_ks2_4x128x4096   badile44
+    fp16_ks4_8x128x8192   badile06     fp32_ks4_8x128x4096   larain13
+    fp16_ks4_16x128x4096  badile32     fp32_ks4_16x128x2048  badile10
+
+VCS 71/29 -> 65/35. All 12 degraded arms are 4x4; **zero 8x8 arms are degraded**, including all ten
+KS=8 arms at `vl=64 B`.
+
+**Also found -- 2 true orphans, 7.5 days old.** A fleet sweep matching `/proc/<pid>/cwd` against
+badist's job list found 2 simulators still burning VCS seats for jobs badist has as `cancelled`
+(`s8vtop-.../0000` fp32_1024x64x2048 on badile34, `s8vtop-9ea2/0000` fp32_512x64x2048 on badile24)
+-- the known "cancel does not stop simv" failure. Both arms' transcripts are already archived under
+`docs/benchmarks/8x8_scaleup/deadlock_evidence/`, so nothing is lost by killing them.
+
+**Method note.** The first version of that sweep reported *76 orphans and zero matches*. The key was
+built from `j["id"]`, but badist's field is **`job`** -- so every key was empty and nothing could
+match. A classifier that matches *nothing* is a bug report, not a result. It also matched 35 of my
+own ssh login shells, because `pgrep -f "simv|vsimk"` sees the pattern inside the ssh command line.
+
+**Cleanup done 2026-08-31.** After user confirmation on both steps:
+
+* the 6 killed run1 job dirs removed from badile42/06/32/44/10 and larain13 -- **30 GB**. Each
+  removal was gated on the path matching `*/badist/run/*/NNNN`, the dir existing, and **zero live
+  processes with it as cwd**; the harvested `probe/` + `fpug/` copies on fenga1 were verified
+  >100 KB and present in the utilisation explorer (3,759-5,825 windows, 16 groups each) first.
+* the 2 week-old orphans killed and removed -- **27 GB**. VCS 65/35 -> **63/37**.
+
+**Fleet is now orphan-free**: 72 simulators, all on live badist jobs, plus 3 local fenga1 GUI/bench
+sims. The 20 arms still sitting in `submitted` are **19 duplicates + 1 already-killed livelock**
+(`fp32_ks4_16x128x2048`), so nothing there is worth dispatching -- their controllers are dead
+(`attempt=0, node=None`) and 11 of the 12 distinct arms are already running or done elsewhere.
+
+**Second window trap, same session.** The orphan join first reported **18 orphans** -- all of them
+healthy week-old 8x8 arms. Cause: **`badist batches` returns only ~20 of 265 batches by default**
+(no truncation notice; use `--limit 500`). Acting on that list would have killed 18 live arms. Two
+different windowed views burned this session: this one and `j["id"]` vs `j["job"]`. Both failed the
+same way -- a join whose left side is silently incomplete reports *absence*, which reads as a
+finding rather than as a broken query.
