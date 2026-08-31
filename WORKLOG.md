@@ -12858,3 +12858,31 @@ node would have been packed with ~15 arms where ~6 fit.
 immediately, 9 held by the governor; VCS 80/100 with exactly 20 free.** Expect **2-3 days per arm**:
 the 8x8 KS=8 set is 14.3 h in at only 24-88 benchmark windows, against ~100-170 windows for a
 completed 4x4 arm.
+
+## 2026-08-31 -- icache warmup WEDGES at 8x8 on the GEMM app (A/B, default path)
+
+**Setup.** Two arms, fp32 512x32x256, same image (`build_tgt8x8`, 1024 cores, VCS), differing only
+in `ICACHE_WARMUP`.
+
+| arm | ICACHE_WARMUP | outcome |
+|---|---|---|
+| `iw0` | 0 | **DONE, 5,614 cycles**, `[FPU FINAL] util=22.56%` (busy 4,755,340 of 21,078,016 lane-cycles over 5,146 benchmark cycles) |
+| `iw1` | 1 | **WEDGED** -- 433,000+ cycles, 412 windows, retired in **4 of 412**; all 64 groups at `insn=0` for the last 408; 7 h elapsed, transcript still growing (154 MB) |
+
+So this is not "warmup costs N cycles"; the warmup path does not survive. Only iw0 is a usable
+number.
+
+**This is the DEFAULT path.** `software/runtime/runtime.mk:139` --
+`DEFINES += -DICACHE_WARMUP=$(if $(icache_warmup),$(icache_warmup),1)` -- so every arm built
+without an explicit `icache_warmup=0` carries it.
+
+**But it is NOT universal at 8x8, and the scope matters.** The 10 decode KS=8 8x8 arms are all built
+`ICACHE_WARMUP=1` and are running clean (24-88 windows, retiring normally at 14 h). `iw1` is the
+**GEMM** app (`sp-fmatmul-opt-burst-merge`), a different kernel from the decode app. The failure is
+specific to that app/shape at 8x8; which of the two has not been isolated.
+
+**Watch item.** All 26 Wave A arms also carry `ICACHE_WARMUP=1`. At +30 min they are at
+`windows=0`, which is expected for 8x8 (the KS=8 set took time to reach the benchmark region too),
+so this is not yet evidence of anything. The discriminator once they warm up is `[INSNG] bench`
+summed across groups -- **not** simulator cyc/s (a wedged design simulates *faster*) and **not**
+trace-file mtimes (a kill flushes handles, so a dead run reads healthy).
