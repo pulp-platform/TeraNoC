@@ -13812,3 +13812,34 @@ all in band: `fp16_ks1_4x128x32768` (sh=4, vl=256) at tmo=24,649 / RH=10,332, an
 **Stated on the card as NOT a verdict**, and the reason is worth keeping: timeouts are the mechanism
 the predicate is *about*, so a band arm accumulating them is closer to a restatement than to
 independent evidence. The verdict still needs completion, or its absence, past ~100 windows.
+
+## 2026-08-31 -- artifact restructured: one perf table, 19 sections down to 15
+
+**One table for both meshes**, placed directly after the 8x8 mesh card, replacing three scattered
+views (a 4x4-only ladder, a run-2 result table, and the separate 8x8 counter card). All 104 arms in
+one place with: mesh, KS, B, sharers, vl, state, cycles, efficiency, **tmo, RH, bypass, windows** --
+counters read live for arms still running, so the 8x8 half finally has counter data at all. Filters
+for mesh / prec / KS / state / band, each populated only from values still reachable given the
+filters to its left, so no combination dead-ends into an empty table.
+
+**Merged and retitled the tail:**
+
+* *Kernel size sets the ceiling* + *KS at matched B* -> **What kernel size buys** (one card, the
+  second now an `h3`);
+* *What separates the livelocked arms* + *The predicate under test* -> **Why arms livelock -- two
+  conditions, not one**, with the live test as an `h3` inside it;
+* plainer titles throughout: *Read this first*, *The livelocked arms*, *Run 1 -- the superseded
+  baseline*, *Why KS=1 exists, and what it costs*.
+
+**Two mistakes worth recording, both caught by verifying rather than assuming:**
+
+1. First insertion landed **inside an indented block** (the anchor sat within an `if`), producing an
+   `IndentationError`. Restored from a backup taken first.
+2. A block-deletion helper bounded "run 1" by the next `# ----` marker and proposed removing
+   **744 lines** -- the data-loading section, not the card. Restored again, then mapped the real
+   markers before touching anything. *Never let a range-delete run on a marker pair you have not
+   printed.*
+
+Verified after: 15 sections and 15 card divs (balanced), `<div>` open/close 78/78, the perf JS
+executes under a DOM shim rendering 104/104 rows with all five filters populated, and the
+utilisation explorer still holds its 73 arms.

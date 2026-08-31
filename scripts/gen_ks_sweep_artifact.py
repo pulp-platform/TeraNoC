@@ -603,7 +603,7 @@ A('<div class="card hero">'
               "r" if _empty else "", _empty, len(KILLED)))
 
 # ---- caveat first, exactly as the reference dashboards do -------------------
-A('<div class="card"><h2>Read this first &mdash; two capacity limits, one shape</h2>'
+A('<div class="card"><h2>Read this first</h2>'
   '<p>Before any sweep arm finished, the campaign had already produced two results &mdash; and both '
   'are RTL defects that gated whole columns of the matrix. <strong>Run&nbsp;2 addresses both</strong> '
   '(see the config table below); they are recorded here because they explain why run&nbsp;1 is not '
@@ -717,6 +717,59 @@ for mesh, cores in (("4x4", 256), ("8x8", 1024)):
       '<span class="mono">L1</span> is the working set as a share of the %s&nbsp;MB L1.</p></div>'
       % ("4" if mesh == "4x4" else "16"))
 
+# ---- ONE performance table for both meshes ---------------------------------------
+# The counters used to live in three places -- a 4x4-only ladder, a run2 result table and a
+# separate 8x8 card -- so no single view answered "how is arm X doing". This replaces all three.
+try:
+    _PA = json.load(open("/tmp/claude-620771/perf_all.json"))
+except Exception:
+    _PA = []
+if _PA:
+    _ST = {"measured": ("done", "measured"), "livelocked": ("bad", "livelocked"),
+           "running": ("run", "running"), "pending": ("", "not started")}
+    _prow = "".join(
+        '<tr class="%s" data-mesh="%s" data-prec="%s" data-ks="%d" data-st="%s" data-band="%d">'
+        '<td class="mono">%s</td><td>%s</td><td class="num">%d</td><td class="num">%d</td>'
+        '<td class="num">%s</td><td class="num">%s</td>'
+        '<td><span class="pill %s">%s</span></td>'
+        '<td class="num">%s</td><td class="num b">%s</td>'
+        '<td class="num %s">%s</td><td class="num %s">%s</td><td class="num dim">%s</td>'
+        '<td class="num">%s</td></tr>'
+        % ("bandrow" if x["band"] else "", x["mesh"], x["prec"], x["KS"], x["st"], x["band"],
+           x["arm"].replace("sw_", ""), x["mesh"], x["KS"], x["B"], x["sh"], x["vl"],
+           _ST[x["st"]][0], _ST[x["st"]][1],
+           format(x["cyc"], ",") if x["cyc"] else "&mdash;",
+           ("%.1f%%" % x["eff"]) if x["eff"] else "&mdash;",
+           "st-bad b" if x["tmo"] else "dim", format(x["tmo"], ","),
+           "st-bad" if x["rh"] else "dim", format(x["rh"], ","),
+           format(x["byp"], ","),
+           format(x["win"], ",") if x["win"] else "&mdash;")
+        for x in _PA)
+    A('<div class="card"><h2>Every arm, both meshes &mdash; results and counters</h2>'
+      '<p class="sub">One table for the whole campaign: cycles and efficiency where an arm has '
+      'finished, and merge-cohort timeouts, RH-stuck episodes and bank-full bypasses for every arm '
+      '&mdash; read live for those still running. A red edge marks the failure band '
+      '(<code>sharers &isin; {2,4}</code> and <code>vl &ge; 128&nbsp;B</code>).</p>'
+      '<div class="filters">'
+      '<label>mesh<select id="p_mesh"></select></label>'
+      '<label>prec<select id="p_prec"></select></label>'
+      '<label>KS<select id="p_ks"></select></label>'
+      '<label>state<select id="p_st"></select></label>'
+      '<label>band<select id="p_band"></select></label>'
+      '<label>&nbsp;<span id="p_n" class="mono" style="color:var(--muted)"></span></label></div>'
+      '<div class="tw"><table class="d"><thead><tr>'
+      '<th>arm</th><th>mesh</th><th class="num">KS</th><th class="num">B</th>'
+      '<th class="num">sharers</th><th class="num">vl</th><th>state</th>'
+      '<th class="num">cycles</th><th class="num">efficiency</th>'
+      '<th class="num" title="merge-cohort timeouts">tmo</th>'
+      '<th class="num" title="RH-stuck episodes">RH</th>'
+      '<th class="num" title="bank-full bypasses">byp</th>'
+      '<th class="num" title="benchmark windows so far">win</th>'
+      '</tr></thead><tbody id="p_rows">%s</tbody></table></div>'
+      '<p class="sub">Counters are cumulative from the start of a run and include the warm-up '
+      'region, so compare arms of similar age. An arm cannot be judged before about '
+      '<strong>100 windows</strong>.</p></div>' % _prow)
+
 # ---- method ----------------------------------------------------------------
 if _best:
     _rows = []
@@ -813,7 +866,7 @@ if RUN1:
                         ("%.0f%%" % v["acc"]) if v["acc"] is not None else "&mdash;",
                         ("%.0f%%" % v["raw"]) if v["raw"] is not None else "&mdash;",
                         ("%.0f%%" % v["ins"]) if v["ins"] is not None else "&mdash;"))
-    A('<div class="card"><h2>Run&nbsp;1 &mdash; the stock-config baseline, and what it could not measure</h2>'
+    A('<div class="card"><h2>Run&nbsp;1 &mdash; the superseded baseline</h2>'
       '<p>Run&nbsp;1 has finished %d of its 36 arms. They split into two groups, and the split is '
       'the finding.</p>'
       '<div class="tw"><table><thead><tr><th>arm</th><th class="num">KS</th>'
@@ -844,52 +897,6 @@ if RUN1:
       'loop (147 windows for a 4,595-cycle pass implies R&asymp;32), unlike the local ladder runs.</p>'
       '</div>' % (len(RUN1), "".join(_rows), len(_bad)))
 
-# ---- run 2: the target-config results ------------------------------------------
-_r2ok = [(k, v) for k, v in sorted(RUN2.items()) if v["cyc"]]
-_r2no = [k for k, v in RUN2.items() if not v["cyc"]]
-if _r2ok:
-    _i3 = {"sw_%s_%s_ks%d_%dx%dx%d" % (r["mesh"], r["prec"], r["KS"], r["B"], r["D"], r["I"]): r
-           for r in M}
-    _rows3 = []
-    for k, v in _r2ok:
-        r = _i3.get(k)
-        eff = (100.0 * r["ideal"] / v["cyc"]) if r else 0
-        b1 = RUN1.get(k)
-        delta = ""
-        if b1 and b1["cyc"]:
-            d = 100.0 * (b1["cyc"] / float(v["cyc"]) - 1)
-            delta = '<span class="%s">%+.1f%%</span>' % ("st-done" if d > 0 else "st-bad", d)
-        _rows3.append('<tr><td class="mono">%s</td><td class="num">%s</td><td class="num">%s</td>'
-                      '<td class="num b">%s</td><td class="num st-done">%.1f%%</td>'
-                      '<td class="num %s">%d</td><td class="num %s">%d</td>'
-                      '<td class="num dim">%d</td><td class="num dim">%s</td>'
-                      '<td class="num dim">%s</td><td class="num dim">%s</td>'
-                      '<td class="num">%s</td></tr>'
-                      % (k.replace("sw_4x4_", ""), r["KS"] if r else "?", r["sh"] if r else "?",
-                         format(v["cyc"], ","), eff,
-                         "st-bad" if v["tmo"] else "dim", v["tmo"],
-                         "st-bad" if v["rh"] else "dim", v["rh"], v["byp"],
-                         ("%.0f%%" % v["acc"]) if v["acc"] is not None else "&mdash;",
-                         ("%.0f%%" % v["raw"]) if v["raw"] is not None else "&mdash;",
-                         ("%.0f%%" % v["ins"]) if v["ins"] is not None else "&mdash;",
-                         delta or '<span class="dim">&mdash;</span>'))
-    A('<div class="card"><h2>Run&nbsp;2 &mdash; results on the target config</h2>'
-      '<p>ROB0=128, ROBN=16, mshr=64, bypass_ways=16. The last column is the speed-up over the '
-      'same arm on run&nbsp;1&rsquo;s stock config, where run&nbsp;1 measured it at all.</p>'
-      '<div class="tw"><table><thead><tr><th>arm</th><th class="num">KS</th>'
-      '<th class="num">sharers</th><th class="num">cycles/pass</th><th class="num">efficiency</th>'
-      '<th class="num" title="group-MSHR merge-cohort timeouts">tmo</th>'
-      '<th class="num" title="response-hold stuck episodes; within-config only">RH</th>'
-      '<th class="num" title="bank-full bypasses of the MSHR">byp</th>'
-      '<th class="num" title="core cycles parked on the Spatz queue">acc</th>'
-      '<th class="num" title="scalar RAW hazard">raw</th>'
-      '<th class="num" title="icache starvation (NOT retired instructions)">i$</th>'
-      '<th class="num">vs run 1</th></tr></thead><tbody>%s</tbody></table>'
-      '</div>%s</div>'
-      % ("".join(_rows3),
-         ('<p class="sub">%d arm(s) finished without activating the benchmark region.</p>' % len(_r2no))
-         if _r2no else ""))
-
 # ---- degraded / livelocked arms: partial data, explicitly NOT measurements ----------
 DEG = []
 try:
@@ -919,7 +926,7 @@ if DEG:
                    % (d["arm"].replace("sw_", ""), d["batch"], r.get("KS", "?"), r.get("sh", "?"),
                       d["bench"], d["tmo"], d["acc"] or "&mdash;",
                       format(d["peak"], ","), format(d["insn"], ",")))
-    A('<div class="card"><h2>Degraded / livelocked arms &mdash; partial data, not measurements</h2>'
+    A('<div class="card"><h2>The livelocked arms</h2>'
       '<p>These %d arms are still running but have stopped doing useful work. They are kept here '
       'because a failure mode is evidence, and their per-group series are in the explorer above '
       '(filter <code>state = degraded</code>) &mdash; but <strong>none of these is a cycle '
@@ -972,7 +979,7 @@ if len(_line) >= 2:
                      100.0 * (8*128*8192/(256*4*2)) / st["took"])
                   for lb, rb0, ld, _d in LADDER
                   for st in [ladder_row(_d)] if st and st.get("took"))
-    A('<div class="card"><h2>Kernel size sets the ceiling &mdash; before any memory effect</h2>'
+    A('<div class="card"><h2>What kernel size buys</h2>'
       '<p>At <code>sharers = B/KS = 1</code> there is no MSHR merging at all, so these arms isolate '
       'the kernel shape. Same precision, same D and I; only KS changes:</p>'
       '<div class="tw"><table><thead><tr><th class="num">KS</th><th>arm</th>'
@@ -985,7 +992,7 @@ if len(_line) >= 2:
       'when ROB0=128 + split was chosen. The split costs 4.5%%; the kernel shape costs the rest.</p>'
       '<p>Larger KS amortises the per-iteration scalar and loop overhead across more FMAs per loaded '
       'element. It also needs more registers (<code>KS &times; LMUL = 16</code>), which is why KS=8 '
-      'is the practical ceiling and why B must be a multiple of KS.</p></div></div>'
+      'is the practical ceiling and why B must be a multiple of KS.</p></div>'
       % (_l1, _lr))
 
 # ---- matched-B KS comparison ---------------------------------------------------
@@ -1031,7 +1038,8 @@ _unb = "  ".join("KS=%d: B&nbsp;=&nbsp;%s" % (_ks, ",&nbsp;".join(
         str(_x) for _x in sorted({_bb for (_pp, _kk, _bb) in _lan if _kk == _ks})))
         for _ks in (2, 4, 8))
 if _mrows:
-    A('<div class="card"><h2>KS at matched B &mdash; the only fair comparison</h2>'
+    A('<h3 style="margin-top:22px">At matched B &mdash; the only comparison the grid supports</h3>'
+      '<h3>At matched B &mdash; the only fair comparison</h3>'
       '<p>The landed arms are <strong>not balanced across KS</strong>, because <code>B &ge; KS</code> '
       'removes the small-B arms from KS=8 and only part of the grid has finished:</p>'
       '<p class="mono sm">%s</p>'
@@ -1093,7 +1101,7 @@ for (_sh, _vl), _v in sorted(_cells.items()):
 _fut = sorted(_k for _k, _r in _idx2.items()
               if _r["mesh"] == "8x8" and _r["KS"] in (2, 4) and _pred(_r))
 if _crows:
-    A('<div class="card"><h2>What separates the livelocked arms &mdash; a conjunction, not a variable</h2>'
+    A('<div class="card"><h2>Why arms livelock &mdash; two conditions, not one</h2>'
       '<p>Neither <em>sharers</em> nor <em>vl</em> predicts failure on its own. Two arms with '
       '<code>sharers=2</code> complete; one with <code>sharers=8</code> and <code>vl=128</code> '
       'completes; arms at <code>vl=256</code> complete at every cohort size from 8 up. Every cell '
@@ -1119,7 +1127,7 @@ if _crows:
       '<code>vl=64</code>, and <code>sharers&nbsp;&isin;&nbsp;{2,4}</code> never occurs at '
       '<code>vl=512</code> anywhere in the grid &mdash; so neither corner is covered, and the '
       'predicate is a boundary fitted on 31 points with <strong>no mechanism yet</strong>.</p>'
-      '</div>'
+      ''
       % ("".join(_crows), _sc[0] + _sc[3], sum(_sc), _sc[0], _sc[3],
          len(_fut), 26 - len(_fut),
          "<br>".join(_x.replace("sw_8x8_", "") for _x in _fut)))
@@ -1146,7 +1154,7 @@ if _HZ:
            ('<span class="st-bad">in band &mdash; predicted to fail</span>' if h["band"]
             else '<span class="dim">predicted healthy</span>'))
         for h in sorted(_HZ, key=lambda x: (-x["win"],)))
-    A('<div class="card"><h2>The predicate under test &mdash; how far the live arms have got</h2>'
+    A('<h3 style="margin-top:24px">Is it holding? &mdash; the live test</h3>'
       '<p>An arm cannot be judged before about <strong>100 benchmark windows</strong>: every 4x4 '
       'failure retired 6,600&ndash;20,800 instructions per window, indistinguishable from a healthy '
       'arm, until roughly that point and only then collapsed. Progress against that horizon:</p>'
@@ -1168,76 +1176,8 @@ if _HZ:
       % (_wcp, len(_wc), format(max(h["win"] for h in _wc), ","),
          _bdp, format(max((h["win"] for h in _bd), default=0), ","), _rows))
 
-# ---- 8x8 live counters -------------------------------------------------------------
-# The 8x8 half of the grid had NO counter table at all: its mesh card shows only shape, vl and
-# sharers. These are read live off the running transcripts, so the band can be watched while the
-# arms are still in flight rather than only after they finish.
-try:
-    _P8 = json.load(open("/tmp/claude-620771/perf8x8.json"))
-except Exception:
-    _P8 = []
-if _P8:
-    _b8 = [x for x in _P8 if x["band"]]
-    _o8 = [x for x in _P8 if not x["band"]]
-    def _med(v):
-        v = sorted(v)
-        return v[len(v) // 2] if v else 0
-    _rows8 = "".join(
-        '<tr class="%s"><td class="mono">%s</td><td class="num">%s</td><td class="num">%s</td>'
-        '<td class="num">%s</td><td class="num %s">%s</td><td class="num %s">%s</td>'
-        '<td class="num">%s</td><td class="num">%s</td><td>%s</td></tr>'
-        % ("bandrow" if x["band"] else "", x["arm"].replace("sw_8x8_", ""),
-           x["sh"], x["vl"], format(x["win"], ","),
-           "st-bad b" if x["tmo"] else "dim", format(x["tmo"], ","),
-           "st-bad" if x["rh"] else "dim", format(x["rh"], ","),
-           format(x["byp"], ","), ("%.1f%%" % x["util"]) if x["util"] else "&mdash;",
-           ('<span class="st-bad">in band</span>' if x["band"] else '<span class="dim">outside</span>'))
-        for x in sorted(_P8, key=lambda z: (-z["band"], -z["tmo"])))
-    A('<div class="card"><h2>8&times;8 counters, read live</h2>'
-      '<p>The 8&times;8 arms carry no completed results yet, so these are read from the running '
-      'transcripts: merge-cohort timeouts, RH-stuck episodes, bank-full bypasses and cumulative FPU '
-      'utilisation as they stand right now.</p>'
-      '<div class="note bad"><span class="lab">the band separates on counters alone</span>'
-      '<p>Splitting these 52 live arms by the livelock predicate, before any of them has finished '
-      'or crossed the ~100-window horizon:</p>'
-      '<div class="formula">'
-      'in band&nbsp;&nbsp;&nbsp;&nbsp;n=%d&nbsp;&nbsp; median tmo <b>%s</b>&nbsp;&nbsp; median RH <b>%s</b><br>'
-      'outside&nbsp;&nbsp;&nbsp;&nbsp; n=%d&nbsp;&nbsp; median tmo <b>%s</b>&nbsp;&nbsp; median RH <b>%s</b>'
-      '</div>'
-      '<p>The out-of-band arms are not merely lower &mdash; they are at <strong>exactly zero</strong> '
-      'on both counters. This is consistent with the predicate but is <em>not</em> a verdict: '
-      'timeouts are the mechanism the predicate is about, so a band arm accumulating them is closer '
-      'to a restatement than to independent evidence. The verdict still needs completion, or the '
-      'absence of it, past ~100 windows.</p></div>'
-      '<div class="tw"><table><thead><tr><th>arm</th><th class="num">sharers</th>'
-      '<th class="num">vl</th><th class="num">windows</th><th class="num">tmo</th>'
-      '<th class="num">RH stuck</th><th class="num">bypass</th><th class="num">FPU util</th>'
-      '<th>predicate</th></tr></thead><tbody>%s</tbody></table></div>'
-      '<p class="sub">Counters are cumulative from the start of the run and include the warm-up '
-      'region, so they are comparable between arms of similar age but not across very different '
-      'window counts.</p></div>'
-      % (len(_b8), format(_med([x["tmo"] for x in _b8]), ","), format(_med([x["rh"] for x in _b8]), ","),
-         len(_o8), format(_med([x["tmo"] for x in _o8]), ","), format(_med([x["rh"] for x in _o8]), ","),
-         _rows8))
-
-A('<div class="card"><h2>How to read these numbers</h2><ul>'
-  '<li><strong>Efficiency, not the TB utilisation counter.</strong> '
-  '<code>ideal/actual</code>, with <code>ideal = B&middot;D&middot;I / (cores &times; 4 FPU '
-  '&times; 2 for fp16)</code>. The util counter measures lane <em>occupancy</em>, which is not '
-  'conserved across runs of identical work &mdash; it has inverted a real ranking here before.</li>'
-  '<li><strong>Livelocked arms are excluded, never averaged in.</strong> An arm can lose ~400&times; '
-  'in throughput and still advance, producing a plausible cycle count that is not a measurement of '
-  'the kernel. The signature is sustained <code>mshr_timeout</code> together with '
-  '<code>[RH&nbsp;STUCK] &hellip; peers=0</code>: a merge cohort that never assembles, so every '
-  'remote load times out instead of merging, which removes the partners that would have ended it.</li>'
-  '<li><strong>Correctness is NOT yet checked, and the planned check does not work.</strong> The intent was cross-KS agreement: every KS variant of one shape computes the same C, so their <code>[SPOT]</code> words should match. They cannot. <code>gendatalib.py</code> draws the input matrices with <code>np.random</code> and <strong>no seed</strong>, so every build gets different data &mdash; three arms at one shape, built seven seconds apart, carry three different data hashes. Comparing <code>[SPOT]</code> across separately-built ELFs is meaningless, and the two completed KS=1 runs disagree for exactly this reason, not because either is wrong. A real check needs a seeded generator (one line) or a device-vs-host verify inside a single ELF.</li>'
-  '<li><strong>The spot check is sampled, not exhaustive.</strong> Four rows, because each printed '
-  'line costs about 13,000 cycles on the UART and a full verify cost three times the measurement '
-  'it was there to protect.</li>'
-  '</ul></div>')
-
 # ---- KS=1 ------------------------------------------------------------------
-A('<div class="card"><h2>KS=1 &mdash; what it costs, and why it has to exist</h2>'
+A('<div class="card"><h2>Why KS=1 exists, and what it costs</h2>'
   '<p><code>kernel_size</code> must divide M, so <strong>KS=1 is the only legal kernel at B=1</strong>: '
   'without it, decode GEMV does not run at all. It is also the extreme of the sweep\'s one real '
   'trade-off. At <code>sharers = B/KS = 1</code> there is no cohort for the group MSHR to merge, and '
@@ -1305,6 +1245,43 @@ A('<div class="card"><h2>Open issues</h2><ul>'
   'them against small-B arms without saying so.</li>'
   '</ul></div>' % nb)
 
+
+# ---- filters for the unified performance table -----------------------------------
+if _PA:
+    A('''<script>
+(function(){
+ var $=function(i){return document.getElementById(i)};
+ var rows=[].slice.call(document.querySelectorAll("#p_rows tr"));
+ var F=[["p_mesh","mesh"],["p_prec","prec"],["p_ks","ks"],["p_st","st"],["p_band","band"]];
+ var LB={st:{measured:"measured",livelocked:"livelocked",running:"running",pending:"not started"},
+         band:{"1":"in band","0":"outside"}};
+ function keep(r,upto){
+   for(var i=0;i<upto;i++){var v=$(F[i][0]).value;
+     if(v!=="*"&&r.dataset[F[i][1]]!==v) return false;}
+   return true;
+ }
+ // each select lists only values still reachable given the filters to its LEFT, so no
+ // combination can produce an empty table
+ function fill(){
+   F.forEach(function(f,i){
+     var el=$(f[0]), keepv=el.value||"*", seen=[];
+     rows.forEach(function(r){ if(keep(r,i)){ var v=r.dataset[f[1]];
+       if(seen.indexOf(v)<0) seen.push(v); }});
+     seen.sort(function(a,b){return (isNaN(a)||isNaN(b))?a.localeCompare(b):(+a)-(+b)});
+     el.innerHTML='<option value="*">all</option>'+seen.map(function(v){
+       var t=(LB[f[1]]&&LB[f[1]][v])||v; return '<option value="'+v+'">'+t+'</option>';}).join("");
+     el.value = seen.indexOf(keepv)>=0 ? keepv : "*";
+   });
+ }
+ function draw(){
+   var n=0;
+   rows.forEach(function(r){ var ok=keep(r,F.length); r.style.display=ok?"":"none"; if(ok)n++; });
+   $("p_n").textContent=n+" / "+rows.length+" arms";
+ }
+ F.forEach(function(f){$(f[0]).addEventListener("change",function(){fill();draw();})});
+ fill(); draw();
+})();
+</script>''')
 
 # ---- per-group utilisation: mesh heat-map, time scrubber, progress bars ----------
 try:    GU = json.load(open(os.path.join(SCR, "ks_group_util.json")))
