@@ -13435,3 +13435,32 @@ Sent with it the operational traps that cost time here today:
 
 Also asked for campaign status: the two band probes, their matched control, whether the sharers=2
 hang has a mechanism yet, and whether it is blocking their 4x4 bulk run.
+
+## 2026-08-31 -- reclaimed 330 GB; requeued the lost band arm
+
+**Disk.** The GVSoC peer filled `/usr/scratch/fenga1` to 92% with a 112 GB per-window log and warned
+us, since we share the filesystem and our wedges last hours by design. Checked: our exposure is
+different. We run the **same `GROUP_MSHR_STATS_PERIOD=2000`** that produced their log, but our worst
+real wedge (`iw1`, 7 h) produced **159 MB** and the 10 h degraded 4x4 arms produced 5-11 MB each.
+The difference is **simulated cycles per wall-second** -- their wedge reached 96e9 cycles, ~48
+million windows at period 2000, where RTL at ~1e3 cycles/s gives ~18,000 windows in ten hours. The
+hazard is a fast simulator times an unbounded spin, not a fine period, so no watchdog is needed here.
+
+Our 92% came from stale GUI waveforms instead. Deleted, on user instruction,
+`hardware/build_1_gui_4096x32x512/vsim.wlf` -- **330.3 GB**, untouched for 106 h, with **no process
+holding it** (checked both by cwd and by open fd immediately before removal). Only the `.wlf` went;
+traces, `dma.log` and `compile.tcl` in that directory are intact. **92% -> 88%, free 559 GB ->
+884 GB.** A second 353.7 GB waveform is still held by an idle GUI session and left alone.
+
+**Requeue.** `sw_8x8_fp32_ks4_16x128x8192` was lost when **badile19 rebooted** (`up 10 min`) at only
+25 windows -- far short of the ~100-window horizon, so it yielded no verdict. Unlike the three arms
+lost to the badile46 outage, all of which were predicted-healthy coverage, this one is **inside the
+band**: it is one of the eight arms testing the livelock predicate, and the `fp32 KS=4 sharers=4`
+cell. Resubmitted as `waveA8x8rq-20260831-150519-6b30` (ELF re-verified 1024-core,
+`log_barrier=16384`).
+
+It is **queued, not running, and that is correct**: with VCS at 19 free and a reserve of 20,
+`19 - 1 = 18 < 20`, so the governor refuses. It will dispatch when free reaches 21. Note this is
+ordinary behaviour rather than a demonstration of today's fail-open patch -- the patch only changes
+what happens when the licence query *fails*; here the reading is valid and the old code would have
+refused too.
