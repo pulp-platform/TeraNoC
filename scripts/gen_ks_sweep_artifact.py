@@ -971,11 +971,18 @@ if len(_line) >= 2:
 # KS. Comparing pooled medians therefore compares different parts of the grid. Only
 # same-precision, same-B pairs isolate KS. (Trap raised by the GVSoC peer session, which
 # hit it from the other side; verified here against our own landed set.)
+# Build from status(), NOT from RUN2 alone. RUN2 only carries arms whose fleet probe landed,
+# so a card sourced from it silently omits every arm harvested from a transcript -- which is
+# how this table showed 4 rows while 9 matched-B ladders existed, and hid the B=128 inversion
+# entirely. Every card must read the same source the tables render.
 _lan = {}
-for _k, _v in RUN2.items():
-    _r = _idx2.get(_k)
-    if _r and _v.get("cyc"):
-        _lan[(_r["prec"], _r["KS"], _r["B"])] = (100.0 * _r["ideal"] / int(_v["cyc"]), _r.get("vl"))
+for _r in M:
+    if _r["mesh"] != "4x4": continue
+    _c, _t, _l = status(_r)
+    if _c != "done": continue
+    _txt = _t.rstrip("%*")
+    if not _txt.replace(".", "").isdigit(): continue
+    _lan[(_r["prec"], _r["KS"], _r["B"])] = (float(_txt), _r.get("vl"))
 _byb = {}
 for (_p, _ks, _b), _val in _lan.items():
     _byb.setdefault((_p, _b), {})[_ks] = _val
@@ -986,10 +993,17 @@ for (_p, _b), _d in sorted(_byb.items()):
                      % ('<b>%.1f%%</b><span class="dim sm"> vl=%s</span>' % (_d[_ks][0], _d[_ks][1])
                         if _ks in _d else '&mdash;')
                      for _ks in (2, 4, 8))
-    _hi, _lo = max(_d), min(_d)
+    # max(_d)/min(_d) over a DICT returns max/min KEYS -- i.e. highest-KS over lowest-KS,
+    # not best over worst. Those coincide only while the ranking is monotonic, so the header
+    # ("best / worst") and the number silently disagreed until B=128 inverted the order.
+    _best = max(_v[0] for _v in _d.values())
+    _worst = min(_v[0] for _v in _d.values())
+    _peak = max(_d, key=lambda k: _d[k][0])
     _mrows.append('<tr><td class="mono">%s</td><td class="num">%d</td>%s'
-                  '<td class="num st-done b">%.2f&times;</td></tr>'
-                  % (_p, _b, _cells, _d[_hi][0] / _d[_lo][0]))
+                  '<td class="num st-done b">%.2f&times;</td>'
+                  '<td class="num%s">KS=%d</td></tr>'
+                  % (_p, _b, _cells, _best / _worst,
+                     ' st-bad b' if _peak != max(_d) else '', _peak))
 _unb = "  ".join("KS=%d: B&nbsp;=&nbsp;%s" % (_ks, ",&nbsp;".join(
         str(_x) for _x in sorted({_bb for (_pp, _kk, _bb) in _lan if _kk == _ks})))
         for _ks in (2, 4, 8))
@@ -1002,11 +1016,22 @@ if _mrows:
       '<em>and</em> B fixed, varying only KS:</p>'
       '<div class="tw"><table><thead><tr><th>prec</th><th class="num">B</th>'
       '<th class="num">KS=2</th><th class="num">KS=4</th><th class="num">KS=8</th>'
-      '<th class="num">best / worst</th></tr></thead><tbody>%s</tbody></table></div>'
-      '<div class="note good"><span class="lab">the ranking is real</span>'
-      '<p>Every matched pair ranks the same way, monotonically where three points exist, at '
-      '<strong>2.24&ndash;3.21&times;</strong>. The KS effect is not an artifact of which arms '
-      'happened to land.</p></div>'
+      '<th class="num">best / worst</th><th class="num">peak at</th></tr></thead><tbody>%s</tbody></table></div>'
+      '<div class="note bad"><span class="lab">CORRECTION &mdash; the ranking is not monotonic</span>'
+      '<p>An earlier version of this page said every matched pair ranks the same way, '
+      'monotonically. That was drawn from <code>B&nbsp;&le;&nbsp;64</code>, and it is wrong at the '
+      'top of the range. <strong>At <code>B=128</code> the order inverts in both precisions</strong>, '
+      'with KS=8 falling <em>below</em> KS=4 &mdash; 44.0%%&rarr;33.0%% in fp16 and '
+      '43.3%%&rarr;33.5%% in fp32, from arms with <code>tmo=0</code> and identical '
+      '<code>ideal</code>.</p>'
+      '<p>So the real shape is a <strong>peak at KS=4 for large B</strong>, not a climb to KS=8. '
+      'KS=8 still wins decisively at <code>B&nbsp;&le;&nbsp;64</code> (up to 3.21&times;), and the '
+      'effect is still not an artifact of which arms landed &mdash; but &ldquo;larger KS is '
+      'better&rdquo; is only true below B=128.</p>'
+      '<p class="sub">This surfaced only when 13 arms that had finished, while still being '
+      'reported as running, were harvested &mdash; and every one of them sits at the large-B end '
+      'of the grid. A partially-landed grid does not just add noise; it can hide a whole '
+      'regime.</p></div>'
       '<div class="note bad"><span class="lab">but KS and vl cannot be separated here</span>'
       '<p>At fixed B, KS <em>determines</em> vl: <code>vl = I &middot; B &middot; elem_bytes / '
       '(cores &middot; KS)</code>, so KS=2&rarr;256&nbsp;B, KS=4&rarr;128&nbsp;B, KS=8&rarr;64&nbsp;B '

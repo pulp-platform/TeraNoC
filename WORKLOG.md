@@ -13653,3 +13653,19 @@ KS=8 falls **below** KS=4 -- an 11 pp drop in fp16, 9.8 pp in fp32, from arms wi
 identical `ideal`. Every earlier statement of a monotonic KS ranking was drawn from B <= 64, where
 it does hold. **This needs correcting in the artifact and to the GVSoC side**, who were told to
 target the ranking as the thing worth reproducing.
+
+**Republished with the corrected ranking, plus two card bugs found while doing it.**
+
+1. **The matched-B card was sourced from `RUN2` alone**, so it omitted every arm harvested from a
+   transcript -- it rendered **4 ladders when 9 existed**, and the B=128 rows that carry the
+   inversion were simply absent. Now built from `status()`, the same source the tables render, so
+   no card can hold a narrower view than the page.
+2. **The "best / worst" column was computing neither.** `max(_d), min(_d)` over a *dict* returns the
+   max and min **keys**, i.e. highest-KS over lowest-KS. That equals best/worst only while the
+   ranking is monotonic, so the header and the number agreed by luck until B=128 broke the order --
+   fp16 B=128 rendered **1.68x** (33.0/19.7, KS=8 over KS=1) where best/worst is **2.23x**
+   (44.0/19.7). Fixed, and a **peak at** column added that flags every row whose maximum is not at
+   KS=8; both B=128 rows now carry that flag.
+
+Final state: **33 measured**, 9 matched-B ladders (6 of them three-point or better), and the page
+states the non-monotonicity as a correction rather than quietly changing the numbers.
