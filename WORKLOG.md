@@ -14316,3 +14316,39 @@ bottom) is the one that counts.
 **Miss to record:** the 9 wedged arms killed earlier were waveA8x8 and therefore HAD
 populated trace_hart files. I harvested only the probe lines before deleting their node
 dirs, so their stuck PCs are gone. Harvest traces, not just probes, before cleaning.
+
+## 2026-09-01 -- ROOT CAUSE: deadlock in mempool_barrier, 624 of 1024 cores arrive
+
+**Purpose.** Harvest the traces the previous nine kills lost, then determine why whole
+groups never execute.
+
+**Implementation.** Harvested boot + stuck-PC traces from `sw_8x8_fp32_ks2_16x128x8192`
+(badile04, waveA8x8, tracing ON) into /tmp/claude-620771/wedge_traces/, plus a probe
+harvest from badile15, then killed both wedged arms (verified no `execution took` first).
+
+**Result.** Every core that ran ends at one of two PCs, and BOTH are inside
+**`mempool_barrier` (0x80002cb4)**:
+
+    0x80002cc8  bne  -- barrier spin loop   (harts 0x000, 0x00a, 0x1ff)
+    0x80002ce4  wfi  -- asleep, awaiting wake (harts 0x250, 0x2e0)
+
+The barrier waits for `NUM_CORES` = 1024. Only **624 harts ever execute an instruction**
+(the other 400 have 0-byte trace files), so it can never release. Participants park -- some
+spinning, some in `wfi` -- utilisation falls to zero, and `execution took` is never reached.
+That is exactly the measured wedge signature: barrier quiet at window 82-178, retirement
+draining, no cycle count.
+
+The idle set is **group-granular**: groups 0-31 complete, plus 37, 38, 45, 46, 47, 53, 55.
+All 16 cores of a group run, or none.
+
+**It strikes at whichever barrier comes first.** Ten `waveC8x8` arms are stuck the same way
+but EARLIER: at 1,665,000 cycles they are still in the `pre` phase with zero `[FPU] bench`
+windows (a healthy arm finishes the whole benchmark in ~200,000), same `grp_min=0.0%`
+idle-group pattern. So this is one failure mode, not two.
+
+**Still open.** WHY those groups never boot. The 400 idle harts executed nothing at all, so
+there is no PC to read from them -- the evidence has to come from the RTL side (reset/wake
+fan-out to groups) or from a run with a boot-side probe.
+
+**Decisions taken (user-approved).** Harvest-then-kill on the two wedged arms; investigate
+waveC8x8; HOLD the nine unmeasured grid points rather than requeue them on the same image.
