@@ -14283,3 +14283,36 @@ exactly the signature recorded above (barrier quiet at window 82-178, retirement
 prediction: the two dead-top-half arms still running (fp32 KS=1 4x128x16384, fp32 KS=8
 16x128x8192) should also wedge. Settling it needs a debug image (snitch_trace=1) to recover
 a top-half hart's stuck PC.
+
+### 2026-09-01 -- hart-level proof, and a correction to "half the machine"
+
+**Disk.** larain12 hit 29 GB free (100%), which would have failed
+`sw_8x8_fp32_ks4_128x1024x1024` at packaging -- a HEALTHY arm at 60.97% cum utilisation
+with all 64 groups active. 38 of its 38 GB were trace files; truncated 4,097 of them
+(safe on a live sim), **29 GB -> 64 GB free**, transcript intact (50 MB, 99 FPU windows).
+
+**Hart-level proof of the idle-core bug.** `sw_8x8_fp32_ks2_16x128x8192` on badile04 is a
+waveA8x8 arm built WITH instruction tracing, so `trace_hart_*.dasm` records every executed
+instruction. After 33 h:
+
+    harts 0x000, 0x00a, 0x0ff, 0x1ff : 14,307,328 bytes each
+    harts 0x200, 0x201, 0x23f, 0x3ff : 0
+
+**624 of 1024 harts non-empty** -- the other 400 never retired a single instruction. Its
+own split print (16,128,8192 / m 0,2 / p 0,64 = 8 row_chunks x 128 p_blocks) again covers
+all 1024 cores. The arm now reads `util=0.00%` after 581 windows: wedging in front of us.
+
+**Correction to the earlier entry.** It is NOT "exactly the top half". The active set is
+**group-granular** -- groups 0-31 complete, PLUS 37, 38, 45, 46, 47, 53, 55 -- so the idle
+set is neither half nor contiguous. Whatever gates it acts on whole groups (all 16 cores of
+a group run, or none).
+
+**Also retracted:** an empty `trace_hart` file is NOT by itself evidence that a core never
+ran -- on waveB/waveC images ALL 1024 traces are empty because those were built
+`snitch_trace=0`. The evidence only holds within an image known to have tracing on, which
+is why the waveA8x8 comparison (healthy arm: both harts traced; wedging arm: only the
+bottom) is the one that counts.
+
+**Miss to record:** the 9 wedged arms killed earlier were waveA8x8 and therefore HAD
+populated trace_hart files. I harvested only the probe lines before deleting their node
+dirs, so their stuck PCs are gone. Harvest traces, not just probes, before cleaning.
