@@ -14138,3 +14138,38 @@ The wedges are the bigger problem and the predicate does not point at them.
 **What is now known to be unsound and needs redoing:** the "band vs outside, ratio 0.98" comparison,
 the "no arm past w60 retiring nothing" health count, and the disconfirmation note published in the
 artifact. All three used the contaminated metric.
+
+## 2026-09-01 -- the 9 wedged 8x8 arms marked in the artifact, left running for review
+
+Recorded in `docs/benchmarks/wedged_8x8.tsv` and rendered as their own card, deliberately **not**
+merged with the 4x4 livelocks: same outcome, different population.
+
+| arm | prec | sh | vl | windows | node |
+|---|---|---:|---:|---:|---|
+| fp32_ks8_64x512x2048 | fp32 | 8 | 64 | 2,082 | badile32 |
+| fp16_ks8_8x128x32768 | fp16 | 1 | 64 | 2,038 | badile01 |
+| fp16_ks8_128x1024x2048 | fp16 | 16 | 64 | 1,976 | badile29 |
+| fp16_ks8_64x512x4096 | fp16 | 8 | 64 | 1,927 | badile10 |
+| fp16_ks4_4x128x32768 | fp16 | 1 | 64 | 942 | badile08 |
+| fp16_ks2_128x1024x2048 | fp16 | 64 | 256 | 890 | badile32 |
+| fp16_ks4_32x256x8192 | fp16 | 8 | 128 | 817 | badile34 |
+| fp16_ks4_128x1024x2048 | fp16 | 32 | 128 | 702 | badile24 |
+| fp16_ks2_64x512x4096 | fp16 | 32 | 256 | 540 | badile29 |
+
+**It is not the failure band: 0 of 9 are band arms, and 0 of the 12 band arms are wedged.** Two other
+variables track it:
+
+    precision    fp16  8 of 26 (31%)      fp32  1 of 24 (4%)
+    kernel split KS=1 0%   KS=2 14%   KS=4 25%   KS=8 50%       -- monotone in KS
+
+**The known fp16 VFU wedge is NOT the cause.** `spatz_vfu.sv:159` reads `result_tag.vsew`, which is
+the *fixed* form; the bug was reading vsew from the live request. Checked in the compiled source, so
+this is something else.
+
+Campaign now reads: **42 measured, 41 running, 12 livelocked (4x4), 9 wedged (8x8)**.
+
+Left running pending the user's review, as asked.
+
+**Also.** larain12 hit **28 GB free** and its one arm (`fp32_ks4_128x1024x1024`, ~44% done) is at
+real risk of dying at packaging as the larain6 arm did. Nothing of ours is reclaimable there -- our
+33 GB *is* that arm's own live job dir; the node is full from other users.

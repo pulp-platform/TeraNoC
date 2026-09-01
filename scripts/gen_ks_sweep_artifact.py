@@ -139,6 +139,11 @@ def status(r):
         return ("bad", "degr", "livelocked \u2014 killed, partial data only, not a measurement")
     if name in KEPT_ALIVE:
         return ("bad", "degr?", "degraded but still running \u2014 borderline, left alive")
+    if name in WEDGED8:
+        _w = WEDGED8[name]
+        return ("bad", "wedged",
+                "wedged in the benchmark region \u2014 %s windows, zero retirement, no result"
+                % format(_w["win"], ","))
     st = FLEET.get(name, ("", ""))[0]
     if st == "failed":    return ("bad", "killed", "killed after livelock")
     if st == "running":   return ("run",  "run",   "running")
@@ -194,6 +199,19 @@ try:
 except IOError:
     pass
 """
+
+# ---- 8x8 arms wedged in the benchmark region (detected 2026-09-01) ------------------
+# Same class as the 4x4 livelocks in outcome -- no forward progress -- but a DIFFERENT population:
+# none is in the failure band, and they skew hard to fp16 and to high KS. Kept in their own set so
+# the page never conflates them with the band arms.
+WEDGED8 = {}
+try:
+    for _l in open(os.path.join(ROOT, "docs", "benchmarks", "wedged_8x8.tsv")):
+        if _l.startswith("#") or not _l.strip(): continue
+        _f = _l.rstrip("\n").split("\t")
+        if len(_f) >= 4: WEDGED8[_f[0]] = dict(node=_f[1], win=int(_f[2]), age=float(_f[3]))
+except IOError:
+    pass
 
 # arms found livelocked and killed -- their cells must NOT read as pending or running
 DEGRADED = set()
@@ -958,6 +976,50 @@ if DEG:
       '<p class="sub">All %d are 4&times;4. <strong>Zero 8&times;8 arms are degraded</strong>, '
       'including all ten KS=8 arms at <code>vl=64&nbsp;B</code>.</p></div>'
       % (len(DEG), "".join(_dr), len(DEG)))
+
+# ---- 8x8 wedged arms ---------------------------------------------------------------
+if WEDGED8:
+    # local index -- _idx2 is built further down, after this card
+    _wix = {armname(r): r for r in M}
+    _w8 = []
+    for _n, _d in sorted(WEDGED8.items(), key=lambda kv: -kv[1]["win"]):
+        _r = _wix.get(_n) or {}
+        _w8.append('<tr><td class="mono">%s</td><td>%s</td><td class="num">%s</td>'
+                   '<td class="num">%s</td><td class="num st-bad b">%s</td>'
+                   '<td class="num st-bad">0</td><td class="num">%.0f h</td>'
+                   '<td class="dim sm">%s</td></tr>'
+                   % (_n.replace("sw_8x8_", ""), _r.get("prec", "?"), _r.get("sh", "?"),
+                      _r.get("vl", "?"), format(_d["win"], ","), _d["age"], _d["node"]))
+    _fp16 = sum(1 for n in WEDGED8 if "fp16" in n)
+    A('<div class="card"><h2>8&times;8 arms wedged &mdash; no forward progress</h2>'
+      '<p class="sub">Nine 8&times;8 arms have stopped retiring instructions entirely while their '
+      'simulations keep advancing. They hold seats and will never produce a result.</p>'
+      '<div class="tw"><table><thead><tr><th>arm</th><th>prec</th><th class="num">sharers</th>'
+      '<th class="num">vl</th><th class="num">windows</th>'
+      '<th class="num" title="instructions retired over the last 40 windows, summed across all 64 groups">retired, last 40 win</th>'
+      '<th class="num">age</th><th>node</th></tr></thead><tbody>%s</tbody></table></div>'
+      '<div class="note bad"><span class="lab">how they were identified</span>'
+      '<p><strong>Zero</strong> retired instructions across the last 40 windows, summed over all 64 '
+      'groups, with no <code>execution took</code> and only the two banner UART lines. A completing '
+      '8&times;8 arm needs <strong>160&ndash;195 windows</strong>; these are at 540&ndash;2,082.</p>'
+      '<p>They are <em>spinning, not paused</em> &mdash; watched for 60 s, one advanced its cycle '
+      'counter 2,301,000&rarr;2,302,000 and its window 2237&rarr;2238 while retiring nothing.</p>'
+      '</div>'
+      '<div class="note"><span class="lab">this is NOT the failure band</span>'
+      '<p><strong>0 of the 9 are band arms</strong>, and 0 of the 12 band arms are wedged. Two other '
+      'variables track it instead:</p>'
+      '<div class="formula">'
+      'by precision &nbsp; fp16 <b>8 of 26</b> (31%%) &nbsp;&middot;&nbsp; fp32 <b>1 of 24</b> (4%%)<br>'
+      'by kernel split &nbsp; KS=1 <b>0%%</b> &nbsp; KS=2 <b>14%%</b> &nbsp; KS=4 <b>25%%</b> &nbsp; '
+      'KS=8 <b>50%%</b>'
+      '</div>'
+      '<p>So the wedges are an fp16-and-high-KS phenomenon, monotone in KS, and the livelock '
+      'predicate does not point at them at all. The known fp16 VFU wedge '
+      '(<code>spatz_vfu.sv:159</code>, vsew read from the live request instead of the result tag) '
+      'is <strong>already fixed</strong> in the compiled source, so it is not the cause &mdash; this '
+      'is something else.</p></div>'
+      '<p class="sub">Recorded in <code>docs/benchmarks/wedged_8x8.tsv</code>. Left running pending '
+      'review; %d of the 9 are fp16.</p></div>' % ("".join(_w8), _fp16))
 
 # ---- kernel size vs efficiency, at fixed sharers -------------------------------
 _line = []
