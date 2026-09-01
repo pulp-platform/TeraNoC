@@ -55,7 +55,7 @@ module mempool_group_mshr_cfg
   // Upper bound on bank_burst_bits: ALL BankIdW bank bits may legitimately come from inside the
   // load. At KS=1 a group holds ONE p-slice, so the gap field carries no information and the
   // intra-load burst index is the only spread available -- that case needs the full BankIdW.
-  parameter int unsigned BankBurstBitsMax    = 4,
+  parameter int unsigned BankBurstBitsMax    = mempool_pkg::MshrCfgBankIdW,
   // Mirrors the MSHR's elaboration guard at mempool_group_mshr.sv:328 -- serve_timeout == 0 pins a
   // CACHED way forever when the serve target is never reached and the entry is not an eviction
   // victim. Only then is 0 refused.

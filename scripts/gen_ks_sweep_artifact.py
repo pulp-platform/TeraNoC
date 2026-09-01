@@ -341,6 +341,33 @@ def perf_detail(d):
 BS  = sorted({r["B"]  for r in M})
 KSS = sorted({r["KS"] for r in M})
 
+# ---- MSHR bank-hash: shapes whose SHIPPED setting reached fewer banks than the workload
+# allows. Scored against the ACHIEVABLE CEILING (distinct concurrent lines in one group, capped
+# at the bank count), so a shape sitting at its own ceiling is optimal even when that ceiling is
+# below 16 and is NOT flagged. Built by scripts/mshr_bank_hash_explore.py's model.
+HASHBAD = {}
+try:
+    for _l in open(os.path.join(ROOT, "docs", "benchmarks", "mshr_hash_affected.tsv")):
+        if _l.startswith("#") or not _l.strip():
+            continue
+        _f = _l.rstrip("\n").split("\t")
+        if len(_f) >= 11:
+            HASHBAD[(_f[1], _f[2], int(_f[3]), _f[4])] = dict(got=_f[6], ceil=_f[7], best=_f[9])
+except IOError:
+    pass
+
+
+def hashdot(r):
+    """Red dot for an arm whose MSHR bank hash was below its ceiling."""
+    k = (r["mesh"], r["prec"], r["KS"], "%dx%dx%d" % (r["B"], r["D"], r["I"]))
+    d = HASHBAD.get(k)
+    if not d:
+        return ""
+    return ('<span class="hashdot" title="MSHR bank hash reached only %s of a possible %s banks '
+            '(best setting sh_burst,bb = %s) &mdash; fixed 2026-09-01, this number predates it">'
+            '&#9679;</span>' % (d["got"], d["ceil"], d["best"]))
+
+
 def matrix(mesh, prec):
     idx = {(r["B"], r["KS"]): r for r in M if r["mesh"] == mesh and r["prec"] == prec}
     h = ['<div class="tw"><table><thead><tr>',
@@ -358,7 +385,8 @@ def matrix(mesh, prec):
             if r is None:
                 h.append('<td class="num na" title="KS must divide B">&middot;</td>'); continue
             cls, txt, lab = status(r)
-            h.append('<td class="num st-%s" title="%s &middot; %s">%s</td>' % (cls, armname(r), lab, txt))
+            h.append('<td class="num st-%s" title="%s &middot; %s">%s%s</td>'
+                     % (cls, armname(r), lab, txt, hashdot(r)))
         h.append('<td class="num dim sm">%s</td><td class="num dim sm">%s</td><td class="num dim">%d</td></tr>'
                  % (" / ".join(str(r["vl"]) for r in row if r),
                     " / ".join(str(r["sh"]) for r in row if r), anyr["R"]))
@@ -403,7 +431,7 @@ th,td{padding:5px 9px;border-bottom:1px solid var(--line-soft);text-align:left;w
 th{font-family:var(--mono);font-size:10px;letter-spacing:.07em;text-transform:uppercase;
 color:var(--ink-3);font-weight:500}
 .num{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums}
-.mono{font-family:var(--mono)}.dim{color:var(--ink-3)}.na{color:var(--line)}
+.mono{font-family:var(--mono)}.dim{color:var(--ink-3)}.hashdot{color:var(--bad);font-size:.62em;vertical-align:super;margin-left:.28em;line-height:0}.hashkey{display:inline-block;color:var(--bad);font-size:.7em;vertical-align:super}.na{color:var(--line)}
 .sm{font-size:11px}.b{font-weight:600}
 .st-done{color:var(--good);font-weight:600}.st-bad{color:var(--bad);font-weight:600}
 .st-blocked{color:var(--warn);font-weight:600}
@@ -736,6 +764,7 @@ for mesh, cores in (("4x4", 256), ("8x8", 1024)):
       '<span class="st-bad">degr</span> = livelocked and killed (partial data in the degraded section; never a measurement) &middot; '
       '<span class="st-run">run</span> = on the fleet &middot; '
       '<span class="na">&middot;</span> = KS does not divide B, so the arm does not exist. '
+      '<span class="hashkey">&#9679;</span> = the MSHR bank hash reached fewer banks than this shape allows (see the MSHR bank-hash card); the number predates the 2026-09-01 fix. '
       '<strong>An asterisk (*)</strong> marks a cell measured on a <em>non-default</em> '
       'configuration &mdash; the number is real but not comparable with stock arms, and the '
       'deviation is named in the cell tooltip and in the fix-ladder table above. '

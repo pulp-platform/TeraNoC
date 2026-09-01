@@ -710,8 +710,19 @@ package mempool_pkg;
   // bank_burst_bits: how many of the BankIdW bank bits come from WITHIN the load (which burst
   // of this load) rather than from the gap between p-slices. Was a single bit, which silently
   // truncated the software-derived 2/3/4 to its LSB and left KS=4/1 with 4 of 16 banks
-  // reachable. 3 bits holds 0..4, i.e. every value up to BankIdW.
-  localparam integer unsigned MshrCfgBurstBitsW = 3;
+  // reachable.
+  //
+  // DERIVED from the MSHR bank count, not hardcoded: the legal range is [0, BankIdW], so the
+  // field needs clog2(BankIdW+1) bits. These three mirror mempool_group_mshr.sv:487-488
+  // exactly -- MshrTagNum is driven by the same GROUP_MSHR_NUM macro as its MshrNum, and the
+  // ways knob by the same GROUP_MSHR_WAYS_PER_BANK -- so re-sizing the MSHR re-sizes the CSR
+  // with it and the two can never drift apart.
+  localparam integer unsigned MshrCfgWaysPerBank =
+      `ifdef GROUP_MSHR_WAYS_PER_BANK `GROUP_MSHR_WAYS_PER_BANK `else 1 `endif;
+  localparam integer unsigned MshrCfgBankNum =
+      (MshrCfgWaysPerBank > 0) ? (MshrTagNum / MshrCfgWaysPerBank) : 1;
+  localparam integer unsigned MshrCfgBankIdW = idx_width(MshrCfgBankNum);
+  localparam integer unsigned MshrCfgBurstBitsW = idx_width(MshrCfgBankIdW + 1);
 
   typedef struct packed {
     logic                            enable;              // 0 = every request bypasses the MSHR

@@ -14716,3 +14716,26 @@ reached fewer banks than their workload allows; **28 are already measured**. Sco
 ACHIEVABLE CEILING (distinct concurrent lines per group, capped at 16) -- a shape at its ceiling
 is optimal even when that ceiling is below 16, which is why the naive "not 16/16" count of 100
 overstates it. Worst measured losses are **8x** (4x4 fp32/fp16 KS=1, reaching 1 of 8 banks).
+
+### 2026-09-01 -- derive MshrCfgBurstBitsW; mark hash-affected cells in the artifact
+
+**Derived, not hardcoded.** `mempool_pkg.sv` now computes the CSR field width from the MSHR
+geometry instead of a literal 3:
+
+    MshrCfgWaysPerBank = `GROUP_MSHR_WAYS_PER_BANK (default 1)
+    MshrCfgBankNum     = MshrTagNum / MshrCfgWaysPerBank
+    MshrCfgBankIdW     = idx_width(MshrCfgBankNum)
+    MshrCfgBurstBitsW  = idx_width(MshrCfgBankIdW + 1)     // legal range is [0, BankIdW]
+
+These mirror `mempool_group_mshr.sv:487-488` exactly -- `MshrTagNum` is driven by the same
+`GROUP_MSHR_NUM` macro as its `MshrNum` -- so re-sizing the MSHR re-sizes the CSR with it and the
+two cannot drift. `mempool_group_mshr_cfg`'s `BankBurstBitsMax` now defaults to
+`mempool_pkg::MshrCfgBankIdW` for the same reason. At 64 entries / 4 ways this still evaluates to
+3 bits, so the fix is unchanged for the shipping config -- it just cannot go stale.
+Recompiled: 0 errors, both modules compiled.
+
+**Artifact.** The 4x4 and 8x8 mesh cards now carry a small red dot beside any cell whose MSHR
+bank hash reached fewer banks than the shape allows -- 84 cells, each with a tooltip naming the
+banks reached, the ceiling, and the best (sh_burst, bb). Legend added to both card footers.
+Scored against the achievable ceiling, so a shape at its own ceiling is NOT flagged even when
+that ceiling is below 16.
