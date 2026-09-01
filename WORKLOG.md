@@ -14071,3 +14071,37 @@ single observation carrying the entire "no loss" claim. It is a hypothesis worth
 
 **ETA note:** this arm was estimated at 5 h remaining and finished within the hour -- the second
 such case. Confirms arms accelerate near completion and the ETA hours are upper bounds.
+
+## 2026-09-01 -- fp16 DOES burst in every campaign image; a kernel comment corrected
+
+The GVSoC peer asked two config questions after finding their model's `vlsu_burst.sub_word`
+defaulted to False -- **0 bursts and 140,304 single-word requests** on one group of
+`fp16_ks2_16x128x4096`, against 4,288 bursts + 3,592 singles for the equal-byte fp32 twin. That is
+~18x the request count and lines up with their fp16 error against our numbers (median 51.2%, e.g.
+20,755 model vs our 13,728) while fp32 matched at -3.6%.
+
+**Q1 -- `SPATZ_VLSU_BURST_EW16=1` in all three campaign images** (`build_tgt4x4`, `build_tgt8x8`,
+`build_waveA2`), read from the elaborated define sets rather than the config source. So
+`BurstSubWord=1` and fp16 bursts in run 1 and run 2 alike.
+
+**Q2 -- the m8 / 512 B warning does NOT apply, shown rather than derived.** The RTL's own BURSTWHY
+probe on the exact arm they named:
+
+    fp16 KS=2 16x128x4096   6,144 samples:  vsew=1  vl=256  ew_ok=1  burst=1
+    fp32 KS=2 16x128x2048   6,144 samples:  vsew=2  vl=256  ew_ok=1  burst=1
+
+`burst=1` on every sampled load in both precisions.
+
+**A comment in our own source caused the confusion, and I nearly repeated it.** `main.c:348` read
+"2 -> matmul_2xVL (e16,m8 -> vl=256, 2 accumulators; 512 B > burst ceiling, no burst)". Reading
+"vl=256" as *elements* gives 512 B and the warning follows -- I was about to tell the peer these arms
+do not burst. The RTL's `vl` is in **bytes** and the real load is **256 B**: the full m8 group is
+512 B but the kernel never issues a full-width load, because vl is set by the work split. Comment
+rewritten with the probe evidence and the units spelled out.
+
+Two independent reasons these arms are clear, both now recorded in the comment: the load is 256 B,
+and at ROB0=128 the ceiling is 512 B anyway (the warning's 256 B assumed ROB0=64). `NoVlCeiling` is
+not defined in any image, so the ceiling is genuinely active -- simply never reached.
+
+Also told them both precisions carry the **same vl=256 B** -- the fp16 arm moves identical bytes and
+twice the elements -- so after their fix both should converge, not fp16 alone.

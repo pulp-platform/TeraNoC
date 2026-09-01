@@ -345,7 +345,14 @@ int main() {
   // S1 experiment (docs/spatz_bottleneck_analysis_and_plan.md): kernel_size also selects LMUL --
   //   8 -> matmul_8xVL (e16,m2 -> vl=64,  8 accumulators)
   //   4 -> matmul_4xVL (e16,m4 -> vl=128, 4 accumulators)
-  //   2 -> matmul_2xVL (e16,m8 -> vl=256, 2 accumulators; 512 B > burst ceiling, no burst)
+  //   2 -> matmul_2xVL (e16,m8 -> vl=256 B, 2 accumulators; DOES burst -- see below)
+  // NOTE the vl figures here are BYTES, matching the RTL's mem_spatz_req.vl. An earlier
+  // version of this line warned that KS=2 is "512 B > burst ceiling, no burst", reading the
+  // full m8 register group (512 B) as the load width. The kernel does not issue a full-width
+  // load: vl is set by the work split. Verified with the RTL's own BURSTWHY probe on
+  // sw_4x4_fp16_ks2_16x128x4096 -- 6,144 samples, all vsew=1 vl=256 ew_ok=1 burst=1.
+  // (Independently, ROB0=128 puts the ceiling at 512 B, so even a full-width load would
+  // burst in the campaign images; the 256 B ceiling in that warning assumed ROB0=64.)
   // Higher LMUL = fewer, longer vector ops = more FPU work per load => the 109-cycle load latency
   // needs less memory-level parallelism to hide. Override with
   // EXTRA_DEFINES=-DKERNEL_SIZE=4 (NOT DEFINES=..., which overrides the build's own
