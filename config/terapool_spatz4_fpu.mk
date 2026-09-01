@@ -72,7 +72,7 @@ noc_routing_algorithm ?= 0
 #
 # The three in-flight PPA sweeps were all built with 0 and are NOT comparable to builds made after
 # this commit. Re-baseline before comparing across it.
-noc_router_remapping ?= 2
+noc_router_remapping ?= 3
 
 # Hash-based port spreading at tile level (bitmask)
 #   bit0 (1): req port hash     — spread req across remote req ports
@@ -179,7 +179,10 @@ group_mshr_ways_per_bank ?= 4
 # group_mshr_merge_reqs    ?= 8      # 1024x128x128: A 2-way, B 8-way
 # group_mshr_merge_reqs    ?= 16     # 128x1024x512 (best measured 96.8%): A 16-way, B 1-way
 # 512x512x512 (default): A 4-way, B 4-way -> max = 4
-group_mshr_merge_reqs    ?= 4
+# Sim convention: MERGE_REQS is elaboration-only and the SW sets the real target via CSR
+# (group_mshr_cfg_runtime=1 above), so 16 is the sizing every sweep image was built with.
+# Only a backend run needs the true merge number here.
+group_mshr_merge_reqs    ?= 16
 # Admit single-word reqs into MSHR merge pool (1) or let them bypass (0).
 # Set to 1 (design intent: single-word loads coalesce + multicast via the MSHR).
 # The earlier sporadic sp-fmatmul deadlocks attributed here to a "duplicate-entry
@@ -485,6 +488,7 @@ group_mshr_cache_reclaimable ?= 0
 # cycle BEFORE the core's own assertion. Also prints a periodic [BYP] fwd/rsp/orphan
 # summary (uses group_mshr_stats_period). Single-beat traffic only (multi-beat bypass
 # responses are retagged by ParityDrain and would produce false orphans). Silent when clean.
+group_mshr_bypass_ways ?= 16
 group_mshr_bypass_probe ?= 1
 # RESP_HOLD stall probe (SIM ONLY): age threshold in cycles. An entry still holding its response
 # after this many cycles is reported ONCE with byp/stl/peers/bank-census -- the evidence that says
@@ -648,7 +652,14 @@ spatz_vlsu_block_alloc ?= 1
 # atomically (snitch_pkg::RobDepth, spatz NrOutstandingLoads, spatz_mem_rsp_t.id); widens
 # every mesh link by 1 bit (PNR re-close needed). Measured: cycle-identical (3589) for m2 --
 # invisible on its own, it is the enabler for dual_load below.
-spatz_vlsu_rob_depth ?= 64
+# "ROB0 deep, rest shallow" (hardware/Makefile:491): bursts use ROB0 alone, so ports 1..N-1
+# need not match its depth. This pair is what build_tgt4x4 / build_tgt8x8 were built with and
+# what every sweep result on this branch was measured on.
+# NOTE robn_depth=16: bursts are LOADS ONLY, so a large STORE goes word-interleaved and may
+# not fit 16 ids. An earlier investigation (2026-08-29) found KS=2 needed robn_depth=32.
+# Raise this first if a non-burst path wedges with no timeout counter moving.
+spatz_vlsu_rob_depth ?= 128
+spatz_vlsu_robn_depth ?= 16
 # --- H1 dual-load runahead (REQUIRES spatz_vlsu_rob_depth=64 to have ROB room) ---
 # Unset/1 = legacy: the next load starts only when the previous one fully retires
 # (bit-identical). 2 = the next burst-safe load starts as soon as the previous one's requests

@@ -14412,3 +14412,39 @@ about `grp_min`: an instantaneous minimum is not a statement about the whole run
 
 Artifact and the Basic Memory note corrected. Chart now holds 137 arms; all 21 killed arms
 (11 wedged + 10 prologue) have their series in it.
+
+## 2026-09-01 -- fold the build_tgt4x4/8x8 knobs into the flavour as defaults
+
+**Purpose.** A bare `make config=terapool_spatz4_fpu[_8x8]` did not reproduce the images every
+sweep result on this branch was measured on, so any new build (e.g. a GUI debug run) silently
+differed from the arm it was meant to explain.
+
+**Implementation.** Four knobs into `config/terapool_spatz4_fpu.mk` (inherited by the 8x8
+flavour, which only sets mesh geometry):
+
+| knob | was | now |
+|---|---|---|
+| `spatz_vlsu_rob_depth`   | 64            | **128** |
+| `spatz_vlsu_robn_depth`  | unset (no define) | **16** |
+| `group_mshr_merge_reqs`  | 4             | **16** |
+| `group_mshr_bypass_ways` | unset (no define) | **16** |
+
+The two that were UNSET are the dangerous ones: `hardware/Makefile` emits those defines only
+under `ifneq ($(strip $(...)),)`, so an unset knob produced no define at all and the RTL fell
+back to a different internal default -- silently.
+
+**Verification.** Full define-set diff of a `make -n` dry run against the built images, not a
+spot check. All four knobs now match; the only remaining differences are the VCS-vs-Questa
+flow (`TARGET_VCS`, `SRAM`, `SNITCH_ENABLE_*`), `SNITCH_TRACE` (a per-build choice: 0 for
+sweeps, 1 for debug), and `TERAPOOL_SPATZ4_FPU[_8X8]`, an inert marker no RTL references.
+
+**Concern recorded in the file, not silently resolved.** `robn_depth=16` is the pairing
+`hardware/Makefile:491` sanctions for "ROB0 deep, rest shallow", and it is what build_tgt*
+used -- but bursts are LOADS ONLY, so a large STORE goes word-interleaved and may not fit 16
+ids, and a 2026-08-29 investigation found KS=2 needed 32. Four of the eleven wedged 8x8 arms
+are KS=2, and all ten prologue-stuck arms are KS=1 (the largest vector length, hence the
+largest stores). That is a correlation worth testing, not a conclusion. A comment at the knob
+says to raise it first if a non-burst path wedges with no timeout counter moving.
+
+**Consequence.** New builds now match the sweep images by default. Anything built earlier from
+the bare flavour (`build_gui_4x4`, `build_2_gui_4096x32x512`) will CHANGE if rebuilt.
