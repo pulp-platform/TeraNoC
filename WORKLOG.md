@@ -14906,3 +14906,28 @@ running arms finish; 4x4 arms are short and the cost is wall-clock only.
 
 Recorded as a standing preference: always pass an explicit high `--max-parallel`, and verify
 after submitting that nothing sits in `submitted` while seats are free.
+
+### 2026-09-01 -- restart the hashfix fleet with NO concurrency cap
+
+Killed and resubmitted so the licence reserve is the only governor.
+
+Sequence, and why it avoids duplicates -- the failure this fleet has hit before:
+1. `badist cancel <batch>` marked the 24 running jobs `cancelled`; the 12 queued stayed
+   `submitted`. Cancel does NOT kill a simv, so the 24 processes were killed by matching
+   `/proc/<pid>/exe` to `mempool_simvopt` and the cwd to the batch. Seats confirmed the kill:
+   **66 -> 42 in use, ours 35 -> 11**.
+2. A cancelled batch will NOT dispatch its queued jobs: 24 slots freed and the 12 stayed
+   `submitted` regardless. So they were stranded, not pending, and resubmitting them could not
+   duplicate anything.
+3. Resubmitted in two batches, both `--max-parallel 200 --reserve-licenses 20`:
+   `teranoc-20260901-202325-286d` (24) and `teranoc-20260901-202519-3595` (12).
+
+**All 36 dispatched immediately -- no queueing.** Verified no duplicates: across all three
+batches every hf arm appears exactly once (36 arms x 1 instance). Seats 78/100 in use, **22
+free**, above the 20 reserved for others.
+
+Two verification traps hit on the way:
+- `pgrep -cf 'build_tgt4x4_hashfix'` reported a survivor on every node -- it was matching the
+  ssh command line carrying that string. Matching `/proc/<pid>/exe` instead gave the truth.
+- `find -maxdepth 4` for the transcripts was too shallow (they sit at depth 7), which earlier
+  made all 24 healthy arms read as "dir not found".
