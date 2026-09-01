@@ -14372,3 +14372,43 @@ KS=1 (largest row-chunk count, hence fewest column blocks).
 
 Lesson: an instantaneous per-window minimum is not evidence about whether a group ever ran;
 only a max over the whole series is.
+
+## 2026-09-01 -- RETRACTION: the idle groups are SLOW, not dead
+
+Adding the two killed wedged arms to the utilisation chart exposed a contradiction: their
+FPUG series shows **all 64 groups reaching non-zero utilisation**, while I had reported that
+25 of 64 groups "never execute a single instruction" on the strength of 0-byte
+`trace_hart_*.dasm` files.
+
+**The trace claim was wrong.** `hardware/src/mempool_cc.sv:337`:
+
+    if ((i_snitch.csr_trace_q || SnitchTrace) && (!i_snitch.stall || ...))
+
+The image is built `SNITCH_TRACE=0`, so a hart writes its trace ONLY while `csr_trace_q` is
+set -- the CSR the benchmark enables at its start. An empty file means the core never
+reached the traced region, NOT that it never ran.
+
+**What the data actually shows** (badile04, `fp32_ks2_16x128x8192`, 642 FPUG windows):
+
+    39 groups  peak FPU util 80.1 - 99.8%   reached the traced region
+    25 groups  peak FPU util 10.7 - 43.9%   never did
+
+The bands do not overlap. This is the previously recorded **fixed spatial slow set** at 8x8
+(21 of 64 groups, bimodal ~82%/~22%) -- the same phenomenon, not a boot failure.
+
+**What survives.** The stuck PCs are real, from actual trace data: every traced core ends
+inside `mempool_barrier` (0x80002cb4) at 0x80002cc8 (`bne` spin) or 0x80002ce4 (`wfi`). The
+fast groups finish and park there; the slow groups, at roughly a quarter of the rate, do not
+arrive.
+
+**What is withdrawn.** "400 cores never execute"; "only 624 arrive so the barrier waits for
+1024 forever". Whether the barrier never releases or merely takes longer than the run
+allowed is now OPEN.
+
+**Lesson.** A zero-length trace file is evidence only in an image whose tracing is
+unconditional. Under `SNITCH_TRACE=0` it measures csr_trace coverage, not execution -- check
+the gate before reading absence as absence. (Related to the earlier same-day retraction
+about `grp_min`: an instantaneous minimum is not a statement about the whole run either.)
+
+Artifact and the Basic Memory note corrected. Chart now holds 137 arms; all 21 killed arms
+(11 wedged + 10 prologue) have their series in it.

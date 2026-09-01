@@ -210,10 +210,13 @@ try:
         if _l.startswith("#") or not _l.strip(): continue
         _f = _l.rstrip("\n").split("\t")
         if len(_f) >= 4:
-            WEDGED8[_f[0]] = dict(node=_f[1], win=int(_f[2]), age=float(_f[3]),
-                                  died=int(_f[7]) if len(_f) > 7 else 0,
-                                  peak=int(_f[8]) if len(_f) > 8 else 0,
-                                  tmo=int(_f[9]) if len(_f) > 9 else 0)
+            # later rows carry '-' where a field was never measured; never let one
+            # unparsed placeholder drop the whole evidence file.
+            def _n(i, cast=int, dflt=0):
+                try:    return cast(_f[i])
+                except (IndexError, ValueError): return dflt
+            WEDGED8[_f[0]] = dict(node=_f[1], win=_n(2), age=_n(3, float, 0.0),
+                                  died=_n(7), peak=_n(8), tmo=_n(9))
 except IOError:
     pass
 
@@ -1062,7 +1065,7 @@ if WEDGED8:
       % ("".join(_w8), _fp16))
 
 # ---- half the machine idle at 8x8 -------------------------------------------------
-A('<div class="card"><h2>Hundreds of cores never execute &mdash; and it precedes the hang</h2>'
+A('<div class="card"><h2>A slow group set, not dead cores &mdash; and it precedes the hang</h2>'
   '<p class="sub">In six 8&times;8 arms, groups <strong>32&ndash;63</strong> (cores 512&ndash;1023) '
   'show zero FPU utilisation for the entire run, while groups 0&ndash;31 run at ~65%. '
   'Four of those six went on to wedge; the three arms that <em>completed</em> all use 64/64.</p>'
@@ -1083,23 +1086,18 @@ A('<div class="card"><h2>Hundreds of cores never execute &mdash; and it precedes
   '<strong>1</strong> in every app (the <code>=4</code> in the source is comment text, not a '
   'setting), and every NUM_CORES-scaled ELF symbol is identical across working and broken '
   'builds.</p></div>'
-  '<div class="note bad"><span class="lab">hart-level proof: 400 cores execute nothing</span>'
-  '<p>On a live arm built <em>with</em> instruction tracing (<code>fp32 KS=2 16x128x8192</code>, '
-  'waveA8x8), each hart&rsquo;s <code>trace_hart_*.dasm</code> records every instruction it '
-  'executes. After 33 hours:</p>'
-  '<div class="tw"><table><thead><tr><th>hart</th><th class="num">trace bytes</th></tr></thead>'
-  '<tbody>'
-  '<tr><td><code>0x000</code>, <code>0x00a</code>, <code>0x0ff</code>, <code>0x1ff</code></td>'
-  '<td class="num b">14,307,328 each</td></tr>'
-  '<tr><td><code>0x200</code>, <code>0x201</code>, <code>0x23f</code>, <code>0x3ff</code></td>'
-  '<td class="num b st-bad">0</td></tr></tbody></table></div>'
-  '<p><strong>624 of 1024 harts are non-empty</strong> &mdash; the other 400 never retired a '
-  'single instruction. The active set is <strong>group-granular</strong>: groups 0&ndash;31 '
-  'complete, plus 37, 38, 45, 46, 47, 53 and 55. So it is not literally &ldquo;half&rdquo;, and '
-  'the idle set is not contiguous &mdash; whatever gates it acts on whole groups.</p>'
-  '<p>That arm now reads <code>util=0.00%</code> after 581 windows: it is wedging, in front of us, '
-  'having done its work on 61% of the machine.</p></div>'
-  '<div class="note bad"><span class="lab">and it is not the work split</span>'
+  '<div class="note bad"><span class="lab">RETRACTED: they are slow, not dead</span>'
+      '<p>An earlier version of this card claimed 400 of 1024 cores <em>never execute a single instruction</em>, based on their <code>trace_hart_*.dasm</code> being 0 bytes while others held 14,307,328. <strong>That was wrong.</strong> <code>mempool_cc.sv:337</code> gates the tracer:</p>'
+      '<pre class="code">if ((i_snitch.csr_trace_q || SnitchTrace) &amp;&amp; ...)</pre>'
+      '<p>This image is built <code>SNITCH_TRACE=0</code>, so a hart writes its trace <em>only while <code>csr_trace_q</code> is set</em> &mdash; the CSR the benchmark enables. An empty file means the core never reached the traced region, not that it never ran.</p>'
+      '<p>The FPU counters say so directly: over the full series, <strong>all 64 groups reach non-zero utilisation</strong>. What is real is a <strong>bimodal split</strong>:</p>'
+      '<div class="tw"><table><thead><tr><th>group set</th><th class="num">count</th><th class="num">peak FPU utilisation</th></tr></thead><tbody>'
+      '<tr><td>fast &mdash; reached the traced region</td><td class="num">39</td>'
+      '<td class="num b st-ok">80.1 &ndash; 99.8%</td></tr>'
+      '<tr><td>slow &mdash; never did</td><td class="num">25</td>'
+      '<td class="num b st-bad">10.7 &ndash; 43.9%</td></tr></tbody></table></div>'
+      '<p>The two bands do not overlap at all, and this matches the previously recorded <em>fixed spatial slow set</em> at 8&times;8 (21 of 64 groups, bimodal ~82%/~22%). So this is that same phenomenon, not a boot failure.</p></div>'
+      '<div class="note bad"><span class="lab">and it is not the work split</span>'
   '<p>Two independent probes agree. Mid-run, <code>[STALLG]</code> shows groups 0&ndash;31 with '
   'accelerator-stall 4,000&ndash;16,000 of 16,000 while groups 32&ndash;63 report exactly zero of '
   '<em>everything</em> &mdash; no instructions, no RAW stalls, no LSU, no accelerator. '
@@ -1107,20 +1105,14 @@ A('<div class="card"><h2>Hundreds of cores never execute &mdash; and it precedes
   '<p>These zeroes are real idleness, not a tracing gap: the TB counters are gated by '
   '<code>csr_trace_any_global</code>, a <em>global</em> OR, so once any core enables tracing every '
   'group is being measured.</p></div>'
-  '<div class="note bad"><span class="lab">root cause: they deadlock in <code>mempool_barrier</code></span>'
-  '<p>Every core that <em>did</em> run ends at one of two program counters, and both are inside '
-  '<code>mempool_barrier</code> (<code>0x80002cb4</code>):</p>'
-  '<div class="tw"><table><thead><tr><th>PC</th><th>instruction</th><th>cores</th></tr></thead>'
-  '<tbody>'
-  '<tr><td><code>0x80002cc8</code></td><td><code>bne</code> &mdash; barrier spin</td>'
-  '<td>0x000, 0x00a, 0x1ff</td></tr>'
-  '<tr><td><code>0x80002ce4</code></td><td><code>wfi</code> &mdash; asleep, waiting to be woken</td>'
-  '<td>0x250, 0x2e0</td></tr></tbody></table></div>'
-  '<p>The barrier waits for <code>NUM_CORES</code> = 1024. Only 624 cores ever arrive, so it can '
-  'never release: the participants park &mdash; some spinning, some in <code>wfi</code> &mdash; '
-  'utilisation falls to zero, and <code>execution took</code> is never reached. That is exactly '
-  'the measured signature: barrier quiet, retirement draining, no cycle count.</p></div>'
-  '<div class="note"><span class="lab">the prologue-stuck arms are a DIFFERENT failure</span>'
+  '<div class="note bad"><span class="lab">where the fast cores end up: <code>mempool_barrier</code></span>'
+      '<p>This part still holds &mdash; it comes from real program counters. Every traced core ends at one of two PCs, both inside <code>mempool_barrier</code> (<code>0x80002cb4</code>):</p>'
+      '<div class="tw"><table><thead><tr><th>PC</th><th>instruction</th></tr></thead><tbody>'
+      '<tr><td><code>0x80002cc8</code></td><td><code>bne</code> &mdash; barrier spin</td></tr>'
+      '<tr><td><code>0x80002ce4</code></td><td><code>wfi</code> &mdash; asleep, awaiting wake</td></tr></tbody></table></div>'
+      '<p>So the fast groups finish their share and park in the barrier. The barrier waits for <code>NUM_CORES</code> = 1024, and the slow groups &mdash; running at roughly a quarter of the rate &mdash; do not arrive. Utilisation falls to zero and <code>execution took</code> is never reached.</p>'
+      '<p class="sub">What is <em>not</em> established is why the slow set is slow. The earlier claim that it is a boot failure is withdrawn: those cores run, they are simply far behind. Whether the barrier never releases, or merely takes longer than the run allowed, is open.</p></div>'
+      '<div class="note"><span class="lab">the prologue-stuck arms are a DIFFERENT failure</span>'
   '<p>Ten <code>waveC8x8</code> arms never emitted a single <code>[FPU] bench</code> window, '
   'sitting in the <code>pre</code> phase at 1.43&ndash;1.83M cycles &mdash; roughly 7&ndash;9x a '
   'healthy arm&rsquo;s <em>entire</em> runtime. But measured over their full FPUG series, '

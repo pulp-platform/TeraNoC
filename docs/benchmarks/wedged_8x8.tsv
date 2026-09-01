@@ -15,3 +15,6 @@ sw_8x8_fp16_ks8_8x128x32768	badile01	2038	42.9	1	64	0	137	129316	0	0	128	0.06	0
 sw_8x8_fp16_ks8_64x512x4096	badile10	1927	42.9	8	64	0	165	88666	0	0	124	0.06	0
 sw_8x8_fp16_ks8_128x1024x2048	badile29	1976	42.9	16	64	0	162	81557	0	0	82	0.04	0
 sw_8x8_fp32_ks8_64x512x2048	badile32	2082	42.9	8	64	0	157	93719	0	0	118	0.05	0
+# added 2026-09-01: two further arms wedged the same way, harvested then killed
+sw_8x8_fp32_ks2_16x128x8192	badile04	642	-	-	-	-
+sw_8x8_fp32_ks2_64x512x2048	badile15	883	-	-	-	-
