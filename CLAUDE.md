@@ -359,6 +359,14 @@ it from `scripts/gemm_sweep_shapes.txt` with `--shapes ... --elf-template ...`.
   the local figure, in 2,362 s against 67 min on a load-106 fenga1 — 1.7× faster, RSS
   2.03 GB.
 
+- **⚠️ Before shipping ANY software MSHR/shape setting, run `scripts/mshr_bank_hash_explore.py`**
+  and require the hash to reach **all banks CONCURRENTLY**. `bank_burst_bits` is a **1-BIT** CSR
+  field (`mempool_group_mshr_cfg.sv:179` stores `wr_data_i[0]`), so a derived 2/3/4 silently
+  truncates to its LSB — that left `fp16_ks4_8x128x8192` reaching **4 of 16 banks per group**.
+  Score by CONCURRENT spread, never an aggregate histogram: `sh_burst=12` looks perfect summed
+  over the loop and is the worst real setting (every core collides in one bank at any instant).
+  Note the `-DMSHR_CFG_*` in a build log are only FALLBACKS; the CSR gets the derived `MSHR_D_*`.
+
 ## Coding Conventions
 
 - `.editorconfig` enforced: 2 spaces, LF, 80 cols (100 for `*.sv`/`*.svh`), tabs in Makefiles
