@@ -14931,3 +14931,29 @@ Two verification traps hit on the way:
   ssh command line carrying that string. Matching `/proc/<pid>/exe` instead gave the truth.
 - `find -maxdepth 4` for the transcripts was too shallow (they sit at depth 7), which earlier
   made all 24 healthy arms read as "dir not found".
+
+### 2026-09-01 -- peer calibration: the decode-GEMM campaign is NOT stale
+
+The gvsoc session asked which of our published numbers the hash fix invalidates. I answered that
+their four 8x8 goldens (48,825 / 66,868 / 35,946 / 50,747) were "not found in our published
+results" -- WRONG. I grepped `docs/benchmarks/*.tsv docs/benchmarks/*.json` and never touched
+`*.md`. They are in `docs/benchmarks/decode_gemm_results.md`, three occurrences of the first one
+alone. Second time today a zero-result search was reported as a finding.
+
+**Computed verdict on those four (off-grid shapes, so not generalised from "KS=8 is clean"):
+all VALID.** W sharers = 4, and the old setting (sh=5, bb=1) already reached 8 of 8 banks --
+only 8 distinct concurrent lines exist per group there, so 8 is the ceiling. The corrected
+config (sh=4, bb=0) reaches the same 8.
+
+Checked the whole file: **all 8 distinct rows are at their ceiling. Nothing in the decode-GEMM
+campaign is stale.** The stale set stays confined to decode_bxks -- 23 of 44 measured arms.
+
+Useful consequence, passed on: those four are a NULL CHECK for a corrected rebuild. Their config
+changes (sh 5->4, bb 1->0) while their achieved spread does not, so a corrected re-run should
+reproduce the same cycles within noise; if one moves materially, something other than the hash
+changed.
+
+Peer also verified our predicted (4, 0) reproduces exactly in their model -- CSR stream shows
+`BANK_SHIFT_BURST 4` and `BANK_BURST_BITS 0`, every write accepted, zero REFUSED -- after they
+moved their guard floor to 4 to match `BankShiftMin`. They correctly did NOT lower the software
+`MSHR_SHIFT_MIN`, which stays 5 and clamps only sh_single.
