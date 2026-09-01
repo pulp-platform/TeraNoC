@@ -14739,3 +14739,33 @@ bank hash reached fewer banks than the shape allows -- 84 cells, each with a too
 banks reached, the ceiling, and the best (sh_burst, bb). Legend added to both card footers.
 Scored against the achievable ceiling, so a shape at its own ceiling is NOT flagged even when
 that ceiling is below 16.
+
+### 2026-09-01 -- CORRECTION: a class with one sharer BYPASSES the MSHR, so its spread is moot
+
+User pointed out that a request with no merge partner in its group never enters the group MSHR
+at all. Confirmed in the RTL -- `mempool_group_mshr.sv:1454`:
+
+    hold_subs_* = 1 -> that CLASS does not merge, so bypass it. A 1-way-shared operand
+    (B at M=128) has nothing to merge with
+
+    req_can_merge = req_is_load && !(is_single ? cfg_bypass_single : cfg_bypass_burst) && ...
+
+and `mshr_cfg.h:384` derives `hold_subs = 1` exactly when the sharer count is below 2. So a
+1-sharer class allocates no entry, occupies no bank, and is never hashed. Scoring its bank spread
+is meaningless.
+
+Across the 104-point grid: **16 arms bypass the burst class** (W sharers = 1) and **40 bypass the
+single class** (A sharers = 1). Which class bypasses flips with the shape:
+
+    4x4 fp16 1x128x8192  KS=1 : W sharers 1  -> bursts BYPASS ; A sharers 16 -> singles merge
+    4x4 fp16 128x1024x512 KS=8: W sharers 16 -> bursts merge  ; A sharers 1  -> singles BYPASS
+
+**Re-scored with the bypass gate: 72 affected, not 84; 22 measured, not 28.** All 72 are the
+W-burst class; no A-single class is below its ceiling anywhere in the grid. KS=8 remains 0.
+
+**B=1 KS=1 is NO LONGER flagged** -- its burst class bypasses entirely, and its single class sits
+at its ceiling (1 line, 1 bank). My step-by-step explanation of that case, tracing the shift from
+4 to 8 through BURST_FLOOR, described arithmetic that never runs.
+
+`docs/benchmarks/mshr_hash_affected.tsv` regenerated with a `class` column; artifact dots down
+from 84 to 72, tooltips now name the class.

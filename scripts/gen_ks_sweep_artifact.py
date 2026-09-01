@@ -342,17 +342,19 @@ BS  = sorted({r["B"]  for r in M})
 KSS = sorted({r["KS"] for r in M})
 
 # ---- MSHR bank-hash: shapes whose SHIPPED setting reached fewer banks than the workload
-# allows. Scored against the ACHIEVABLE CEILING (distinct concurrent lines in one group, capped
-# at the bank count), so a shape sitting at its own ceiling is optimal even when that ceiling is
-# below 16 and is NOT flagged. Built by scripts/mshr_bank_hash_explore.py's model.
+# allows, for the classes that ACTUALLY ENTER it. A class with one sharer per group has nothing to
+# merge with and mempool_group_mshr.sv:1454 bypasses it entirely -- no entry, no bank, no hash --
+# so its spread is not scored. Scored against the achievable ceiling, so a class at its own
+# ceiling is optimal even when that ceiling is below 16.
 HASHBAD = {}
 try:
     for _l in open(os.path.join(ROOT, "docs", "benchmarks", "mshr_hash_affected.tsv")):
         if _l.startswith("#") or not _l.strip():
             continue
         _f = _l.rstrip("\n").split("\t")
-        if len(_f) >= 11:
-            HASHBAD[(_f[1], _f[2], int(_f[3]), _f[4])] = dict(got=_f[6], ceil=_f[7], best=_f[9])
+        if len(_f) >= 9:
+            _k = (_f[1], _f[2], int(_f[3]), _f[4])
+            HASHBAD.setdefault(_k, []).append((_f[6], _f[7], _f[8]))
 except IOError:
     pass
 
@@ -363,9 +365,10 @@ def hashdot(r):
     d = HASHBAD.get(k)
     if not d:
         return ""
-    return ('<span class="hashdot" title="MSHR bank hash reached only %s of a possible %s banks '
-            '(best setting sh_burst,bb = %s) &mdash; fixed 2026-09-01, this number predates it">'
-            '&#9679;</span>' % (d["got"], d["ceil"], d["best"]))
+    _t = "; ".join("%s reached %s of %s banks" % (c, g, ce) for c, g, ce in d)
+    return ('<span class="hashdot" title="MSHR bank hash: %s &mdash; fixed 2026-09-01, this number '
+            'predates it. Classes with one sharer per group bypass the MSHR and are not counted.">'
+            '&#9679;</span>' % _t)
 
 
 def matrix(mesh, prec):

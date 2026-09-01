@@ -1,88 +1,80 @@
-# MSHR bank-hash: shapes whose SHIPPED setting reached fewer banks than the workload allows.
-# Generated 2026-09-01. 'ceiling' = distinct concurrent lines in one group, capped at 16 banks;
-# a shape that already hits its ceiling is OPTIMAL even if that ceiling is below 16.
-# arm	mesh	prec	KS	shape	measured	banks_old	ceiling	banks_fixed	best(sh,bb)	verdict
-sw_4x4_fp16_ks1_1x128x8192	4x4	fp16	1	1x128x8192	yes	2.0	16.0	16.0	4,0	LOSES 8.0x
-sw_4x4_fp16_ks1_2x128x8192	4x4	fp16	1	2x128x8192	no	2.0	16.0	16.0	4,0	LOSES 8.0x
-sw_4x4_fp16_ks1_4x128x8192	4x4	fp16	1	4x128x8192	no	1.0	16.0	16.0	4,0	LOSES 16.0x
-sw_4x4_fp16_ks1_8x128x8192	4x4	fp16	1	8x128x8192	no	1.0	16.0	16.0	4,0	LOSES 16.0x
-sw_4x4_fp16_ks1_16x128x4096	4x4	fp16	1	16x128x4096	yes	1.0	8.0	8.0	4,0	LOSES 8.0x
-sw_4x4_fp16_ks1_32x256x2048	4x4	fp16	1	32x256x2048	yes	1.0	8.0	8.0	4,0	LOSES 8.0x
-sw_4x4_fp16_ks1_64x512x1024	4x4	fp16	1	64x512x1024	yes	1.0	8.0	8.0	4,0	LOSES 8.0x
-sw_4x4_fp16_ks1_128x1024x512	4x4	fp16	1	128x1024x512	yes	1.0	8.0	8.0	4,0	LOSES 8.0x
-sw_4x4_fp16_ks2_2x128x8192	4x4	fp16	2	2x128x8192	yes	4.0	16.0	16.0	4,0	LOSES 4.0x
-sw_4x4_fp16_ks2_4x128x8192	4x4	fp16	2	4x128x8192	no	4.0	16.0	16.0	4,0	LOSES 4.0x
-sw_4x4_fp16_ks2_8x128x8192	4x4	fp16	2	8x128x8192	no	4.0	16.0	16.0	4,0	LOSES 4.0x
-sw_4x4_fp16_ks2_16x128x4096	4x4	fp16	2	16x128x4096	yes	2.0	8.0	8.0	4,0	LOSES 4.0x
-sw_4x4_fp16_ks2_32x256x2048	4x4	fp16	2	32x256x2048	yes	2.0	4.0	4.0	4,0	LOSES 2.0x
-sw_4x4_fp16_ks2_64x512x1024	4x4	fp16	2	64x512x1024	yes	2.0	4.0	4.0	4,0	LOSES 2.0x
-sw_4x4_fp16_ks2_128x1024x512	4x4	fp16	2	128x1024x512	yes	2.0	4.0	4.0	4,0	LOSES 2.0x
-sw_4x4_fp16_ks4_4x128x8192	4x4	fp16	4	4x128x8192	yes	4.0	16.0	16.0	4,0	LOSES 4.0x
-sw_4x4_fp16_ks4_8x128x8192	4x4	fp16	4	8x128x8192	no	4.0	16.0	16.0	4,0	LOSES 4.0x
-sw_4x4_fp16_ks4_16x128x4096	4x4	fp16	4	16x128x4096	no	2.0	8.0	8.0	4,0	LOSES 4.0x
-sw_4x4_fp16_ks4_32x256x2048	4x4	fp16	4	32x256x2048	yes	1.0	4.0	4.0	4,0	LOSES 4.0x
-sw_4x4_fp16_ks4_64x512x1024	4x4	fp16	4	64x512x1024	yes	1.0	2.0	2.0	4,0	LOSES 2.0x
-sw_4x4_fp16_ks4_128x1024x512	4x4	fp16	4	128x1024x512	yes	1.0	2.0	2.0	4,0	LOSES 2.0x
-sw_4x4_fp32_ks1_1x128x4096	4x4	fp32	1	1x128x4096	yes	2.0	16.0	16.0	4,0	LOSES 8.0x
-sw_4x4_fp32_ks1_2x128x4096	4x4	fp32	1	2x128x4096	no	1.0	16.0	16.0	4,0	LOSES 16.0x
-sw_4x4_fp32_ks1_4x128x4096	4x4	fp32	1	4x128x4096	no	1.0	16.0	16.0	4,0	LOSES 16.0x
-sw_4x4_fp32_ks1_8x128x4096	4x4	fp32	1	8x128x4096	no	1.0	16.0	16.0	4,0	LOSES 16.0x
-sw_4x4_fp32_ks1_16x128x2048	4x4	fp32	1	16x128x2048	yes	1.0	8.0	8.0	4,0	LOSES 8.0x
-sw_4x4_fp32_ks1_32x256x1024	4x4	fp32	1	32x256x1024	yes	1.0	8.0	8.0	4,0	LOSES 8.0x
-sw_4x4_fp32_ks1_64x512x512	4x4	fp32	1	64x512x512	yes	1.0	8.0	8.0	4,0	LOSES 8.0x
-sw_4x4_fp32_ks1_128x1024x256	4x4	fp32	1	128x1024x256	yes	1.0	8.0	8.0	4,0	LOSES 8.0x
-sw_4x4_fp32_ks2_2x128x4096	4x4	fp32	2	2x128x4096	yes	4.0	16.0	16.0	4,0	LOSES 4.0x
-sw_4x4_fp32_ks2_4x128x4096	4x4	fp32	2	4x128x4096	no	4.0	16.0	16.0	4,0	LOSES 4.0x
-sw_4x4_fp32_ks2_8x128x4096	4x4	fp32	2	8x128x4096	no	4.0	16.0	16.0	4,0	LOSES 4.0x
-sw_4x4_fp32_ks2_16x128x2048	4x4	fp32	2	16x128x2048	yes	2.0	8.0	8.0	4,0	LOSES 4.0x
-sw_4x4_fp32_ks2_32x256x1024	4x4	fp32	2	32x256x1024	yes	2.0	4.0	4.0	4,0	LOSES 2.0x
-sw_4x4_fp32_ks2_64x512x512	4x4	fp32	2	64x512x512	yes	2.0	4.0	4.0	4,0	LOSES 2.0x
-sw_4x4_fp32_ks2_128x1024x256	4x4	fp32	2	128x1024x256	yes	2.0	4.0	4.0	4,0	LOSES 2.0x
-sw_4x4_fp32_ks4_4x128x4096	4x4	fp32	4	4x128x4096	yes	4.0	16.0	16.0	4,0	LOSES 4.0x
-sw_4x4_fp32_ks4_8x128x4096	4x4	fp32	4	8x128x4096	no	4.0	16.0	16.0	4,0	LOSES 4.0x
-sw_4x4_fp32_ks4_16x128x2048	4x4	fp32	4	16x128x2048	no	2.0	8.0	8.0	4,0	LOSES 4.0x
-sw_4x4_fp32_ks4_32x256x1024	4x4	fp32	4	32x256x1024	yes	1.0	4.0	4.0	4,0	LOSES 4.0x
-sw_4x4_fp32_ks4_64x512x512	4x4	fp32	4	64x512x512	yes	1.0	2.0	2.0	4,0	LOSES 2.0x
-sw_4x4_fp32_ks4_128x1024x256	4x4	fp32	4	128x1024x256	yes	1.0	2.0	2.0	4,0	LOSES 2.0x
-sw_8x8_fp16_ks1_1x128x32768	8x8	fp16	1	1x128x32768	no	2.0	16.0	16.0	4,0	LOSES 8.0x
-sw_8x8_fp16_ks1_2x128x32768	8x8	fp16	1	2x128x32768	no	2.0	16.0	16.0	4,0	LOSES 8.0x
-sw_8x8_fp16_ks1_4x128x32768	8x8	fp16	1	4x128x32768	no	1.0	16.0	16.0	4,0	LOSES 16.0x
-sw_8x8_fp16_ks1_8x128x32768	8x8	fp16	1	8x128x32768	no	1.0	16.0	16.0	4,0	LOSES 16.0x
-sw_8x8_fp16_ks1_16x128x16384	8x8	fp16	1	16x128x16384	no	1.0	8.0	8.0	4,0	LOSES 8.0x
-sw_8x8_fp16_ks1_32x256x8192	8x8	fp16	1	32x256x8192	no	1.0	8.0	8.0	4,0	LOSES 8.0x
-sw_8x8_fp16_ks1_64x512x4096	8x8	fp16	1	64x512x4096	no	1.0	8.0	8.0	4,0	LOSES 8.0x
-sw_8x8_fp16_ks1_128x1024x2048	8x8	fp16	1	128x1024x2048	no	1.0	8.0	8.0	4,0	LOSES 8.0x
-sw_8x8_fp16_ks2_2x128x32768	8x8	fp16	2	2x128x32768	no	4.0	16.0	16.0	4,0	LOSES 4.0x
-sw_8x8_fp16_ks2_4x128x32768	8x8	fp16	2	4x128x32768	no	4.0	16.0	16.0	4,0	LOSES 4.0x
-sw_8x8_fp16_ks2_8x128x32768	8x8	fp16	2	8x128x32768	no	4.0	16.0	16.0	4,0	LOSES 4.0x
-sw_8x8_fp16_ks2_16x128x16384	8x8	fp16	2	16x128x16384	no	2.0	8.0	8.0	4,0	LOSES 4.0x
-sw_8x8_fp16_ks2_32x256x8192	8x8	fp16	2	32x256x8192	no	2.0	4.0	4.0	4,0	LOSES 2.0x
-sw_8x8_fp16_ks2_64x512x4096	8x8	fp16	2	64x512x4096	no	2.0	4.0	4.0	4,0	LOSES 2.0x
-sw_8x8_fp16_ks2_128x1024x2048	8x8	fp16	2	128x1024x2048	no	2.0	4.0	4.0	4,0	LOSES 2.0x
-sw_8x8_fp16_ks4_4x128x32768	8x8	fp16	4	4x128x32768	no	4.0	16.0	16.0	4,0	LOSES 4.0x
-sw_8x8_fp16_ks4_8x128x32768	8x8	fp16	4	8x128x32768	no	4.0	16.0	16.0	4,0	LOSES 4.0x
-sw_8x8_fp16_ks4_16x128x16384	8x8	fp16	4	16x128x16384	no	2.0	8.0	8.0	4,0	LOSES 4.0x
-sw_8x8_fp16_ks4_32x256x8192	8x8	fp16	4	32x256x8192	no	1.0	4.0	4.0	4,0	LOSES 4.0x
-sw_8x8_fp16_ks4_64x512x4096	8x8	fp16	4	64x512x4096	no	1.0	2.0	2.0	4,0	LOSES 2.0x
-sw_8x8_fp16_ks4_128x1024x2048	8x8	fp16	4	128x1024x2048	no	1.0	2.0	2.0	4,0	LOSES 2.0x
-sw_8x8_fp32_ks1_1x128x16384	8x8	fp32	1	1x128x16384	no	2.0	16.0	16.0	4,0	LOSES 8.0x
-sw_8x8_fp32_ks1_2x128x16384	8x8	fp32	1	2x128x16384	no	1.0	16.0	16.0	4,0	LOSES 16.0x
-sw_8x8_fp32_ks1_4x128x16384	8x8	fp32	1	4x128x16384	no	1.0	16.0	16.0	4,0	LOSES 16.0x
-sw_8x8_fp32_ks1_8x128x16384	8x8	fp32	1	8x128x16384	no	1.0	16.0	16.0	4,0	LOSES 16.0x
-sw_8x8_fp32_ks1_16x128x8192	8x8	fp32	1	16x128x8192	no	1.0	8.0	8.0	4,0	LOSES 8.0x
-sw_8x8_fp32_ks1_32x256x4096	8x8	fp32	1	32x256x4096	no	1.0	8.0	8.0	4,0	LOSES 8.0x
-sw_8x8_fp32_ks1_64x512x2048	8x8	fp32	1	64x512x2048	no	1.0	8.0	8.0	4,0	LOSES 8.0x
-sw_8x8_fp32_ks1_128x1024x1024	8x8	fp32	1	128x1024x1024	no	1.0	8.0	8.0	4,0	LOSES 8.0x
-sw_8x8_fp32_ks2_2x128x16384	8x8	fp32	2	2x128x16384	no	4.0	16.0	16.0	4,0	LOSES 4.0x
-sw_8x8_fp32_ks2_4x128x16384	8x8	fp32	2	4x128x16384	no	4.0	16.0	16.0	4,0	LOSES 4.0x
-sw_8x8_fp32_ks2_8x128x16384	8x8	fp32	2	8x128x16384	no	4.0	16.0	16.0	4,0	LOSES 4.0x
-sw_8x8_fp32_ks2_16x128x8192	8x8	fp32	2	16x128x8192	no	2.0	8.0	8.0	4,0	LOSES 4.0x
-sw_8x8_fp32_ks2_32x256x4096	8x8	fp32	2	32x256x4096	no	2.0	4.0	4.0	4,0	LOSES 2.0x
-sw_8x8_fp32_ks2_64x512x2048	8x8	fp32	2	64x512x2048	no	2.0	4.0	4.0	4,0	LOSES 2.0x
-sw_8x8_fp32_ks2_128x1024x1024	8x8	fp32	2	128x1024x1024	no	2.0	4.0	4.0	4,0	LOSES 2.0x
-sw_8x8_fp32_ks4_4x128x16384	8x8	fp32	4	4x128x16384	no	4.0	16.0	16.0	4,0	LOSES 4.0x
-sw_8x8_fp32_ks4_8x128x16384	8x8	fp32	4	8x128x16384	no	4.0	16.0	16.0	4,0	LOSES 4.0x
-sw_8x8_fp32_ks4_16x128x8192	8x8	fp32	4	16x128x8192	no	2.0	8.0	8.0	4,0	LOSES 4.0x
-sw_8x8_fp32_ks4_32x256x4096	8x8	fp32	4	32x256x4096	no	1.0	4.0	4.0	4,0	LOSES 4.0x
-sw_8x8_fp32_ks4_64x512x2048	8x8	fp32	4	64x512x2048	no	1.0	2.0	2.0	4,0	LOSES 2.0x
-sw_8x8_fp32_ks4_128x1024x1024	8x8	fp32	4	128x1024x1024	no	1.0	2.0	2.0	4,0	LOSES 2.0x
+# MSHR bank-hash: arms where a class that ACTUALLY ENTERS the MSHR reached fewer banks than
+# the workload allows. Regenerated 2026-09-01 with the BYPASS GATE.
+#
+# A class with only ONE sharer per group has nothing to merge with, so mempool_group_mshr.sv:1454
+# BYPASSES it entirely -- no entry, no bank, no hash. Scoring its spread is meaningless. 16 arms
+# bypass the burst class and 40 bypass the single class; those classes are excluded here.
+# 'ceiling' = distinct concurrent lines for the merging class, capped at 16 banks.
+# arm	mesh	prec	KS	shape	measured	class	banks_old	ceiling
+sw_4x4_fp16_ks1_2x128x8192	4x4	fp16	1	2x128x8192	no	W-burst	2.0	16.0
+sw_4x4_fp16_ks1_4x128x8192	4x4	fp16	1	4x128x8192	no	W-burst	1.0	16.0
+sw_4x4_fp16_ks1_8x128x8192	4x4	fp16	1	8x128x8192	no	W-burst	1.0	16.0
+sw_4x4_fp16_ks1_16x128x4096	4x4	fp16	1	16x128x4096	yes	W-burst	1.0	8.0
+sw_4x4_fp16_ks1_32x256x2048	4x4	fp16	1	32x256x2048	yes	W-burst	1.0	8.0
+sw_4x4_fp16_ks1_64x512x1024	4x4	fp16	1	64x512x1024	yes	W-burst	1.0	8.0
+sw_4x4_fp16_ks1_128x1024x512	4x4	fp16	1	128x1024x512	yes	W-burst	1.0	8.0
+sw_4x4_fp16_ks2_4x128x8192	4x4	fp16	2	4x128x8192	no	W-burst	4.0	16.0
+sw_4x4_fp16_ks2_8x128x8192	4x4	fp16	2	8x128x8192	no	W-burst	4.0	16.0
+sw_4x4_fp16_ks2_16x128x4096	4x4	fp16	2	16x128x4096	yes	W-burst	2.0	8.0
+sw_4x4_fp16_ks2_32x256x2048	4x4	fp16	2	32x256x2048	yes	W-burst	2.0	4.0
+sw_4x4_fp16_ks2_64x512x1024	4x4	fp16	2	64x512x1024	yes	W-burst	2.0	4.0
+sw_4x4_fp16_ks2_128x1024x512	4x4	fp16	2	128x1024x512	yes	W-burst	2.0	4.0
+sw_4x4_fp16_ks4_8x128x8192	4x4	fp16	4	8x128x8192	no	W-burst	4.0	16.0
+sw_4x4_fp16_ks4_16x128x4096	4x4	fp16	4	16x128x4096	no	W-burst	2.0	8.0
+sw_4x4_fp16_ks4_32x256x2048	4x4	fp16	4	32x256x2048	yes	W-burst	1.0	4.0
+sw_4x4_fp16_ks4_64x512x1024	4x4	fp16	4	64x512x1024	yes	W-burst	1.0	2.0
+sw_4x4_fp16_ks4_128x1024x512	4x4	fp16	4	128x1024x512	yes	W-burst	1.0	2.0
+sw_4x4_fp32_ks1_2x128x4096	4x4	fp32	1	2x128x4096	no	W-burst	1.0	16.0
+sw_4x4_fp32_ks1_4x128x4096	4x4	fp32	1	4x128x4096	no	W-burst	1.0	16.0
+sw_4x4_fp32_ks1_8x128x4096	4x4	fp32	1	8x128x4096	no	W-burst	1.0	16.0
+sw_4x4_fp32_ks1_16x128x2048	4x4	fp32	1	16x128x2048	yes	W-burst	1.0	8.0
+sw_4x4_fp32_ks1_32x256x1024	4x4	fp32	1	32x256x1024	yes	W-burst	1.0	8.0
+sw_4x4_fp32_ks1_64x512x512	4x4	fp32	1	64x512x512	yes	W-burst	1.0	8.0
+sw_4x4_fp32_ks1_128x1024x256	4x4	fp32	1	128x1024x256	yes	W-burst	1.0	8.0
+sw_4x4_fp32_ks2_4x128x4096	4x4	fp32	2	4x128x4096	no	W-burst	4.0	16.0
+sw_4x4_fp32_ks2_8x128x4096	4x4	fp32	2	8x128x4096	no	W-burst	4.0	16.0
+sw_4x4_fp32_ks2_16x128x2048	4x4	fp32	2	16x128x2048	yes	W-burst	2.0	8.0
+sw_4x4_fp32_ks2_32x256x1024	4x4	fp32	2	32x256x1024	yes	W-burst	2.0	4.0
+sw_4x4_fp32_ks2_64x512x512	4x4	fp32	2	64x512x512	yes	W-burst	2.0	4.0
+sw_4x4_fp32_ks2_128x1024x256	4x4	fp32	2	128x1024x256	yes	W-burst	2.0	4.0
+sw_4x4_fp32_ks4_8x128x4096	4x4	fp32	4	8x128x4096	no	W-burst	4.0	16.0
+sw_4x4_fp32_ks4_16x128x2048	4x4	fp32	4	16x128x2048	no	W-burst	2.0	8.0
+sw_4x4_fp32_ks4_32x256x1024	4x4	fp32	4	32x256x1024	yes	W-burst	1.0	4.0
+sw_4x4_fp32_ks4_64x512x512	4x4	fp32	4	64x512x512	yes	W-burst	1.0	2.0
+sw_4x4_fp32_ks4_128x1024x256	4x4	fp32	4	128x1024x256	yes	W-burst	1.0	2.0
+sw_8x8_fp16_ks1_2x128x32768	8x8	fp16	1	2x128x32768	no	W-burst	2.0	16.0
+sw_8x8_fp16_ks1_4x128x32768	8x8	fp16	1	4x128x32768	no	W-burst	1.0	16.0
+sw_8x8_fp16_ks1_8x128x32768	8x8	fp16	1	8x128x32768	no	W-burst	1.0	16.0
+sw_8x8_fp16_ks1_16x128x16384	8x8	fp16	1	16x128x16384	no	W-burst	1.0	8.0
+sw_8x8_fp16_ks1_32x256x8192	8x8	fp16	1	32x256x8192	no	W-burst	1.0	8.0
+sw_8x8_fp16_ks1_64x512x4096	8x8	fp16	1	64x512x4096	no	W-burst	1.0	8.0
+sw_8x8_fp16_ks1_128x1024x2048	8x8	fp16	1	128x1024x2048	no	W-burst	1.0	8.0
+sw_8x8_fp16_ks2_4x128x32768	8x8	fp16	2	4x128x32768	no	W-burst	4.0	16.0
+sw_8x8_fp16_ks2_8x128x32768	8x8	fp16	2	8x128x32768	no	W-burst	4.0	16.0
+sw_8x8_fp16_ks2_16x128x16384	8x8	fp16	2	16x128x16384	no	W-burst	2.0	8.0
+sw_8x8_fp16_ks2_32x256x8192	8x8	fp16	2	32x256x8192	no	W-burst	2.0	4.0
+sw_8x8_fp16_ks2_64x512x4096	8x8	fp16	2	64x512x4096	no	W-burst	2.0	4.0
+sw_8x8_fp16_ks2_128x1024x2048	8x8	fp16	2	128x1024x2048	no	W-burst	2.0	4.0
+sw_8x8_fp16_ks4_8x128x32768	8x8	fp16	4	8x128x32768	no	W-burst	4.0	16.0
+sw_8x8_fp16_ks4_16x128x16384	8x8	fp16	4	16x128x16384	no	W-burst	2.0	8.0
+sw_8x8_fp16_ks4_32x256x8192	8x8	fp16	4	32x256x8192	no	W-burst	1.0	4.0
+sw_8x8_fp16_ks4_64x512x4096	8x8	fp16	4	64x512x4096	no	W-burst	1.0	2.0
+sw_8x8_fp16_ks4_128x1024x2048	8x8	fp16	4	128x1024x2048	no	W-burst	1.0	2.0
+sw_8x8_fp32_ks1_2x128x16384	8x8	fp32	1	2x128x16384	no	W-burst	1.0	16.0
+sw_8x8_fp32_ks1_4x128x16384	8x8	fp32	1	4x128x16384	no	W-burst	1.0	16.0
+sw_8x8_fp32_ks1_8x128x16384	8x8	fp32	1	8x128x16384	no	W-burst	1.0	16.0
+sw_8x8_fp32_ks1_16x128x8192	8x8	fp32	1	16x128x8192	no	W-burst	1.0	8.0
+sw_8x8_fp32_ks1_32x256x4096	8x8	fp32	1	32x256x4096	no	W-burst	1.0	8.0
+sw_8x8_fp32_ks1_64x512x2048	8x8	fp32	1	64x512x2048	no	W-burst	1.0	8.0
+sw_8x8_fp32_ks1_128x1024x1024	8x8	fp32	1	128x1024x1024	no	W-burst	1.0	8.0
+sw_8x8_fp32_ks2_4x128x16384	8x8	fp32	2	4x128x16384	no	W-burst	4.0	16.0
+sw_8x8_fp32_ks2_8x128x16384	8x8	fp32	2	8x128x16384	no	W-burst	4.0	16.0
+sw_8x8_fp32_ks2_16x128x8192	8x8	fp32	2	16x128x8192	no	W-burst	2.0	8.0
+sw_8x8_fp32_ks2_32x256x4096	8x8	fp32	2	32x256x4096	no	W-burst	2.0	4.0
+sw_8x8_fp32_ks2_64x512x2048	8x8	fp32	2	64x512x2048	no	W-burst	2.0	4.0
+sw_8x8_fp32_ks2_128x1024x1024	8x8	fp32	2	128x1024x1024	no	W-burst	2.0	4.0
+sw_8x8_fp32_ks4_8x128x16384	8x8	fp32	4	8x128x16384	no	W-burst	4.0	16.0
+sw_8x8_fp32_ks4_16x128x8192	8x8	fp32	4	16x128x8192	no	W-burst	2.0	8.0
+sw_8x8_fp32_ks4_32x256x4096	8x8	fp32	4	32x256x4096	no	W-burst	1.0	4.0
+sw_8x8_fp32_ks4_64x512x2048	8x8	fp32	4	64x512x2048	no	W-burst	1.0	2.0
+sw_8x8_fp32_ks4_128x1024x1024	8x8	fp32	4	128x1024x1024	no	W-burst	1.0	2.0
