@@ -112,16 +112,69 @@ def collect_fleet(gu):
         span = per[-1]["cyc"] - per[0]["cyc"] + 1000
         lane = 2 if prec == "fp16" else 1
         # macs_per_group is only used for the (normalised) progress view; keep it consistent
-        R = max(1, round(span / (B * D * I / (256.0 * 4 * lane))))
+        # cores is MESH-DEPENDENT: 16 cores/group x g groups (256 at 4x4, 1024 at 8x8).
+        # A hardcoded 256 made every 8x8 arm's normalised progress wrong by 4x -- the same
+        # hardcoded-field-width trap that cost the 8x8 barrier campaign.
+        cores = 16 * g
+        R = max(1, round(span / (B * D * I / float(cores * 4 * lane))))
         key = (batch + "__" + arm) if batch else arm
-        st = _state.get(key, _state.get(arm, "done")) if tag == "deg" else "done"
-        base_tag = ("degraded" if st == "degraded" else "running") if tag == "deg" else tag
+        if tag == "wedge8":
+            st = "wedged"
+        elif tag == "deg":
+            st = _state.get(key, _state.get(arm, "done"))
+        else:
+            st = "done"
+        base_tag = ("degraded" if st == "degraded" else "running") if tag == "deg" else (
+            "wedged" if tag == "wedge8" else tag)
         shown_tag = (base_tag + " " + batch) if (batch and tag == "deg") else base_tag
         label = "%s%s KS=%d %dx%dx%d" % ((shown_tag + " ") if shown_tag else "", prec, ks, B, D, I)
         gu[label] = {"groups": g, "prec": prec, "mesh": mesh,
                      "shape": "%dx%dx%d" % (B, D, I), "periods": per,
                      "run": shown_tag or "local", "state": st,
                      "ks": ks, "B": B, "D": D, "I": I,
+                     "macs_per_group": B * D * I * R / float(g)}
+    return gu
+
+
+def collect_delivered(gu):
+    """Completed fleet arms, read from their DELIVERED transcript.
+
+    collect_fleet() only sees /tmp/.../fpug/*.txt, which is a node-side harvest of arms that
+    were still running. An arm that finished and was fetched has its [FPUG] series only in
+    hardware/<prefix>_<arm>/transcript -- so the arms with actual results were the ones
+    missing from the chart. These take priority over any stale harvest of the same arm.
+    """
+    import glob as _g
+    for d in sorted(_g.glob(os.path.join(ROOT, "hardware", "*_sw_[48]x[48]_*"))):
+        t = os.path.join(d, "transcript")
+        if not os.path.isfile(t): continue
+        try: b = re.sub(rb"(?m)^# ", b"", open(t, "rb").read())
+        except IOError: continue
+        mt = re.search(rb"execution took (\d+)", b)
+        if not mt: continue                       # only completed arms here
+        base = os.path.basename(d)
+        m = re.search(r"sw_(\dx\d)_(fp\d+)_ks(\d+)_(\d+)x(\d+)x(\d+)$", base)
+        if not m: continue
+        mesh, prec, ks, B, D, I = m.group(1), m.group(2), int(m.group(3)), \
+                                  int(m.group(4)), int(m.group(5)), int(m.group(6))
+        per = []
+        for mm in re.finditer(rb"\[FPUG\]\s+bench\s+cyc=(\d+)\s+denom=(\d+)\s+busy=\s*([0-9,\s]+)", b):
+            den = int(mm.group(2))
+            if den <= 0: continue
+            u = [round(100.0 * int(x.strip()) / den, 1)
+                 for x in mm.group(3).split(b",") if x.strip()]
+            if u: per.append({"cyc": int(mm.group(1)), "u": u, "den": den})
+        if not per: continue
+        g = len(per[0]["u"])
+        per = [w for w in per if len(w["u"]) == g]
+        took = int(mt.group(1))
+        span = per[-1]["cyc"] - per[0]["cyc"] + 1000
+        R = max(1, round(span / float(took)))     # R from the MEASURED pass, not from ideal
+        label = "done %s KS=%d %dx%dx%d" % (prec, ks, B, D, I)
+        gu[label] = {"groups": g, "prec": prec, "mesh": mesh,
+                     "shape": "%dx%dx%d" % (B, D, I), "periods": per,
+                     "run": "done", "state": "done", "ks": ks, "B": B, "D": D, "I": I,
+                     "cycles": took,
                      "macs_per_group": B * D * I * R / float(g)}
     return gu
 
@@ -138,6 +191,7 @@ if __name__ == "__main__":
     ]
     gu = collect(RUNS)
     gu = collect_fleet(gu)
+    gu = collect_delivered(gu)   # completed arms LAST: they take priority over a stale harvest
     out = os.path.join("/tmp/claude-620771", "ks_group_util.json")
     json.dump(gu, open(out, "w"))
     for k, v in gu.items():

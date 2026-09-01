@@ -14221,3 +14221,29 @@ and retirement draining to nothing. This sharpens the completion-path story: the
 after the last barrier release, not in the memory system.
 
 Node-local dirs cleaned after the counters were in the artifact: 9 dirs, **46 GB**.
+
+### 2026-09-01 -- per-group utilisation chart: three defects found while adding 8x8
+
+Checking whether 8x8 was represented in "Per-group FPU utilisation over the benchmark"
+turned up three problems, all fixed in scripts/extract_ks_group_util.py:
+
+1. **Completed arms were missing.** collect_fleet() reads only /tmp/.../fpug/*.txt, a
+   NODE-SIDE harvest of arms still running. An arm that finished and was fetched has its
+   [FPUG] series only in hardware/<prefix>_<arm>/transcript -- so the arms with actual
+   results were exactly the ones absent from the chart. Added collect_delivered(), which
+   runs last so a real result outranks a stale harvest. 4x4 went 57 -> 95 arms, and all
+   three completed 8x8 arms appeared for the first time.
+2. **Hardcoded 256-core divisor in the R derivation** (`B*D*I/(256.0*4*lane)`). Cores are
+   MESH-DEPENDENT -- 256 at 4x4, 1024 at 8x8 -- so every 8x8 arm's normalised progress was
+   wrong by 4x. Now `cores = 16 * g`, derived from the group count. Same hardcoded-field
+   trap as the 8x8 barrier bug; the scaling checklist in CLAUDE.md applies to derived
+   analysis constants too, not just to software address fields.
+3. **Wedged arms were labelled `done`.** The wedge8 harvest tag fell through to the
+   `else: st = "done"` branch, so nine hung arms would have plotted as completed runs.
+   Now tagged `wedged`.
+
+Also: the chart was NOT part of on_new_result.sh, so it had been frozen at 08-31 12:48
+while everything else refreshed. Chain is now 6 steps with extract_ks_group_util.py
+running BEFORE the artifact that reads its json. Added a `mesh` facet to the explorer.
+
+Chart now holds 123 arms: 95 at 4x4, 28 at 8x8 (16 running, 9 wedged, 3 done).

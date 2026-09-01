@@ -524,7 +524,7 @@ MESH_JS = """
  }
  // Facet order matters: each select is populated from the arms that survive the facets to its
  // LEFT, so a combination that does not exist can never be selected. "any" opts out of a facet.
- var FACETS=[["f_state","state"],["f_run","run"],["f_prec","prec"],["f_ks","ks"],["f_B","B"],["f_D","D"],["f_I","I"]];
+ var FACETS=[["f_mesh","mesh"],["f_state","state"],["f_run","run"],["f_prec","prec"],["f_ks","ks"],["f_B","B"],["f_D","D"],["f_I","I"]];
  function matches(k, upto){
    for (var i=0;i<FACETS.length;i++){
      if (upto!==undefined && i>=upto) break;
@@ -1411,6 +1411,7 @@ if GU:
       'The grid sizes itself to the mesh, so 4&times;4 (16 groups) and 8&times;8 (64 groups) '
       'both render.</p>'
       '<div class="ctl facets">'
+      '<label>mesh <select id="f_mesh"></select></label>'
       '<label>state <select id="f_state"></select></label>'
       '<label>run <select id="f_run"></select></label>'
       '<label>prec <select id="f_prec"></select></label>'
