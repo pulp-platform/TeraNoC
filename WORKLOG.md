@@ -14020,3 +14020,24 @@ cost -- but at 1024 cores it degrades throughput instead of deadlocking.
 
 That is a more useful claim than the original predicate, and it is measured rather than fitted: the
 utilisation gap (18.6% vs 36.8%) is direct evidence, not a boundary drawn around outcomes.
+
+## 2026-09-01 -- fp16_ks1_64x512x1024 completes; ETAs are upper bounds, not point estimates
+
+    sw_4x4_fp16_ks1_64x512x1024   89,637 cyc   358 windows   tmo=0   RH=0   util 18.89%   eff 18.3%
+
+Clean: zero timeouts, zero RH. `sharers=64`, `vl=512` -- outside the failure band, predicted
+healthy, completed. Campaign now **41 measured**.
+
+**Calibration on my own ETA, which said 5 h and was beaten inside the hour.** The two halves of the
+estimate behaved very differently:
+
+* **fraction-done was accurate**: the model put it at 71%; it was truly at 268 of 358 windows = 75%.
+* **the time extrapolation was not**: it assumes the observed window rate holds, and the arm was
+  running ~23 win/h. Finishing 90 windows inside an hour means it sustained **>90 win/h** over the
+  tail -- roughly 4x its average.
+
+So arms **accelerate markedly near completion**, and a constant-rate extrapolation systematically
+over-estimates the time left. The ETAs I gave should be read as **upper bounds**; the `done%` column
+is the trustworthy part. Likely cause: the final windows have fewer cores still active, so
+contention falls -- the same effect that makes a finishing arm's retirement taper look like decline
+(the trap that produced the "borderline degraded" misclassification earlier).
