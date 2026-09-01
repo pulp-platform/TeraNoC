@@ -13984,3 +13984,39 @@ wedge. `SNITCH_TRACE=1` on that image also meant they were writing the large per
 
 **VCS: ours 69 -> 59.** The pool is still tight at 89/100 because **other users hold 30 seats**, so
 the queued arms stay queued -- but that is now entirely other people's usage, not ours.
+
+## 2026-09-01 -- completion estimates, and what they say about the band
+
+**Method.** Every arm does the same work: `ideal x R = 65,536` cycles, by construction. So
+`windows_needed = 65.536 / efficiency`, and an arm's progress can be read from its own live FPU
+utilisation rather than a prior:
+
+    fraction done = windows x 1000 x util x k / 65,536        k = 0.781
+
+**First attempt was wrong and discarded.** Using a single efficiency prior (the median of completed
+arms) made `needed` identical for all 8x8 arms and reported **20 arms as "~done" while they were
+plainly still running** -- live utilisation actually ranges 2.3% to 75%, so one prior cannot serve.
+The per-arm utilisation fixes it. **Caveat: k is calibrated on ONE completed arm with a utilisation
+reading**, so treat these as order-of-magnitude.
+
+**Estimates (45 arms with a usable reading):**
+
+    median 22 h · 25th percentile 13 h · 75th 36 h · longest 192 h
+
+* the 3 useful 4x4 arms: **1 h, 5 h, 14 h**
+* most 8x8 arms: **1-2 days**
+* a long tail of band arms at 54-192 h
+
+**The interesting result -- at 8x8 the band is a SLOWDOWN, not a livelock:**
+
+    in band   n=12   median ETA 34 h   median util 18.6%
+    outside   n=28   median ETA 23 h   median util 36.8%
+    -> 1.5x slower, at half the utilisation
+
+This sharpens yesterday's disconfirmation. The band is not inert at 8x8: its arms run at **half the
+FPU utilisation** and take **1.5x longer**. What does not happen is the 4x4 outcome, where they
+stopped retiring entirely. So the conjunction still marks something real -- the same cohort-assembly
+cost -- but at 1024 cores it degrades throughput instead of deadlocking.
+
+That is a more useful claim than the original predicate, and it is measured rather than fitted: the
+utilisation gap (18.6% vs 36.8%) is direct evidence, not a boundary drawn around outcomes.
