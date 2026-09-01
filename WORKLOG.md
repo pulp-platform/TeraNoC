@@ -14201,3 +14201,23 @@ stop the simulator). 9 killed, 0 refused. Evidence: docs/benchmarks/wedged_8x8.t
 
 **Status.** Seats reclaimed (VCS 22 free, 48 ours). Nine grid points unmeasured; requeueing
 on the same image would reproduce the hang. Node-local dirs left in place pending approval.
+
+### 2026-09-01 -- correction: the MSHR counters do not discriminate at 8x8
+
+Extracted the full counter set (bar_rel, bankfull_bypass, per-group MSHRG timeout/bypass)
+from the harvest before cleaning, and compared the 9 wedged arms against the 3 *completed*
+8x8 arms.
+
+**`tmo`, `bankfull_bypass` and RH are identically zero for all twelve** -- healthy and
+wedged alike. The earlier WORKLOG entry read their zeroes as "the memory system reports
+nothing wrong, the opposite of the 4x4 livelocks"; that was wrong. They discriminate at
+4x4 (2,612-97,556 timeouts) but at 8x8 they are uniformly zero and carry no signal.
+
+**The barrier is the discriminator.** Last window with a non-zero `bar_rel`, over total
+windows: completed arms 0.58-0.94, wedged arms 0.04-0.22. In *absolute* windows the
+barrier stops at 82-178 in both cases -- the difference is that a healthy arm finishes
+there, while a wedged arm runs on for another 600-2,200 windows with the barrier silent
+and retirement draining to nothing. This sharpens the completion-path story: the hang is
+after the last barrier release, not in the memory system.
+
+Node-local dirs cleaned after the counters were in the artifact: 9 dirs, **46 GB**.
