@@ -14991,3 +14991,34 @@ wrong twice today about mechanisms that merely resembled each other.
 
 **Our own status: still zero cycle counts.** 36 arms running, leaders ~10-12 windows in at cum
 35-48%. Declined to send a partial cumulative figure as a stand-in for a delta.
+
+### 2026-09-01 -- peer's hang is probably the SPOT printf tail, and it is NOT our wedge
+
+The gvsoc session took the "check where the harts are parked" suggestion and ran a PC census on
+`fp32 ks2 8x128x4096` past cycle 40,000:
+
+    cores executing at all : 1 of 256   (cid 0)
+    its PCs                : _vsnprintf, _ntoa_long, printf_ -- 5,000 cycles apart
+
+**Our wedge is a DIFFERENT failure.** In our 8x8 wedged arm core 0 ends at 0x80002cc8, the
+`mempool_barrier` spin -- our printf_ is at 0x80001d44 and core 0 is nowhere near it. Ours has
+core 0 parked WITH everyone else; theirs has core 0 alive and progressing. Same barrier,
+different failure. The resemblance I flagged as suspicious was real and this measurement
+separates them.
+
+**What theirs probably is.** main.c:79-83 documents, measured on our RTL: each SPOT printf is
+UART-bound at **~13,000 simulated cycles per 70-char line**, which is why 410a0fde capped
+`MATMUL_SPOT_SAMPLES` at 4. `MATMUL_SPOTCHECK` defaults to 1, so any ELF rebuilt from our main.c
+carries up to 4 of those prints followed by `mempool_barrier(active_cores)` -- exactly the shape
+they observe. On RTL that is ~52,000 cycles of epilogue; with a slower UART model it is unbounded.
+
+**This also explains their negative result on the hash fix.** A printf-bound tail cannot move
+when the MSHR bank hash changes -- which is precisely the bit-identical 30,000 they measured
+before and after. Their eleven falsified hypotheses were all datapath, and the datapath is
+finished by then.
+
+Handed them the decisive test: rebuild with `-DMATMUL_SPOTCHECK=0` and nothing else. Completes ->
+epilogue print, not a deadlock. Still stalls -> something real, and worth knowing.
+
+They also falsified hypothesis eleven for us: blocked lanes in the MSHR passthrough,
+BLOCK = UNBLOCK = 24,215, zero left blocked.
