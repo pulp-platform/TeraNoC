@@ -184,7 +184,10 @@ static inline uint32_t mshr_clog2(uint32_t x) {
 // the hardware quietly run a tuning nobody asked for.
 // The CSR field for bank_burst_bits is ONE BIT WIDE (mempool_group_mshr_cfg.sv:179 stores
 // wr_data_i[0]). Anything larger is silently truncated to its LSB, so software must clamp.
-#define MSHR_BANK_BURST_BITS_MAX 1u
+// Must MATCH mempool_pkg::MshrCfgBurstBitsW / the cfg module's BankBurstBitsMax. The CSR was a
+// single bit until 2026-09-01, which silently truncated a derived 2/3/4 to its LSB; it is now
+// 3 bits wide and range-checked, so the full value up to BankIdW is expressible.
+#define MSHR_BANK_BURST_BITS_MAX 4u
 #define MSHR_SHIFT_MIN 5u
 #define MSHR_SHIFT_MAX 10u
 // Hold-window MAGNITUDE is not derivable from M/N/P: the two classes carry OPPOSITE policies

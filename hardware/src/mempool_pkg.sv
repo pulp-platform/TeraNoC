@@ -707,6 +707,11 @@ package mempool_pkg;
   // 128x*x512 value of 32 could not be represented at all.
   localparam integer unsigned MshrCfgSubsW      = 6;   // hold_subs [1, MergeReqs]; reuse target [0, 2*MergeReqs]
   localparam integer unsigned MshrCfgShiftW     = 4;   // raw shift; the RTL muxes over a small range
+  // bank_burst_bits: how many of the BankIdW bank bits come from WITHIN the load (which burst
+  // of this load) rather than from the gap between p-slices. Was a single bit, which silently
+  // truncated the software-derived 2/3/4 to its LSB and left KS=4/1 with 4 of 16 banks
+  // reachable. 3 bits holds 0..4, i.e. every value up to BankIdW.
+  localparam integer unsigned MshrCfgBurstBitsW = 3;
 
   typedef struct packed {
     logic                            enable;              // 0 = every request bypasses the MSHR
@@ -717,7 +722,7 @@ package mempool_pkg;
     logic [MshrCfgHoldCntW-1:0]      serve_timeout;       // response-side, SINGLE-ONLY (RESP_HOLD/CACHED)
     logic [MshrCfgShiftW-1:0]        bank_shift_single;   // bank-hash address bit select, singles
     logic [MshrCfgShiftW-1:0]        bank_shift_burst;    // ... bursts
-    logic                            bank_burst_bits;     // BankBurstBits (0 or 1)
+    logic [MshrCfgBurstBitsW-1:0]    bank_burst_bits;     // BankBurstBits, 0..BankIdW
     // Cache reuse target (fp16 half-word aliasing). 0 = LEGACY: a CACHED line self-invalidates at
     // hold_subs_{single,burst}, exactly as before this field existed. Non-zero = the line instead
     // survives until served_cnt reaches THIS value, so a second cohort addressing the other half

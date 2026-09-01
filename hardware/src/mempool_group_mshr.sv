@@ -578,8 +578,12 @@ module mempool_group_mshr
   if ((BankHash == 3) && (BankSelShiftBurst < BurstAlignBits + BankBurstBits))
     $error("[mempool_group_mshr] group_mshr_bank_shift_burst (%0d) overlaps the intra-load burst bits [%0d +: %0d]. Set it to clog2(p_start gap in words), e.g. 5 (M=P=256) / 7 (M=P=512).",
            BankSelShiftBurst, BurstAlignBits, BankBurstBits);
-  if ((BankHash == 3) && (BankBurstBits >= BankIdW))
-    $error("[mempool_group_mshr] group_mshr_bank_burst_bits (%0d) must leave at least 1 gap bit (BankIdW=%0d).",
+    // bb == BankIdW is LEGAL: every bank bit then comes from the intra-load burst index,
+    // which is exactly what a shape with ONE p-slice per group (KS=1) needs -- there the gap
+    // field is constant and would pin the whole group to a single bank. Only bb > BankIdW
+    // is nonsense.
+    if ((BankHash == 3) && (BankBurstBits > BankIdW))
+      $error("[mempool_group_mshr] group_mshr_bank_burst_bits (%0d) exceeds BankIdW (%0d).",
            BankBurstBits, BankIdW);
 
   // Map a (target group, merge address key, request type) to its MSHR bank. Folds address bits
@@ -597,7 +601,7 @@ module mempool_group_mshr
                                                       input logic is_single,
                                                       input logic [mempool_pkg::MshrCfgShiftW-1:0] sh_single,
                                                       input logic [mempool_pkg::MshrCfgShiftW-1:0] sh_burst,
-                                                      input logic burst_bits);
+                                                      input logic [mempool_pkg::MshrCfgBurstBitsW-1:0] burst_bits);
     logic [BankIdW-1:0]              b;
     logic [$bits(tcdm_addr_t)-1:0]   mix;
     logic [WordAddrW-1:0]            word_addr;
@@ -620,10 +624,14 @@ module mempool_group_mshr
       end else if (!burst_bits) begin
         b = word_addr[sh_burst +: BankIdW];
       end else begin
-        // BankBurstBits is 0 or 1 in every shipping config, so the split field is the high
-        // BankIdW-1 bits from sh_burst plus one bit just above the burst boundary.
-        b = { word_addr[sh_burst +: BankIdW - 1],
-              word_addr[BurstAlignBits +: 1] };
+        // GENERALISED to any burst_bits in [1, BankIdW]. It used to hardcode ONE intra-load bit
+        // (`BankIdW-1` from sh_burst plus `word_addr[BurstAlignBits]`), which was all the 1-bit CSR
+        // could express -- and at KS=1, where a group holds a single p-slice, the gap field carries
+        // no information at all and every bank bit must come from inside the load. Variable widths
+        // are not legal in a part-select, so shift instead: the low `burst_bits` bits are the
+        // intra-load burst index, the rest come from the p-slice gap at sh_burst.
+        b = BankIdW'(((word_addr >> sh_burst) << burst_bits)
+                     | ((word_addr >> BurstAlignBits) & ((1 << burst_bits) - 1)));
       end
     end else if (BankHash == 0) begin
       // Legacy: each bank bit is the XOR of a fixed stride-BankIdW subset of address bits.

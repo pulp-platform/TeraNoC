@@ -52,6 +52,10 @@ module mempool_group_mshr_cfg
   // Checked at ENABLE rather than per write: software sets BANK_SHIFT_BURST before
   // BANK_BURST_BITS, so a per-write test would compare against a stale burst_bits.
   parameter int unsigned BurstAlignBits      = 4,
+  // Upper bound on bank_burst_bits: ALL BankIdW bank bits may legitimately come from inside the
+  // load. At KS=1 a group holds ONE p-slice, so the gap field carries no information and the
+  // intra-load burst index is the only spread available -- that case needs the full BankIdW.
+  parameter int unsigned BankBurstBitsMax    = 4,
   // Mirrors the MSHR's elaboration guard at mempool_group_mshr.sv:328 -- serve_timeout == 0 pins a
   // CACHED way forever when the serve target is never reached and the entry is not an eviction
   // victim. Only then is 0 refused.
@@ -87,7 +91,7 @@ module mempool_group_mshr_cfg
       serve_timeout     : MshrCfgHoldCntW'(DefServeTimeout),
       bank_shift_single : MshrCfgShiftW'(DefBankShiftSingle),
       bank_shift_burst  : MshrCfgShiftW'(DefBankShiftBurst),
-      bank_burst_bits   : (DefBankBurstBits != 0),
+      bank_burst_bits   : MshrCfgBurstBitsW'(DefBankBurstBits),
       cache_reuse_target: MshrCfgSubsW'(DefCacheReuseTarget),
       cache_timeout     : MshrCfgHoldCntW'(DefCacheTimeout),
       bankfull_backpressure: (DefBankfullBp != 0)
@@ -124,7 +128,7 @@ module mempool_group_mshr_cfg
              MshrCfgHoldCntW, HoldCntHwMax);
 
     // Range checks. Each mirrors an elaboration guard in mempool_group_mshr.sv.
-    logic subs_ok, cnt_ok, shift_s_ok, shift_b_ok, tmo_ok, burst_hash_ok, reuse_ok;
+    logic subs_ok, cnt_ok, shift_s_ok, shift_b_ok, tmo_ok, burst_hash_ok, reuse_ok, burst_bits_ok;
     assign subs_ok    = (wr_data_i >= 32'd1) && (wr_data_i <= MergeReqs);
     assign cnt_ok     = (wr_data_i <= HoldCntHwMax);
     assign shift_s_ok = (wr_data_i >= BankShiftMin) && (wr_data_i <= BankShiftMax);
@@ -141,6 +145,7 @@ module mempool_group_mshr_cfg
     assign reuse_ok   = (wr_data_i <= (2 * MergeReqs));
     // Evaluated on the SETTLED config, not on wr_data_i, because the two fields arrive in
     // separate writes.
+    assign burst_bits_ok = (wr_data_i <= BankBurstBitsMax);
     assign burst_hash_ok = (32'(cfg_q.bank_shift_burst) >=
                             32'(BurstAlignBits) + 32'(cfg_q.bank_burst_bits));
 
@@ -175,8 +180,12 @@ module mempool_group_mshr_cfg
           IdxW'(MSHR_CSR_BANK_SHIFT_BURST)   : if (mshr_busy_i)      status_d[MSHR_STATUS_BANK_BUSY] = 1'b1;
                                                else if (!shift_b_ok) status_d[MSHR_STATUS_RANGE]     = 1'b1;
                                                else cfg_d.bank_shift_burst = MshrCfgShiftW'(wr_data_i);
+          // RANGE-CHECKED like every other CSR. This write used to store wr_data_i[0] with no
+          // check at all, so a software-derived 2/3/4 was silently truncated to its LSB -- the
+          // only CSR here that could be mis-set without ever raising MSHR_STATUS_RANGE.
           IdxW'(MSHR_CSR_BANK_BURST_BITS)    : if (mshr_busy_i) status_d[MSHR_STATUS_BANK_BUSY] = 1'b1;
-                                               else cfg_d.bank_burst_bits = wr_data_i[0];
+                                               else if (!burst_bits_ok) status_d[MSHR_STATUS_RANGE] = 1'b1;
+                                               else cfg_d.bank_burst_bits = MshrCfgBurstBitsW'(wr_data_i);
           IdxW'(MSHR_CSR_CACHE_REUSE_TARGET) : if (reuse_ok) cfg_d.cache_reuse_target = MshrCfgSubsW'(wr_data_i);
                                                else status_d[MSHR_STATUS_RANGE] = 1'b1;
           IdxW'(MSHR_CSR_CACHE_TIMEOUT)      : if (cnt_ok)   cfg_d.cache_timeout      = MshrCfgHoldCntW'(wr_data_i);
@@ -202,7 +211,7 @@ module mempool_group_mshr_cfg
           serve_timeout     : MshrCfgHoldCntW'(DefServeTimeout),
           bank_shift_single : MshrCfgShiftW'(DefBankShiftSingle),
           bank_shift_burst  : MshrCfgShiftW'(DefBankShiftBurst),
-          bank_burst_bits   : (DefBankBurstBits != 0),
+          bank_burst_bits   : MshrCfgBurstBitsW'(DefBankBurstBits),
           cache_reuse_target: MshrCfgSubsW'(DefCacheReuseTarget),
           cache_timeout     : MshrCfgHoldCntW'(DefCacheTimeout),
           bankfull_backpressure: (DefBankfullBp != 0)

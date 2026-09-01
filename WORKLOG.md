@@ -14682,3 +14682,37 @@ instant (measured 1.0/16 concurrent). The MSHR holds requests that are outstandi
 so `spread()` now groups addresses by k-loop step and reports the average number of distinct
 banks reached per step. Rule: for a concurrency structure, never score a hash by its histogram
 over time.
+
+## 2026-09-01 -- MSHR bank hash: full SW+HW fix, no silent truncation
+
+**Hardware.**
+- `mempool_pkg.sv`: new `MshrCfgBurstBitsW = 3`; `cfg_t.bank_burst_bits` widened from a single
+  bit to that width (holds 0..4, i.e. every value up to BankIdW).
+- `mempool_group_mshr_cfg.sv`: the BANK_BURST_BITS write is now **range-checked like every other
+  CSR** (`burst_bits_ok`, new `BankBurstBitsMax=4` parameter) and raises `MSHR_STATUS_RANGE` on
+  violation. It was previously the ONLY CSR that could be mis-set silently -- it stored
+  `wr_data_i[0]` with no check at all. Static-config path now casts the full width instead of
+  squashing to a bool.
+- `mempool_group_mshr.sv`: `mshr_bank_of` takes `[MshrCfgBurstBitsW-1:0] burst_bits`, and the
+  hash is generalised from a hardcoded ONE intra-load bit to any k in [1, BankIdW] (shift-based,
+  since variable part-select widths are illegal). Elaboration guard relaxed from
+  `bb >= BankIdW` to `bb > BankIdW`: bb == BankIdW is legal and is exactly what a shape with one
+  p-slice per group (KS=1) needs.
+
+**Software.** `mshr_cfg.h`: `MSHR_BANK_BURST_BITS_MAX` raised 1 -> 4 to match, with the derived
+value clamped against it (so SW can never write something the CSR would refuse).
+
+**Verified.** `make compile config=terapool_spatz4_fpu buildpath=build_hashfix`: **0 errors**,
+`mempool_group_mshr` and `mempool_group_mshr_cfg` both actually compiled. The only warnings are
+pre-existing ones in `deps/`.
+
+**ELF.** `hardware/sw_4x4_fp16_ks4_8x128x8192_hashfix.elf` rebuilt; the fixed software derives
+`sh_burst=6, bank_burst_bits=2` (previously 2 truncated to 0), which the tool scores at
+**16/16 banks concurrently** (was 4/16). NOTE: this ELF needs the FIXED RTL -- on an old image
+the 1-bit CSR truncates bb=2 back to 0.
+
+**Affected runs.** `docs/benchmarks/mshr_hash_affected.tsv`: **84 of 104** decode grid points
+reached fewer banks than their workload allows; **28 are already measured**. Scored against the
+ACHIEVABLE CEILING (distinct concurrent lines per group, capped at 16) -- a shape at its ceiling
+is optimal even when that ceiling is below 16, which is why the naive "not 16/16" count of 100
+overstates it. Worst measured losses are **8x** (4x4 fp32/fp16 KS=1, reaching 1 of 8 banks).
