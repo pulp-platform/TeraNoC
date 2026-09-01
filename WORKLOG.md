@@ -14041,3 +14041,33 @@ over-estimates the time left. The ETAs I gave should be read as **upper bounds**
 is the trustworthy part. Likely cause: the final windows have fewer cores still active, so
 contention falls -- the same effect that makes a finishing arm's retirement taper look like decline
 (the trap that produced the "borderline degraded" misclassification earlier).
+
+## 2026-09-01 -- first fp16 8x8 result, and the scale-up loss is NOT uniform
+
+    sw_8x8_fp16_ks8_16x128x16384   9,972 cyc   159 windows   tmo=16   RH=16   util 48.33%   eff 41.1%
+
+Clean, and the campaign's **first fp16 arm at 1024 cores**. Now **42 measured**.
+
+**Three 8x8 arms can now be matched to their 4x4 counterparts** -- same precision, KS and B, with I
+scaled 4x so the total work is identical:
+
+| prec / KS / B | 8x8 | 4x4 | efficiency loss |
+|---|---|---|---:|
+| fp16 KS=8 B=16 | 9,972 cyc, 41.1% | 6,031 cyc, 67.9% | **1.65x** |
+| fp32 KS=8 B=8 | 11,924 cyc, 34.4% | 6,979 cyc, 58.7% | **1.71x** |
+| fp32 KS=8 B=128 | 97,494 cyc, 33.6% | 97,690 cyc, 33.5% | **1.00x** |
+
+**The scale-up loss is not a constant.** At B=8 and B=16 it costs 1.65-1.71x; at B=128 it costs
+**nothing at all** -- 97,494 against 97,690 cycles, within 0.2%. Going from 256 to 1024 cores is free
+for the large-batch arm and expensive for the small-batch ones.
+
+That is a more useful shape than a single "scale-up costs N%" figure, and it points somewhere
+specific: at large B each core already has plenty of independent work, so the extra 768 cores are
+absorbed; at small B the work per core is thin and the added cores mostly add contention.
+
+**Caveat, stated plainly: this is 3 pairs.** All are KS=8, two are fp32, and the B=128 pair is a
+single observation carrying the entire "no loss" claim. It is a hypothesis worth testing against the
+49 remaining 8x8 arms, not a result. The matched-pair structure is right; the sample is not yet.
+
+**ETA note:** this arm was estimated at 5 h remaining and finished within the hour -- the second
+such case. Confirms arms accelerate near completion and the ETA hours are upper bounds.
