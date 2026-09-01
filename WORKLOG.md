@@ -13950,3 +13950,37 @@ arm of ours has been killed by a refused seat: every retry in flight traces to t
 to licensing.
 
 No new results since the two 8x8 KS=8 arms (4.8 h and 5.6 h ago). Scale-up sweep steady at 193 done.
+
+## 2026-09-01 -- killed 10 run-1 arms wedged for 57 h on the ROB0=64 ceiling
+
+**Found by health-checking rather than counting states.** Of 66 arms badist called `running`, 44
+were genuinely retiring, 10 were 8x8 arms legitimately still in prologue (~9 h, normal for that
+mesh), and **10 were 4x4 arms wedged in the pre-benchmark region for 57 hours**.
+
+**They are RUN 1, not run 2** -- the question that settled it is which image they run:
+
+| define | `build_waveA2` (these 10) | `build_tgt4x4` (run 2) |
+|---|---|---|
+| `SPATZ_VLSU_ROB_DEPTH` | **64** | **128** |
+| `SPATZ_VLSU_ROBN_DEPTH` | unset | 16 |
+| `GROUP_MSHR_BYPASS_WAYS` | 8 | 16 |
+| `SNITCH_TRACE` | 1 | 0 |
+
+**ROB0=64 is the stock ceiling this campaign root-caused.** All ten are KS=2 arms, and at
+`vl == ROB0 * 4` one load reserves every reorder-buffer id, so the core can never admit another.
+The transcript is exactly that failure, not a new one:
+
+    [INSNG] pre  cyc=16,535,000  insn= 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    [CMS]        inflight=0  orphan=0            util 3.12%, cum 0.00%
+
+Cycle **16.5 million**, still pre-benchmark, zero retirement on all 16 groups -- against 4,000 to
+100,000 cycles for a healthy 4x4 arm. Useless twice over: a superseded config *and* a known-cause
+wedge. `SNITCH_TRACE=1` on that image also meant they were writing the large per-hart traces.
+
+**Killed after verifying every one had its result elsewhere** -- 8 measured on run 2 (13,728 to
+84,710 cyc), 2 harvested as degraded probes (5.2 MB, 2.8 MB). Each kill re-checked on the node that
+*that* job had not in fact completed, and refused otherwise; 10 killed, 0 refused, 0 left alive.
+9 job dirs removed (1.4 GB); the tenth had already been reaped from larain5's scratch.
+
+**VCS: ours 69 -> 59.** The pool is still tight at 89/100 because **other users hold 30 seats**, so
+the queued arms stay queued -- but that is now entirely other people's usage, not ours.
