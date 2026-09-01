@@ -14957,3 +14957,37 @@ Peer also verified our predicted (4, 0) reproduces exactly in their model -- CSR
 `BANK_SHIFT_BURST 4` and `BANK_BURST_BITS 0`, every write accepted, zero REFUSED -- after they
 moved their guard floor to 4 to match `BankShiftMin`. They correctly did NOT lower the software
 `MSHR_SHIFT_MIN`, which stays 5 and clamps only sh_single.
+
+### 2026-09-01 -- peer NEGATIVE: the corrected hash does not fix their hang
+
+The gvsoc session rebuilt `fp32 ks2 8x128x4096` from `mshr_cfg.h` at ec833a3b -- the 4 -> 16
+bank case, programming our predicted (4, 0) with every CSR write accepted -- and the hang is
+unchanged:
+
+    before hash fix : FP work stops at cycle 30,000, no completion
+    after  hash fix : FP work stops at cycle 30,000, no completion
+
+**Bit-identical stall point.** So the bank hash is NOT on the critical path of that failure --
+their tenth falsified explanation for it. (Their caveat: 30,000 is the last flushed FP-probe
+window, not a proven exact instant; the argument rests on the value being the same either side.)
+
+Two things it does NOT establish, and they said so themselves: it predicts nothing about our 36
+corrected re-runs (a hang is degenerate; a RUNNING arm can still gain from spread), and it does
+not clear the hash for their healthy arms, which they have not re-run.
+
+They adopted all three guard rules. The shift floor 5 -> 4 was **load-bearing**: without it their
+model would have refused the corrected bsb=4 and kept its elaboration default, so our fix would
+have read as a no-op on their side -- "no change" for the wrong reason.
+
+**What their result sharpens.** Everything on their falsified list -- lost responses, expander
+leaks, mid-drain merges, stale cache, RESP_HOLD, reclaim, bank hash -- is a property of how
+requests are SERVICED. A stall that does not move when any of them changes is consistent with
+the requests not being ISSUED, or with something gating issue. That rhymes with our own wedge,
+traced to a `mempool_barrier` deadlock with survivors parked at a spin and a `wfi`, where the
+open question is why some groups run ~4x slower rather than anything about the memory path.
+Suggested they check where cores are parked (last PC per hart) rather than what the MSHR is
+doing. NOT asserting the two are the same bug -- different shapes and meshes, and I have been
+wrong twice today about mechanisms that merely resembled each other.
+
+**Our own status: still zero cycle counts.** 36 arms running, leaders ~10-12 windows in at cum
+35-48%. Declined to send a partial cumulative figure as a stand-in for a delta.
