@@ -54,6 +54,22 @@ for _d in sorted(glob.glob(os.path.join(ROOT, "hardware", "*_sw_*"))):
     s_ = scrape(t)
     if s_: RES.setdefault(arm, {})[pref] = s_
 
+# ---- re-runs on the CORRECTED MSHR bank hash -------------------------------------------------
+# Dispatched 2026-09-01 as `hashfix_hf_<mesh>_...` against build_tgt4x4_hashfix, whose +define+
+# set is IDENTICAL to build_tgt4x4 (the fix is an RTL parameter), so old-vs-new isolates the hash.
+# They are kept in their OWN dict, never merged into RES: the originals are the record of what
+# the campaign measured and must not be silently overwritten by a differently-configured re-run.
+# NOTE the arm name is hf_..., not sw_..., so the loop above cannot see them -- a prefix that the
+# discovery regex misses makes a finished arm INVISIBLE, which has bitten this file three times.
+RESFIX = {}
+for _d in sorted(glob.glob(os.path.join(ROOT, "hardware", "*_hf_[48]x[48]_*"))):
+    _m = re.match(r"^(.+?)_hf_([48]x[48]_.+)$", os.path.basename(_d))
+    if not _m: continue
+    t = os.path.join(_d, "transcript")
+    if not os.path.exists(t): continue
+    s_ = scrape(t)
+    if s_: RESFIX["sw_" + _m.group(2)] = s_
+
 # Local diagnostic runs that measure a matrix cell. The ROB0=256 arm needed a non-default
 # ROB depth to run at all, so its cell is flagged rather than presented as a stock result.
 LOCAL = {
@@ -366,6 +382,17 @@ def hashdot(r):
     if not d:
         return ""
     _t = "; ".join("%s reached %s of %s banks" % (c, g, ce) for c, g, ce in d)
+    # once the corrected re-run lands, the dot turns into the before/after
+    _f = RESFIX.get(armname(r))
+    if _f and _f.get("cyc") and r.get("ideal"):
+        _got = RES.get(armname(r), {})
+        _old = next((_got[k]["cyc"] for k in _PREF_RANK if k in _got and _got[k].get("cyc")), None)
+        _eff = 100.0 * r["ideal"] / _f["cyc"]
+        _delta = ("  (%+.1f%% vs %s cyc)" % (100.0 * (_f["cyc"] - _old) / _old, format(_old, ","))
+                  if _old else "")
+        return ('<span class="hashfixdot" title="MSHR bank hash: %s. RE-RUN on the corrected hash: '
+                '%s cyc, %.1f%% efficiency%s">&#9679;</span>'
+                % (_t, format(_f["cyc"], ","), _eff, _delta))
     return ('<span class="hashdot" title="MSHR bank hash: %s &mdash; fixed 2026-09-01, this number '
             'predates it. Classes with one sharer per group bypass the MSHR and are not counted.">'
             '&#9679;</span>' % _t)
@@ -434,7 +461,7 @@ th,td{padding:5px 9px;border-bottom:1px solid var(--line-soft);text-align:left;w
 th{font-family:var(--mono);font-size:10px;letter-spacing:.07em;text-transform:uppercase;
 color:var(--ink-3);font-weight:500}
 .num{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums}
-.mono{font-family:var(--mono)}.dim{color:var(--ink-3)}.hashdot{color:var(--bad);font-size:.62em;vertical-align:super;margin-left:.28em;line-height:0}.hashkey{display:inline-block;color:var(--bad);font-size:.7em;vertical-align:super}.na{color:var(--line)}
+.mono{font-family:var(--mono)}.dim{color:var(--ink-3)}.hashfixdot{color:var(--ok);font-size:.62em;vertical-align:super;margin-left:.28em;line-height:0}.hashdot{color:var(--bad);font-size:.62em;vertical-align:super;margin-left:.28em;line-height:0}.hashkey{display:inline-block;color:var(--bad);font-size:.7em;vertical-align:super}.na{color:var(--line)}
 .sm{font-size:11px}.b{font-weight:600}
 .st-done{color:var(--good);font-weight:600}.st-bad{color:var(--bad);font-weight:600}
 .st-blocked{color:var(--warn);font-weight:600}
@@ -767,7 +794,8 @@ for mesh, cores in (("4x4", 256), ("8x8", 1024)):
       '<span class="st-bad">degr</span> = livelocked and killed (partial data in the degraded section; never a measurement) &middot; '
       '<span class="st-run">run</span> = on the fleet &middot; '
       '<span class="na">&middot;</span> = KS does not divide B, so the arm does not exist. '
-      '<span class="hashkey">&#9679;</span> = the MSHR bank hash reached fewer banks than this shape allows (see the MSHR bank-hash card); the number predates the 2026-09-01 fix. '
+      '<span class="hashkey">&#9679;</span> = the MSHR bank hash reached fewer banks than this shape allows; the number predates the 2026-09-01 fix. '
+      '<span class="hashkey" style="color:var(--ok)">&#9679;</span> = a corrected re-run has landed &mdash; hover for its cycles and the delta. '
       '<strong>An asterisk (*)</strong> marks a cell measured on a <em>non-default</em> '
       'configuration &mdash; the number is real but not comparable with stock arms, and the '
       'deviation is named in the cell tooltip and in the fix-ladder table above. '
