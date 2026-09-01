@@ -37,4 +37,11 @@ docs/benchmarks/8x8_scaleup/transcript_vault/
 # plus MATMUL_DECODE_SPLIT; the ELF is copied to hardware/ and is standalone, so the app dir is
 # a build artifact. Committing generated shape apps is what left 1064 sp-fp16-* files in the
 # tree; do not repeat it for decode.
-software/apps/spatz_apps/sp-decode-*/
+# Per-shape decode app dirs were GENERATED, one per shape, and drifted into 5 distinct
+# main.c versions before being merged. Only shape-named dirs are generated now.
+software/apps/spatz_apps/sp-decode-[0-9]*/
+# sp-decode-fp16 / sp-decode-fp32 ARE source (main.c and kernel are symlinks to the
+# canonical sp-fmatmul-opt-burst-merge{,-fp16}), but their shape spec and the 16-36 MB
+# data header are generated at build time from gemm_m/gemm_n/gemm_p.
+software/apps/spatz_apps/sp-decode-fp*/script/matmul.json
+software/apps/spatz_apps/sp-decode-fp*/data/data_gemm.h

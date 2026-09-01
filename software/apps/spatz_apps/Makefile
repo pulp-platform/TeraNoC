@@ -49,7 +49,56 @@ $(BINARIES): $(BIN_DIR)/%: %/main.c.o $(RUNTIME) $(LINKER_SCRIPT) data_%.h updat
 %/data/data_gemm.h: %/script/matmul.json %/script/gen_data.py
 	cd $(APPS_DIR)/$* && $(python) script/gen_data.py -c script/matmul.json
 
+# ---- shape-parameterised decode apps -------------------------------------------------
+# ONE app per PRECISION (sp-decode-fp16 / sp-decode-fp32) instead of one directory per shape.
+# The 43 per-shape copies this replaces had drifted into 5 distinct main.c versions and 6
+# distinct kernels; three of those groups were stale (one missing MATMUL_REPEAT entirely, so
+# its cycles were not comparable to any other arm). Only the fp16/fp32 split is principled --
+# elem_t vs float, and a genuinely different verify tolerance -- so precision stays a
+# directory and shape becomes a parameter.
+#
+# The shape arrives as make variables and is WRITTEN INTO script/matmul.json, which is already
+# the prerequisite of data/data_gemm.h. That matters: data_gemm.h carries the GEMM_M/N/P and
+# ELEM_BYTES macros that runtime/mshr_cfg.h derives the MSHR tuning from AT COMPILE TIME, so a
+# shape that changed without regenerating the header would silently mistune the run. Writing
+# the json through a cmp guard means its mtime moves exactly when the shape really changes.
+#
+#   make sp-decode-fp16 config=terapool_spatz4_fpu gemm_m=16 gemm_n=128 gemm_p=16384
+#
+DECODE_APPS := sp-decode-fp16 sp-decode-fp32
+gemm_m ?= 16
+gemm_n ?= 128
+gemm_p ?= 16384
+
+define DECODE_SHAPE_rule
+$(1)/script/matmul.json: FORCE
+	@mkdir -p $$(@D)
+	@{ \
+	  echo '// GENERATED from make vars gemm_m/gemm_n/gemm_p -- do not hand-edit.'; \
+	  echo '// DECODE-shape GEMM: C[B][I] = A[B][D] x W[D][I], mapped as M=B, N=D, P=I.'; \
+	  echo '{'; \
+	  echo '    kernel: "GEMM"'; \
+	  echo '    M: $$(gemm_m),'; \
+	  echo '    N: $$(gemm_n),'; \
+	  echo '    P: $$(gemm_p),'; \
+	  echo '    alpha: 0,'; \
+	  echo '    transpose_A: false,'; \
+	  echo '    transpose_B: false,'; \
+	  echo '    prec: $(2),'; \
+	  echo '    expand: 0'; \
+	  echo '}'; \
+	} > $$@.tmp
+	@if cmp -s $$@.tmp $$@; then rm -f $$@.tmp; else mv $$@.tmp $$@; fi
+endef
+$(eval $(call DECODE_SHAPE_rule,sp-decode-fp16,16))
+$(eval $(call DECODE_SHAPE_rule,sp-decode-fp32,32))
+.PHONY: FORCE
+FORCE:
+
 GEMM_APPS := $(patsubst $(APPS_DIR)/%/script/matmul.json,%,$(wildcard $(APPS_DIR)/*/script/matmul.json))
+# the merged apps have no checked-in matmul.json, so the wildcard above cannot see them
+GEMM_APPS += $(DECODE_APPS)
+GEMM_APPS := $(sort $(GEMM_APPS))
 $(foreach a,$(GEMM_APPS),$(eval $(a)/main.c.o: $(a)/data/data_gemm.h))
 
 # Helper targets, here force a spatz configuration

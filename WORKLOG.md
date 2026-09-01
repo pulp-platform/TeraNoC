@@ -14481,3 +14481,48 @@ truncated dirs still hold theirs.
 **Still open (not touched, needs a decision):** `build_gui_4x4` 45 GB (built 08-29 from the
 OLD flavour defaults, so stale after today's config change), `vb8` 19 GB + `vb4` 5 GB
 (Verilator builds from 08-05, superseded by `vbuild_4x4`).
+
+## 2026-09-01 -- merge 43 per-shape decode apps into two precision apps
+
+**Purpose.** `software/apps/spatz_apps/sp-decode-<B>x<D>x<I>/` had grown to 43 directories.
+
+**What was actually wrong -- not just redundancy, DRIFT.** The 43 copies held **5 distinct
+main.c versions and 6 distinct kernels**:
+
+    886ad1f4  21 dirs  fp16 mainline
+    8af2bc8d  16 dirs  fp32 mainline
+    bf7257fa   3 dirs  STALE -- 76 lines behind, MISSING MATMUL_REPEAT entirely
+    a6ba151a   2 dirs  STALE -- 126 lines behind
+    3f7fc8b8   1 dir   STALE -- 114 lines behind
+
+`MATMUL_REPEAT` is the work normalisation that equalises every arm at ~65k ideal cycles, so an
+arm built from that group would not have been comparable to any other. **None of the 6 stale
+dirs is in the sweep** (measured=0, in-fleet=0 for all six) -- luck, not design.
+
+The fp16/fp32 split IS principled: `elem_t` vs `float`, and a genuinely different verify
+tolerance (fp16 needs `0.03*mag + 1.0` because it accumulates over N terms in an 11-bit
+mantissa; fp32 uses `0.001`). So precision stays a directory; shape becomes a parameter.
+
+**Implementation.**
+- `sp-decode-fp16` / `sp-decode-fp32`, whose `main.c`, `kernel/` and `script/gen_data.py` are
+  **symlinks** to the canonical `sp-fmatmul-opt-burst-merge{,-fp16}`. Copying is exactly how
+  the 43 drifted -- and the fp16 decode snapshot was already a day stale against the canonical
+  source. A kernel fix is now made once and cannot diverge.
+- Shape arrives as `gemm_m`/`gemm_n`/`gemm_p` make variables, written into
+  `script/matmul.json` through a `cmp` guard so its mtime moves exactly when the shape really
+  changes. That matters: `data_gemm.h` carries the GEMM_M/N/P macros `runtime/mshr_cfg.h`
+  tunes the MSHR from AT COMPILE TIME, so a stale header would silently mistune the run.
+- `scripts/gen_decode_shape_app.sh` no longer creates a directory per shape, and now asserts
+  the built header's GEMM_M/N/P match the requested shape before declaring ELF_OK.
+- `.gitignore:40` ignored `sp-decode-*/` wholesale, correct when every dir was generated. The
+  two merged dirs are SOURCE, so the rule is narrowed to `sp-decode-[0-9]*/` and the generated
+  `matmul.json` / `data_gemm.h` are ignored explicitly. Left as it was, a fresh clone would
+  have had no decode app at all.
+
+**Verified.** Built merged and per-shape apps at the same config and shape, stripped both:
+**byte-identical for fp16 AND fp32.** Shape change regenerates the header (GEMM_P 16384 ->
+8192); rebuilding at the same shape does not (no needless 34 MB regeneration). End-to-end
+generator run: `ELF_OK 8x128x32768`.
+
+**Not yet done.** The 43 old dirs still exist (untracked, ~1.1 GB of generated headers)
+pending the user's go-ahead to delete.
