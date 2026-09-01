@@ -15022,3 +15022,31 @@ epilogue print, not a deadlock. Still stalls -> something real, and worth knowin
 
 They also falsified hypothesis eleven for us: blocked lanes in the MSHR passthrough,
 BLOCK = UNBLOCK = 24,215, zero left blocked.
+
+### 2026-09-01 -- RETRACTION: the GVSoC "low-sharers / sharers=2 defect" was an ARTEFACT
+
+Retracts the 2026-08-31 entry "the GVSoC model hangs on our two FASTEST arms", and specifically
+my conclusion there that **"the sharers=2 defect is a blocker to sequence before the bulk run"**.
+There is no sharers defect. Do not sequence anything around it.
+
+The peer ran the `-DMATMUL_SPOTCHECK=0` test and both previously "no finish" arms complete:
+
+    fp32 ks2 8x128x4096    -> 11,516 cycles
+    fp16 ks8 16x128x4096   -> 267,848 cycles
+
+Their 50 "did not finish" arms were finishing their measured region and dying in the SPOT
+printf tail; the apparent sharers boundary tracked which arms were slow enough that
+compute + tail exceeded their wall-clock timeout. The two independent "confirmations" they sent
+(including the four 8x8 decode-GEMM arms at sharers=4) were the same artefact twice.
+
+**Verified in OUR source, and it matters for us too:** the SPOT block cannot perturb any
+measurement. `main.c`: `timer_end` at :679, `printf("The execution took ...")` at :708,
+`#if MATMUL_SPOTCHECK` at :713, the SPOT printf at :742 -- the probe is entirely AFTER the cycle
+count is computed AND printed. So `-DMATMUL_SPOTCHECK=0` is purely ENABLING, never perturbing,
+and every number we have already published is unaffected either way.
+
+**What survives is better than what was lost.** With the tail removed,
+`fp16 ks8 16x128x4096` is 267,848 in the model against our **6,031** on RTL -- a **44.4x** gap
+that was previously hidden behind "did not finish". A real, chaseable calibration delta instead
+of a fake structural boundary. Their other arm, `fp32 ks2 8x128x4096`, has no RTL cycle count
+on our side (degraded), but it IS in the 36-arm hashfix reissue set, so we will have it.
