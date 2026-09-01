@@ -624,14 +624,14 @@ module mempool_group_mshr
       end else if (!burst_bits) begin
         b = word_addr[sh_burst +: BankIdW];
       end else begin
-        // GENERALISED to any burst_bits in [1, BankIdW]. It used to hardcode ONE intra-load bit
-        // (`BankIdW-1` from sh_burst plus `word_addr[BurstAlignBits]`), which was all the 1-bit CSR
-        // could express -- and at KS=1, where a group holds a single p-slice, the gap field carries
-        // no information at all and every bank bit must come from inside the load. Variable widths
-        // are not legal in a part-select, so shift instead: the low `burst_bits` bits are the
-        // intra-load burst index, the rest come from the p-slice gap at sh_burst.
-        b = BankIdW'(((word_addr >> sh_burst) << burst_bits)
-                     | ((word_addr >> BurstAlignBits) & ((1 << burst_bits) - 1)));
+        // ONE intra-load bit: the high BankIdW-1 bits from the p-slice gap at sh_burst, plus the
+        // bit just above the burst boundary. Two constant part-selects -- no second variable shift.
+        // bb is capped at 1 by construction (mempool_pkg::MshrCfgBurstBitsW), and a CSR write above
+        // that is REFUSED with MSHR_STATUS_RANGE rather than truncated, so this can never be
+        // silently asked for something it does not implement. Measured justification: every merging
+        // burst class in the decode grid reaches its ceiling at bb=0, and KS=8 prefill at bb<=1.
+        b = { word_addr[sh_burst +: BankIdW - 1],
+              word_addr[BurstAlignBits +: 1] };
       end
     end else if (BankHash == 0) begin
       // Legacy: each bank bit is the XOR of a fixed stride-BankIdW subset of address bits.

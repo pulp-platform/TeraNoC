@@ -14769,3 +14769,36 @@ at its ceiling (1 line, 1 bank). My step-by-step explanation of that case, traci
 
 `docs/benchmarks/mshr_hash_affected.tsv` regenerated with a `class` column; artifact dots down
 from 84 to 72, tooltips now name the class.
+
+### 2026-09-01 -- option 2: keep the 1-bit field, REFUSE oversized writes
+
+Reverted the bit expansion; kept the fix that matters.
+
+- `mempool_pkg.sv`: `MshrCfgBurstBitsW = 1` again. The derived ceiling stays visible as
+  `MshrCfgBurstBitsCeil = MshrCfgBankIdW` so a re-sized MSHR still moves it, but the implemented
+  field is one bit.
+- `mempool_group_mshr_cfg.sv`: `BankBurstBitsMax = (1 << MshrCfgBurstBitsW) - 1`, so the range
+  check tracks the implemented width. A write of 2/3/4 now raises **MSHR_STATUS_RANGE** instead of
+  being truncated to its LSB. The silent-failure class is gone either way.
+- `mempool_group_mshr.sv`: hash back to the two constant part-selects -- no second variable shift
+  in the bank-select path.
+- `mshr_cfg.h`: `MSHR_BANK_BURST_BITS_MAX` back to 1.
+
+**Justification, measured.** No configuration this design runs needs bb>1: all 88 merging burst
+classes in the decode grid reach their ceiling at **bb=0**, and KS=8 prefill (197 of the 199 built
+prefill ELFs) needs at most bb=1. Only a hypothetical KS=4 prefill sweep wants bb=2 (20 shapes),
+and of the two KS=4 prefill arms ever built, exactly one would use it. Recompiled: 0 errors.
+
+**A THIRD defect, found while checking this.** The software cap alone fixes only **28 of 72**
+affected arms -- the remaining 44 are held back by the SHIFT, not by bb. The rule that works is
+
+    sh_burst = clog2(MaxBurstWords) = 4,  bank_burst_bits = 0
+
+which reaches the ceiling on **88 of 88** merging burst classes. It works because a group's
+p_blocks are CONTIGUOUS in memory (p_block = cid / n_row_chunks over consecutive cids), so the
+group's W accesses at a given d form one contiguous span and indexing its 16-word bursts spreads
+them perfectly. Two things block it today:
+  * `MSHR_SHIFT_MIN = 5` clamps the derived shift up from 4;
+  * `BankShiftMin = 5` in the cfg module would REFUSE a runtime write of 4.
+Both are legal to lower: the RTL's real rule is `bank_shift_burst >= BurstAlignBits + bb` = 4 at
+bb=0. NOT YET APPLIED.

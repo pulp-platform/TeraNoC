@@ -722,7 +722,16 @@ package mempool_pkg;
   localparam integer unsigned MshrCfgBankNum =
       (MshrCfgWaysPerBank > 0) ? (MshrTagNum / MshrCfgWaysPerBank) : 1;
   localparam integer unsigned MshrCfgBankIdW = idx_width(MshrCfgBankNum);
-  localparam integer unsigned MshrCfgBurstBitsW = idx_width(MshrCfgBankIdW + 1);
+  // MshrCfgBankIdW is the largest bank_burst_bits the HASH COULD use; it is derived here so a
+  // re-sized MSHR moves it automatically. The implemented field is ONE BIT, because bb<=1
+  // reaches the achievable ceiling on every shape this design runs (all 88 merging burst
+  // classes in the decode grid need only bb=0; KS=8 prefill needs at most bb=1). A wider field
+  // would buy a single one-off KS=4 prefill shape at the cost of a second variable shift in
+  // the bank-select path.
+  // A write ABOVE this width is REFUSED with MSHR_STATUS_RANGE by mempool_group_mshr_cfg --
+  // never truncated. That is the whole point: the gap is loud, not silent.
+  localparam integer unsigned MshrCfgBurstBitsCeil = MshrCfgBankIdW;
+  localparam integer unsigned MshrCfgBurstBitsW    = 1;
 
   typedef struct packed {
     logic                            enable;              // 0 = every request bypasses the MSHR
@@ -733,7 +742,7 @@ package mempool_pkg;
     logic [MshrCfgHoldCntW-1:0]      serve_timeout;       // response-side, SINGLE-ONLY (RESP_HOLD/CACHED)
     logic [MshrCfgShiftW-1:0]        bank_shift_single;   // bank-hash address bit select, singles
     logic [MshrCfgShiftW-1:0]        bank_shift_burst;    // ... bursts
-    logic [MshrCfgBurstBitsW-1:0]    bank_burst_bits;     // BankBurstBits, 0..BankIdW
+    logic [MshrCfgBurstBitsW-1:0]    bank_burst_bits;     // 0 or 1; a larger write is REFUSED, not truncated
     // Cache reuse target (fp16 half-word aliasing). 0 = LEGACY: a CACHED line self-invalidates at
     // hold_subs_{single,burst}, exactly as before this field existed. Non-zero = the line instead
     // survives until served_cnt reaches THIS value, so a second cohort addressing the other half

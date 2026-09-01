@@ -187,7 +187,12 @@ static inline uint32_t mshr_clog2(uint32_t x) {
 // Must MATCH mempool_pkg::MshrCfgBurstBitsW / the cfg module's BankBurstBitsMax. The CSR was a
 // single bit until 2026-09-01, which silently truncated a derived 2/3/4 to its LSB; it is now
 // 3 bits wide and range-checked, so the full value up to BankIdW is expressible.
-#define MSHR_BANK_BURST_BITS_MAX 4u
+// MUST equal (1 << mempool_pkg::MshrCfgBurstBitsW) - 1. The CSR is one bit and the hash
+// implements one intra-load bit; a larger write is now REFUSED with MSHR_STATUS_RANGE rather
+// than silently truncated to its LSB (which is what left KS=4/1 at 4 of 16 banks). Capping
+// here also drops MSHR_D_BURST_FLOOR back to BurstAlign+1, which is what lets the shift sit
+// on the p-slice gap where it belongs -- the same clamp fixes both halves.
+#define MSHR_BANK_BURST_BITS_MAX 1u
 #define MSHR_SHIFT_MIN 5u
 #define MSHR_SHIFT_MAX 10u
 // Hold-window MAGNITUDE is not derivable from M/N/P: the two classes carry OPPOSITE policies
