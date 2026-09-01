@@ -14247,3 +14247,39 @@ while everything else refreshed. Chain is now 6 steps with extract_ks_group_util
 running BEFORE the artifact that reads its json. Added a `mesh` facet to the explorer.
 
 Chart now holds 123 arms: 95 at 4x4, 28 at 8x8 (16 running, 9 wedged, 3 done).
+
+## 2026-09-01 -- 512 of 1024 cores never execute at 8x8 (user-spotted)
+
+**Purpose.** User noticed in the per-group utilisation chart that ~half the groups of the
+8x8 arms never run. Determine whether the software fails to give them work.
+
+**Result.** Confirmed and characterised, but the cause is NOT a missing work assignment.
+
+In six 8x8 arms, groups **32-63 (cores 512-1023)** show zero FPU utilisation for the whole
+run while groups 0-31 run at ~65%. Four of the six later wedged; the three arms that
+COMPLETED all use 64/64. Counts in docs/benchmarks/dead_top_half_8x8.tsv.
+
+Ruled out, with evidence:
+- **The work split is correct.** The kernel prints its own decomposition, and a broken and
+  a working arm compute the SAME 1024-core split:
+    fp32 KS=1 4x128x16384  (dead top half): m 0,1  p 0,64 -> 4 row_chunks x 256 p_blocks
+    fp32 KS=8 32x256x4096  (all 64 busy)  : m 0,8  p 0,16 -> 4 row_chunks x 256 p_blocks
+- **ACTIVE_GROUP_DIV is 1** in every app (the `=4` in main.c is comment text, not a setting).
+- **NUM_CORES-scaled ELF symbols are identical** across working and broken builds
+  (log_barrier=0x4000 in all).
+- `mempool_get_core_count()` is the compile-time NUM_CORES, so active_cores is uniform.
+
+What the probes show: mid-run `[STALLG]` gives groups 0-31 acc-stall 4,000-16,000/16,000
+and groups 32-63 **exactly zero of everything** -- no insn, no raw, no lsu, no acc. `[CMS]`
+reports STUCK_REQ only in the bottom half. The zeroes are real idleness, not a tracing gap:
+the TB counters are gated by `csr_trace_any_global`, a GLOBAL OR.
+
+So 512 cores are assigned work and never start. This plausibly explains the wedge: the
+bottom half finishes its share and waits at a barrier for cores that never arrive, which is
+exactly the signature recorded above (barrier quiet at window 82-178, retirement drains, no
+`execution took`).
+
+**Open.** Why only some shapes, when the split arithmetic is identical. Falsifiable
+prediction: the two dead-top-half arms still running (fp32 KS=1 4x128x16384, fp32 KS=8
+16x128x8192) should also wedge. Settling it needs a debug image (snitch_trace=1) to recover
+a top-half hart's stuck PC.

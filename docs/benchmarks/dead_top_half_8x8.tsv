@@ -1,0 +1,30 @@
+# 8x8 arms: groups that NEVER retire, measured 2026-09-01
+# arm	state	dead_groups	windows
+running fp16 KS=8 128x1024x2048	running	32	88
+running fp32 KS=1 4x128x16384	running	32	91
+running fp16 KS=8 64x512x4096	running	29	80
+running fp32 KS=8 64x512x2048	running	29	72
+running fp16 KS=8 8x128x32768	running	27	56
+running fp32 KS=8 16x128x8192	running	27	44
+running fp16 KS=1 1x128x32768	running	0	48
+running fp16 KS=1 2x128x32768	running	0	38
+running fp16 KS=1 4x128x32768	running	0	54
+running fp16 KS=8 16x128x16384	running	0	28
+running fp16 KS=8 32x256x8192	running	0	24
+running fp32 KS=1 1x128x16384	running	0	57
+running fp32 KS=1 2x128x16384	running	0	36
+running fp32 KS=8 128x1024x1024	running	0	66
+running fp32 KS=8 32x256x4096	running	0	29
+running fp32 KS=8 8x128x16384	running	0	47
+wedged fp16 KS=2 128x1024x2048	wedged	0	1183
+wedged fp16 KS=2 64x512x4096	wedged	0	763
+wedged fp16 KS=4 128x1024x2048	wedged	0	930
+wedged fp16 KS=4 32x256x8192	wedged	0	1098
+wedged fp16 KS=4 4x128x32768	wedged	0	1267
+wedged fp16 KS=8 128x1024x2048	wedged	0	2205
+wedged fp16 KS=8 64x512x4096	wedged	0	2222
+wedged fp16 KS=8 8x128x32768	wedged	0	2342
+wedged fp32 KS=8 64x512x2048	wedged	0	2378
+done fp16 KS=8 16x128x16384	done	0	159
+done fp32 KS=8 128x1024x1024	done	0	195
+done fp32 KS=8 8x128x16384	done	0	190
