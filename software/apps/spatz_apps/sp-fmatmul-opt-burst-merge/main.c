@@ -92,6 +92,31 @@
 #ifndef MATMUL_VERIFY
 #define MATMUL_VERIFY 0
 #endif
+// ---------------------------------------------------------------------------------------------
+// SPLIT PREDICATE, HOISTED. The kernel included below derives SPATZ_1XVL_LOAD_LMUL from the
+// per-core column slice, which needs the same work-split predicate this file derives further
+// down. Hoist it here so the kernel can see it. Every definition is #ifndef-guarded, so the
+// later copy finds them already defined and is a no-op -- the two cannot disagree. (Same pattern
+// as the KERNEL_SIZE hoist that already sits next to the predicate below.)
+#ifndef ACTIVE_GROUP_DIV
+#define ACTIVE_GROUP_DIV 1
+#endif
+#ifndef KERNEL_SIZE
+#define KERNEL_SIZE 8
+#endif
+#ifndef MATMUL_DECODE_SPLIT
+#  define MATMUL_ACTIVE_GROUPS ((NUM_GROUPS) / (ACTIVE_GROUP_DIV))
+#  if ((GEMM_M) % (MATMUL_ACTIVE_GROUPS)) != 0
+#    define MATMUL_DECODE_SPLIT 1
+#  elif ((GEMM_M) / (MATMUL_ACTIVE_GROUPS)) < (KERNEL_SIZE)
+#    define MATMUL_DECODE_SPLIT 1
+#  elif ((((GEMM_M) / (MATMUL_ACTIVE_GROUPS)) % (KERNEL_SIZE)) != 0)
+#    define MATMUL_DECODE_SPLIT 1
+#  else
+#    define MATMUL_DECODE_SPLIT 0
+#  endif
+#endif
+
 #include "kernel/sp-fmatmul.c"
 #include "printf.h"
 #ifdef MEMPOOL

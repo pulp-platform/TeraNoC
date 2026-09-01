@@ -510,14 +510,71 @@ void matmul_4xVL(float *c, const float *a, const float *b,
   }
 }
 
-#ifndef SPATZ_1XVL_LOAD_LMUL
-// B-vector load chunking, mirroring SPATZ_1XVL_STORE_LMUL. A vl=512 B load is 128 words =
-// EXACTLY all 128 ROB0 ids at rob_depth=128; every 512 B run to date has issued one. Splitting it
-// into two m4 halves keeps both on the burst path (256 B is above the 64 B floor) while halving
-// the ids one load reserves at a time. Loading v8 as v8+v12 (and v16 as v16+v20) fills the same
-// m8 group, so the vfmacc consuming it is unchanged -- same register-mapping argument as the
-// store split. 8 = single full-length load (previous behaviour).
-#define SPATZ_1XVL_LOAD_LMUL 8
+// ---- B-vector load chunking (DERIVED -- see the ROB0 budget below) -------------------------
+// Mirrors SPATZ_1XVL_STORE_LMUL. Loading v8 as v8+v12 (and v16 as v16+v20) fills the same m8
+// group, so the vfmacc consuming it is unchanged -- same register-mapping argument as the store
+// split. 8 = one full-length load; 4 = two m4 halves, both still on the burst path (256 B is
+// above the 64 B burst floor).
+//
+// WHY THIS IS DERIVED AND NOT A DEFAULT. The ROB0 id IS the memory response tag, and
+// spatz_vlsu.sv:279 admits a burst load on the sole condition vl <= NrOutstandingLoads *
+// MemDataWidthB -- a TAG-UNIQUENESS bound, with `<=`. The ALLOCATOR needs strictly more than
+// that: reorder_buffer.sv:249 grants a burst block only at status_cnt <= NumWords - BlockWords,
+// :236 never hands out the top two ids at all, and SPATZ_VLSU_DUAL_LOAD=2 deliberately keeps a
+// SECOND load in flight (its validated design point is two loads that TOGETHER fill ROB0:
+// 2 x 32 ids at rob_depth=64). So a load sized to the whole ROB passes the eligibility test and
+// then starves -- no error, the run simply freezes before the kernel.
+//
+// Measured, single-variable control (waveC4, 2026-08-31): at rob_depth=128 an unsplit 512 B load
+// froze at request 241,349; the split ran to completion. Passing this by hand is what made 10 of
+// the 2026-09-01 re-run arms deadlock in the I$ warm-up -- the flag was simply omitted. Derive it
+// so it cannot be omitted again.
+//
+// BUDGET: with dual-load, two loads must coexist, so one load may claim at most half of ROB0.
+#ifndef SPATZ_ROB0_WORDS
+// Software mirror of the RTL rob_depth (config/terapool_spatz4_fpu.mk: spatz_vlsu_rob_depth,
+// -> SPATZ_VLSU_ROB_DEPTH). Keep the two in step; this is the only place software knows it.
+#define SPATZ_ROB0_WORDS 128
+#endif
+#define SPATZ_1XVL_LOAD_WORD_CAP ((SPATZ_ROB0_WORDS) / 2)
+
+#if defined(GEMM_M) && defined(GEMM_P) && defined(GEMM_ELEM_BYTES)
+// Per-core column slice, from the SAME work split main.c hands the kernel (decode: main.c:415-418
+// via n_p_blocks; prefill: main.c:440-441 via split_p_count). MATMUL_DECODE_SPLIT is hoisted above
+// the kernel include so this sees the same branch the run takes.
+#  if MATMUL_DECODE_SPLIT
+#    define SPATZ_1XVL_PSPAN  ((GEMM_P) / ((NUM_CORES) / ((GEMM_M) / (KERNEL_SIZE))))
+#  else
+#    define SPATZ_1XVL_CPG_   ((NUM_CORES) / (NUM_GROUPS))
+#    define SPATZ_1XVL_SHRB_  (((GEMM_M) / (NUM_GROUPS)) / (KERNEL_SIZE))
+#    define SPATZ_1XVL_SPLITP ((SPATZ_1XVL_SHRB_ > 0 && SPATZ_1XVL_SHRB_ < SPATZ_1XVL_CPG_) \
+                                 ? (SPATZ_1XVL_CPG_ / SPATZ_1XVL_SHRB_) : 1)
+#    define SPATZ_1XVL_PSPAN  ((GEMM_P) / (SPATZ_1XVL_SPLITP))
+#  endif
+// gvl = min(p_span, vlmax); vlmax in BYTES at LMUL=8 is VLEN bits * 8 / 8 bits-per-byte = VLEN.
+#  define SPATZ_1XVL_VLMAX_B  (((VLEN) * 8) / 8)
+#  define SPATZ_1XVL_VL_B     (((SPATZ_1XVL_PSPAN) * (GEMM_ELEM_BYTES)) < (SPATZ_1XVL_VLMAX_B) \
+                                 ? ((SPATZ_1XVL_PSPAN) * (GEMM_ELEM_BYTES)) : (SPATZ_1XVL_VLMAX_B))
+#  define SPATZ_1XVL_LOAD_WORDS ((SPATZ_1XVL_VL_B) / 4)
+#  ifndef SPATZ_1XVL_LOAD_LMUL
+#    if (SPATZ_1XVL_LOAD_WORDS) > (SPATZ_1XVL_LOAD_WORD_CAP)
+#      define SPATZ_1XVL_LOAD_LMUL 4
+#    else
+#      define SPATZ_1XVL_LOAD_LMUL 8
+#    endif
+#  endif
+// A hand-passed 8 on a shape that needs 4 is the exact failure above. Fail the BUILD, where it is
+// still cheap, rather than the run, where it costs a wedged simulation and no error message.
+#  if ((SPATZ_1XVL_LOAD_LMUL) == 8) && ((SPATZ_1XVL_LOAD_WORDS) > (SPATZ_1XVL_LOAD_WORD_CAP))
+#    error "SPATZ_1XVL_LOAD_LMUL=8 issues a load wider than half of ROB0 for this shape; with dual-load in flight it cannot allocate and the run freezes before the kernel. Drop the override (the derivation picks 4) or raise spatz_vlsu_rob_depth and SPATZ_ROB0_WORDS together."
+#  endif
+#else
+// No GEMM shape in this translation unit: cannot derive the slice, so take the safe branch. At
+// gvl <= half the split macro skips its second load, so 4 is never wrong, only occasionally
+// one vsetvli more than necessary.
+#  ifndef SPATZ_1XVL_LOAD_LMUL
+#    define SPATZ_1XVL_LOAD_LMUL 4
+#  endif
 #endif
 #if SPATZ_1XVL_LOAD_LMUL == 4
 #  define SPATZ_LD(REGLO, REGHI, ADDR)                                                    \

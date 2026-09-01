@@ -1,0 +1,36 @@
+### arm=hf_4x4_fp32_ks1_64x512x512 node=larain3 fs=/scratch2
+[FPU] pre    cyc=12000 util=0.00% cum=0.00% busy=0/1024000 lane-cyc  grp_max=0.0%(g0) grp_min=0.0%(g0)  mshr_timeout=+0 bankfull_bypass=+0  core_spread=0/0(g0)  bar_rel=+0 bar_spread=0.0 bar_max=0  insn_drift_intra=0/0(g0) inter=0 insn_max=0
+[STALLG] pre    cyc=12000 denom=16000 ins= 379,180,189,197,163,172,184,194,173,181,192,201,182,193,202,209 raw= 1044,528,1174,6781,4463,2113,5018,7000,6052,3196,2472,6068,5392,3216,4588,6954 lsu= 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 acc= 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 fen= 14,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+[CMS] cyc=12000 period_summary: req=6419 resp=6386 inflight=33 orphan=0 dup_alloc=0 top_inflight={g=3,t=5,c=0,p=0,hart=0x35,n=1}
+[FPU] pre    cyc=13000 util=1.49% cum=0.00% busy=15272/1024000 lane-cyc  grp_max=13.8%(g2) grp_min=0.0%(g5)  mshr_timeout=+0 bankfull_bypass=+0  core_spread=262/1676(g2)  bar_rel=+16 bar_spread=22.1 bar_max=45  insn_drift_intra=0/0(g0) inter=0 insn_max=0
+[STALLG] pre    cyc=13000 denom=16000 ins= 3444,3101,2879,3219,3776,3440,3141,3792,4256,3984,3776,4192,4736,4512,4208,4720 raw= 288,95,95,158,121,80,142,719,80,80,97,80,81,80,145,316 lsu= 24,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 acc= 8354,8702,8876,8618,8388,8736,8688,8388,7920,8196,8404,7992,7444,7668,7976,7464 fen= 168,517,542,496,168,168,496,168,168,168,168,168,168,168,168,198
+[CMS] cyc=13000 period_summary: req=49396 resp=20805 inflight=26496 orphan=0 dup_alloc=0 top_inflight={g=1,t=14,c=0,p=1,hart=0x1e,n=128}
+[FPU] pre    cyc=14000 util=27.60% cum=0.00% busy=282576/1024000 lane-cyc  grp_max=51.6%(g1) grp_min=5.2%(g15)  mshr_timeout=+0 bankfull_bypass=+0  core_spread=2329/3392(g12)  bar_rel=+0 bar_spread=0.0 bar_max=45  insn_drift_intra=0/0(g0) inter=0 insn_max=0
+[STALLG] pre    cyc=14000 denom=16000 ins= 475,12,99,0,6,4,8,0,15,0,0,0,0,0,0,0 raw= 1172,2845,636,1818,4560,3070,1682,1465,3784,2320,1244,504,3887,1789,504,15 lsu= 4982,0,199,0,0,0,0,0,0,0,0,0,0,0,0,0 acc= 8228,12875,14641,13996,11158,12722,14115,14385,11980,13546,14603,15369,11945,14078,15371,15914 fen= 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+[CMS] cyc=14000 stuck_summary: total_stuck=122 newly_warned=122
+[CMS] cyc=14000 period_summary: req=103675 resp=72675 inflight=15976 orphan=0 dup_alloc=0 top_inflight={g=3,t=4,c=0,p=1,hart=0x34,n=128}
+[FPU] pre    cyc=15000 util=49.48% cum=0.00% busy=506624/1024000 lane-cyc  grp_max=70.4%(g13) grp_min=0.6%(g0)  mshr_timeout=+0 bankfull_bypass=+0  core_spread=2876/3960(g2)  bar_rel=+0 bar_spread=0.0 bar_max=45  insn_drift_intra=0/0(g0) inter=0 insn_max=0
+[STALLG] pre    cyc=15000 denom=16000 ins= 427,210,594,8,471,131,155,0,296,193,155,0,254,43,59,0 raw= 482,1038,147,821,940,606,685,2811,2849,3212,1968,2554,3522,5559,5142,7385 lsu= 2994,1759,5691,0,2775,126,723,0,2585,2189,129,0,2378,18,0,0 acc= 410,12640,4919,14921,10034,14830,14083,12928,9194,9982,13341,13230,9005,10050,10487,8404 fen= 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+[CMS] cyc=15000 period_summary: req=176410 resp=138132 inflight=9976 orphan=0 dup_alloc=0 top_inflight={g=13,t=3,c=0,p=1,hart=0xd3,n=127}
+[FPU] pre    cyc=16000 util=25.65% cum=0.00% busy=262628/1024000 lane-cyc  grp_max=66.1%(g15) grp_min=0.0%(g0)  mshr_timeout=+0 bankfull_bypass=+0  core_spread=2947/4000(g1)  bar_rel=+0 bar_spread=0.0 bar_max=45  insn_drift_intra=0/0(g0) inter=0 insn_max=0
+[STALLG] pre    cyc=16000 denom=16000 ins= 0,667,205,838,352,719,776,660,372,569,668,365,398,659,622,238 raw= 0,1046,89,168,148,217,394,186,212,228,512,56,168,217,403,0 lsu= 0,3189,1111,5906,1835,4063,4610,4602,2529,3914,5863,2900,3306,4453,4684,2784 acc= 0,1140,1000,8017,3772,6467,1992,9661,5764,4074,2560,12018,7303,8592,8235,12556 fen= 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+[CMS] cyc=16000 period_summary: req=235762 resp=197523 inflight=827 orphan=0 dup_alloc=0 top_inflight={g=11,t=14,c=0,p=1,hart=0xbe,n=93}
+[FPU] pre    cyc=17000 util=4.88% cum=0.00% busy=49996/1024000 lane-cyc  grp_max=18.8%(g14) grp_min=0.0%(g0)  mshr_timeout=+0 bankfull_bypass=+0  core_spread=2293/4000(g1)  bar_rel=+0 bar_spread=0.0 bar_max=45  insn_drift_intra=0/0(g0) inter=0 insn_max=0
+[STALLG] pre    cyc=17000 denom=16000 ins= 0,0,0,172,0,0,0,124,164,123,123,470,297,164,164,724 raw= 0,1000,0,126,0,0,0,109,94,55,69,353,238,115,129,493 lsu= 0,0,0,31,0,0,0,1000,1039,284,417,2265,1855,932,904,2481 acc= 0,0,1000,0,2000,2000,0,2000,2000,1000,0,1082,69,2000,3000,0 fen= 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+[CMS] cyc=17000 period_summary: req=241959 resp=204471 inflight=0 orphan=0 dup_alloc=0 top_inflight={g=0,t=0,c=0,p=0,hart=0x0,n=0}
+[FPU] pre    cyc=18000 util=4.69% cum=0.00% busy=48000/1024000 lane-cyc  grp_max=18.8%(g14) grp_min=0.0%(g0)  mshr_timeout=+0 bankfull_bypass=+0  core_spread=2250/4000(g1)  bar_rel=+0 bar_spread=0.0 bar_max=45  insn_drift_intra=0/0(g0) inter=0 insn_max=0
+[STALLG] pre    cyc=18000 denom=16000 ins= 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 raw= 0,1000,0,0,0,0,0,0,0,0,0,0,0,0,0,0 lsu= 0,0,0,0,0,0,0,1000,0,0,0,0,0,0,0,0 acc= 0,0,1000,0,2000,2000,0,2000,2000,1000,0,1000,0,2000,3000,0 fen= 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+[CMS] cyc=18000 period_summary: req=241959 resp=204471 inflight=0 orphan=0 dup_alloc=0 top_inflight={g=0,t=0,c=0,p=0,hart=0x0,n=0}
+--- last period ---
+[CMS] cyc=690000 period_summary: req=241959 resp=204471 inflight=0 orphan=0 dup_alloc=0 top_inflight={g=0,t=0,c=0,p=0,hart=0x0,n=0}
+[FPU] pre    cyc=691000 util=4.69% cum=0.00% busy=48000/1024000 lane-cyc  grp_max=18.8%(g14) grp_min=0.0%(g0)  mshr_timeout=+0 bankfull_bypass=+0  core_spread=2250/4000(g1)  bar_rel=+0 bar_spread=0.0 bar_max=45  insn_drift_intra=0/0(g0) inter=0 insn_max=0
+[FPUG] pre    cyc=691000 denom=64000 busy= 0,4000,4000,0,4000,4000,0,8000,4000,4000,0,0,0,4000,12000,0
+[MSHRG] pre    cyc=691000 timeout= 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 bypass= 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+[STALLG] pre    cyc=691000 denom=16000 ins= 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 raw= 0,1000,0,0,0,0,0,0,0,0,0,0,0,0,0,0 lsu= 0,0,0,0,0,0,0,1000,0,0,0,0,0,0,0,0 acc= 0,0,1000,0,2000,2000,0,2000,2000,1000,0,1000,0,2000,3000,0 fen= 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+[MEMOG] pre    cyc=691000 memo= 0,2000,3000,0,5000,5000,0,9000,5000,3000,0,3000,0,6000,6000,0 memq= 0,1000,2000,0,3000,3000,0,6000,3000,2000,0,2000,0,4000,3000,0
+[INSNG] pre    cyc=691000 insn= 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 rel= 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+[CMS] cyc=691000 period_summary: req=241959 resp=204471 inflight=0 orphan=0 dup_alloc=0 top_inflight={g=0,t=0,c=0,p=0,hart=0x0,n=0}
+--- distinct FPU busy after freeze ---
+      1 busy=262628
+    674 busy=48000
+      1 busy=49996

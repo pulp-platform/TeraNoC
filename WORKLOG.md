@@ -15050,3 +15050,52 @@ and every number we have already published is unaffected either way.
 that was previously hidden behind "did not finish". A real, chaseable calibration delta instead
 of a fake structural boundary. Their other arm, `fp32 ks2 8x128x4096`, has no RTL cycle count
 on our side (degraded), but it IS in the 36-arm hashfix reissue set, so we will have it.
+
+---
+
+## 2026-09-02 01:00 · Derive SPATZ_1XVL_LOAD_LMUL from the shape (10 arms deadlocked without it)
+
+**Purpose.** 10 of the 36 hashfix re-run arms never reached the benchmark: they froze at
+cyc=16000, inside the I$ warm-up, and stayed frozen for 1.23M cycles. Root-cause it and make the
+failure unrepeatable.
+
+**Diagnosis.** Not the MSHR hash fix (the MSHR is configured *after* the warm-up, main.c:572, so
+those CSR writes are never reached) and not the RTL (the 107-define sets of `build_tgt4x4` and
+`build_tgt4x4_hashfix` are identical, and the three edited RTL files are runtime-inert). The
+`hf_` build simply **omitted `-DSPATZ_1XVL_LOAD_LMUL=4`**, which the previous clean campaign
+(`build_waveC4.sh`) passed on every one of these same 10 shapes and documented as MANDATORY.
+
+Frozen state: `ins=0` in all 16 groups, `inflight=0`, FPU `busy` pinned to 140000/140016 across
+1228 consecutive windows — a hard deadlock, not slowness.
+
+**Why 512 B deadlocks.** `spatz_vlsu.sv:279` admits a burst load on `vl <= NrOutstandingLoads *
+MemDataWidthB` — a *tag-uniqueness* bound, with `<=`, so 512 B at rob_depth=128 passes with zero
+spare. The *allocator* needs strictly more: `reorder_buffer.sv:249` grants a block only at
+`status_cnt <= NumWords - BlockWords`, `:236` never hands out the top two ids, and
+`SPATZ_VLSU_DUAL_LOAD=2` deliberately keeps a second load in flight (validated design point: two
+loads that *together* fill ROB0, 2x32 at rob_depth=64). One load sized to the whole ROB passes
+eligibility and then starves.
+
+**Implementation.**
+- `sp-fmatmul{,-fp16}/kernel/sp-fmatmul.c`: `SPATZ_1XVL_LOAD_LMUL` is now DERIVED from the
+  per-core column slice — `SPATZ_1XVL_PSPAN` for both split branches, `gvl = min(pspan, vlmax)`,
+  and LMUL=4 whenever the load exceeds `SPATZ_ROB0_WORDS/2` (half, because dual-load keeps two
+  loads resident). `SPATZ_ROB0_WORDS` (128) is the software mirror of `spatz_vlsu_rob_depth`.
+- Same files: a `#error` rejects a hand-passed `LOAD_LMUL=8` on a shape that needs 4 — the silent
+  freeze becomes a build failure. Verified: it fires with the intended message.
+- `sp-fmatmul{,-fp16}/main.c`: hoisted the `ACTIVE_GROUP_DIV` / `KERNEL_SIZE` /
+  `MATMUL_DECODE_SPLIT` predicate above `#include "kernel/sp-fmatmul.c"` so the kernel derives
+  from the same branch the run takes. All `#ifndef`-guarded, so the later copy is a no-op.
+
+**Result.**
+- Derivation reproduces the empirical split 14/14 across the KS=1 grid: B>=8 -> 4 (the 10 frozen
+  arms, both precisions), B in {2,4} -> 8 (the 4 arms that are running, code unchanged).
+- `matmul_1xVL` in the derived build is **byte-identical** to the known-good
+  `-DSPATZ_1XVL_LOAD_LMUL=4` build (`sw_4x4_fp16_ks1_16x128x4096`): 196 insns, identical
+  disassembly. The broken `hf_` build differs (8 vle16 vs 12).
+- 10 shapes rebuilt as `hardware/rf_4x4_fp{16,32}_ks1_*.elf`.
+
+**Status.** Software fix landed and verified. The 10 frozen arms still hold VCS seats — awaiting
+the go-ahead to kill and re-dispatch. ROB0 stays 128 (user decision): with dual-load the two
+64-word halves overlap, so the split should cost little, and two halves together fill ROB0
+exactly — the same 2x-fills-ROB0 shape as the validated 2x32-at-64 design point.
