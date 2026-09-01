@@ -616,6 +616,36 @@ def main():
               '' % (f(best, 4) / f(worst, 4) if f(worst, 4) else 0)]
         h += [ratio_chart(ratio_pairs), '<p class="sub" style="margin-top:2px">Filled marks are pairs where BOTH arms ran clean; hollow dashed marks carry RH&nbsp;&gt;&nbsp;0 or mshr_timeout&nbsp;&gt;&nbsp;0 on one side and measure MSHR degradation, not precision &mdash; a sick fp32 arm inflates the ratio, a sick fp16 arm deflates it. <b>Every point above the 2&times; ceiling is fp32-sick</b>, so the earlier reading of this chart (&ldquo;fp32 is losing on traffic&rdquo;) does not survive: on the clean pairs alone the ratio sits at or just around the arithmetic limit, which is what ~2 MACs per lane-cycle predicts and needs no traffic explanation. Hover any mark for its health counters.</p></section>']
 
+    # ---- harvest / kill provenance --------------------------------------------------
+    # results.tsv is merge-only and keeps a measurement forever, but its `done` says nothing
+    # about how the PROCESS ended. An arm whose benchmark completed and whose epilogue then
+    # hung looks identical to a clean exit in that file. harvest_notes.tsv carries that
+    # difference so the distinction survives into the page. Optional: absent file = no section.
+    _hn = []
+    try:
+        with open(os.path.join(ROOT, "docs/benchmarks/8x8_scaleup/harvest_notes.tsv")) as fh:
+            for ln in fh:
+                if ln.startswith("#") or not ln.strip():
+                    continue
+                f4 = ln.rstrip("\n").split("\t")
+                if len(f4) >= 4:
+                    _hn.append(f4[:4])
+    except Exception:
+        _hn = []
+    if _hn:
+        h += ['<section><h2>Harvest &amp; kill provenance</h2>',
+              '<p class="sub" style="margin-bottom:14px">Arms whose process was ended '
+              'deliberately. The measurement in <code>results.tsv</code> is unaffected and still '
+              'charted above &mdash; this records <b>how the run ended</b>, so a <code>done</code> '
+              'row is never read as a clean exit.</p>',
+              '<table><thead><tr><th>arm</th><th>date</th><th>state</th><th>what happened</th>'
+              '</tr></thead><tbody>']
+        for a, d, st, note in _hn:
+            h += ['<tr><td class="mono">%s</td><td class="mono">%s</td>'
+                  '<td class="mono">%s</td><td>%s</td></tr>'
+                  % (html.escape(a), html.escape(d), html.escape(st), html.escape(note))]
+        h += ['</tbody></table></section>']
+
     # ---- per-group mesh over time ----
     try:
         gu = json.load(open(os.path.join(ROOT, "docs/benchmarks/8x8_scaleup/group_util.json")))

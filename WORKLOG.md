@@ -15099,3 +15099,34 @@ eligibility and then starves.
 the go-ahead to kill and re-dispatch. ROB0 stays 128 (user decision): with dual-load the two
 64-word halves overlap, so the split should cost little, and two halves together fill ROB0
 exactly — the same 2x-fills-ROB0 shape as the validated 2x32-at-64 design point.
+
+---
+
+## 2026-09-02 01:50 · Harvest + kill the stalled 8x8 scale-up arm; add kill provenance to the dashboard
+
+**Purpose.** `s8_fp16_8192x256x512` (local headless Questa) finished its benchmark at cyc=731,000
+and then sat 5,076 further periods in the epilogue with no EOC, crawling ~2k cycles per 10 min,
+holding a seat. Harvest everything useful, kill it, and make the artifact say what happened.
+
+**Checked first.** Verified it was NOT a GUI run before touching it: its cmdline is `-c -do run -a
+work.s8_opt`, with no `-voptargs=+acc`, no `-wlf vsim.wlf`, no `run.tcl` -- unlike the two live GUI
+runs, which carry all three. Also confirmed its `.badist_cmd.sh` retry loop is inert here (guard is
+`transcript >8 lines`, and the transcript is 663 MB), and that the bash parent in the repo root is a
+reporting loop, not a launcher.
+
+**Result.**
+- Harvested to `docs/benchmarks/8x8_scaleup/harvested/s8_fp16_8192x256x512_epilogue_stall.txt`:
+  phase histogram (128 pre / 604 bench / 5,076 pre), final bench period, peak `cum=40.64%`,
+  per-group busy, MSHRG/STALLG/MEMOG/INSNG/CMS, cache+timeout totals, epilogue evidence.
+- The measurement was ALREADY in `results.tsv` (`8192x256x512 fp16 1 604231 ~25.01 ... done`) and
+  the 604-period per-group series already in `group_util.json` -- nothing was at risk.
+- Killed by process group after enumerating both groups and confirming every PID belonged to job
+  0013. 0 survivors, no relaunch; mtiverification 47 -> 36.
+- `gen_8x8_dashboard.py`: new optional **Harvest & kill provenance** section, fed by a new
+  `docs/benchmarks/8x8_scaleup/harvest_notes.tsv`. `results.tsv` is merge-only and its `done` says
+  nothing about how the PROCESS ended, so a completed-benchmark/hung-epilogue arm was
+  indistinguishable from a clean exit. Absent file = no section, so it is safe for other users.
+- Republished the 8x8 Scale-Up Campaign artifact to the same URL; both the per-group FPU
+  utilisation section and the new provenance section verified present in the rendered page.
+
+**Status.** Done. 194 done / 2 running / 4 failed on that dashboard.

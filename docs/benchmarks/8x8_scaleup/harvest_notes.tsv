@@ -1,0 +1,4 @@
+# arm	date	state	note
+# Provenance for arms whose PROCESS was ended deliberately. results.tsv carries the measurement;
+# this file carries how the run ended, so a "done" row is never mistaken for a clean exit.
+fp16_8192x256x512	2026-09-02	harvested+killed	Benchmark COMPLETE and valid (604 periods, cyc 128,000-731,000; final cum 25.02%, peak 40.64%). The EPILOGUE never terminated: 5,076 further periods with no EOC marker, crawling ~2k cycles per 10 min. Local headless Questa (-c, -do run -a), not a GUI run. Full record: docs/benchmarks/8x8_scaleup/harvested/s8_fp16_8192x256x512_epilogue_stall.txt. Killed 2026-09-02 by process group after verifying every PID belonged to job 0013; freed a mtiverification seat.
