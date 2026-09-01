@@ -14869,3 +14869,24 @@ truncated to 0) = **16/16 banks concurrently**, up from 4/16.
 call, so the harness saw the wrapper exit immediately and reported success while `vcs` was still
 elaborating -- the build dir had `compilevcs.sh` and `.daidir` but no `mempool_simvopt`. Not a
 build failure; a double-backgrounding mistake. Check for the actual binary, not the exit code.
+
+### 2026-09-01 -- GUI waveform CONFIRMS the corrected bank spread
+
+User ran `hardware/sw_4x4_fp16_ks4_8x128x8192_hashfix.elf` in the QuestaSim GUI on an image
+built with the fix and reports the MSHR bank spread is now **much better and evenly spread**.
+
+That is independent confirmation of the model, from the waveform rather than from the analysis:
+
+    shipped setting  sh_burst=6, bank_burst_bits=2 (truncated to 0)  ->  4 of 16 banks
+    corrected        sh_burst=4, bank_burst_bits=0                   -> 16 of 16 banks
+
+and it closes the loop opened when the same waveform showed most banks idle. The chain --
+waveform observation -> address-model analysis -> three defects (1-bit CSR truncation, floor
+inflation, SHIFT_MIN clamp) -> SW+HW fix -> waveform confirmation -- is complete on the
+STRUCTURAL question.
+
+**Still open: the THROUGHPUT question.** Better spread is not automatically fewer cycles; the
+MSHR could have been bank-limited or limited by something else entirely. The 36 re-issued 4x4
+arms (batch teranoc-20260901-185541-d0d9, 24 running / 12 queued) answer that, and none has
+produced a cycle count yet. Do NOT quote a performance benefit until a matched old-vs-new pair
+lands.
