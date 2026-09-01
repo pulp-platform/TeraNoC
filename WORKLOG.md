@@ -14448,3 +14448,36 @@ says to raise it first if a non-burst path wedges with no timeout counter moving
 
 **Consequence.** New builds now match the sweep images by default. Anything built earlier from
 the bare flavour (`build_gui_4x4`, `build_2_gui_4096x32x512`) will CHANGE if rebuilt.
+
+## 2026-09-01 -- hardware/ cleanup: 1.3 TB -> 402 GB, no results lost
+
+**Purpose.** hardware/ had grown to 1.3 TB across 749 directories.
+
+**What it was.** Per-campaign breakdown: run4/run32 old GEMM sweep 627 GB (84 dirs),
+run_/runN 338 GB (136), other 132 GB (67), builds/tools 112 GB (7), s8_ old 8x8 sweep 54 GB
+(248), decode/fix/ab/reuse 11 GB (50), rob_ 2 GB (48). The **current campaign is only 22 GB**
+across 109 dirs.
+
+**Method -- truncate, do not delete.** Traces dominated (36.6 of 41.4 GB in one dir, 60.9 of
+61.7 in another) and those dirs HOLD RESULTS, so deleting them would have destroyed data.
+Truncated `trace_hart_*`, `trace_spatz_*`, `trace_fpu_fleet.log`, `trace_core_*` above 1 MB
+in every dir outside the current campaign: **121,223 files across 203 dirs, +818 GB**.
+
+Then spyglass: 13 project dirs held 60.9 GB but their `consolidated_reports/` are only ~120 MB
+and the findings were already harvested into `docs/lint_findings_review.md` (Aug 14). Removed
+the intermediates, kept all 13 reports: **60,871 MB -> 99 MB, +59 GB**.
+
+**Protections applied.**
+- `run_fmvbench` -- THREE live local sim processes; skipped entirely (trace verified non-zero
+  afterwards, sim still running).
+- Current-campaign dirs (`*_sw_[48]x[48]_*`) -- untouched; the artifact reads them.
+- `both_run_ks1`, `r256_run_ks1` -- read by `extract_ks_group_util.py`'s RUNS list.
+- `build_*` -- VCS arms reference images by absolute path over the automount, so these must
+  stay while arms can launch.
+
+**Verified after.** 62 current-campaign dirs still hold a cycle count; 57 of the 60 largest
+truncated dirs still hold theirs.
+
+**Still open (not touched, needs a decision):** `build_gui_4x4` 45 GB (built 08-29 from the
+OLD flavour defaults, so stale after today's config change), `vb8` 19 GB + `vb4` 5 GB
+(Verilator builds from 08-05, superseded by `vbuild_4x4`).
