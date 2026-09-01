@@ -65,7 +65,12 @@ $(BINARIES): $(BIN_DIR)/%: %/main.c.o $(RUNTIME) $(LINKER_SCRIPT) data_%.h updat
 #
 #   make sp-decode-fp16 config=terapool_spatz4_fpu gemm_m=16 gemm_n=128 gemm_p=16384
 #
-DECODE_APPS := sp-decode-fp16 sp-decode-fp32
+# Same treatment for PREFILL. Its 274 per-shape dirs (sp-fp16-*/sp-fp32-*) had drifted
+# 96 non-comment lines behind the canonical app -- missing MATMUL_REPEAT, MATMUL_SPOTCHECK
+# at 0 instead of 1, and no KERNEL_SIZE / auto-derived MATMUL_DECODE_SPLIT. These thin
+# wrappers symlink the canonical source so the canonical app's own checked-in matmul.json
+# stays pristine (building a shape here never dirties a tracked file).
+DECODE_APPS := sp-decode-fp16 sp-decode-fp32 sp-prefill-fp16 sp-prefill-fp32
 gemm_m ?= 16
 gemm_n ?= 128
 gemm_p ?= 16384
@@ -92,6 +97,8 @@ $(1)/script/matmul.json: FORCE
 endef
 $(eval $(call DECODE_SHAPE_rule,sp-decode-fp16,16))
 $(eval $(call DECODE_SHAPE_rule,sp-decode-fp32,32))
+$(eval $(call DECODE_SHAPE_rule,sp-prefill-fp16,16))
+$(eval $(call DECODE_SHAPE_rule,sp-prefill-fp32,32))
 .PHONY: FORCE
 FORCE:
 

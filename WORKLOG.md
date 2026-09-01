@@ -14526,3 +14526,36 @@ generator run: `ELF_OK 8x128x32768`.
 
 **Not yet done.** The 43 old dirs still exist (untracked, ~1.1 GB of generated headers)
 pending the user's go-ahead to delete.
+
+## 2026-09-01 -- merge 274 per-shape PREFILL apps into two wrappers; delete 43 decode dirs
+
+**Decode.** The 43 per-shape `sp-decode-<shape>` dirs are deleted (untracked scratch).
+
+**Prefill -- the same bug, six times larger and WORSE.** `gen_gemm_shape_app.sh:20` did the
+same `cp "$SRC/main.c"` per shape, and 274 dirs accumulated (152 fp16 + 122 fp32) with **1,918
+tracked files**. They had drifted badly:
+
+    fp16 canonical 7219b48c matched  0 of 152 dirs   (majority 72eb102a, 141 dirs)
+    fp32 canonical 8af2bc8d matched  1 of 122 dirs   (majority 24b1dd37, 109 dirs)
+
+The fp16 majority sits **96 non-comment lines** behind the canonical app: no `MATMUL_REPEAT`,
+`MATMUL_SPOTCHECK` at 0 instead of 1 (so no correctness signal at all), no `KERNEL_SIZE`
+parameterisation, and no auto-derived `MATMUL_DECODE_SPLIT`. These were not redundant copies of
+the canonical source -- every one of them was an older program.
+
+**Implementation.** `sp-prefill-fp16` / `sp-prefill-fp32`, thin wrappers whose `main.c`,
+`kernel/` and `gen_data.py` are SYMLINKS to `sp-fmatmul-opt-burst-merge{,-fp16}`, with the
+shape as `gemm_m`/`gemm_n`/`gemm_p`. Wrappers rather than building the canonical apps directly,
+so their checked-in `matmul.json` stays pristine -- building a shape never dirties a tracked
+file. `gen_gemm_shape_app.sh` rewritten to use them and to assert the built header's GEMM_M/N/P
+match the request. **ELF naming is unchanged** (`hardware/fp16_<shape>.elf`), so every existing
+scraper keeps working.
+
+**Verified.** End-to-end: `ELF_OK 512x64x256`. App dirs 356 -> 39. All four wrapper symlinks
+resolve; both canonical apps intact.
+
+**CONSEQUENCE TO CARRY FORWARD.** The 36 prefill ELFs already in `hardware/` were built from the
+STALE copies. Rebuilding any prefill shape now uses the canonical source, which is 96 lines
+ahead -- so an old prefill ELF and a newly built one are **not** running the same program, and
+their cycles are not comparable. Most importantly the old ones lack `MATMUL_REPEAT`, so their
+work normalisation differs. Re-measure rather than mixing old and new prefill numbers.

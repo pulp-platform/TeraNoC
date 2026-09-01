@@ -45,3 +45,6 @@ software/apps/spatz_apps/sp-decode-[0-9]*/
 # data header are generated at build time from gemm_m/gemm_n/gemm_p.
 software/apps/spatz_apps/sp-decode-fp*/script/matmul.json
 software/apps/spatz_apps/sp-decode-fp*/data/data_gemm.h
+# Same for the prefill wrappers, which replaced 274 per-shape sp-fp16-*/sp-fp32-* dirs.
+software/apps/spatz_apps/sp-prefill-fp*/script/matmul.json
+software/apps/spatz_apps/sp-prefill-fp*/data/data_gemm.h
