@@ -14629,3 +14629,31 @@ is disabled by the truncation. Each defect alone would be milder.
 
 **Not yet done:** no fix, no re-measure. Every decode-sweep number stands as measured, but the
 MSHR was tuned for a spread it never achieved on KS=1/2/4.
+
+### 2026-09-01 -- why the bank hash fails on decode, and a tool to size it
+
+**Why.** The shift derivation targets the gap between adjacent p-slices
+(`clog2(GAP_WORDS)`). That is right for PREFILL and for decode at KS=8, and wrong at KS<8,
+for a structural reason the 2026-08-26 PGAP fix did not cover: the fix corrected the p STRIDE
+but not the p SPAN inside one group.
+
+    prefill 1024x128x512 ks=8 : 2 p-slices per group -- spread comes from the k-loop stride
+                                (256 words), which the field at shift 7 overlaps -> 16/16
+    decode  8x128x8192  ks=8  : 16 p-slices per group = #banks -> p alone reaches 16/16
+    decode  8x128x8192  ks=4  :  8 p-slices per group -> 8 max from p, needs burst_bits=1 to
+                                double it; software derives 2, the CSR truncates to 0, and the
+                                BURST_FLOOR (4+2) pushes the shift to 6 -> 4/16 banks
+
+So the hash was never "perfect"; it happened to be correct wherever a varying field lands
+under the selected bits -- k-stride for prefill, p for decode KS=8 -- and KS<8 has neither.
+
+**Tool.** `scripts/mshr_bank_hash_explore.py` takes shape, kernel size, min/max burst, MSHR
+entries and banks; reports burst feasibility, the ceiling on reachable banks, a ranked search
+over (shift, burst_bits), and an ASCII occupancy histogram for A and W. It flags any setting
+whose burst_bits exceeds what the 1-bit CSR can hold.
+
+**Actionable result.** For 8x128x8192 ks=4 the current setting gives **4/16** banks. The best
+setting REPRESENTABLE ON TODAY'S HARDWARE is `sh_burst=12, burst_bits=0` -> **16/16 banks,
+evenness 1.000** -- spreading by the k-loop stride (4096 words = 2^12) instead of by p. That is
+a pure CSR/software change: no RTL fix, no re-elaboration. Widening the CSR field would also
+work but is not required for this shape.
