@@ -1,6 +1,6 @@
 # GEMM results — 8×8 mesh, 1024 cores — 248-shape scale-up campaign
 
-Generated 2026-08-27 21:35 by `scripts/gen_8x8_scaleup_doc.py`. **Re-run rather than editing.**
+Generated 2026-09-01 17:34 by `scripts/gen_8x8_scaleup_doc.py`. **Re-run rather than editing.**
 
 `eff = ideal/actual`, `ideal = M·N·P / lanes` (fp16 8192 MAC/cyc, fp32 4096). Rank on `eff`,
 not on the TB `util` column — that counter is lane *occupancy*, is not conserved across runs
@@ -13,11 +13,11 @@ of identical work, and has inverted a real ranking before.
 
 | | count |
 |---|---:|
-| measurements | **181** |
-| recorded livelock (failures, excluded below) | **51** |
+| measurements | **194** |
+| recorded livelock (failures, excluded below) | **52** |
 | of manifest | 248 |
 
-Efficiency over the 181 measurements: **median 42.2%**, mean 43.9%, range 7.4–89.3%.
+Efficiency over the 194 measurements: **median 43.6%**, mean 45.1%, range 7.4–89.3%.
 
 ## Cohort target × P
 
@@ -26,10 +26,10 @@ on `P`. Mean efficiency by (target, P) over measurements only:
 
 | target \ P | 128 | 256 | 512 | 1024 | 2048 |
 |---:|---:|---:|---:|---:|---:|
-| **16** | — | 36.5% (7) | 48.3% (14) | 46.7% (14) | 36.7% (4) |
-| **8** | 36.6% (7) | 51.1% (14) | 61.1% (13) | 58.0% (10) | 68.7% (5) |
-| **4** | 38.7% (9) | 56.1% (10) | 65.0% (9) | 63.4% (7) | 70.1% (4) |
-| **1** | 18.7% (20) | 24.5% (17) | 28.2% (13) | 37.8% (4) | — |
+| **16** | — | 36.5% (7) | 48.3% (14) | 46.7% (14) | 36.9% (5) |
+| **8** | 36.6% (7) | 51.1% (14) | 61.7% (14) | 60.9% (13) | 70.1% (7) |
+| **4** | 38.7% (9) | 56.1% (10) | 67.3% (10) | 67.2% (9) | 70.1% (4) |
+| **1** | 18.7% (20) | 24.6% (18) | 27.6% (14) | 39.5% (5) | — |
 
 Livelock arms are excluded, so the low-target/low-P cells read better here than the
 campaign actually ran — the failures are listed separately below.
@@ -40,16 +40,16 @@ campaign actually ran — the failures are listed separately below.
 |---|---|---:|---:|---:|---:|---:|---:|
 | `1024x2048x512` | fp16 | 8 | 128B | 146,697 | **89.3%** | 92.14% | 4 |
 | `2048x2048x256` | fp16 | 4 | 128B | 147,182 | **89.1%** | 91.84% | 4 |
+| `2048x2048x512` | fp16 | 4 | 256B | 296,270 | **88.5%** | ~92.17% | 4 |
 | `1024x1024x512` | fp16 | 8 | 128B | 75,645 | **86.6%** | 89.79% | 0 |
 | `2048x1024x512` | fp16 | 4 | 256B | 151,919 | **86.3%** | 90.52% | 0 |
+| `2048x1024x1024` | fp16 | 4 | 512B | 306,013 | **85.7%** | ~90.14% | 0 |
 | `2048x1024x256` | fp16 | 4 | 128B | 78,437 | **83.6%** | 87.42% | 0 |
 | `1024x2048x256` | fp32 | 8 | 128B | 157,344 | **83.3%** | 86.50% | 0 |
 | `2048x512x1024` | fp16 | 4 | 512B | 158,268 | **82.8%** | ~87.37% | 0 |
 | `2048x512x512` | fp16 | 4 | 256B | 79,169 | **82.8%** | 87.12% | 4 |
 | `1024x512x512` | fp16 | 8 | 128B | 39,928 | **82.1%** | 85.86% | 0 |
 | `2048x512x2048` | fp16 | 4 | 1024B | 323,675 | **81.0%** | ~86.73% | 14 |
-| `2048x1024x256` | fp32 | 4 | 256B | 162,982 | **80.4%** | 85.17% | 0 |
-| `1024x1024x256` | fp32 | 8 | 128B | 81,530 | **80.4%** | 84.42% | 0 |
 
 ## Worst 12 by efficiency
 
@@ -70,7 +70,7 @@ campaign actually ran — the failures are listed separately below.
 
 ## Low efficiency with `RH = 0` — a second, separate mechanism
 
-44 measurements sit below 25% efficiency with **no** RH-livelock. Their `N` distribution:
+45 measurements sit below 25% efficiency with **no** RH-livelock. Their `N` distribution:
 
 | N | arms |
 |---:|---:|
@@ -79,6 +79,7 @@ campaign actually ran — the failures are listed separately below.
 | 128 | 8 |
 | 256 | 6 |
 | 512 | 4 |
+| 1024 | 1 |
 
 Small contraction depth, not the cohort mechanism. Distinct from the livelock and
 not addressed by any MSHR hold-window change.
@@ -113,7 +114,7 @@ smallest `M` in the family, so the shortest elaboration, at the precision the de
 workload uses. `fp32_512x32x2048` is the control if the fp16 datapath itself falls
 under suspicion.
 
-## Recorded LIVELOCK (51) — failures, not results
+## Recorded LIVELOCK (52) — failures, not results
 
 Root cause: the per-core **B slice** `(P/SPLIT_P)*elem_bytes` is below the **64-byte** burst floor, so B cannot burst, falls back to single-word requests, and inherits `hold_subs_single` — a target derived for **A**, which B can never meet because each core owns a distinct `p` range. See `docs/benchmarks/8x8_scaleup/rh_livelock_root_cause.md` §0. **Every one of these has a sub-burst B slice.** Averaging them into the campaign drags the mean by ~7 pp.
 
@@ -152,6 +153,7 @@ Root cause: the per-core **B slice** `(P/SPLIT_P)*elem_bytes` is below the **64-
 | `512x128x256` | fp16 | 16 | **32B** | ~3.06% | 355439 |
 | `512x2048x128` | fp32 | 16 | **32B** | ~0.44% | 47908 |
 | `512x2048x128` | fp16 | 16 | **16B** | ~0.02% | 167916 |
+| `512x2048x2048` | fp16 | 16 | **256B** | 53.60% | 2132 |
 | `512x2048x256` | fp16 | 16 | **32B** | ~1.19% | 97472 |
 | `512x256x128` | fp16 | 16 | **16B** | ~0.08% | 232618 |
 | `512x256x128` | fp32 | 16 | **32B** | ~1.81% | 291364 |
