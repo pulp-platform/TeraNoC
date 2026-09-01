@@ -209,7 +209,11 @@ try:
     for _l in open(os.path.join(ROOT, "docs", "benchmarks", "wedged_8x8.tsv")):
         if _l.startswith("#") or not _l.strip(): continue
         _f = _l.rstrip("\n").split("\t")
-        if len(_f) >= 4: WEDGED8[_f[0]] = dict(node=_f[1], win=int(_f[2]), age=float(_f[3]))
+        if len(_f) >= 4:
+            WEDGED8[_f[0]] = dict(node=_f[1], win=int(_f[2]), age=float(_f[3]),
+                                  died=int(_f[7]) if len(_f) > 7 else 0,
+                                  peak=int(_f[8]) if len(_f) > 8 else 0,
+                                  tmo=int(_f[9]) if len(_f) > 9 else 0)
 except IOError:
     pass
 
@@ -986,19 +990,36 @@ if WEDGED8:
         _r = _wix.get(_n) or {}
         _w8.append('<tr><td class="mono">%s</td><td>%s</td><td class="num">%s</td>'
                    '<td class="num">%s</td><td class="num st-bad b">%s</td>'
-                   '<td class="num st-bad">0</td><td class="num">%.0f h</td>'
-                   '<td class="dim sm">%s</td></tr>'
+                   '<td class="num b">%s</td><td class="num">%s</td>'
+                   '<td class="num dim">%s</td></tr>'
                    % (_n.replace("sw_8x8_", ""), _r.get("prec", "?"), _r.get("sh", "?"),
-                      _r.get("vl", "?"), format(_d["win"], ","), _d["age"], _d["node"]))
+                      _r.get("vl", "?"), format(_d["win"], ","), format(_d["died"], ","),
+                      format(_d["peak"], ","), _d["tmo"]))
     _fp16 = sum(1 for n in WEDGED8 if "fp16" in n)
     A('<div class="card"><h2>8&times;8 arms wedged &mdash; no forward progress</h2>'
-      '<p class="sub">Nine 8&times;8 arms have stopped retiring instructions entirely while their '
-      'simulations keep advancing. They hold seats and will never produce a result.</p>'
+      '<p class="sub">Nine 8&times;8 arms stopped retiring instructions entirely while their '
+      'simulations kept advancing. Harvested, then <strong>killed 2026-09-01</strong> &mdash; each '
+      're-verified on its node, immediately before the kill, to hold no cycle count.</p>'
       '<div class="tw"><table><thead><tr><th>arm</th><th>prec</th><th class="num">sharers</th>'
       '<th class="num">vl</th><th class="num">windows</th>'
-      '<th class="num" title="instructions retired over the last 40 windows, summed across all 64 groups">retired, last 40 win</th>'
-      '<th class="num">age</th><th>node</th></tr></thead><tbody>%s</tbody></table></div>'
-      '<div class="note bad"><span class="lab">how they were identified</span>'
+      '<th class="num" title="last window in which the arm retired anything">stopped at</th>'
+      '<th class="num" title="peak instructions retired in one window">peak insn/win</th>'
+      '<th class="num">tmo</th></tr></thead><tbody>%s</tbody></table></div>'
+      '<div class="note bad"><span class="lab">they stop exactly where a healthy arm FINISHES</span>'
+      '<p>Every one stopped retiring between window <strong>137 and 210</strong> (mean 170) &mdash; '
+      'and a completing 8&times;8 arm needs <strong>159&ndash;195</strong>. Their peak retirement '
+      '(58,000&ndash;129,000 per window) matches healthy arms too. So they are not stalling part-way '
+      'through the work: they do roughly a full arm&rsquo;s worth and then hang.</p>'
+      '<p><strong>Every one has <code>tmo=0</code> and <code>RH=0</code></strong>. The memory system '
+      'reports nothing wrong at all &mdash; no merge-cohort timeouts, no RH-stuck episodes. That is '
+      'the opposite of the 4&times;4 livelocks, which carried 2,612&ndash;97,556 timeouts.</p>'
+      '<p>Their UART output reaches only the prologue &mdash; <code>finish copy</code> and the shape '
+      'line &mdash; and never <code>execution took</code>. Since the timer print precedes the '
+      'verify, the hang sits <em>before</em> the result is reported: at the end of the kernel or in '
+      'the barrier/fence ahead of the timer read, not in the memory system and not in the verify.</p>'
+      '<p class="sub">This is a completion-path hang, not a livelock, and it is why no cycle count '
+      'can be recovered from them.</p></div>'
+      '<div class="note"><span class="lab">how they were identified</span>'
       '<p><strong>Zero</strong> retired instructions across the last 40 windows, summed over all 64 '
       'groups, with no <code>execution took</code> and only the two banner UART lines. A completing '
       '8&times;8 arm needs <strong>160&ndash;195 windows</strong>; these are at 540&ndash;2,082.</p>'
@@ -1018,8 +1039,10 @@ if WEDGED8:
       '(<code>spatz_vfu.sv:159</code>, vsew read from the live request instead of the result tag) '
       'is <strong>already fixed</strong> in the compiled source, so it is not the cause &mdash; this '
       'is something else.</p></div>'
-      '<p class="sub">Recorded in <code>docs/benchmarks/wedged_8x8.tsv</code>. Left running pending '
-      'review; %d of the 9 are fp16.</p></div>' % ("".join(_w8), _fp16))
+      '<p class="sub">Recorded in <code>docs/benchmarks/wedged_8x8.tsv</code>; '
+      '%d of the 9 are fp16. Their nine grid points are unmeasured &mdash; requeueing them on the '
+      'same image would reproduce the hang, so they need the cause first.</p></div>'
+      % ("".join(_w8), _fp16))
 
 # ---- kernel size vs efficiency, at fixed sharers -------------------------------
 _line = []

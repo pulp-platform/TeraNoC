@@ -14173,3 +14173,31 @@ Left running pending the user's review, as asked.
 **Also.** larain12 hit **28 GB free** and its one arm (`fp32_ks4_128x1024x1024`, ~44% done) is at
 real risk of dying at packaging as the larain6 arm did. Nothing of ours is reclaimable there -- our
 33 GB *is* that arm's own live job dir; the node is full from other users.
+
+## 2026-09-01 -- 9 wedged 8x8 arms: harvested, characterised, killed
+
+**Purpose.** Nine 8x8 Wave A arms had stopped retiring instructions while their
+simulations kept advancing. Extract everything recoverable before reclaiming the seats.
+
+**Implementation.** Harvested [FPU]/[FPUG]/[INSNG]/[STALLG]/[MSHRG]/UART from all nine
+node-local transcripts (1.3-3.9 MB probe + 145-415 KB fpug each), then killed each simv
+by matching /proc/<pid>/cwd to its <batch>/<job> dir, re-verifying on the node immediately
+before the kill that the transcript held no `execution took` (badist cancel alone does not
+stop the simulator). 9 killed, 0 refused. Evidence: docs/benchmarks/wedged_8x8.tsv.
+
+**Result.** This is a **completion-path hang, not a livelock**:
+- Every arm stopped retiring at window 137-210 (mean 170). A healthy 8x8 arm completes in
+  159-195. Peak retirement (58k-129k insn/window) matches healthy arms. They do roughly a
+  full arm's worth of work, then hang.
+- `tmo=0` and `RH=0` on all nine -- the memory system reports nothing. The 4x4 livelocks
+  carried 2,612-97,556 timeouts, so this is a different failure.
+- UART reaches only the prologue (`finish copy`, the shape line), never `execution took`.
+  The timer print precedes the verify, so the hang is *before* the result is reported:
+  end of kernel or the barrier/fence ahead of the timer read -- not the memory system and
+  not the device-side verify.
+- Rate tracks fp16 (31% vs fp32 4%) and KS monotonically (0/14/25/50% for KS=1/2/4/8).
+  0 of 9 are band arms. The known fp16 VFU wedge (spatz_vfu.sv:159) is already fixed in
+  the compiled source, so it is not the cause.
+
+**Status.** Seats reclaimed (VCS 22 free, 48 ours). Nine grid points unmeasured; requeueing
+on the same image would reproduce the hang. Node-local dirs left in place pending approval.
