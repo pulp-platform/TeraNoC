@@ -1,0 +1,12 @@
+# waveC8x8 arms stuck in the PROLOGUE -- zero [FPU] bench windows. Harvested + killed 2026-09-01
+# arm	node	cyc_reached	bench_windows	groups	idle_groups	fpug_windows
+sw_8x8_fp16_ks1_128x1024x2048	badile32	1735000	0	64	0	1736
+sw_8x8_fp16_ks1_16x128x16384	badile15	1742000	0	64	0	1743
+sw_8x8_fp16_ks1_32x256x8192	badile42	1827000	0	64	0	1828
+sw_8x8_fp16_ks1_64x512x4096	badile08	1812000	0	64	0	1813
+sw_8x8_fp16_ks1_8x128x32768	badile34	1785000	0	64	0	1786
+sw_8x8_fp32_ks1_128x1024x1024	badile04	1815000	0	64	0	1816
+sw_8x8_fp32_ks1_16x128x8192	badile07	1644000	0	64	0	1645
+sw_8x8_fp32_ks1_32x256x4096	badile46	1451000	0	64	0	1451
+sw_8x8_fp32_ks1_64x512x2048	badile35	1428000	0	64	0	1429
+sw_8x8_fp32_ks1_8x128x16384	badile01	1676000	0	64	0	1677

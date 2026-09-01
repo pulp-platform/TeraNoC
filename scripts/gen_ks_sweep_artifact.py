@@ -1120,12 +1120,15 @@ A('<div class="card"><h2>Hundreds of cores never execute &mdash; and it precedes
   'never release: the participants park &mdash; some spinning, some in <code>wfi</code> &mdash; '
   'utilisation falls to zero, and <code>execution took</code> is never reached. That is exactly '
   'the measured signature: barrier quiet, retirement draining, no cycle count.</p></div>'
-  '<div class="note"><span class="lab">it strikes at whichever barrier comes first</span>'
-  '<p>Ten <code>waveC8x8</code> arms are stuck the same way but <em>earlier</em>: at 1,665,000 '
-  'cycles they are still in the <code>pre</code> phase and have never emitted a single '
-  '<code>[FPU] bench</code> window &mdash; a healthy arm finishes the whole benchmark in about '
-  '200,000. Same idle-group pattern (<code>grp_min=0.0%</code>), same stall, caught before the '
-  'timed region instead of after it.</p></div>'
+  '<div class="note"><span class="lab">the prologue-stuck arms are a DIFFERENT failure</span>'
+  '<p>Ten <code>waveC8x8</code> arms never emitted a single <code>[FPU] bench</code> window, '
+  'sitting in the <code>pre</code> phase at 1.43&ndash;1.83M cycles &mdash; roughly 7&ndash;9x a '
+  'healthy arm&rsquo;s <em>entire</em> runtime. But measured over their full FPUG series, '
+  '<strong>all 64 groups run in every one of them</strong> (0 idle groups).</p>'
+  '<p class="sub">So this is <em>not</em> the barrier deadlock: that one is defined by groups that '
+  'never start. An earlier reading here claimed they shared the idle-group pattern &mdash; that '
+  'came from one window&rsquo;s instantaneous <code>grp_min=0.0%</code>, which is not the same as '
+  'a group never running, and it was wrong. Two distinct problems.</p></div>'
   '<div class="note"><span class="lab">what is still open</span>'
   '<p>If 512 cores never arrive, the bottom half completes its own share and then waits at a '
   'barrier for cores that will never come. That is exactly the wedge signature: the barrier goes '
@@ -1138,6 +1141,42 @@ A('<div class="card"><h2>Hundreds of cores never execute &mdash; and it precedes
   '(<code>snitch_trace=1</code>) to recover a top-half hart\'s stuck PC.</p></div>'
   '<p class="sub">Per-arm counts in <code>docs/benchmarks/dead_top_half_8x8.tsv</code>; filter the '
   'utilisation explorer to <em>mesh 8&times;8</em> to see it directly.</p></div>')
+
+# ---- prologue-stuck waveC8x8 arms -------------------------------------------------
+PRO = []
+try:
+    for _l in open(os.path.join(ROOT, "docs", "benchmarks", "prologue_stuck_8x8.tsv")):
+        if _l.startswith("#") or not _l.strip(): continue
+        _f = _l.rstrip("\n").split("\t")
+        if len(_f) >= 7: PRO.append(_f)
+except IOError: pass
+if PRO:
+    _rows = "".join(
+        '<tr><td class="mono">%s</td><td class="dim sm">%s</td><td class="num">%s</td>'
+        '<td class="num st-bad">%s</td><td class="num b st-ok">%s</td>'
+        '<td class="num dim">%s</td></tr>'
+        % (f[0].replace("sw_8x8_", ""), f[1], format(int(f[2]), ","), f[3],
+           "%s/%s" % (int(f[4]) - int(f[5]), f[4]), f[6])
+        for f in PRO)
+    A('<div class="card"><h2>Ten arms never reached the timed region</h2>'
+      '<p class="sub">The whole <code>waveC8x8</code> batch &mdash; every one KS=1 &mdash; sat in '
+      'the prologue for 1.4&ndash;1.8M cycles without emitting a single benchmark window. '
+      'Harvested and killed 2026-09-01.</p>'
+      '<div class="tw"><table><thead><tr><th>arm</th><th>node</th>'
+      '<th class="num">cycles reached</th>'
+      '<th class="num" title="[FPU] bench windows emitted">bench windows</th>'
+      '<th class="num" title="groups that retired something at any point">groups active</th>'
+      '<th class="num">FPUG windows</th></tr></thead><tbody>%s</tbody></table></div>'
+      '<p>For scale: a healthy 8&times;8 arm completes its <em>entire</em> benchmark in about '
+      '200,000 cycles. These ran 7&ndash;9x that without starting it, while still executing '
+      '(~3.5%% utilisation, transcripts growing).</p>'
+      '<div class="note"><span class="lab">distinct from the barrier deadlock</span>'
+      '<p>Every one uses <strong>all 64 groups</strong>. The barrier deadlock is defined by groups '
+      'that never start, so whatever holds these in the prologue is a second, separate problem '
+      '&mdash; and it correlates perfectly with <strong>KS=1</strong>, the largest row-chunk count '
+      'and therefore the smallest number of column blocks.</p></div>'
+      '<p class="sub">Evidence in <code>docs/benchmarks/prologue_stuck_8x8.tsv</code>; their series '
+      'are in the utilisation explorer under state <em>prologue</em>.</p></div>' % _rows)
 
 # ---- kernel size vs efficiency, at fixed sharers -------------------------------
 _line = []

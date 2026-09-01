@@ -120,12 +120,14 @@ def collect_fleet(gu):
         key = (batch + "__" + arm) if batch else arm
         if tag == "wedge8":
             st = "wedged"
+        elif tag == "wedgeC":
+            st = "prologue"      # never emitted a [FPU] bench window; stuck before the timed region
         elif tag == "deg":
             st = _state.get(key, _state.get(arm, "done"))
         else:
             st = "done"
         base_tag = ("degraded" if st == "degraded" else "running") if tag == "deg" else (
-            "wedged" if tag == "wedge8" else tag)
+            "wedged" if tag == "wedge8" else ("prologue" if tag == "wedgeC" else tag))
         shown_tag = (base_tag + " " + batch) if (batch and tag == "deg") else base_tag
         label = "%s%s KS=%d %dx%dx%d" % ((shown_tag + " ") if shown_tag else "", prec, ks, B, D, I)
         gu[label] = {"groups": g, "prec": prec, "mesh": mesh,

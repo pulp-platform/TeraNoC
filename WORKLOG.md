@@ -14352,3 +14352,23 @@ fan-out to groups) or from a run with a boot-side probe.
 
 **Decisions taken (user-approved).** Harvest-then-kill on the two wedged arms; investigate
 waveC8x8; HOLD the nine unmeasured grid points rather than requeue them on the same image.
+
+### 2026-09-01 -- waveC8x8: ten arms stuck in the PROLOGUE (a SECOND, distinct failure)
+
+Harvested all ten before killing: FPUG 325-597 KB and probe 3.4-14.2 MB per arm, into
+/tmp/claude-620771/{fpug,probe}/wedgeC__*. Evidence: docs/benchmarks/prologue_stuck_8x8.tsv.
+Their series are in the utilisation explorer under state `prologue`. 10 killed, 0 refused.
+
+**They never entered the timed region.** Zero `[FPU] bench` windows at 1.43-1.83M cycles --
+roughly 7-9x a healthy 8x8 arm's ENTIRE runtime -- while still executing (~3.5% util,
+transcripts growing 4 KB/20 s). The whole batch is KS=1.
+
+**CORRECTION to the previous entry.** I wrote that these shared the barrier deadlock's
+idle-group pattern. That was read off ONE window's instantaneous `grp_min=0.0%`, which is
+not the same as a group never running. Measured over the full FPUG series,
+**all 64 groups run in all ten (0 idle groups)**. The barrier deadlock is DEFINED by groups
+that never start, so this is a second, separate problem -- and it correlates perfectly with
+KS=1 (largest row-chunk count, hence fewest column blocks).
+
+Lesson: an instantaneous per-window minimum is not evidence about whether a group ever ran;
+only a max over the whole series is.
