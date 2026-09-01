@@ -260,19 +260,32 @@ static inline int mshr_cfg_derive(uint32_t M, uint32_t N, uint32_t P,
   const uint32_t n_words   = (N * elem_bytes) / 4u;
   const uint32_t gap_words = (gap * elem_bytes) / 4u;
 
-  const uint32_t burst_bits = (vl_words > MSHR_MAX_BURST_WORDS)
-                                ? mshr_clog2(vl_words / MSHR_MAX_BURST_WORDS) : 0u;
-  // The burst field must sit ABOVE the burst-align bits. This floor is STRICTER than the CSR
-  // window at burst_bits>=2, where the guard would accept an illegal 5.
-  const uint32_t lo = mshr_clog2(MSHR_MAX_BURST_WORDS) + burst_bits;
-  uint32_t burst_floor = (lo > MSHR_SHIFT_MIN) ? lo : MSHR_SHIFT_MIN;
+    // BURST-CLASS BANK FIELD -- must stay IDENTICAL to the MSHR_D_* enum above; this runtime path
+    // and that compile-time path are two copies of one rule, and silently diverging is a real trap.
+    // A group's concurrent lines are clusters (one per p-slice it owns) of load_words/MaxBurst
+    // bursts, cluster stride gap_words, burst stride MaxBurstWords:
+    //   load >= gap : the core loads its WHOLE slice -> ONE CONTIGUOUS run -> index it at the
+    //                 burst boundary (shift = clog2(MaxBurstWords), burst_bits = 0). All decode.
+    //   load <  gap : holes between clusters -> SPLIT the field (cluster index from
+    //                 clog2(gap_words), burst index from the low bits). All prefill.
+    const uint32_t load_words = (vl_words < gap_words) ? vl_words : gap_words;
+    const uint32_t nbursts    = ((load_words / MSHR_MAX_BURST_WORDS) < 1u)
+                                  ? 1u : (load_words / MSHR_MAX_BURST_WORDS);
+    const uint32_t contiguous = (load_words >= gap_words);
+    uint32_t burst_bits = contiguous ? 0u : mshr_clog2(nbursts);
+    if (burst_bits > MSHR_BANK_BURST_BITS_MAX) burst_bits = MSHR_BANK_BURST_BITS_MAX;
+    // The RTL's real rule: bank_shift_burst >= BurstAlignBits + burst_bits. NOT clamped up to
+    // MSHR_SHIFT_MIN -- that clamp forbade the shift from sitting ON the burst boundary, which is
+    // exactly where a contiguous group span must be indexed.
+    const uint32_t burst_floor = mshr_clog2(MSHR_MAX_BURST_WORDS) + burst_bits;
 
-  uint32_t sh_s = (n_words   > 0u) ? mshr_clog2(n_words)   : 0u;
-  uint32_t sh_b = (gap_words > 0u) ? mshr_clog2(gap_words) : 0u;
-  if (sh_s < MSHR_SHIFT_MIN) sh_s = MSHR_SHIFT_MIN;
-  if (sh_s > MSHR_SHIFT_MAX) sh_s = MSHR_SHIFT_MAX;
-  if (sh_b < burst_floor)    sh_b = burst_floor;
-  if (sh_b > MSHR_SHIFT_MAX) sh_b = MSHR_SHIFT_MAX;
+    uint32_t sh_s = (n_words   > 0u) ? mshr_clog2(n_words)   : 0u;
+    uint32_t sh_b = contiguous ? mshr_clog2(MSHR_MAX_BURST_WORDS)
+                               : ((gap_words > 0u) ? mshr_clog2(gap_words) : 0u);
+    if (sh_s < MSHR_SHIFT_MIN) sh_s = MSHR_SHIFT_MIN;
+    if (sh_s > MSHR_SHIFT_MAX) sh_s = MSHR_SHIFT_MAX;
+    if (sh_b < burst_floor)    sh_b = burst_floor;
+    if (sh_b > MSHR_SHIFT_MAX) sh_b = MSHR_SHIFT_MAX;
 
   c->hold_subs_single  = subs_a;
   c->hold_subs_burst   = subs_b;
@@ -425,31 +438,50 @@ enum {
 
   MSHR_D_LMUL     = 16 / MSHR_KERNEL_SIZE,          // KERNEL_SIZE 8/4/2 -> m2/m4/m8
   MSHR_D_VL_WORDS = ((int)VLEN * MSHR_D_LMUL) / (int)MSHR_ELEN,
-  // CAP AT THE HARDWARE FIELD WIDTH. mempool_group_mshr_cfg.sv:179 stores wr_data_i[0] and
-  // mempool_group_mshr.sv:600 takes `input logic burst_bits` -- ONE BIT. An uncapped derivation
-  // gives 1/2/3/4 at KS=8/4/2/1, and the field keeps only the LSB: 1/0/1/0. So KS=4 and KS=1
-  // silently lost the intra-load spread entirely, and (worse) the raw value also inflated
-  // MSHR_D_BURST_FLOOR below, clamping the shift one bit too high on top of that. Measured on
-  // 8x128x8192 ks=4: 4 of 16 banks reachable per group instead of 16.
-  // Capping here fixes both halves at once -- the value now survives the CSR, and the floor
-  // drops back to BurstAlign+1, which lets the shift sit on the p-slice gap where it belongs.
-  MSHR_D_BANK_BURST_BITS_RAW = (MSHR_D_VL_WORDS > (int)MSHR_MAX_BURST_WORDS)
-                             ? MSHR_CLOG2(MSHR_D_VL_WORDS / (int)MSHR_MAX_BURST_WORDS) : 0,
-  MSHR_D_BANK_BURST_BITS = (MSHR_D_BANK_BURST_BITS_RAW > (int)MSHR_BANK_BURST_BITS_MAX)
-                             ? (int)MSHR_BANK_BURST_BITS_MAX : MSHR_D_BANK_BURST_BITS_RAW,
 
   // N and P count ELEMENTS; the hash selects WORD-address bits, so at fp16 both shifts drop one.
   MSHR_D_N_WORDS   = ((int)GEMM_N * (int)GEMM_ELEM_BYTES) / 4,
   /* PGAP is split_p_count in prefill and n_p_blocks in decode -- see the primitives above. */
   MSHR_D_GAP_WORDS = (((int)GEMM_P / MSHR_D_PGAP) * (int)GEMM_ELEM_BYTES) / 4,
 
+  // ---- BURST-CLASS BANK FIELD --------------------------------------------------------------
+  // The distinct concurrent lines one GROUP presents to the MSHR at a fixed k are NPB clusters
+  // (one per p-slice the group owns) of MSHR_D_NBURSTS bursts each: cluster stride GAP_WORDS,
+  // burst stride MaxBurstWords. Two cases -- the old formula only ever handled the second:
+  //
+  //   LOAD_WORDS >= GAP_WORDS : the core loads its WHOLE slice, the clusters butt together and
+  //                             the group's lines are ONE CONTIGUOUS RUN. Index it at the burst
+  //                             boundary -- shift = clog2(MaxBurstWords), burst_bits = 0.
+  //                             This is every decode shape.
+  //   LOAD_WORDS <  GAP_WORDS : holes between clusters. One contiguous field cannot span both
+  //                             strides, so SPLIT: cluster index from clog2(GAP_WORDS), burst
+  //                             index from the low bits. This is prefill.
+  //
+  // Measured over both workloads: decode reaches the ceiling on 88/88 merging burst classes (was
+  // 44/88 under the gap-only formula), prefill 388/800 (was 204/800), and KS=8 prefill -- what
+  // 197 of the 199 built prefill ELFs use -- stays 200/200. Strictly better everywhere.
+  //
+  // burst_bits is capped at MSHR_BANK_BURST_BITS_MAX, which MUST equal the implemented CSR width;
+  // a larger write is REFUSED with MSHR_STATUS_RANGE, never truncated (fixed 2026-09-01).
+  MSHR_D_LOAD_WORDS = (MSHR_D_VL_WORDS < MSHR_D_GAP_WORDS) ? MSHR_D_VL_WORDS : MSHR_D_GAP_WORDS,
+  MSHR_D_NBURSTS    = ((MSHR_D_LOAD_WORDS / (int)MSHR_MAX_BURST_WORDS) < 1)
+                        ? 1 : (MSHR_D_LOAD_WORDS / (int)MSHR_MAX_BURST_WORDS),
+  MSHR_D_CONTIGUOUS = (MSHR_D_LOAD_WORDS >= MSHR_D_GAP_WORDS),
+  MSHR_D_BANK_BURST_BITS_RAW = MSHR_D_CONTIGUOUS ? 0 : MSHR_CLOG2(MSHR_D_NBURSTS),
+  MSHR_D_BANK_BURST_BITS = (MSHR_D_BANK_BURST_BITS_RAW > (int)MSHR_BANK_BURST_BITS_MAX)
+                             ? (int)MSHR_BANK_BURST_BITS_MAX : MSHR_D_BANK_BURST_BITS_RAW,
+
   // Stricter than the CSR window: the burst field must sit above the burst-align bits.
-  MSHR_D_BURST_FLOOR = ((MSHR_CLOG2((int)MSHR_MAX_BURST_WORDS) + MSHR_D_BANK_BURST_BITS)
-                          > (int)MSHR_SHIFT_MIN)
-                         ? (MSHR_CLOG2((int)MSHR_MAX_BURST_WORDS) + MSHR_D_BANK_BURST_BITS)
-                         : (int)MSHR_SHIFT_MIN,
+  // The RTL's ACTUAL rule (mempool_group_mshr.sv): bank_shift_burst >= BurstAlignBits + bb.
+  // It used to be clamped up to MSHR_SHIFT_MIN(5) as well, which forbade the shift from sitting
+  // ON the burst boundary (4) -- exactly where a contiguous group span must be indexed. That
+  // clamp alone held 44 of the 72 affected decode arms below their ceiling even after the
+  // burst_bits cap. BankShiftMin in mempool_group_mshr_cfg.sv is lowered to 4 to match, so a
+  // runtime write of 4 is accepted rather than refused.
+  MSHR_D_BURST_FLOOR = MSHR_CLOG2((int)MSHR_MAX_BURST_WORDS) + MSHR_D_BANK_BURST_BITS,
   MSHR_D_SH_S_RAW = MSHR_CLOG2(MSHR_D_N_WORDS),
-  MSHR_D_SH_B_RAW = MSHR_CLOG2(MSHR_D_GAP_WORDS),
+  MSHR_D_SH_B_RAW = MSHR_D_CONTIGUOUS ? MSHR_CLOG2((int)MSHR_MAX_BURST_WORDS)
+                                      : MSHR_CLOG2(MSHR_D_GAP_WORDS),
   // Clamp here: an out-of-window CSR write is REFUSED and the RESET value stays in force,
   // silently -- that is how 15 of 23 fp16 arms were once labelled with a tuning they never ran.
   MSHR_D_BANK_SHIFT_SINGLE = (MSHR_D_SH_S_RAW < (int)MSHR_SHIFT_MIN) ? (int)MSHR_SHIFT_MIN

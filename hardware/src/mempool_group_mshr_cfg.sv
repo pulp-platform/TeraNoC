@@ -41,7 +41,11 @@ module mempool_group_mshr_cfg
   // Legal ranges, enforced at runtime.
   parameter int unsigned MergeReqs           = 4,     // hold_subs upper bound
   parameter int unsigned HoldCntHwMax        = 2047,  // window/timeout upper bound
-  parameter int unsigned BankShiftMin        = 5,
+  // 4 = BurstAlignBits. The burst field must be allowed to sit ON the burst boundary: when a
+  // core loads its whole p-slice the group's lines are one contiguous run, and indexing it
+  // there is the only setting that reaches the ceiling. The RTL's real constraint is
+  // bank_shift_burst >= BurstAlignBits + bank_burst_bits, which this does not violate.
+  parameter int unsigned BankShiftMin        = 4,
   parameter int unsigned BankShiftMax        = 10,
   // Burst-hash overlap floor. The static [BankShiftMin,BankShiftMax] window is NOT the real
   // rule: mempool_group_mshr.sv:525 requires bank_shift_burst >= BurstAlignBits + bank_burst_bits,

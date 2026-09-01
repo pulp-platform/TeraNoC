@@ -14802,3 +14802,41 @@ them perfectly. Two things block it today:
   * `BankShiftMin = 5` in the cfg module would REFUSE a runtime write of 4.
 Both are legal to lower: the RTL's real rule is `bank_shift_burst >= BurstAlignBits + bb` = 4 at
 bb=0. NOT YET APPLIED.
+
+### 2026-09-01 -- the complete hash fix: contiguity-aware shift, floor at the RTL's real rule
+
+Third and final defect. The burst shift was derived as `clog2(GAP_WORDS)` and then clamped up to
+`MSHR_SHIFT_MIN(5)`. Both are wrong for decode.
+
+**The rule that works.** A group's concurrent lines are NPB clusters (one per p-slice it owns) of
+`load_words/MaxBurst` bursts -- cluster stride `gap_words`, burst stride `MaxBurstWords`:
+
+    load_words >= gap_words : the core loads its WHOLE slice, clusters butt together and the
+                              group's lines are ONE CONTIGUOUS RUN -> index at the burst boundary
+                              (shift = clog2(MaxBurstWords) = 4, burst_bits = 0).  ALL DECODE.
+    load_words <  gap_words : holes between clusters; one contiguous field cannot span both
+                              strides -> SPLIT (cluster index from clog2(gap_words), burst index
+                              from the low bits).  ALL PREFILL.
+
+**Measured, both workloads:**
+
+                            decode (merging burst classes)   prefill all-KS   prefill KS=8
+    shipped + bb cap only            44 / 88                    204 / 800       200 / 200
+    contiguity rule                  88 / 88                    388 / 800       200 / 200
+
+Strictly better everywhere, and unchanged on KS=8 prefill -- what 197 of the 199 built prefill
+ELFs use.
+
+**Changes.**
+- `mshr_cfg.h`: new `MSHR_D_LOAD_WORDS / NBURSTS / CONTIGUOUS`; burst_bits and the burst shift
+  derived from contiguity; `MSHR_D_BURST_FLOOR` is now exactly `clog2(MaxBurstWords) + bb`, the
+  RTL's real constraint, no longer clamped up to MSHR_SHIFT_MIN.
+- **The same rule exists TWICE** -- a compile-time enum and a runtime C function
+  (`mshr_cfg_derive`). Both updated; a comment on each now says they are two copies of one rule.
+  Only the enum was touched by the earlier fixes, so they had already diverged.
+- `mempool_group_mshr_cfg.sv`: `BankShiftMin` 5 -> 4, so a runtime write of 4 is accepted. The
+  RTL's real constraint (`shift >= BurstAlignBits + bb`) is unchanged and still enforced.
+
+**Verified.** RTL recompiles with 0 errors. The GUI shape now derives **sh_burst=4, bb=0** (was
+sh=6, bb=2 truncated to 0), which the tool scores at **16/16 banks concurrently**, up from 4/16.
+ELF rebuilt: `hardware/sw_4x4_fp16_ks4_8x128x8192_hashfix.elf`.
