@@ -14105,3 +14105,36 @@ not defined in any image, so the ceiling is genuinely active -- simply never rea
 
 Also told them both precisions carry the **same vl=256 B** -- the fp16 arm moves identical bytes and
 twice the elements -- so after their fix both should converge, not fp16 alone.
+
+## 2026-09-01 -- RETRACTION: my 8x8 health metric was 100% cycle counter; 9 arms are wedged
+
+**I have to withdraw yesterday's "first disconfirming evidence" and every 8x8 health check built on
+it.** The metric was wrong.
+
+    grep '\[INSNG\] bench' | tail -2 | grep -oE '[0-9]+' | paste -sd+ | bc
+
+The **first** number on an `[INSNG]` line is `cyc=`, not an insn value. On one wedged arm's last
+window the true retirement was **169**; that command reported **1,424,169**. The cycle counter, which
+grows monotonically forever, was ~100% of what I was calling "retirement". Every arm looked healthy
+by construction.
+
+This is the [[reference-multigroup-probe-field0-trap]] in a new dress: same probe family, but the
+error was grabbing a *field before* the CSV rather than only its first element.
+
+**Corrected picture, parsing `insn=` properly and summing the 64 group fields:**
+
+* **9 8x8 arms are WEDGED** -- 540 to 2,082 windows, **zero** retirement across their last 40
+  windows, `execution took` absent, only the 2 banner UART lines. Verified spinning rather than
+  paused: over 60 s one advanced cyc 2,301,000 -> 2,302,000 and window 2237 -> 2238 with `insn=0`.
+  A completing 8x8 arm needs ~160-195 windows, so these are 3-13x past that.
+* **None of the 9 is a band arm.** 0 of 9.
+* The **band** arms are a different population: retirement *declining* 8x-37x but still non-zero
+  (`fp32_ks1_4x128x16384` 6,103 -> 167, `fp16_ks4_16x128x16384` 48,542 -> 1,883).
+
+So the corrected reading is **not** the tidy one I gave yesterday in either direction: the band is
+degrading as the predicate says, *and* a separate set of nine non-band arms has stopped entirely.
+The wedges are the bigger problem and the predicate does not point at them.
+
+**What is now known to be unsound and needs redoing:** the "band vs outside, ratio 0.98" comparison,
+the "no arm past w60 retiring nothing" health count, and the disconfirmation note published in the
+artifact. All three used the contaminated metric.
