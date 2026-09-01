@@ -29,6 +29,20 @@ make all_llvm COMPILER=llvm                                # includes float apps
 - **`COMPILER` default is `llvm`** for software (`software/runtime/runtime.mk`). The meaningful override is `COMPILER=gcc`. `-march` is derived from compiler **and** config — mixing `COMPILER=gcc` with a Spatz config produces wrong flags silently.
 - App binaries land in `software/bin/apps/<category>/<name>`; `riscv-tests` ISA binaries land directly in `software/bin/`.
 - Apps live one-per-folder with a `main.c`; an app's `data_<name>.h` is auto-generated from `software/data/gendata_params.hjson` at build time.
+- **⚠️ GEMM: there are exactly TWO apps, and they cover EVERY shape in BOTH regimes.**
+  `sp-fmatmul-opt-burst-merge` (fp32) and `sp-fmatmul-opt-burst-merge-fp16`. Shape is a make
+  variable — `gemm_m=<B> gemm_n=<D> gemm_p=<I>` — and prefill vs decode needs **no separate app**:
+  `main.c:295` auto-derives `MATMUL_DECODE_SPLIT` from `GEMM_M` / active groups / `KERNEL_SIZE`.
+  Build via `scripts/gen_decode_shape_app.sh B D I {16|32}` or `gen_gemm_shape_app.sh`, which copy
+  the ELF to a shape-named path under `hardware/`.
+  **NEVER copy an app directory to change its shape.** Doing so produced 317 generated per-shape
+  dirs that drifted into **9 distinct `main.c` versions**; three decode groups were stale and one
+  lacked `MATMUL_REPEAT` (the normalisation that equalises every arm at ~65k ideal cycles), and the
+  141-dir prefill majority sat 96 non-comment lines behind with `MATMUL_SPOTCHECK` at 0 — no
+  correctness signal at all. Precision is the ONLY thing that justifies a second directory.
+  The generated `script/matmul.json` and `data/data_gemm.h` are gitignored; the json is written
+  through a `cmp` guard so a stale header can never silently mistune the MSHR (`runtime/mshr_cfg.h`
+  derives its tuning from the header's `GEMM_M/N/P` at compile time).
 
 ### Hardware Compile & Simulate (from `hardware/`)
 ```bash
@@ -308,7 +322,9 @@ it from `scripts/gemm_sweep_shapes.txt` with `--shapes ... --elf-template ...`.
   core per arm instead of nine tenths of a contended one.
 - **Fall back, do not wait.** `--fallback questa` runs VCS and, if VCS exits before
   simulation time 0 (the only trace a refused seat leaves), re-runs the same ELF under
-  QuestaSim *in the same job*. Questa's pool is `msimhdlsim` — **400 seats**, ~105 in use
+  QuestaSim *in the same job*. Questa's binding pool is **`mtiverification`** — **200 seats** (check with
+  `lmutil lmstat -c 8161@lic-mentor.ethz.ch -f mtiverification`; `msimhdlsim` is a *different*
+  feature reporting 400 and overstates headroom ~2x)
   — and VCS/Questa cycle counts are validated identical, so the results pool. The price:
   Questa needs **15.9 GB** against VCS's 2.0 GB, and a job that might fall back must be
   *placed* for that, so a 62 GB node drops from ~10 slots to 3. Setting `--fallback` also
