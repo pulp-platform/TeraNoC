@@ -14585,3 +14585,47 @@ them:
 
 **Verified.** Decode build from the canonical app is **byte-identical** to the campaign ELF
 `sw_8x8_fp16_ks8_8x128x32768`; prefill build `ELF_OK 512x64x256`. App dirs **356 -> 31**.
+
+## 2026-09-01 -- MSHR bank hash is mistuned: bank_burst_bits truncated, shift above the group span
+
+User spotted in the 4x4 `fp16_ks4_8x128x8192` waveform that most MSHR banks are idle.
+Confirmed, with two independent defects that compound.
+
+**Settings actually in force for `hardware/sw_4x4_fp16_ks4_8x128x8192.elf`**
+
+RTL (elaboration, build_tgt4x4): `GROUP_MSHR_BANK_HASH=3` (field-select), `GROUP_MSHR_NUM=64`,
+`GROUP_MSHR_WAYS_PER_BANK=4` -> **16 banks, BankIdW=4**.
+
+Software (written to the CSR at runtime; the `-DMSHR_CFG_*` in the build log are only
+FALLBACKS -- `mshr_cfg.h:498` sends the DERIVED `MSHR_D_*`):
+
+    BANK_SHIFT_SINGLE = 6    singles -> word_addr[9:6]
+    BANK_SHIFT_BURST  = 6    bursts  -> word_addr[9:6]
+    BANK_BURST_BITS   = 2    <-- but the CSR keeps only bit 0
+
+**Defect 1 -- silent truncation.** `mempool_group_mshr_cfg.sv:179`:
+`cfg_d.bank_burst_bits = wr_data_i[0]`. The field is ONE BIT and the RTL function takes
+`input logic burst_bits`. Software derives 2 here (LMUL=m4, VL_WORDS=64 > MaxBurstWords=16),
+and 2&1 = 0, so the split-field path never engages and all four bursts of one 64-word load
+land in the SAME bank. The cfg file's own comment (:47-48) names this exact case.
+**Systemic across KS:** SW derives 1/2/3/4 for KS=8/4/2/1; after the 1-bit field the HW sees
+1/0/1/0. **Only KS=8 is correct** -- three quarters of the decode grid is mistuned.
+
+**Defect 2 -- the bank field sits above the group's address span.** The MSHR is SOURCE-SIDE
+per group, so the unit is one group's 16 banks:
+- a group's 16 cores cover 8 p_blocks x 64 elements = 512 elements = **256 words**
+- the bank field starts at bit 6, i.e. changes every **64 words** -> only **4** distinct values
+- the d (k-loop) stride is `P*EB/4` = **4096 words = 0x1000**, whose bits[9:6] are always 0, so
+  the entire inner loop contributes NOTHING to bank selection
+
+Measured per group: **W bursts touch 4 of 16 banks; A singles touch 8 of 16.** Groups differ in
+WHICH 4 (g0 -> banks 0-3, g1 -> 4-7, g7 -> 12-15), which is why a machine-wide histogram looks
+uniform and hides it -- the aggregate was my first (wrong) reading.
+
+**How they compound.** `BANK_SHIFT_BURST` raw is clog2(GAP_WORDS=32) = 5, then clamped UP to
+`BURST_FLOOR = clog2(MaxBurstWords) + BANK_BURST_BITS` = 4+2 = 6. So the floor is computed
+assuming the split field exists, pushing the shift one bit too high -- and then the split field
+is disabled by the truncation. Each defect alone would be milder.
+
+**Not yet done:** no fix, no re-measure. Every decode-sweep number stands as measured, but the
+MSHR was tuned for a spread it never achieved on KS=1/2/4.
