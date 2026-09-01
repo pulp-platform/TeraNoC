@@ -14840,3 +14840,32 @@ ELFs use.
 **Verified.** RTL recompiles with 0 errors. The GUI shape now derives **sh_burst=4, bb=0** (was
 sh=6, bb=2 truncated to 0), which the tool scores at **16/16 banks concurrently**, up from 4/16.
 ELF rebuilt: `hardware/sw_4x4_fp16_ks4_8x128x8192_hashfix.elf`.
+
+## 2026-09-01 -- kill the hash-affected arms; re-issue the 4x4 set on the corrected SW+HW
+
+**New result first.** `sw_8x8_fp16_ks2_32x256x8192` completed at **39,802 cycles, 20.6%
+efficiency** and had ALREADY EXITED when the kill sweep reached it (the sweep printed GONE,
+which was accurate -- nothing was destroyed). Fetched; its 4x4 twin `fp16_ks2_32x256x2048` ran
+38,179 cyc / 21.5%, so the scale-up cost is **1.04x** -- essentially free at sharers=16, matching
+the pattern the other matched pairs show at large B. Campaign: 45 measured.
+
+**Killed.** 21 of the 23 affected running arms (3 4x4, 20 8x8); 2 were already gone. **badile06
+is unreachable** (ssh timeout), so `sw_4x4_fp32_ks4_128x1024x256` could not be reached and its
+state is unknown -- NOT confirmed killed.
+
+**Re-issued: 36 corrected 4x4 arms**, batch `teranoc-20260901-185541-d0d9`, prefix `hashfix`.
+
+Prerequisites built and verified:
+- **New VCS image** `build_tgt4x4_hashfix`. Its `+define+` set is **identical** to the reference
+  `build_tgt4x4` (107 defines, empty diff) -- the fix is an RTL parameter, not a define -- so an
+  old-vs-new comparison isolates the hash change and nothing else.
+- **36 new ELFs** (`hardware/hf_4x4_*.elf`) built from the corrected `mshr_cfg.h`. All 36 built,
+  0 failures.
+
+For the GUI shape the derivation now gives **sh_burst=4, bank_burst_bits=0** (was sh=6, bb=2
+truncated to 0) = **16/16 banks concurrently**, up from 4/16.
+
+**Process note.** The VCS image build was launched with `nohup ... &` INSIDE a backgrounded Bash
+call, so the harness saw the wrapper exit immediately and reported success while `vcs` was still
+elaborating -- the build dir had `compilevcs.sh` and `.daidir` but no `mempool_simvopt`. Not a
+build failure; a double-backgrounding mistake. Check for the actual binary, not the exit code.
