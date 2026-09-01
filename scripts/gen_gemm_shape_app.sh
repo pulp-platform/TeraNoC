@@ -22,7 +22,7 @@ M=$1; N=$2; P=$3; PREC=${4:-16}; S="${M}x${N}x${P}"
 ROOT=/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC
 APPS=$ROOT/software/apps/spatz_apps
 case "$PREC" in 16|32) ;; *) echo "BAD_PREC $PREC (want 16 or 32)"; exit 1;; esac
-APP=sp-prefill-fp$PREC
+APP=$([ "$PREC" = 16 ] && echo sp-fmatmul-opt-burst-merge-fp16 || echo sp-fmatmul-opt-burst-merge)
 PFX=sp-fp$PREC          # ELF naming unchanged, so every existing scraper keeps working
 [ -d "$APPS/$APP" ] || { echo "MISSING APP $APPS/$APP"; exit 1; }
 

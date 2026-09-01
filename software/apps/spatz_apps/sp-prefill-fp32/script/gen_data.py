@@ -1,1 +1,0 @@
-../../sp-fmatmul-opt-burst-merge/script/gen_data.py

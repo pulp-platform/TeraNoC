@@ -14559,3 +14559,29 @@ STALE copies. Rebuilding any prefill shape now uses the canonical source, which 
 ahead -- so an old prefill ELF and a newly built one are **not** running the same program, and
 their cycles are not comparable. Most importantly the old ones lack `MATMUL_REPEAT`, so their
 work normalisation differs. Re-measure rather than mixing old and new prefill numbers.
+
+## 2026-09-01 -- one app per precision covers BOTH prefill and decode
+
+**The wrappers were unnecessary.** `sp-fmatmul-opt-burst-merge{,-fp16}/main.c:295` already
+AUTO-DERIVES `MATMUL_DECODE_SPLIT` from `GEMM_M` / active groups / `KERNEL_SIZE`, so prefill and
+decode are the same program at different shapes. The `sp-decode-fp*` / `sp-prefill-fp*` wrappers
+added yesterday existed only to keep the canonical apps' checked-in `matmul.json` pristine --
+solved instead by untracking that file and generating it, like the data header it feeds.
+
+**Now:** the shape rule applies directly to the two canonical apps; both generators
+(`gen_decode_shape_app.sh`, `gen_gemm_shape_app.sh`) build them with `gemm_m/gemm_n/gemm_p`.
+ELF naming is unchanged, so every scraper keeps working.
+
+**Removed** (8 dirs): `sp-decode-fp16/fp32`, `sp-prefill-fp16/fp32` (redundant wrappers) and
+`sp-fmatmul-rm-{128x128x512,128x512x512,256x512x256,512x512x128}` -- shape-named matmul copies,
+623 lines, **0 references** in scripts or docs.
+
+**KEPT, and deliberately** -- these are NOT matmul copies and the canonical app cannot replace
+them:
+- `sp-resp-bw-1core` (123 lines) and `sp-resp-bw-stream` (114 lines) -- standalone response-
+  bandwidth microbenchmarks, 3 references in scripts/docs.
+- `sp-vfu-ew-tag-probe` (80 lines) -- "targeted confirmation of the spatz_vfu.sv:141
+  element-width" bug, 1 reference. Deleting it would lose the ability to re-confirm that RTL bug.
+
+**Verified.** Decode build from the canonical app is **byte-identical** to the campaign ELF
+`sw_8x8_fp16_ks8_8x128x32768`; prefill build `ELF_OK 512x64x256`. App dirs **356 -> 31**.

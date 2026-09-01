@@ -43,8 +43,9 @@ software/apps/spatz_apps/sp-decode-[0-9]*/
 # sp-decode-fp16 / sp-decode-fp32 ARE source (main.c and kernel are symlinks to the
 # canonical sp-fmatmul-opt-burst-merge{,-fp16}), but their shape spec and the 16-36 MB
 # data header are generated at build time from gemm_m/gemm_n/gemm_p.
-software/apps/spatz_apps/sp-decode-fp*/script/matmul.json
-software/apps/spatz_apps/sp-decode-fp*/data/data_gemm.h
-# Same for the prefill wrappers, which replaced 274 per-shape sp-fp16-*/sp-fp32-* dirs.
-software/apps/spatz_apps/sp-prefill-fp*/script/matmul.json
-software/apps/spatz_apps/sp-prefill-fp*/data/data_gemm.h
+# The canonical apps carry BOTH regimes now (main.c auto-derives MATMUL_DECODE_SPLIT), so
+# their shape spec and 16-36 MB data header are generated per build from gemm_m/n/p.
+software/apps/spatz_apps/sp-fmatmul-opt-burst-merge/script/matmul.json
+software/apps/spatz_apps/sp-fmatmul-opt-burst-merge/data/data_gemm.h
+software/apps/spatz_apps/sp-fmatmul-opt-burst-merge-fp16/script/matmul.json
+software/apps/spatz_apps/sp-fmatmul-opt-burst-merge-fp16/data/data_gemm.h

@@ -65,17 +65,16 @@ $(BINARIES): $(BIN_DIR)/%: %/main.c.o $(RUNTIME) $(LINKER_SCRIPT) data_%.h updat
 #
 #   make sp-decode-fp16 config=terapool_spatz4_fpu gemm_m=16 gemm_n=128 gemm_p=16384
 #
-# Same treatment for PREFILL. Its 274 per-shape dirs (sp-fp16-*/sp-fp32-*) had drifted
-# 96 non-comment lines behind the canonical app -- missing MATMUL_REPEAT, MATMUL_SPOTCHECK
-# at 0 instead of 1, and no KERNEL_SIZE / auto-derived MATMUL_DECODE_SPLIT. These thin
-# wrappers symlink the canonical source so the canonical app's own checked-in matmul.json
-# stays pristine (building a shape here never dirties a tracked file).
-DECODE_APPS := sp-decode-fp16 sp-decode-fp32 sp-prefill-fp16 sp-prefill-fp32
+# ONE APP PER PRECISION, for BOTH prefill and decode. main.c:295 auto-derives
+# MATMUL_DECODE_SPLIT from GEMM_M / active groups / KERNEL_SIZE, so the two regimes need no
+# separate program -- only a different shape. This replaces 317 generated per-shape dirs
+# (43 decode + 274 prefill) that had drifted into 9 distinct main.c versions between them.
+SHAPED_APPS := sp-fmatmul-opt-burst-merge-fp16 sp-fmatmul-opt-burst-merge
 gemm_m ?= 16
 gemm_n ?= 128
 gemm_p ?= 16384
 
-define DECODE_SHAPE_rule
+define SHAPE_rule
 $(1)/script/matmul.json: FORCE
 	@mkdir -p $$(@D)
 	@{ \
@@ -95,16 +94,14 @@ $(1)/script/matmul.json: FORCE
 	} > $$@.tmp
 	@if cmp -s $$@.tmp $$@; then rm -f $$@.tmp; else mv $$@.tmp $$@; fi
 endef
-$(eval $(call DECODE_SHAPE_rule,sp-decode-fp16,16))
-$(eval $(call DECODE_SHAPE_rule,sp-decode-fp32,32))
-$(eval $(call DECODE_SHAPE_rule,sp-prefill-fp16,16))
-$(eval $(call DECODE_SHAPE_rule,sp-prefill-fp32,32))
+$(eval $(call SHAPE_rule,sp-fmatmul-opt-burst-merge-fp16,16))
+$(eval $(call SHAPE_rule,sp-fmatmul-opt-burst-merge,32))
 .PHONY: FORCE
 FORCE:
 
 GEMM_APPS := $(patsubst $(APPS_DIR)/%/script/matmul.json,%,$(wildcard $(APPS_DIR)/*/script/matmul.json))
 # the merged apps have no checked-in matmul.json, so the wildcard above cannot see them
-GEMM_APPS += $(DECODE_APPS)
+GEMM_APPS += $(SHAPED_APPS)
 GEMM_APPS := $(sort $(GEMM_APPS))
 $(foreach a,$(GEMM_APPS),$(eval $(a)/main.c.o: $(a)/data/data_gemm.h))
 

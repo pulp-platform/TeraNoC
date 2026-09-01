@@ -18,7 +18,7 @@ B=$1; D=$2; I=$3; PREC=${4:-16}; S="${B}x${D}x${I}"
 ROOT=/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC
 APPS=$ROOT/software/apps/spatz_apps
 case "$PREC" in 16|32) ;; *) echo "BAD_PREC $PREC (want 16 or 32)"; exit 1;; esac
-APP=sp-decode-fp$PREC
+APP=$([ "$PREC" = 16 ] && echo sp-fmatmul-opt-burst-merge-fp16 || echo sp-fmatmul-opt-burst-merge)
 [ -d "$APPS/$APP" ] || { echo "MISSING APP $APPS/$APP"; exit 1; }
 
 # The app target depends on main.c.o, not on the define set: if the binary is newer than the

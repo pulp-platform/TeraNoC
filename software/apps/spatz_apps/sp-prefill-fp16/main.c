@@ -1,1 +1,0 @@
-../sp-fmatmul-opt-burst-merge-fp16/main.c

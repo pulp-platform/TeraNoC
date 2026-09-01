@@ -1,9 +1,5 @@
-// Copyright 2020 ETH Zurich and University of Bologna.
-// Solderpad Hardware License, Version 0.51, see LICENSE for details.
-// SPDX-License-Identifier: SHL-0.51
-
-// Parameters for a GEMM
-
+// GENERATED from make vars gemm_m/gemm_n/gemm_p -- do not hand-edit.
+// DECODE-shape GEMM: C[B][I] = A[B][D] x W[D][I], mapped as M=B, N=D, P=I.
 {
     kernel: "GEMM"
     M: 512,
