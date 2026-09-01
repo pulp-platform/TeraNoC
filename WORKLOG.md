@@ -14890,3 +14890,19 @@ MSHR could have been bank-limited or limited by something else entirely. The 36 
 arms (batch teranoc-20260901-185541-d0d9, 24 running / 12 queued) answer that, and none has
 produced a cycle count yet. Do NOT quote a performance benefit until a matched old-vs-new pair
 lands.
+
+### 2026-09-01 -- the hashfix batch was capped by the client default, not by licences
+
+Submitted the 36 corrected 4x4 arms with `--reserve-licenses 20` and no `--max-parallel`,
+believing that left concurrency to the licence. It does not: the client's **default is
+`--max-parallel 24`**, and it is written into the submitted spec as `license.max`, enforced by
+badist's daemon. Result: 24 running, 12 queued, while **34 seats were free**.
+
+The cap CANNOT be lifted afterwards. badist has no update command, and `badist cancel --job <id>`
+on a queued job reports success while leaving it `submitted` (verified on all twelve: 0024-0035).
+Resubmitting those arms would create duplicates -- the failure mode that once left 60 instances
+of 36 arms hidden behind the newest-batch-only status view. So the 12 are left to backfill as
+running arms finish; 4x4 arms are short and the cost is wall-clock only.
+
+Recorded as a standing preference: always pass an explicit high `--max-parallel`, and verify
+after submitting that nothing sits in `submitted` while seats are free.
