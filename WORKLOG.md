@@ -14657,3 +14657,28 @@ setting REPRESENTABLE ON TODAY'S HARDWARE is `sh_burst=12, burst_bits=0` -> **16
 evenness 1.000** -- spreading by the k-loop stride (4096 words = 2^12) instead of by p. That is
 a pure CSR/software change: no RTL fix, no re-elaboration. Widening the CSR field would also
 work but is not required for this shape.
+
+### 2026-09-01 -- FIX: cap bank_burst_bits at the 1-bit CSR width
+
+`software/runtime/mshr_cfg.h`: `MSHR_D_BANK_BURST_BITS` is now clamped to
+`MSHR_BANK_BURST_BITS_MAX` (1), the actual width of the CSR field
+(`mempool_group_mshr_cfg.sv:179` stores `wr_data_i[0]`; the RTL port is `input logic`).
+
+One clamp fixes BOTH halves of the defect, because the raw value also fed `MSHR_D_BURST_FLOOR`:
+
+    KS   before (sh_burst,bb) -> HW saw     after -> HW sees
+     8      (5,1)             -> (5,1)       (5,1) -> (5,1)   unchanged, was already right
+     4      (6,2)             -> (6,0)       (5,1) -> (5,1)
+     2      (7,3)             -> (7,1)       (6,1) -> (6,1)
+     1      (8,4)             -> (8,0)       (7,1) -> (7,1)
+
+Verified with the tool at every KS on 8x128x8192 fp16: **16/16 banks reached CONCURRENTLY**
+(was 4/16 at KS=4). Rebuilt the ks=4 ELF cleanly.
+
+**Metric correction in the tool.** The first version scored AGGREGATE bank usage over the whole
+loop, and on that metric `sh_burst=12` looked perfect (16/16). It is in fact the WORST possible
+setting: it spreads across time while every core of a group collides in ONE bank at any given
+instant (measured 1.0/16 concurrent). The MSHR holds requests that are outstanding SIMULTANEOUSLY,
+so `spread()` now groups addresses by k-loop step and reports the average number of distinct
+banks reached per step. Rule: for a concurrency structure, never score a hash by its histogram
+over time.

@@ -92,23 +92,40 @@ def accesses(g, grp):
         p0 = pblk * g.pspan
         m0 = rc * g.ks
         for d in range(g.N):
-            # W[d][p0 ...] -- one burst-class load per d, per core
-            W.append(wbase + (d * g.P + p0) * g.elem_bytes // 4)
+            # W[d][p0 ...] -- one burst-class load per d per core, split into its bursts so the
+            # intra-load bits (what bank_burst_bits selects) are represented.
+            base = wbase + (d * g.P + p0) * g.elem_bytes // 4
+            nb = max(1, g.load_words // g.max_burst)
+            for k in range(nb):
+                W.append((d, base + k * g.max_burst))
         for b in range(m0, min(m0 + g.ks, g.M)):
             for d in range(0, g.N, 8):
-                A.append((b * g.N + d) * g.elem_bytes // 4)
+                A.append((d, (b * g.N + d) * g.elem_bytes // 4))
     return A, W
 
 
 def spread(addrs, sh, bb, g):
-    h = collections.Counter(bank_of(a, sh, bb, g.bankidw, g.align) for a in addrs)
-    used = len(h)
-    if not h:
+    """CONCURRENCY spread, not aggregate.
+
+    The MSHR holds requests that are OUTSTANDING AT THE SAME TIME, so the figure of merit is
+    how many distinct banks one group's cores reach at a FIXED point in the k loop -- not how
+    many banks the loop visits over its whole life. Those differ wildly: putting the bank field
+    on the k stride visits all 16 banks over time while every core collides in ONE bank at any
+    instant, which is the worst case for a structure whose job is concurrency.
+
+    `addrs` is a list of (step, word_addr): step = the k-loop index that groups concurrent
+    requests together.
+    """
+    per_step = collections.defaultdict(set)
+    h = collections.Counter()
+    for step, a in addrs:
+        b = bank_of(a, sh, bb, g.bankidw, g.align)
+        per_step[step].add(b)
+        h[b] += 1
+    if not per_step:
         return 0, 0.0, h
-    # evenness: normalised entropy over the banks (1.0 = perfectly flat over all banks)
-    tot = sum(h.values())
-    ent = -sum((n / tot) * math.log2(n / tot) for n in h.values())
-    return used, (ent / math.log2(g.banks) if g.banks > 1 else 1.0), h
+    avg = sum(len(v) for v in per_step.values()) / len(per_step)
+    return round(avg), avg / g.banks, h
 
 
 def draw(h, g, title, width=46):
@@ -180,14 +197,14 @@ def main():
             uW, eW, _ = spread(W, sh, bb, g)
             best.append((uW, round(eW, 4), sh, bb))
     best.sort(key=lambda t: (-t[0], -t[1], t[2], t[3]))
-    print(f"\n  BEST BURST (W) SETTINGS  [shift, burst_bits] -> banks used / evenness")
+    print(f"\n  BEST BURST (W) SETTINGS  [shift, burst_bits] -> banks reached CONCURRENTLY")
     seen = set()
     for uW, eW, sh, bb in best:
         if (uW, bb) in seen:
             continue
         seen.add((uW, bb))
         flag = "" if bb <= g.hwbb else f"   !! CSR holds only {g.hwbb} bit -> truncates to {bb & ((1<<g.hwbb)-1)}"
-        print(f"    sh_burst={sh:2d}  bb={bb}  ->  {uW:2d}/{g.banks} banks  evenness={eW:.3f}{flag}")
+        print(f"    sh_burst={sh:2d}  bb={bb}  ->  {uW:2d}/{g.banks} banks concurrently, frac={eW:.3f}{flag}")
         if len(seen) >= 6:
             break
 
@@ -196,9 +213,9 @@ def main():
         uA, eA, _ = spread(A, sh, 0, g)
         bestA.append((uA, round(eA, 4), sh))
     bestA.sort(key=lambda t: (-t[0], -t[1], t[2]))
-    print(f"\n  BEST SINGLE (A) SHIFT -> banks used / evenness")
+    print(f"\n  BEST SINGLE (A) SHIFT -> banks reached CONCURRENTLY")
     for uA, eA, sh in bestA[:4]:
-        print(f"    sh_single={sh:2d}  ->  {uA:2d}/{g.banks} banks  evenness={eA:.3f}")
+        print(f"    sh_single={sh:2d}  ->  {uA:2d}/{g.banks} banks concurrently, frac={eA:.3f}")
 
     # ---- illustration ------------------------------------------------------------
     if a.current:
@@ -208,9 +225,9 @@ def main():
               + (f"  (hardware truncates to {eff})" if eff != bb else ""))
         uW, eW, hW = spread(W, shb, eff, g)
         uA, eA, hA = spread(A, shs, 0, g)
-        print(f"    W bursts : {uW}/{g.banks} banks, evenness {eW:.3f}")
+        print(f"    W bursts : {uW}/{g.banks} banks CONCURRENTLY (fraction {eW:.3f})")
         draw(hW, g, "W (burst) bank occupancy")
-        print(f"    A singles: {uA}/{g.banks} banks, evenness {eA:.3f}")
+        print(f"    A singles: {uA}/{g.banks} banks CONCURRENTLY (fraction {eA:.3f})")
         draw(hA, g, "A (single) bank occupancy")
 
     if best:
@@ -218,13 +235,13 @@ def main():
         bb_hw = min(bb, g.hwbb)
         uW2, eW2, hW2 = spread(W, sh, bb_hw, g)
         print(f"\n  BEST ACHIEVABLE ON THIS HARDWARE  sh_burst={sh} burst_bits={bb_hw}"
-              f"  -> {uW2}/{g.banks} banks, evenness {eW2:.3f}")
+              f"  -> {uW2}/{g.banks} banks concurrently, frac {eW2:.3f}")
         draw(hW2, g, "W (burst) bank occupancy at the best hardware-representable setting")
         if bb > g.hwbb:
             print(f"\n    !! ideal burst_bits is {bb}; the CSR field is {g.hwbb} bit"
                   f" (mempool_group_mshr_cfg.sv:179 stores wr_data_i[0]).")
             print(f"       Widening that field would give {uW}/{g.banks} banks"
-                  f" (evenness {eW:.3f}).")
+                  f" (frac {eW:.3f}).")
     print()
 
 

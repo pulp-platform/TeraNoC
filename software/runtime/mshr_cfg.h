@@ -182,6 +182,9 @@ static inline uint32_t mshr_clog2(uint32_t x) {
 // CSR-accepted bank-shift window (mempool_group_mshr_cfg.sv BankShiftMin/Max). Writing outside
 // it is REFUSED and the RESET value stays in force, silently -- so clamp here rather than let
 // the hardware quietly run a tuning nobody asked for.
+// The CSR field for bank_burst_bits is ONE BIT WIDE (mempool_group_mshr_cfg.sv:179 stores
+// wr_data_i[0]). Anything larger is silently truncated to its LSB, so software must clamp.
+#define MSHR_BANK_BURST_BITS_MAX 1u
 #define MSHR_SHIFT_MIN 5u
 #define MSHR_SHIFT_MAX 10u
 // Hold-window MAGNITUDE is not derivable from M/N/P: the two classes carry OPPOSITE policies
@@ -414,8 +417,18 @@ enum {
 
   MSHR_D_LMUL     = 16 / MSHR_KERNEL_SIZE,          // KERNEL_SIZE 8/4/2 -> m2/m4/m8
   MSHR_D_VL_WORDS = ((int)VLEN * MSHR_D_LMUL) / (int)MSHR_ELEN,
-  MSHR_D_BANK_BURST_BITS = (MSHR_D_VL_WORDS > (int)MSHR_MAX_BURST_WORDS)
+  // CAP AT THE HARDWARE FIELD WIDTH. mempool_group_mshr_cfg.sv:179 stores wr_data_i[0] and
+  // mempool_group_mshr.sv:600 takes `input logic burst_bits` -- ONE BIT. An uncapped derivation
+  // gives 1/2/3/4 at KS=8/4/2/1, and the field keeps only the LSB: 1/0/1/0. So KS=4 and KS=1
+  // silently lost the intra-load spread entirely, and (worse) the raw value also inflated
+  // MSHR_D_BURST_FLOOR below, clamping the shift one bit too high on top of that. Measured on
+  // 8x128x8192 ks=4: 4 of 16 banks reachable per group instead of 16.
+  // Capping here fixes both halves at once -- the value now survives the CSR, and the floor
+  // drops back to BurstAlign+1, which lets the shift sit on the p-slice gap where it belongs.
+  MSHR_D_BANK_BURST_BITS_RAW = (MSHR_D_VL_WORDS > (int)MSHR_MAX_BURST_WORDS)
                              ? MSHR_CLOG2(MSHR_D_VL_WORDS / (int)MSHR_MAX_BURST_WORDS) : 0,
+  MSHR_D_BANK_BURST_BITS = (MSHR_D_BANK_BURST_BITS_RAW > (int)MSHR_BANK_BURST_BITS_MAX)
+                             ? (int)MSHR_BANK_BURST_BITS_MAX : MSHR_D_BANK_BURST_BITS_RAW,
 
   // N and P count ELEMENTS; the hash selects WORD-address bits, so at fp16 both shifts drop one.
   MSHR_D_N_WORDS   = ((int)GEMM_N * (int)GEMM_ELEM_BYTES) / 4,
