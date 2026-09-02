@@ -218,7 +218,13 @@ void mempool_log_partial_barrier(uint32_t step, uint32_t core_id,
           // Both shifts must be < 32 to be defined: `1U << gwidth` overflows for a
           // barrier spanning exactly 32 groups (it wraps to 1, so the mask becomes 0
           // and NOTHING is woken), and `<< group_init` wraps for group_init >= 32.
-          if (group_end <= 32 && gwidth < 32) {
+          // wake_up_group is ONE 32-bit register, so it can only address DataWidth(32)
+          // groups. Above that ctrl_registers.sv loops i<NumGroups over a 32-bit mask,
+          // reading it OUT OF RANGE for i>=32 and driving x onto every group >= 32 --
+          // half an 8x8 mesh goes x on EVERY lower-half group barrier. The per-group
+          // wake_up_tile array is the mechanism that scales (index in the address, not
+          // the data), so use it whenever the mesh has more groups than the mask can hold.
+          if (NUM_GROUPS <= 32 && group_end <= 32 && gwidth < 32) {
             wake_up_group(((1U << gwidth) - 1) << group_init);
           } else {
             // The group-mask register is only 32 bit wide, so groups >= 32 cannot be
@@ -315,7 +321,8 @@ void mempool_partial_barrier(uint32_t volatile core_id,
         uint32_t gwidth = group_end - group_init;
         // Same two shift limits as in mempool_log_partial_barrier: `1U << gwidth` is
         // undefined at a 32-group span and `<< group_init` at group_init >= 32.
-        if (group_end <= 32 && gwidth < 32) {
+        // Same 32-group hardware limit as in mempool_log_partial_barrier above.
+        if (NUM_GROUPS <= 32 && group_end <= 32 && gwidth < 32) {
           wake_up_group(((1U << gwidth) - 1) << group_init);
         } else {
           // Same 32-bit group-mask limit as in mempool_log_partial_barrier: `1U << g`
