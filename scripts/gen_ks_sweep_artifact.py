@@ -10,7 +10,7 @@ Inputs (all optional except the matrix; missing ones just render as pending):
   /tmp/claude-620771/fleet_status.tsv    arm<TAB>state<TAB>node  (teranoc_fleet.py status)
   hardware/{wa1,wa2}_<arm>/transcript    fetched results
 """
-import json, os, re, glob
+import json, os, re, glob, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCR  = "/tmp/claude-620771"
@@ -1641,6 +1641,24 @@ A('<p class="foot">efficiency = ideal/actual &middot; %d planned arms &middot; R
 A('</div>')
 
 open(OUT, "w").write("\n".join(H))
+
+# ---- SELF-CHECK: prove the data actually reached the page -------------------------------------
+# Twice on 2026-09-02 this generator exited 0 having rendered NOTHING new: once because the
+# re-run discovery glob missed the rf_/r8_ prefixes, once because this file read the "cyc" key
+# while scrape() returns "cycles". Both produced a confident "artifact updated" with no data in
+# it. A generator that cannot see its own output is the problem; assert instead.
+_page = open(OUT).read()
+_missing = [(_k, _v["cycles"]) for _k, _v in sorted(RESFIX.items())
+            if _v.get("cycles") and format(_v["cycles"], ",") not in _page]
+if _missing:
+    sys.stderr.write(
+        "SELF-CHECK FAILED: %d corrected re-run(s) scraped but ABSENT from %s -- the page does "
+        "not show data it has. Do NOT publish this build.\n" % (len(_missing), OUT))
+    for _k, _c in _missing[:10]:
+        sys.stderr.write("    %s  cycles=%s\n" % (_k, _c))
+    sys.exit(3)
+_shown = sum(1 for _v in RESFIX.values() if _v.get("cycles"))
+print("  self-check OK: all %d corrected re-run cycle counts appear in the page" % _shown)
 print("wrote %s (%d bytes)" % (OUT, os.path.getsize(OUT)))
 for k in sorted(TALLY, key=lambda x: -TALLY[x]):
     print("  %-40s %d" % (k, TALLY[k]))
