@@ -663,15 +663,30 @@ int main() {
 
       
 #if COLDSTART_GROUP_SYNC
-      // Cold-start intra-group alignment (Phase-0 experiment). Re-align all
-      // cores_per_group cores so their first (n=0) shared-B bursts issue within
-      // the MSHR merge window. num_cores_barrier = cores_per_group => the
-      // barrier wakes via wake_up_group (correct for all 16 groups; avoids the
-      // wake_up_tile groups-8..15 bug). Assumes the whole group is active
-      // (active_cores == num_cores here), else inactive cores would never
-      // arrive. Placed after start_benchmark so the alignment + first bursts are
-      // captured by the NoC tracer / [GroupMerge] stats.
+      // Cold-start alignment (Phase-0). Re-align the cores so their first (n=0)
+      // shared-B bursts issue inside the MSHR merge window. Placed after
+      // start_benchmark so the alignment + first bursts are captured by the NoC
+      // tracer / [GroupMerge] stats.
+      //
+      // Use the FULL log barrier, not the partial one. The partial version takes
+      // num_cores_barrier = cores_per_group, which lands in
+      // mempool_log_partial_barrier's group branch and writes wake_up_group -- a
+      // single 32-bit register that can only name 32 groups. At 64 groups the RTL
+      // loop reads it out of range and drove x onto every group >= 32, so half an
+      // 8x8 mesh never woke. mempool_log_barrier releases through wake_up_all()
+      // (offset 0x4), which is correct at both meshes, so the hazard is
+      // structurally unreachable rather than merely guarded against. Aligning the
+      // whole machine also aligns each group, which is what the merge window needs.
+      //
+      // It does require EVERY core to arrive: the barrier terminates on
+      // mempool_get_core_count(), the whole machine, while this call sits inside
+      // if (is_core_active). With ACTIVE_GROUP_DIV > 1 the inactive cores never
+      // arrive, so keep the partial barrier over the active set there.
+#  if ACTIVE_GROUP_DIV == 1
+      mempool_log_barrier(2, cid);
+#  else
       mempool_log_partial_barrier(2, cid, cores_per_group);
+#  endif
 #endif
 
       // Start benchmark instrumentation
