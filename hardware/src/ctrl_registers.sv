@@ -112,6 +112,9 @@ module ctrl_registers
   // simultaneously with the registered values
   logic wake_up_pulse;
   logic [MAX_NumGroups-1:0] wake_up_tile_pulse;
+  // groups nameable by the single DataWidth-wide wake_up_group register
+  localparam int unsigned NumGroupMaskBits =
+      (NumGroups < DataWidth) ? NumGroups : DataWidth;
   logic wake_up_group_pulse;
   logic wake_up_strd_offst_pulse;
 
@@ -169,14 +172,27 @@ module ctrl_registers
         end
       end
     end
-    // converts 32-bit group wake-up mask into a 'NumCores'-bit mask
+    // converts the 32-bit group wake-up mask into a 'NumCores'-bit mask.
+    //
+    // The mask is ONE DataWidth-wide register, so it can only name NumGroupMaskBits =
+    // min(NumGroups, DataWidth) groups. The previous version looped to NumGroups and read
+    // q[i] beyond the register: an out-of-range bit-select of a 4-state packed vector is
+    // 1'bx, so {NumCoresPerGroup{1'bx}} drove X onto EVERY group >= DataWidth -- half a
+    // 64-group mesh went x on every lower-half group barrier, and `& wake_up_mask_q` kept
+    // it x. Bounding the loop leaves those groups at the '0 default assigned above.
+    //
+    // The all-ones sentinel is also tested FIRST. As `q <= {NumGroups{1'b1}}` the guard
+    // widened to NumGroups bits, so at NumGroups > DataWidth a 32-bit q always compared
+    // less-or-equal and the sentinel branch was unreachable.
+    //
+    // At NumGroups <= DataWidth this is bit-identical to the old behaviour for every input.
     if (wake_up_group_pulse) begin
-      if (ctrl_reg2hw.wake_up_group.q <= {NumGroups{1'b1}}) begin
-        for(int i = 0; i < NumGroups; i = i + 1) begin
+      if (ctrl_reg2hw.wake_up_group.q == {DataWidth{1'b1}}) begin
+        wake_up_o = {NumCores{1'b1}};
+      end else begin
+        for (int i = 0; i < NumGroupMaskBits; i = i + 1) begin
           wake_up_o[NumCoresPerGroup * i +: NumCoresPerGroup] = {NumCoresPerGroup{ctrl_reg2hw.wake_up_group.q[i]}};
         end
-      end else if (ctrl_reg2hw.wake_up_group.q == {DataWidth{1'b1}}) begin
-        wake_up_o = {NumCores{1'b1}};
       end
     end
     wake_up_o = wake_up_o & wake_up_mask_q;
@@ -200,6 +216,11 @@ module ctrl_registers
    ******************/
   if (NumGroups > MAX_NumGroups)
     $error("[ctrl_registers] Number of groups exceeds the maximum supported.");
+
+  if (NumGroups > DataWidth)
+    $warning("[ctrl_registers] wake_up_group can name only %0d of %0d groups (it is one \
+%0d-bit register); software must wake groups >= %0d through wake_up_tile.",
+             DataWidth, NumGroups, DataWidth, DataWidth);
 
   if (MAX_NumGroups != mempool_pkg::MAX_NumGroups)
     $error("[ctrl_registers] MAX_NumGroups parameter does not match the one from mempool_pkg.");
