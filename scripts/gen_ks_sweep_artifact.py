@@ -62,8 +62,17 @@ for _d in sorted(glob.glob(os.path.join(ROOT, "hardware", "*_sw_*"))):
 # NOTE the arm name is hf_..., not sw_..., so the loop above cannot see them -- a prefix that the
 # discovery regex misses makes a finished arm INVISIBLE, which has bitten this file three times.
 RESFIX = {}
-for _d in sorted(glob.glob(os.path.join(ROOT, "hardware", "*_hf_[48]x[48]_*"))):
-    _m = re.match(r"^(.+?)_hf_([48]x[48]_.+)$", os.path.basename(_d))
+# GENERALISED 2026-09-02. Was hardcoded to `hf_` and would have made the `rf_` (corrected
+# 4x4 LOAD_LMUL re-runs) and `r8_` (8x8 wave) arms INVISIBLE -- the fourth instance of the
+# exact failure this block's own comment warns about. Match the arm-prefix from a set and
+# glob broadly, so a new corrected wave only needs its two letters added here.
+#   hf_ = corrected bank hash, 4x4 (the 26 arms whose LOAD_LMUL was already right)
+#   rf_ = corrected bank hash + derived LOAD_LMUL, 4x4 (the 10 that had deadlocked)
+#   r8_ = both fixes, 8x8
+# All three are "corrected re-run" and share RESFIX; the 4x4 pair is complementary, not
+# overlapping, and r8_ keys carry mesh 8x8 so they cannot collide with the 4x4 entries.
+for _d in sorted(glob.glob(os.path.join(ROOT, "hardware", "*_[48]x[48]_*"))):
+    _m = re.match(r"^(.+?)_(?:hf|rf|r8)_([48]x[48]_.+)$", os.path.basename(_d))
     if not _m: continue
     t = os.path.join(_d, "transcript")
     if not os.path.exists(t): continue
