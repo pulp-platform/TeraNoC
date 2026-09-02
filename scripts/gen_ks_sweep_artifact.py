@@ -393,15 +393,19 @@ def hashdot(r):
     _t = "; ".join("%s reached %s of %s banks" % (c, g, ce) for c, g, ce in d)
     # once the corrected re-run lands, the dot turns into the before/after
     _f = RESFIX.get(armname(r))
-    if _f and _f.get("cyc") and r.get("ideal"):
+    # KEY NAME: scrape() returns "cycles", not "cyc". This block read "cyc" and therefore NEVER
+    # fired -- every corrected re-run rendered as the plain "predates the fix" dot no matter what
+    # it measured, and _old was always None so the delta was dead too. Fixed 2026-09-02.
+    if _f and _f.get("cycles") and r.get("ideal"):
         _got = RES.get(armname(r), {})
-        _old = next((_got[k]["cyc"] for k in _PREF_RANK if k in _got and _got[k].get("cyc")), None)
-        _eff = 100.0 * r["ideal"] / _f["cyc"]
-        _delta = ("  (%+.1f%% vs %s cyc)" % (100.0 * (_f["cyc"] - _old) / _old, format(_old, ","))
+        _old = next((_got[k]["cycles"] for k in _PREF_RANK
+                     if k in _got and _got[k].get("cycles")), None)
+        _eff = 100.0 * r["ideal"] / _f["cycles"]
+        _delta = ("  (%+.1f%% vs %s cyc)" % (100.0 * (_f["cycles"] - _old) / _old, format(_old, ","))
                   if _old else "")
         return ('<span class="hashfixdot" title="MSHR bank hash: %s. RE-RUN on the corrected hash: '
                 '%s cyc, %.1f%% efficiency%s">&#9679;</span>'
-                % (_t, format(_f["cyc"], ","), _eff, _delta))
+                % (_t, format(_f["cycles"], ","), _eff, _delta))
     return ('<span class="hashdot" title="MSHR bank hash: %s &mdash; fixed 2026-09-01, this number '
             'predates it. Classes with one sharer per group bypass the MSHR and are not counted.">'
             '&#9679;</span>' % _t)
