@@ -761,9 +761,10 @@ segs = [("measured", "var(--good)"), ("running", "var(--cool)"), ("queued", "var
         ("blocked on the ROB0 ceiling", "var(--warn)"), ("bypass-track overflow", "var(--bad)"),
         ("livelocked", "var(--bad)"), ("fatal", "var(--bad)"), ("not dispatched", "var(--line)")]
 A('<div class="card"><h2>Progress</h2>'
-  '<p class="sub">4&times;4 first, by the user\'s call; the 8&times;8 half waits on that review. '
-  'Wave A covers KS&nbsp;2/4/8 &mdash; the kernels that exist today. Waves B and C are KS=1 and are '
-  'gated on the ROB0 fix.</p>'
+  '<p class="sub">Wave A covers KS&nbsp;2/4/8. Waves B and C are KS=1 and were gated on the ROB0 '
+  'ceiling; that gate was LIFTED on 2026-09-02 &mdash; <code>SPATZ_1XVL_LOAD_LMUL</code> is now derived '
+  'from the shape (commit 3bab8d8d), so a 512&nbsp;B load is split and the KS=1 arms are dispatched at '
+  'both meshes. The 8&times;8 half is running on <code>build_tgt8x8_hashfix</code>.</p>'
   '<div class="pb">%s</div><div class="key">%s</div></div>'
   % ("".join('<i style="width:%.2f%%;background:%s"></i>' % (100.0*TALLY.get(k,0)/len(M), c)
              for k, c in segs if TALLY.get(k)),
@@ -1025,7 +1026,8 @@ if DEG:
                       d["bench"], d["tmo"], d["acc"] or "&mdash;",
                       format(d["peak"], ","), format(d["insn"], ",")))
     A('<div class="card"><h2>The livelocked arms</h2>'
-      '<p>These %d arms are still running but have stopped doing useful work. They are kept here '
+      '<p>These %d arms stopped doing useful work: they are the RH livelock, and most of their '
+      'batches have since gone terminal without ever emitting a cycle count. They are kept here '
       'because a failure mode is evidence, and their per-group series are in the explorer above '
       '(filter <code>state = degraded</code>) &mdash; but <strong>none of these is a cycle '
       'measurement</strong> and none appears in the result tables.</p>'
