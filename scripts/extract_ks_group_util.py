@@ -147,7 +147,11 @@ def collect_delivered(gu):
     missing from the chart. These take priority over any stale harvest of the same arm.
     """
     import glob as _g
-    for d in sorted(_g.glob(os.path.join(ROOT, "hardware", "*_sw_[48]x[48]_*"))):
+    # PREFIX SET, not just sw_. The corrected waves land as hashfix_hf_* / rf_rf_* / r8_r8_*,
+    # and a discovery glob that misses a prefix makes finished arms INVISIBLE -- the same
+    # failure this repo has now hit four separate times (wc4/wc8/s8k8, the artifact RESFIX
+    # glob, the hashfix watcher, and here).
+    for d in sorted(_g.glob(os.path.join(ROOT, "hardware", "*_[48]x[48]_*"))):
         t = os.path.join(d, "transcript")
         if not os.path.isfile(t): continue
         try: b = re.sub(rb"(?m)^# ", b"", open(t, "rb").read())
@@ -155,7 +159,7 @@ def collect_delivered(gu):
         mt = re.search(rb"execution took (\d+)", b)
         if not mt: continue                       # only completed arms here
         base = os.path.basename(d)
-        m = re.search(r"sw_(\dx\d)_(fp\d+)_ks(\d+)_(\d+)x(\d+)x(\d+)$", base)
+        m = re.search(r"(?:sw|hf|rf|r8)_(\dx\d)_(fp\d+)_ks(\d+)_(\d+)x(\d+)x(\d+)$", base)
         if not m: continue
         mesh, prec, ks, B, D, I = m.group(1), m.group(2), int(m.group(3)), \
                                   int(m.group(4)), int(m.group(5)), int(m.group(6))
@@ -172,7 +176,8 @@ def collect_delivered(gu):
         took = int(mt.group(1))
         span = per[-1]["cyc"] - per[0]["cyc"] + 1000
         R = max(1, round(span / float(took)))     # R from the MEASURED pass, not from ideal
-        label = "done %s KS=%d %dx%dx%d" % (prec, ks, B, D, I)
+        _tag = ("fixed " if re.search(r"_(?:hf|rf|r8)_", base) else "done ")
+        label = "%s%s KS=%d %dx%dx%d" % (_tag, prec, ks, B, D, I)
         gu[label] = {"groups": g, "prec": prec, "mesh": mesh,
                      "shape": "%dx%dx%d" % (B, D, I), "periods": per,
                      "run": "done", "state": "done", "ks": ks, "B": B, "D": D, "I": I,
