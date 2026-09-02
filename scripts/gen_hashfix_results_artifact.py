@@ -1,356 +1,363 @@
 #!/usr/bin/env python3
-"""Standalone results page for the corrected-MSHR-hash + derived-LOAD_LMUL re-runs.
+"""Corrected-MSHR-hash results page.
 
-Deliberately SEPARATE from gen_ks_sweep_artifact.py: that page is a 16 MB campaign explorer
-with 18 sections, and these results were unreadable inside it (they lived only in tooltips).
-This page shows exactly one thing and shows it in visible tables.
+ONE DATASET. Every table, card, grid and the per-group explorer are derived from the same
+ARMS dict built below -- there is no second path to the numbers, so they cannot disagree.
 
-Reads the delivered transcripts directly. No hidden state, no cached JSON.
+STALENESS RULE. A pre-fix cycle count for a shape that the bank-hash defect ACTUALLY AFFECTED
+(docs/benchmarks/mshr_hash_affected.tsv, 72 cells) is not a valid measurement of this design and
+is NOT shown as one. Such a shape appears only once its corrected re-run has landed. Shapes the
+defect never touched keep their original number, which is still valid.
+
+TWO PERCENTAGES, deliberately never conflated:
+  efficiency     = ideal/actual cycles          <- rank on this
+  FPU occupancy  = the TB `cum=` counter        <- lane occupancy, NOT conserved across runs
 """
-import glob, os, re, sys, time
+import glob, json, os, re, sys, time
 
 ROOT = "/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC"
-OUT  = "/tmp/claude-620771/hashfix_results.html"
+SCR  = "/tmp/claude-620771"
+OUT  = os.path.join(SCR, "hashfix_results.html")
+
+# ---- inputs ----------------------------------------------------------------------------------
+def _load(path, what):
+    try: return json.load(open(path))
+    except Exception as e:
+        sys.stderr.write("%s load failed: %s\n" % (what, e)); return {}
+
+SM = _load(os.path.join(SCR, "sweep_matrix.json"), "sweep_matrix") or []
+GU_ALL = _load(os.path.join(SCR, "ks_group_util.json"), "group_util")
+
+AFFECTED = set()
+try:
+    for l in open(os.path.join(ROOT, "docs/benchmarks/mshr_hash_affected.tsv")):
+        if l.startswith("#") or not l.strip(): continue
+        f = l.rstrip("\n").split("\t")
+        if len(f) >= 5: AFFECTED.add((f[1], f[2], int(f[3]), f[4]))
+except IOError as e:
+    sys.stderr.write("hash-affected list missing: %s\n" % e)
 
 def scrape(p):
     try: b = re.sub(rb"(?m)^# ", b"", open(p, "rb").read())
     except IOError: return None
-    m = re.search(rb"execution took (\d+)", b)
-    u = re.findall(rb"\[FPU\] bench[^\n]*cum=([0-9.]+)%", b)
-    t = re.findall(rb"timeouts:\s+resp_hold=(\d+) cache_aged=(\d+)", b)
+    m  = re.search(rb"execution took (\d+)", b)
+    u  = re.findall(rb"\[FPU\] bench[^\n]*cum=([0-9.]+)%", b)
+    t  = re.findall(rb"timeouts:\s+resp_hold=(\d+) cache_aged=(\d+) issue=(\d+)\s+bankfull_bypass=(\d+)", b)
+    tm = re.findall(rb"mshr_timeout=\+(\d+)", b)
     return dict(cyc=int(m.group(1)) if m else None, rh=b.count(b"RH STUCK"),
                 util=float(u[-1]) if u else None,
-                rhold=int(t[-1][0]) if t else None)
+                rhold=int(t[-1][0]) if t else None, aged=int(t[-1][1]) if t else None,
+                issue=int(t[-1][2]) if t else None, bf=int(t[-1][3]) if t else None,
+                tmo=sum(int(x) for x in tm) if tm else 0)
 
-def baseline(arm):
-    for p in ("run2_sw_4x4_", "wc4_sw_4x4_"):
-        bp = os.path.join(ROOT, "hardware", p + arm, "transcript")
-        if os.path.exists(bp):
-            s = scrape(bp)
-            if s: return s, p.rstrip("_")
-    return None, None
+# ---- THE dataset -------------------------------------------------------------------------------
+ARMS = {}
+for r in SM:
+    key = "%s_%s_ks%d_%dx%dx%d" % (r["mesh"], r["prec"], r["KS"], r["B"], r["D"], r["I"])
+    ARMS[key] = dict(mesh=r["mesh"], prec=r["prec"], ks=r["KS"], B=r["B"], D=r["D"], I=r["I"],
+                     ideal=r.get("ideal"), new=None, old=None, old_pref=None,
+                     affected=(r["mesh"], r["prec"], r["KS"], "%dx%dx%d" % (r["B"], r["D"], r["I"])) in AFFECTED)
 
-REC, NUL, RF = [], [], []
-for d in sorted(glob.glob(os.path.join(ROOT, "hardware", "hashfix_hf_4x4_*"))):
-    arm = os.path.basename(d).replace("hashfix_hf_4x4_", "")
-    new = scrape(os.path.join(d, "transcript"))
-    if not new or not new["cyc"]: continue
-    old, _ = baseline(arm)
-    if not old: continue
-    (NUL if old["cyc"] else REC).append((arm, old, new))
-for d in sorted(glob.glob(os.path.join(ROOT, "hardware", "rf_rf_4x4_*"))):
-    arm = os.path.basename(d).replace("rf_rf_4x4_", "")
-    new = scrape(os.path.join(d, "transcript"))
-    if not new or not new["cyc"]: continue
-    old, _ = baseline(arm)
-    RF.append((arm, old, new))
+_PREF_RANK = ["wc8", "wc4", "wc", "wa8", "s8k8", "wb", "run2", "wa2"]
+for d in glob.glob(os.path.join(ROOT, "hardware", "*_[48]x[48]_*")):
+    b = os.path.basename(d)
+    mf = re.match(r"^(.+?)_(?:hf|rf|r8)_([48]x[48]_.+)$", b)
+    ms = re.match(r"^(.+?)_sw_([48]x[48]_.+)$", b)
+    m, corrected = (mf, True) if mf else ((ms, False) if ms else (None, False))
+    if not m or m.group(2) not in ARMS: continue
+    s = scrape(os.path.join(d, "transcript"))
+    if not s: continue
+    a = ARMS[m.group(2)]
+    if corrected:
+        if s.get("cyc") and (a["new"] is None or s["cyc"]): a["new"] = s
+    else:
+        pref = m.group(1)
+        rank = _PREF_RANK.index(pref) if pref in _PREF_RANK else 99
+        if a["old"] is None or rank < (_PREF_RANK.index(a["old_pref"]) if a["old_pref"] in _PREF_RANK else 99):
+            a["old"], a["old_pref"] = s, pref
 
-# ---- per-group FPU utilisation series for the corrected arms --------------------------------
-import json
-GU = {}
-try:
-    _all = json.load(open("/tmp/claude-620771/ks_group_util.json"))
-    for _k, _v in _all.items():
-        if _k.startswith("fixed ") and _v.get("periods") and _v.get("mesh") == "4x4":
-            GU[_k[6:]] = {"g": _v["groups"], "cyc": _v["cycles"],
-                          "p": [{"c": w["cyc"], "u": w["u"]} for w in _v["periods"]]}
-except Exception as _e:
-    sys.stderr.write("group-util load failed: %s\n" % _e)
+def eff(a, cyc):
+    return (100.0 * a["ideal"] / cyc) if (a.get("ideal") and cyc) else None
+def effs(a, cyc):
+    e = eff(a, cyc); return ("%.1f%%" % e) if e else "&mdash;"
+def fmt(n): return format(n, ",") if n else "&mdash;"
 
-# ---- mesh cards, exported by gen_ks_sweep_artifact.py ---------------------------------------
-# Embedded rather than re-implemented: matrix()/status()/hashdot() live in that generator and this
-# page renders the IDENTICAL markup, so the two can never drift.
-# Render the grids with THIS page's palette rather than embedding the explorer's stylesheet.
-# Embedding it collided on 16 selectors (body/h1/.card/table/.mesh/...), needed the whole sheet
-# scoped, and its theme-qualified selectors and specificity could not be verified without a
-# browser. One palette, one stylesheet, no cascade surprises.
-try:
-    SM = json.load(open("/tmp/claude-620771/sweep_matrix.json"))
-except IOError as _e:
-    SM = []; sys.stderr.write("sweep_matrix.json missing: %s\n" % _e)
+# ---- classification, applying the staleness rule ------------------------------------------------
+for k, a in ARMS.items():
+    o, n = a["old"], a["new"]
+    o_ok = bool(o and o.get("cyc"))
+    if n and o_ok:                      a["cls"] = "recovered" if False else "rerun"
+    elif n and o and not o_ok:          a["cls"] = "recovered"      # baseline never completed
+    elif n:                             a["cls"] = "rerun"          # corrected, no baseline
+    elif o_ok and not a["affected"]:    a["cls"] = "valid"          # untouched by the defect
+    elif o_ok and a["affected"]:        a["cls"] = "stale"          # pre-fix, defect applied -> HIDE
+    elif o and not o_ok:                a["cls"] = "livelocked"
+    else:                               a["cls"] = "none"
 
-H = []
-A = H.append
+SHOWN   = {k: a for k, a in ARMS.items() if a["cls"] in ("recovered", "rerun", "valid")}
+HIDDEN  = {k: a for k, a in ARMS.items() if a["cls"] == "stale"}
+REC     = sorted([a for a in SHOWN.values() if a["cls"] == "recovered"], key=lambda x: -x["old"]["rh"])
+RERUN   = sorted([a for a in SHOWN.values() if a["cls"] == "rerun"],
+                 key=lambda x: (x["new"]["cyc"] - x["old"]["cyc"]) / float(x["old"]["cyc"]) if x["old"] and x["old"].get("cyc") else 0)
+VALID   = sorted([a for a in SHOWN.values() if a["cls"] == "valid"], key=lambda x: (x["mesh"], x["prec"], x["ks"], x["B"]))
+
+def nm(a): return "%s_%s_ks%d_%dx%dx%d" % (a["mesh"], a["prec"], a["ks"], a["B"], a["D"], a["I"])
+
+# ---- page --------------------------------------------------------------------------------------
+H=[]; A=H.append
 A('<title>Corrected Hash Re-Runs</title>')
 A('<link rel="stylesheet" href="https://fonts.googleapis.com/css2?'
   'family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">')
 A('''<style>
-:root{--bg:#f7f6f3;--surf:#fff;--ink:#1a1917;--ink2:#57534e;--ink3:#8a8480;
-      --line:#e0ddd7;--good:#166534;--bad:#9a3412;--accent:#7c5c3e;--rule:#c9c3ba}
+:root{--bg:#f7f6f3;--surf:#fff;--ink:#1a1917;--ink2:#57534e;--ink3:#8a8480;--line:#e0ddd7;
+      --good:#166534;--bad:#9a3412;--accent:#7c5c3e;--rule:#c9c3ba}
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
-      --bg:#161513;--surf:#201e1b;--ink:#f0ede8;--ink2:#b5aea6;--ink3:#7d766e;
-      --line:#33302b;--good:#86efac;--bad:#fdba74;--accent:#d6b88f;--rule:#3d3934}}
-:root[data-theme="dark"]{--bg:#161513;--surf:#201e1b;--ink:#f0ede8;--ink2:#b5aea6;
-      --ink3:#7d766e;--line:#33302b;--good:#86efac;--bad:#fdba74;--accent:#d6b88f;--rule:#3d3934}
+      --bg:#161513;--surf:#201e1b;--ink:#f0ede8;--ink2:#b5aea6;--ink3:#7d766e;--line:#33302b;
+      --good:#86efac;--bad:#fdba74;--accent:#d6b88f;--rule:#3d3934}}
+:root[data-theme="dark"]{--bg:#161513;--surf:#201e1b;--ink:#f0ede8;--ink2:#b5aea6;--ink3:#7d766e;
+      --line:#33302b;--good:#86efac;--bad:#fdba74;--accent:#d6b88f;--rule:#3d3934}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--ink);
-     font:15px/1.6 "IBM Plex Sans",system-ui,sans-serif;padding:40px 22px 80px}
-.wrap{max-width:1060px;margin:0 auto}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 "IBM Plex Sans",system-ui,sans-serif;padding:40px 22px 80px}
+.wrap{max-width:1120px;margin:0 auto}
 h1{font-size:27px;margin:0 0 6px;letter-spacing:-.02em;text-wrap:balance}
-.sub{color:var(--ink2);margin:0 0 30px;font-size:14px}
-h2{font-size:17px;margin:38px 0 4px;letter-spacing:-.01em}
-h2 .n{color:var(--ink3);font-weight:400}
-p{margin:8px 0 16px;color:var(--ink2);max-width:74ch}
-.card{background:var(--surf);border:1px solid var(--line);border-radius:9px;
-      padding:20px 22px;margin:16px 0}
-.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin:22px 0 6px}
+h2{font-size:17px;margin:38px 0 4px}
+h3{font-size:14px;margin:18px 0 8px;color:var(--ink2)}
+p{margin:8px 0 16px;color:var(--ink2);max-width:76ch}
+.sub{color:var(--ink2);margin:0 0 26px;font-size:14px}
+.card{background:var(--surf);border:1px solid var(--line);border-radius:9px;padding:18px 20px;margin:14px 0}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:20px 0}
 .kpi{background:var(--surf);border:1px solid var(--line);border-radius:9px;padding:15px 17px}
-.kpi .v{font:600 25px/1.15 "IBM Plex Mono",monospace;letter-spacing:-.02em;
-        font-variant-numeric:tabular-nums}
+.kpi .v{font:600 25px/1.15 "IBM Plex Mono",monospace;font-variant-numeric:tabular-nums}
 .kpi .k{color:var(--ink3);font-size:11.5px;text-transform:uppercase;letter-spacing:.07em;margin-top:5px}
-.tw{overflow-x:auto;margin:6px 0 4px}
-table{border-collapse:collapse;width:100%;font-size:13.5px}
-th{text-align:left;color:var(--ink3);font-weight:600;font-size:11px;text-transform:uppercase;
-   letter-spacing:.06em;padding:7px 12px 7px 0;border-bottom:1.5px solid var(--rule);white-space:nowrap}
-td{padding:8px 12px 8px 0;border-bottom:1px solid var(--line);
-   font-variant-numeric:tabular-nums;white-space:nowrap}
+.tw{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th{text-align:left;color:var(--ink3);font-weight:600;font-size:10.5px;text-transform:uppercase;
+   letter-spacing:.05em;padding:7px 10px 7px 0;border-bottom:1.5px solid var(--rule);white-space:nowrap}
+td{padding:7px 10px 7px 0;border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums;white-space:nowrap}
 td.n,th.n{text-align:right}
-.mono{font-family:"IBM Plex Mono",monospace;font-size:12.5px}
-.good{color:var(--good);font-weight:600}
-.bad{color:var(--bad);font-weight:600}
-.big{font-weight:600;font-size:14.5px}
+.mono{font-family:"IBM Plex Mono",monospace;font-size:12px}
+.good{color:var(--good);font-weight:600}.bad{color:var(--bad);font-weight:600}
+.big{font-weight:600}.dim,td.dim{color:var(--ink3)}
 .none{color:var(--ink3);font-style:italic}
-.note{border-left:3px solid var(--accent);padding:2px 0 2px 15px;margin:20px 0;color:var(--ink2)}
-code{font-family:"IBM Plex Mono",monospace;font-size:.9em;background:var(--bg);
-     border:1px solid var(--line);border-radius:4px;padding:1px 5px}
-.mctl{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
-.mctl select{font:inherit;font-size:13px;padding:5px 8px;border:1px solid var(--line);
-             border-radius:6px;background:var(--bg);color:var(--ink);max-width:340px}
-.mctl input[type=range]{flex:1;min-width:200px;accent-color:var(--accent)}
-.mesh{display:grid;grid-template-columns:repeat(4,1fr);gap:4px;max-width:340px}
-.mesh i{aspect-ratio:1;border-radius:5px;border:1px solid var(--line);display:block}
-.scale{display:flex;align-items:center;gap:9px;margin-top:13px;color:var(--ink3);font-size:11.5px}
-.ramp{flex:0 0 130px;height:9px;border-radius:5px;
-      background:linear-gradient(90deg,color-mix(in oklab,var(--accent) 6%,var(--bg)),var(--accent))}
-h3{font-size:15px;margin:2px 0 10px;font-weight:600}
-.gsub{font:600 11px/1 "IBM Plex Mono",monospace;letter-spacing:.09em;text-transform:uppercase;
-      color:var(--ink3);margin:16px 0 5px}
-td.dim,.dimk{color:var(--ink3)}
-td.dg,.dgk{color:var(--bad);font-weight:600;font-size:12px}
-td.fx{color:var(--good);font-weight:600}
-td.fx sup,.fxk{color:var(--good);font-size:.7em;vertical-align:super}
-td[title]{cursor:help}
+.note{border-left:3px solid var(--accent);padding:2px 0 2px 15px;margin:18px 0;color:var(--ink2)}
+code{font-family:"IBM Plex Mono",monospace;font-size:.9em;background:var(--bg);border:1px solid var(--line);border-radius:4px;padding:1px 5px}
+.ctl{display:flex;flex-wrap:wrap;gap:13px;align-items:center;margin:12px 0 6px;font-size:12.5px}
+.ctl label{display:flex;align-items:center;gap:7px;color:var(--ink2)}
+.ctl .grow{flex:1;min-width:220px}
+.ctl select{font-family:"IBM Plex Mono",monospace;font-size:12px;padding:3px 6px;border:1px solid var(--line);border-radius:4px;background:var(--bg);color:var(--ink)}
+.ctl input[type=range]{flex:1;accent-color:var(--accent);min-width:160px}
+.ctl.facets{gap:10px 14px;padding:10px 12px;background:var(--bg);border:1px solid var(--line);border-radius:6px}
+.ctl.facets select{min-width:74px}
+.ctl.facets label{font-family:"IBM Plex Mono",monospace;font-size:11px}
+.rst{font-family:"IBM Plex Mono",monospace;font-size:11px;padding:3px 9px;border:1px solid var(--line);border-radius:4px;background:var(--surf);color:var(--ink2);cursor:pointer}
+.mstats{display:flex;flex-wrap:wrap;gap:22px;margin:10px 0 12px}
+.stat{display:flex;flex-direction:column;gap:1px}
+.stat .k{font-family:"IBM Plex Mono",monospace;font-size:10px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink3)}
+.stat .v{font-size:17px;font-weight:600;font-variant-numeric:tabular-nums}
+.mesh{display:grid;gap:2px;max-width:560px}
+.mesh .cell{aspect-ratio:1;display:flex;align-items:center;justify-content:center;font-family:"IBM Plex Mono",monospace;font-size:12px;font-variant-numeric:tabular-nums;border-radius:3px}
+.mesh.dense{max-width:660px}.mesh.dense .cell{font-size:9px;border-radius:1px}
+.pgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:3px 20px;margin-top:6px}
+.prow{display:flex;align-items:center;gap:7px;font-size:11.5px}
+.prow .gid{font-family:"IBM Plex Mono",monospace;color:var(--ink3);width:26px;flex:none}
+.prow .pb2{flex:1;height:7px;background:var(--line);border-radius:4px;overflow:hidden}
+.prow .pb2 span{display:block;height:100%;background:var(--accent);border-radius:4px}
+.prow .pv{font-family:"IBM Plex Mono",monospace;font-variant-numeric:tabular-nums;color:var(--ink2);width:34px;text-align:right;flex:none}
 .foot{color:var(--ink3);font-size:12px;margin-top:34px;border-top:1px solid var(--line);padding-top:14px}
 </style>''')
 A('<div class="wrap">')
-A('<h1>Corrected MSHR bank hash &mdash; re-run results</h1>')
-A('<p class="sub">4&times;4 mesh, 256 cores, <code>terapool_spatz4_fpu</code>. '
-  'Each row is one shape run twice: once before the fix, once after. Generated %s.</p>'
-  % time.strftime("%Y-%m-%d %H:%M"))
+A('<h1>Corrected MSHR bank hash &mdash; results</h1>')
+A('<p class="sub">Every table, grid and chart on this page is derived from one dataset. '
+  'Generated %s.</p>' % time.strftime("%Y-%m-%d %H:%M"))
 
-sb = sum(o["cyc"] for _, o, _ in NUL) or 1
-sa = sum(n["cyc"] for _, _, n in NUL)
+A('<div class="note"><b>What is shown, and what is withheld.</b> The bank-hash defect made the '
+  'pre-fix number wrong for %d shapes. Those appear here <b>only</b> once their corrected re-run '
+  'has landed &mdash; %d still have none and are omitted rather than shown stale. Shapes the '
+  'defect never touched keep their original measurement, which is still valid.<br><br>'
+  '<b>Two percentages, never the same quantity.</b> <b>Efficiency</b> = ideal/actual cycles; rank '
+  'on this. <b>FPU occupancy</b> is the testbench <code>cum=</code> counter (lane-cycles busy), '
+  'which is not conserved across runs and has inverted a real ranking here before. Example: '
+  '<code>4x4_fp16_ks4_8x128x8192</code> is <b>69.8%% efficiency</b> but <b>78.45%% occupancy</b>.'
+  '</div>' % (len(AFFECTED), len(HIDDEN)))
+
+_nul = [a for a in RERUN if a["old"] and a["old"].get("cyc")]
+_sb = sum(a["old"]["cyc"] for a in _nul) or 1
+_sa = sum(a["new"]["cyc"] for a in _nul)
 A('<div class="kpis">')
-A('<div class="kpi"><div class="v good">%d</div><div class="k">arms recovered<br>from producing nothing</div></div>' % len(REC))
-A('<div class="kpi"><div class="v">%+.2f%%</div><div class="k">aggregate on the %d arms<br>that already worked</div></div>' % (100.0*(sa-sb)/sb, len(NUL)))
-A('<div class="kpi"><div class="v bad">%d</div><div class="k">arms measurably slower<br>(&gt;1%%)</div></div>'
-  % len([1 for _, o, n in NUL if 100.0*(n["cyc"]-o["cyc"])/o["cyc"] > 1.0]))
-A('<div class="kpi"><div class="v">%d</div><div class="k">of 36 arms<br>delivered so far</div></div>' % (len(REC)+len(NUL)+len(RF)))
+A('<div class="kpi"><div class="v good">%d</div><div class="k">recovered<br>produced nothing before</div></div>' % len(REC))
+A('<div class="kpi"><div class="v">%+.2f%%</div><div class="k">aggregate on the %d<br>that already worked</div></div>' % (100.0*(_sa-_sb)/_sb, len(_nul)))
+A('<div class="kpi"><div class="v">%d</div><div class="k">shapes still awaiting<br>a corrected re-run</div></div>' % len(HIDDEN))
+A('<div class="kpi"><div class="v">%d</div><div class="k">shapes shown<br>of %d in the sweep</div></div>' % (len(SHOWN), len(ARMS)))
 A('</div>')
 
-A('<h2>1 &nbsp;These arms produced no result at all before <span class="n">&mdash; %d</span></h2>' % len(REC))
-A('<p>Each sat in the RH livelock: riding out <code>serve_timeout</code> on every remote load, '
-  '3&ndash;13% FPU utilisation, killed by the wall clock after ~2.5M cycles without ever emitting '
-  'a cycle count. There is no &ldquo;before&rdquo; number because none was ever produced.</p>')
-A('<div class="card"><div class="tw"><table><thead><tr><th>arm</th><th class="n">before</th>'
-  '<th class="n">after</th><th class="n">RH before</th><th class="n">RH after</th>'
-  '<th class="n">util before</th><th class="n">util after</th></tr></thead><tbody>')
-for a, o, n in sorted(REC, key=lambda x: -x[1]["rh"]):
-    A('<tr><td class="mono">%s</td><td class="n none">never completed</td>'
-      '<td class="n big good">%s</td><td class="n">%s</td><td class="n">%d</td>'
-      '<td class="n">%.2f%%</td><td class="n big">%.2f%%</td></tr>'
-      % (a, format(n["cyc"], ","), format(o["rh"], ","), n["rh"], o["util"] or 0, n["util"] or 0))
-A('</tbody></table></div></div>')
-A('<div class="note">RH-STUCK falls to a flat <b>8&ndash;16 on every arm</b>, whether it started at '
-  '41,807 or 4,116. That is a fixed floor, not a residue proportional to the old problem.</div>')
+# ---- one table renderer, used for every results table -------------------------------------------
+COLS = [("arm",   lambda a: '<td class="mono">%s</td>' % nm(a)),
+        ("class", lambda a: '<td class="dim">%s</td>' % a["cls"]),
+        ("before",lambda a: '<td class="n">%s</td>' % (format(a["old"]["cyc"], ",")
+                    if a["old"] and a["old"].get("cyc") else '<span class="none">never</span>')),
+        ("after", lambda a: '<td class="n big">%s</td>' % (format(a["new"]["cyc"], ",") if a["new"] else "&mdash;")),
+        ("delta", lambda a: _delta(a)),
+        ("efficiency", lambda a: '<td class="n big">%s</td>' % effs(a, (a["new"] or a["old"] or {}).get("cyc"))),
+        ("FPU occupancy", lambda a: '<td class="n">%s</td>' % _occ(a)),
+        ("RH",        lambda a: _z((a["new"] or a["old"] or {}).get("rh"))),
+        ("resp_hold", lambda a: _z((a["new"] or a["old"] or {}).get("rhold"))),
+        ("aged",      lambda a: _z((a["new"] or a["old"] or {}).get("aged"))),
+        ("issue",     lambda a: _z((a["new"] or a["old"] or {}).get("issue"))),
+        ("bankfull",  lambda a: _z((a["new"] or a["old"] or {}).get("bf"))),
+        ("tmo",       lambda a: _z((a["new"] or a["old"] or {}).get("tmo")))]
 
-A('<h2>2 &nbsp;These arms already worked <span class="n">&mdash; %d, aggregate %+.2f%%</span></h2>'
-  % (len(NUL), 100.0*(sa-sb)/sb))
-A('<p>A positive delta is <b>slower</b>. Sorted best to worst.</p>')
-A('<div class="card"><div class="tw"><table><thead><tr><th>arm</th><th class="n">before</th>'
-  '<th class="n">after</th><th class="n">delta</th><th class="n">util before</th>'
-  '<th class="n">util after</th></tr></thead><tbody>')
-for a, o, n in sorted(NUL, key=lambda x: (x[2]["cyc"]-x[1]["cyc"])/float(x[1]["cyc"])):
-    d = 100.0*(n["cyc"]-o["cyc"])/o["cyc"]
+def _z(v):
+    return '<td class="n dim">0</td>' if v in (0, None) else '<td class="n bad">%s</td>' % format(v, ",")
+def _occ(a):
+    s = a["new"] or a["old"] or {}
+    return ("%.2f%%" % s["util"]) if s.get("util") else "&mdash;"
+def _delta(a):
+    o, n = a["old"], a["new"]
+    if not (n and o and o.get("cyc")): return '<td class="n dim">&mdash;</td>'
+    d = 100.0 * (n["cyc"] - o["cyc"]) / o["cyc"]
     cls = "bad" if d > 1.0 else ("good" if d < -0.5 else "")
-    A('<tr><td class="mono">%s</td><td class="n">%s</td><td class="n">%s</td>'
-      '<td class="n %s">%+.2f%%</td><td class="n">%.2f%%</td><td class="n">%.2f%%</td></tr>'
-      % (a, format(o["cyc"], ","), format(n["cyc"], ","), cls, d, o["util"] or 0, n["util"] or 0))
-A('<tr><td class="mono"><b>aggregate</b></td><td class="n"><b>%s</b></td><td class="n"><b>%s</b></td>'
-  '<td class="n"><b>%+.2f%%</b></td><td class="n">&mdash;</td><td class="n">&mdash;</td></tr>'
-  % (format(sb, ","), format(sa, ","), 100.0*(sa-sb)/sb))
-A('</tbody></table></div></div>')
-A('<div class="note"><b>Two arms are genuinely slower</b>, both B=16 KS=2, and every stress counter '
-  'is zero on both sides &mdash; nothing new is stalling, utilisation simply drops. A hash better on '
-  'average can be worse for one access pattern. Not root-caused.<br><br>'
-  'Also unexplained: utilisation falls on 8 of these 9 arms even where cycles barely move.</div>')
+    return '<td class="n %s">%+.2f%%</td>' % (cls, d)
 
-if RF:
-    A('<h2>3 &nbsp;Derived <code>LOAD_LMUL</code> vs the hand-passed flag <span class="n">&mdash; %d</span></h2>' % len(RF))
-    A('<p>These shapes need the 512&nbsp;B load split or they deadlock before the kernel. The flag '
-      'used to be passed by hand; it is now derived from the shape. Both builds emit a '
-      '<b>byte-identical</b> <code>matmul_1xVL</code>, so this checks the derivation picks the same '
-      'setting &mdash; any delta comes from the bank hash, which the older baselines predate.</p>')
-    A('<div class="card"><div class="tw"><table><thead><tr><th>arm</th><th class="n">hand-flagged</th>'
-      '<th class="n">derived</th><th class="n">delta</th><th class="n">util before</th>'
-      '<th class="n">util after</th></tr></thead><tbody>')
-    for a, o, n in sorted(RF):
-        if o and o["cyc"]:
-            d = 100.0*(n["cyc"]-o["cyc"])/o["cyc"]
-            A('<tr><td class="mono">%s</td><td class="n">%s</td><td class="n">%s</td>'
-              '<td class="n %s">%+.2f%%</td><td class="n">%.2f%%</td><td class="n">%.2f%%</td></tr>'
-              % (a, format(o["cyc"], ","), format(n["cyc"], ","),
-                 "good" if d < -0.5 else ("bad" if d > 1.0 else ""), d,
-                 o["util"] or 0, n["util"] or 0))
-        else:
-            A('<tr><td class="mono">%s</td><td class="n none">never completed</td>'
-              '<td class="n big good">%s</td><td class="n">&mdash;</td><td class="n">&mdash;</td>'
-              '<td class="n">%.2f%%</td></tr>' % (a, format(n["cyc"], ","), n["util"] or 0))
+def table(rows):
+    if not rows: return
+    A('<div class="card"><div class="tw"><table><thead><tr>')
+    for i, (h, _) in enumerate(COLS):
+        A('<th%s>%s</th>' % ('' if i == 0 else ' class="n"' if i > 1 else '', h))
+    A('</tr></thead><tbody>')
+    for a in rows:
+        A('<tr>' + "".join(f(a) for _, f in COLS) + '</tr>')
     A('</tbody></table></div></div>')
 
-# ---- baseline / corrected lookups, keyed by canonical arm name -------------------------------
-# Built here from the transcripts rather than imported: this page must not depend on the other
-# generator's globals.
-_PREF_RANK = ["wc8", "wc4", "wc", "wa8", "s8k8", "wb", "run2", "wa2"]
-RES, RESFIX = {}, {}
-for _d in glob.glob(os.path.join(ROOT, "hardware", "*_sw_[48]x[48]_*")):
-    _m = re.match(r"^(.+?)_(sw_[48]x[48]_.+)$", os.path.basename(_d))
-    if not _m: continue
-    _s = scrape(os.path.join(_d, "transcript"))
-    # keep cycle-less baselines too: "scraped but never printed execution took" is exactly
-    # how a livelocked arm presents, and it is the only way to mark those cells "degr".
-    if _s: RES.setdefault(_m.group(2), {})[_m.group(1)] = {"cycles": _s.get("cyc"), "rh": _s.get("rh", 0)}
-for _d in glob.glob(os.path.join(ROOT, "hardware", "*_[48]x[48]_*")):
-    _m = re.match(r"^(.+?)_(?:hf|rf|r8)_([48]x[48]_.+)$", os.path.basename(_d))
-    if not _m: continue
-    _s = scrape(os.path.join(_d, "transcript"))
-    if _s and _s.get("cyc"): RESFIX["sw_" + _m.group(2)] = {"cycles": _s["cyc"]}
+A('<h2>Arms that produced no result before <span class="dim">&mdash; %d</span></h2>' % len(REC))
+A('<p>Each sat in the RH livelock at 3&ndash;13%% FPU occupancy and was killed by the wall clock '
+  'without ever emitting a cycle count. There is no &ldquo;before&rdquo; number because none '
+  'existed. Counters shown are from the corrected run.</p>')
+table(REC)
 
-def _cell(r):
-    """One grid cell, in this page's own classes."""
-    arm = "sw_%s_%s_ks%d_%dx%dx%d" % (r["mesh"], r["prec"], r["KS"], r["B"], r["D"], r["I"])
-    fx  = RESFIX.get(arm)
-    got = RES.get(arm, {})
-    old = next((got[k]["cycles"] for k in _PREF_RANK if k in got and got[k].get("cycles")), None)
-    ide = r.get("ideal")
-    if fx and fx.get("cycles") and ide:
-        eff = 100.0 * ide / fx["cycles"]
-        d   = ("  (%+.1f%% vs %s)" % (100.0*(fx["cycles"]-old)/old, format(old, ","))) if old else \
-              "  (baseline never completed)"
-        return ('<td class="n fx" title="%s &mdash; corrected re-run: %s cyc%s">%.1f%%<sup>&#9679;</sup></td>'
-                % (arm, format(fx["cycles"], ","), d, eff))
-    if old and ide:
-        return ('<td class="n" title="%s &mdash; %s cyc">%.1f%%</td>'
-                % (arm, format(old, ","), 100.0 * ide / old))
-    if arm in LIVE_SET:
-        return '<td class="n dg" title="%s &mdash; livelocked, never a measurement">degr</td>' % arm
-    return '<td class="n dim" title="%s &mdash; running or not dispatched">&middot;</td>' % arm
+A('<h2>Corrected re-runs whose baseline also completed <span class="dim">&mdash; %d, aggregate %+.2f%%</span></h2>'
+  % (len(_nul), 100.0*(_sa-_sb)/_sb))
+A('<p>A positive delta is <b>slower</b>. Sorted best to worst.</p>')
+table(RERUN)
 
-LIVE_SET = set()
-for _r in SM:
-    _a = "sw_%s_%s_ks%d_%dx%dx%d" % (_r["mesh"], _r["prec"], _r["KS"], _r["B"], _r["D"], _r["I"])
-    _g = RES.get(_a, {})
-    if _g and not any(v.get("cycles") for v in _g.values()) \
-           and max([v.get("rh", 0) for v in _g.values()] or [0]) > 1000:
-        LIVE_SET.add(_a)
+if VALID:
+    A('<h2>Shapes the defect never touched <span class="dim">&mdash; %d</span></h2>' % len(VALID))
+    A('<p>Not re-run, and they do not need to be: the bank-hash defect did not apply to these '
+      'shapes, so their original measurement stands. Shown for completeness of the grid.</p>')
+    table(VALID)
 
-if SM:
-    _KS = sorted({r["KS"] for r in SM})
-    A('<h2>The full grid, both meshes</h2>')
-    A('<p>Every shape in the sweep, as <b>efficiency</b> = ideal/actual. A <span class="fxk">&#9679;</span> '
-      'marks a cell measured on the <b>corrected</b> hash &mdash; hover for its cycles and the delta '
-      'against the pre-fix run. <span class="dgk">degr</span> = livelocked, never a measurement. '
-      '<span class="dimk">&middot;</span> = running, or the arm does not exist because KS does not '
-      'divide B.</p>')
-    for mesh, cores in (("4x4", 256), ("8x8", 1024)):
-        A('<div class="card"><h3>%s mesh &mdash; %d cores</h3>' % (mesh.replace("x","&times;"), cores))
-        for prec in ("fp16", "fp32"):
-            rows = [r for r in SM if r["mesh"] == mesh and r["prec"] == prec]
-            if not rows: continue
-            byB = {}
-            for r in rows: byB.setdefault(r["B"], {})[r["KS"]] = r
-            A('<div class="gsub">%s</div>' % prec)
-            A('<div class="tw"><table><thead><tr><th>B</th><th class="n">D</th><th class="n">I</th>'
-              + "".join('<th class="n">KS=%d</th>' % k for k in _KS)
-              + '</tr></thead><tbody>')
-            for B in sorted(byB):
-                any_r = next(iter(byB[B].values()))
-                A('<tr><td class="mono">%d</td><td class="n dim">%d</td><td class="n dim">%d</td>' % (B, any_r["D"], any_r["I"]))
-                for k in _KS:
-                    A(_cell(byB[B][k]) if k in byB[B] else '<td class="n dim" title="KS does not divide B">&middot;</td>')
-                A('</tr>')
-            A('</tbody></table></div>')
-        A('</div>')
-
-if GU:
-    _keys = sorted(GU)
-    A('<h2>Per-group FPU utilisation over the benchmark <span class="n">&mdash; %d arms</span></h2>'
-      % len(_keys))
-    A('<p>Each cell is one of the 16 groups of the 4&times;4 mesh, coloured by the share of its FPU '
-      'lane-cycles busy in that 1000-cycle window. Whole-run utilisation averages this over every '
-      'group and every window, so it hides what this shows: <b>how evenly the work is spread</b>. '
-      'Drag the scrubber to move through the run.</p>')
-    A('<div class="card">')
-    A('<div class="mctl"><select id="ga">%s</select>'
-      '<input id="gt" type="range" min="0" max="1" value="0">'
-      '<span class="mono" id="gl"></span></div>'
-      % "".join('<option value="%d">%s</option>' % (i, k) for i, k in enumerate(_keys)))
-    A('<div id="gm" class="mesh"></div>')
-    A('<div class="scale"><span>0%</span><i class="ramp"></i><span>100%</span>'
-      '<span class="mono" id="gs"></span></div>')
+# ---- the grid, from the SAME ARMS dict -----------------------------------------------------------
+KSS = sorted({a["ks"] for a in ARMS.values()})
+A('<h2>The full grid, both meshes</h2>')
+A('<p>Cells carry <b>efficiency</b> = ideal/actual. '
+  '<span class="good">green</span> = measured on the corrected hash &middot; '
+  'plain = the defect never applied, original number still valid &middot; '
+  '<span class="bad">await</span> = hash-affected, corrected re-run not landed, deliberately '
+  '<b>not</b> showing the stale pre-fix number &middot; '
+  '<span class="dim">livelock</span> = never produced a cycle count &middot; '
+  '<span class="dim">&middot;</span> = KS does not divide B. Hover any cell for its cycles.</p>')
+for mesh, cores in (("4x4", 256), ("8x8", 1024)):
+    rows = [a for a in ARMS.values() if a["mesh"] == mesh]
+    if not rows: continue
+    A('<div class="card"><h3>%s mesh &mdash; %d cores</h3>' % (mesh.replace("x", "&times;"), cores))
+    for prec in ("fp16", "fp32"):
+        sub = [a for a in rows if a["prec"] == prec]
+        if not sub: continue
+        byB = {}
+        for a in sub: byB.setdefault(a["B"], {})[a["ks"]] = a
+        A('<h3 style="margin:14px 0 4px">%s</h3>' % prec)
+        A('<div class="tw"><table><thead><tr><th>B</th><th class="n">D</th><th class="n">I</th>'
+          + "".join('<th class="n">KS=%d</th>' % k for k in KSS) + '</tr></thead><tbody>')
+        for B in sorted(byB):
+            any_a = next(iter(byB[B].values()))
+            A('<tr><td class="mono">%d</td><td class="n dim">%d</td><td class="n dim">%d</td>' % (B, any_a["D"], any_a["I"]))
+            for k in KSS:
+                a = byB[B].get(k)
+                if a is None:
+                    A('<td class="n dim" title="KS does not divide B">&middot;</td>'); continue
+                if a["cls"] in ("recovered", "rerun"):
+                    o = a["old"]
+                    ttl = "%s &mdash; corrected: %s cyc%s" % (nm(a), format(a["new"]["cyc"], ","),
+                          (", was %s" % format(o["cyc"], ",")) if (o and o.get("cyc")) else ", baseline never completed")
+                    A('<td class="n good" title="%s">%s</td>' % (ttl, effs(a, a["new"]["cyc"])))
+                elif a["cls"] == "valid":
+                    A('<td class="n" title="%s &mdash; %s cyc, defect did not apply">%s</td>'
+                      % (nm(a), format(a["old"]["cyc"], ","), effs(a, a["old"]["cyc"])))
+                elif a["cls"] == "stale":
+                    A('<td class="n bad" title="%s &mdash; hash-affected; pre-fix number withheld, re-run pending">await</td>' % nm(a))
+                elif a["cls"] == "livelocked":
+                    A('<td class="n dim" title="%s &mdash; RH %s, never a cycle count">livelock</td>'
+                      % (nm(a), format(a["old"]["rh"], ",")))
+                else:
+                    A('<td class="n dim" title="%s &mdash; not dispatched">&middot;</td>' % nm(a))
+            A('</tr>')
+        A('</tbody></table></div>')
     A('</div>')
-    A('<script>var GU=%s;var GK=%s;</script>'
-      % (json.dumps([GU[k] for k in _keys], separators=(",", ":")),
-         json.dumps(_keys, separators=(",", ":"))))
-    A('''<script>
-(function(){
-  var sel=document.getElementById("ga"), sl=document.getElementById("gt"),
-      lab=document.getElementById("gl"), mesh=document.getElementById("gm"),
-      stat=document.getElementById("gs"), cells=[];
-  for(var i=0;i<16;i++){var c=document.createElement("i");mesh.appendChild(c);cells.push(c);}
-  function paint(){
-    var a=GU[+sel.value], w=a.p[+sl.value];
-    lab.textContent="cyc "+w.c.toLocaleString()+"  ("+(+sl.value+1)+"/"+a.p.length+")";
-    var s=0,mn=101,mx=-1;
-    for(var i=0;i<16;i++){
-      var v=(w.u[i]===undefined)?0:w.u[i]; s+=v; if(v<mn)mn=v; if(v>mx)mx=v;
-      var t=Math.max(0,Math.min(1,v/100));
-      cells[i].style.background="color-mix(in oklab, var(--accent) "+(6+94*t)+"%, var(--bg))";
-      cells[i].title="group "+i+": "+v.toFixed(1)+"%";
-    }
-    stat.textContent="mean "+(s/16).toFixed(1)+"%  min "+mn.toFixed(1)+"%  max "+mx.toFixed(1)+"%";
-  }
-  function reset(){var a=GU[+sel.value];sl.max=a.p.length-1;sl.value=0;paint();}
-  sel.addEventListener("change",reset); sl.addEventListener("input",paint); reset();
-})();
-</script>''')
 
-A('<h2>How to judge this fix</h2>')
-A('<div class="note"><b>Use RH-STUCK, not <code>bankfull_bypass</code>.</b> '
-  '<code>bankfull_bypass</code> is <b>0 on all 44 baselines &mdash; including every livelocked '
-  'one</b>. Surveying it produced two successive wrong conclusions here: first that a throughput '
-  'win was expected, then that there was nothing to recover. The pressure lives in the RH-STUCK '
-  'episode count: single digits when healthy, 10<sup>4</sup> when livelocked.<br><br>'
-  'Generally: a stress counter that is identically zero across a whole grid is a reason to distrust '
-  'the counter, not evidence of health &mdash; especially when some arms in that grid produced no '
-  'result at all.</div>')
+# ---- per-group explorer, restricted to the SHOWN arms --------------------------------------------
+def _gu_key(a):   # ks_group_util labels look like "fixed fp16 KS=2 8x128x8192" / "done fp32 KS=1 ..."
+    return "%s KS=%d %dx%dx%d" % (a["prec"], a["ks"], a["B"], a["D"], a["I"])
+_ok = {_gu_key(a) for a in SHOWN.values()}
+GU = {k: v for k, v in GU_ALL.items() if " " in k and k.split(" ", 1)[1] in _ok}
+try:
+    MESH_JS = re.search(r'MESH_JS = """(.*?)"""',
+                        open(os.path.join(ROOT, "scripts", "gen_ks_sweep_artifact.py")).read(), re.S).group(1)
+except Exception as e:
+    MESH_JS = ""; sys.stderr.write("MESH_JS extract failed: %s\n" % e)
 
-A('<div class="foot">Sources: <code>hardware/hashfix_hf_4x4_*/transcript</code> (corrected hash), '
-  '<code>hardware/rf_rf_4x4_*/transcript</code> (derived LOAD_LMUL), '
-  '<code>hardware/{run2,wc4}_sw_4x4_*/transcript</code> (baselines). '
-  'Regenerate: <code>scripts/gen_hashfix_results_artifact.py</code>. '
-  'Full campaign explorer: the Decode B&times;KS Sweep artifact.</div>')
+if GU and MESH_JS:
+    A('<h2>Per-group FPU utilisation over the benchmark</h2>')
+    A('<p>Each cell is one group of the mesh, coloured by the share of its FPU lane-cycles busy in '
+      'that window. Restricted to the same shapes as the tables above &mdash; %d series. Filter '
+      '<b>run = fixed</b> for the corrected arms.</p>' % len(GU))
+    A('<div class="card">')
+    A('<div class="ctl facets">'
+      '<label>mesh <select id="f_mesh"></select></label><label>state <select id="f_state"></select></label>'
+      '<label>run <select id="f_run"></select></label><label>prec <select id="f_prec"></select></label>'
+      '<label>KS <select id="f_ks"></select></label><label>B (M) <select id="f_B"></select></label>'
+      '<label>D (N) <select id="f_D"></select></label><label>I (P) <select id="f_I"></select></label>'
+      '<label>arm <select id="marm"></select></label>'
+      '<button type="button" id="f_reset" class="rst">reset</button>'
+      '<span class="mono dim" id="f_count"></span></div>')
+    A('<div class="ctl"><label class="grow">window <input id="mper" type="range" min="0" max="1" value="0"></label>'
+      '<span class="mono dim" id="mcyc">&mdash;</span></div>')
+    A('<div class="mstats">'
+      + "".join('<div class="stat"><span class="k">%s</span><span class="v" id="%s">&mdash;</span></div>' % (k, i)
+                for k, i in [("mesh","mgn"),("mean util","mmean"),("spread","mspread"),
+                             ("busiest","mmax"),("idlest","mmin"),("window","mwin")]) + '</div>')
+    A('<div id="mgrid" class="mesh"></div>')
+    A('<p style="margin-top:12px">Utilisation above is an instantaneous rate. <b>Relative progress</b> '
+      'below is its integral: cumulative busy lane-cycles per group, normalised so the leading group '
+      'reads 100%. A group can look busy in one window and still be cumulatively behind.</p>')
+    A('<div class="mstats">'
+      + "".join('<div class="stat"><span class="k">%s</span><span class="v" id="%s">&mdash;</span></div>' % (k, i)
+                for k, i in [("leader (=100%)","plead"),("laggard","plag"),("gap","pgap"),("lag/lead","pratio")]) + '</div>')
+    A('<div id="pgrid" class="pgrid"></div></div>')
+    A('<script>var GU=%s;</script>' % json.dumps(GU, separators=(",", ":")))
+    A(MESH_JS)
+
+A('<div class="foot">One dataset: %d shapes from sweep_matrix.json, transcripts under '
+  '<code>hardware/{hashfix_hf,rf_rf,r8_r8,r8b_r8}_*</code> (corrected) and '
+  '<code>hardware/*_sw_*</code> (baselines), hash-affected list from '
+  '<code>docs/benchmarks/mshr_hash_affected.tsv</code>. Regenerate: '
+  '<code>scripts/gen_hashfix_results_artifact.py</code>.</div>' % len(ARMS))
 A('</div>')
-
 open(OUT, "w").write("\n".join(H))
 
-# self-check on VISIBLE text
+# ---- self-checks ---------------------------------------------------------------------------------
 vis = re.sub(r"<[^>]*>", " ", open(OUT).read())
-miss = [format(x[2]["cyc"], ",") for x in REC + NUL + RF
-        if format(x[2]["cyc"], ",") not in vis]
-if miss:
-    sys.stderr.write("SELF-CHECK FAILED: %d cycle count(s) not in visible text: %s\n"
-                     % (len(miss), ", ".join(miss[:8])))
+miss = [nm(a) for a in SHOWN.values()
+        if (a["new"] or a["old"]) and format((a["new"] or a["old"])["cyc"], ",") not in vis
+        and (a["new"] or a["old"]).get("cyc")]
+leak = [nm(a) for a in HIDDEN.values()
+        if a["old"].get("cyc") and format(a["old"]["cyc"], ",") in vis]
+bad = []
+if miss: bad.append("%d shown arm(s) whose cycle count is not in the visible text: %s" % (len(miss), miss[:5]))
+if leak: bad.append("%d STALE hash-affected number(s) leaked into the page: %s" % (len(leak), leak[:5]))
+if bad:
+    for b in bad: sys.stderr.write("SELF-CHECK FAILED: %s\n" % b)
     sys.exit(3)
-print("wrote %s  (%d recovered, %d null, %d rf) -- all %d counts visible"
-      % (OUT, len(REC), len(NUL), len(RF), len(REC)+len(NUL)+len(RF)))
+print("wrote %s" % OUT)
+print("  shown %d (recovered %d, rerun %d, valid %d) | withheld-stale %d | livelocked %d"
+      % (len(SHOWN), len(REC), len(RERUN), len(VALID), len(HIDDEN),
+         len([a for a in ARMS.values() if a["cls"] == "livelocked"])))
+print("  self-check OK: every shown number visible, no stale number leaked, %d group series" % len(GU))
