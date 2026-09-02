@@ -15168,3 +15168,43 @@ either half alone.
 in the define set, so it must be verified at RUN TIME -- `[MSHR] cfg REJECTED` on any r8 arm means
 the image lacks the fix and every r8 result is invalid. Monitor `bi6hr1ue5` checks each arm once
 as it reaches the benchmark and reports GATE PASSED / GATE FAILED.
+
+---
+
+## 2026-09-02 06:00 · Hash-fix re-run: null on healthy shapes, RECOVERS the 8 that never completed
+
+**Result.** Matched pre/post pairs on the 4x4 decode grid split cleanly in two:
+
+| baseline state | n | outcome |
+|---|---:|---|
+| completed | 28 | -0.93% .. +0.47% — indistinguishable from noise |
+| **livelocked, no `execution took` at all** | **8** | **now complete, all stress counters 0** |
+
+```
+fp32_ks4_16x128x2048   pre 2,553,000 cyc / 5.13% util / RH STUCK x30,345 / NO RESULT
+                      post 7,789 cyc, resp_hold=0 cache_aged=0
+fp32_ks4_8x128x4096    pre 2,274,000 cyc / 3.99% util / RH STUCK x14,044 / NO RESULT
+                      post 6,349 cyc, resp_hold=0 cache_aged=0
+```
+
+The 8 livelocked baselines are exactly **B in {4,8,16} at KS in {2,4}** — fewest sharers per
+group, which is where the truncated `bank_burst_bits` left the MSHR reaching 4 of 16 banks.
+
+**PREDICTION on record:** the remaining 6 recover; the 28 healthy stay within +-1%.
+
+**Two wrong conclusions I had to retract, same root cause.** I surveyed `bankfull_bypass`, found
+it **0 on all 44 baselines including the livelocked ones**, and concluded first that a throughput
+win was expected and then that there was "nothing to recover". The pressure is in the **RH-STUCK
+episode count** (healthy: single digits; livelocked: 10^4). A stress counter that is identically
+zero across a whole grid is a reason to distrust the counter -- especially when some arms in that
+grid produced no result at all.
+
+**Tooling fixed along the way** (both would have shown an empty artifact while exiting 0):
+- `gen_ks_sweep_artifact`: re-run discovery globbed `*_hf_*` only -> `rf_`/`r8_` invisible.
+- `gen_ks_sweep_artifact`: the render block read key `"cyc"` while `scrape()` returns `"cycles"`,
+  so the corrected-re-run branch was dead and every re-run showed as "predates the fix".
+- Added a SELF-CHECK: every scraped re-run with a cycle count must appear in the written page or
+  the generator exits 3 naming the missing arms. Failure path proven by injection.
+
+**Status.** 11 of 36 4x4 arms delivered; artifact republished (self-check: all 11 present).
+8x8 r8 batch running, config gate clean.
