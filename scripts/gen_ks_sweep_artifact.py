@@ -474,7 +474,7 @@ th,td{padding:5px 9px;border-bottom:1px solid var(--line-soft);text-align:left;w
 th{font-family:var(--mono);font-size:10px;letter-spacing:.07em;text-transform:uppercase;
 color:var(--ink-3);font-weight:500}
 .num{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums}
-.mono{font-family:var(--mono)}.dim{color:var(--ink-3)}.hashfixdot{color:var(--ok);font-size:.62em;vertical-align:super;margin-left:.28em;line-height:0}.hashdot{color:var(--bad);font-size:.62em;vertical-align:super;margin-left:.28em;line-height:0}.hashkey{display:inline-block;color:var(--bad);font-size:.7em;vertical-align:super}.na{color:var(--line)}
+.mono{font-family:var(--mono)}.dim{color:var(--ink-3)}.hashfixdot{color:var(--good);font-size:.62em;vertical-align:super;margin-left:.28em;line-height:0}.hashdot{color:var(--bad);font-size:.62em;vertical-align:super;margin-left:.28em;line-height:0}.hashkey{display:inline-block;color:var(--bad);font-size:.7em;vertical-align:super}.na{color:var(--line)}
 .sm{font-size:11px}.b{font-weight:600}
 .st-done{color:var(--good);font-weight:600}.st-bad{color:var(--bad);font-weight:600}
 .st-blocked{color:var(--warn);font-weight:600}
@@ -825,7 +825,7 @@ for mesh, cores in (("4x4", 256), ("8x8", 1024)):
       '<span class="st-run">run</span> = on the fleet &middot; '
       '<span class="na">&middot;</span> = KS does not divide B, so the arm does not exist. '
       '<span class="hashkey">&#9679;</span> = the MSHR bank hash reached fewer banks than this shape allows; the number predates the 2026-09-01 fix. '
-      '<span class="hashkey" style="color:var(--ok)">&#9679;</span> = a corrected re-run has landed &mdash; hover for its cycles and the delta. '
+      '<span class="hashkey" style="color:var(--good)">&#9679;</span> = a corrected re-run has landed &mdash; hover for its cycles and the delta. '
       '<strong>An asterisk (*)</strong> marks a cell measured on a <em>non-default</em> '
       'configuration &mdash; the number is real but not comparable with stock arms, and the '
       'deviation is named in the cell tooltip and in the fix-ladder table above. '
@@ -871,7 +871,7 @@ if _PA:
       '<label>KS<select id="p_ks"></select></label>'
       '<label>state<select id="p_st"></select></label>'
       '<label>band<select id="p_band"></select></label>'
-      '<label>&nbsp;<span id="p_n" class="mono" style="color:var(--muted)"></span></label></div>'
+      '<label>&nbsp;<span id="p_n" class="mono" style="color:var(--ink-2)"></span></label></div>'
       '<div class="tw"><table class="d"><thead><tr>'
       '<th>arm</th><th>mesh</th><th class="num">KS</th><th class="num">B</th>'
       '<th class="num">sharers</th><th class="num">vl</th><th>state</th>'
@@ -1462,7 +1462,7 @@ if _HZ:
       '<div class="formula">'
       'past the horizon &nbsp; in band <b>205,450</b> insn/window &nbsp;&middot;&nbsp; '
       'outside <b>210,500</b> &nbsp;&middot;&nbsp; ratio <b>0.98</b><br>'
-      '<span style="color:var(--faint)">at 4&times;4 the failures fell to 92&ndash;514 per window '
+      '<span style="color:var(--ink-3)">at 4&times;4 the failures fell to 92&ndash;514 per window '
       '&mdash; a ~40&times; drop. Here there is no drop at all.</span></div>'
       '<p>The band arms do carry the mechanism &mdash; <code>tmo</code> 3,964&ndash;11,207 against '
       '<strong>0</strong> for every out-of-band arm past the horizon &mdash; so the timeouts are '

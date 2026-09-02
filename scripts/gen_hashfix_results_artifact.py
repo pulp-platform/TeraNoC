@@ -60,12 +60,14 @@ except Exception as _e:
 # ---- mesh cards, exported by gen_ks_sweep_artifact.py ---------------------------------------
 # Embedded rather than re-implemented: matrix()/status()/hashdot() live in that generator and this
 # page renders the IDENTICAL markup, so the two can never drift.
-MESH_HTML = MESH_CSS = ""
+# Render the grids with THIS page's palette rather than embedding the explorer's stylesheet.
+# Embedding it collided on 16 selectors (body/h1/.card/table/.mesh/...), needed the whole sheet
+# scoped, and its theme-qualified selectors and specificity could not be verified without a
+# browser. One palette, one stylesheet, no cascade surprises.
 try:
-    MESH_HTML = open("/tmp/claude-620771/ks_mesh_cards.html").read()
-    MESH_CSS  = open("/tmp/claude-620771/ks_mesh_cards.css").read()
+    SM = json.load(open("/tmp/claude-620771/sweep_matrix.json"))
 except IOError as _e:
-    sys.stderr.write("mesh-card fragment missing (run gen_ks_sweep_artifact.py first): %s\n" % _e)
+    SM = []; sys.stderr.write("sweep_matrix.json missing: %s\n" % _e)
 
 H = []
 A = H.append
@@ -120,26 +122,15 @@ code{font-family:"IBM Plex Mono",monospace;font-size:.9em;background:var(--bg);
 .scale{display:flex;align-items:center;gap:9px;margin-top:13px;color:var(--ink3);font-size:11.5px}
 .ramp{flex:0 0 130px;height:9px;border-radius:5px;
       background:linear-gradient(90deg,color-mix(in oklab,var(--accent) 6%,var(--bg)),var(--accent))}
+h3{font-size:15px;margin:2px 0 10px;font-weight:600}
+.gsub{font:600 11px/1 "IBM Plex Mono",monospace;letter-spacing:.09em;text-transform:uppercase;
+      color:var(--ink3);margin:16px 0 5px}
+td.dim,.dimk{color:var(--ink3)}
+td.dg,.dgk{color:var(--bad);font-weight:600;font-size:12px}
+td.fx{color:var(--good);font-weight:600}
+td.fx sup,.fxk{color:var(--good);font-size:.7em;vertical-align:super}
+td[title]{cursor:help}
 .foot{color:var(--ink3);font-size:12px;margin-top:34px;border-top:1px solid var(--line);padding-top:14px}
-</style>''')
-if MESH_CSS:
-    # Scope the fragment's palette to .meshcards so it cannot fight ours -- but the ORDER matters.
-    # A blanket :root -> .meshcards rewrite turns ":root[data-theme=dark]" into
-    # ".meshcards[data-theme=dark]", which can never match: data-theme is stamped on the ROOT
-    # element, not on our wrapper. The cards would then keep the light palette in dark mode.
-    # Rewrite the theme-qualified selectors FIRST, into "<root-condition> .meshcards".
-    # Sentinels: a plain chain would have the final ':root' -> '.meshcards' pass clobber the
-    # output of the first two, producing '.meshcards[data-theme=dark] .meshcards'.
-    _mc = (MESH_CSS
-           .replace(':root[data-theme=dark]', '\x01')
-           .replace(':root:not([data-theme=light])', '\x02')
-           .replace(':root', '.meshcards')
-           .replace('\x01', ':root[data-theme=dark] .meshcards')
-           .replace('\x02', ':root:not([data-theme=light]) .meshcards'))
-    A('<style>' + _mc + '''
-.meshcards{--ground:transparent}
-.meshcards .card{background:var(--surf);border:1px solid var(--line);box-shadow:none}
-.meshcards table{width:100%}
 </style>''')
 A('<div class="wrap">')
 A('<h1>Corrected MSHR bank hash &mdash; re-run results</h1>')
@@ -217,13 +208,79 @@ if RF:
               '<td class="n">%.2f%%</td></tr>' % (a, format(n["cyc"], ","), n["util"] or 0))
     A('</tbody></table></div></div>')
 
-if MESH_HTML:
+# ---- baseline / corrected lookups, keyed by canonical arm name -------------------------------
+# Built here from the transcripts rather than imported: this page must not depend on the other
+# generator's globals.
+_PREF_RANK = ["wc8", "wc4", "wc", "wa8", "s8k8", "wb", "run2", "wa2"]
+RES, RESFIX = {}, {}
+for _d in glob.glob(os.path.join(ROOT, "hardware", "*_sw_[48]x[48]_*")):
+    _m = re.match(r"^(.+?)_(sw_[48]x[48]_.+)$", os.path.basename(_d))
+    if not _m: continue
+    _s = scrape(os.path.join(_d, "transcript"))
+    # keep cycle-less baselines too: "scraped but never printed execution took" is exactly
+    # how a livelocked arm presents, and it is the only way to mark those cells "degr".
+    if _s: RES.setdefault(_m.group(2), {})[_m.group(1)] = {"cycles": _s.get("cyc"), "rh": _s.get("rh", 0)}
+for _d in glob.glob(os.path.join(ROOT, "hardware", "*_[48]x[48]_*")):
+    _m = re.match(r"^(.+?)_(?:hf|rf|r8)_([48]x[48]_.+)$", os.path.basename(_d))
+    if not _m: continue
+    _s = scrape(os.path.join(_d, "transcript"))
+    if _s and _s.get("cyc"): RESFIX["sw_" + _m.group(2)] = {"cycles": _s["cyc"]}
+
+def _cell(r):
+    """One grid cell, in this page's own classes."""
+    arm = "sw_%s_%s_ks%d_%dx%dx%d" % (r["mesh"], r["prec"], r["KS"], r["B"], r["D"], r["I"])
+    fx  = RESFIX.get(arm)
+    got = RES.get(arm, {})
+    old = next((got[k]["cycles"] for k in _PREF_RANK if k in got and got[k].get("cycles")), None)
+    ide = r.get("ideal")
+    if fx and fx.get("cycles") and ide:
+        eff = 100.0 * ide / fx["cycles"]
+        d   = ("  (%+.1f%% vs %s)" % (100.0*(fx["cycles"]-old)/old, format(old, ","))) if old else \
+              "  (baseline never completed)"
+        return ('<td class="n fx" title="%s &mdash; corrected re-run: %s cyc%s">%.1f%%<sup>&#9679;</sup></td>'
+                % (arm, format(fx["cycles"], ","), d, eff))
+    if old and ide:
+        return ('<td class="n" title="%s &mdash; %s cyc">%.1f%%</td>'
+                % (arm, format(old, ","), 100.0 * ide / old))
+    if arm in LIVE_SET:
+        return '<td class="n dg" title="%s &mdash; livelocked, never a measurement">degr</td>' % arm
+    return '<td class="n dim" title="%s &mdash; running or not dispatched">&middot;</td>' % arm
+
+LIVE_SET = set()
+for _r in SM:
+    _a = "sw_%s_%s_ks%d_%dx%dx%d" % (_r["mesh"], _r["prec"], _r["KS"], _r["B"], _r["D"], _r["I"])
+    _g = RES.get(_a, {})
+    if _g and not any(v.get("cycles") for v in _g.values()) \
+           and max([v.get("rh", 0) for v in _g.values()] or [0]) > 1000:
+        LIVE_SET.add(_a)
+
+if SM:
+    _KS = sorted({r["KS"] for r in SM})
     A('<h2>The full grid, both meshes</h2>')
-    A('<p>Every shape in the sweep. Cells carry <b>efficiency</b> = ideal/actual once measured. '
-      'A red dot marks a cell whose MSHR bank hash reached fewer banks than the shape allows, so '
-      'the number predates the fix; a green dot means the corrected re-run has landed &mdash; hover '
-      'for its cycles and delta. Rendered from the same code as the B&times;KS explorer.</p>')
-    A('<div class="meshcards">' + MESH_HTML + '</div>')
+    A('<p>Every shape in the sweep, as <b>efficiency</b> = ideal/actual. A <span class="fxk">&#9679;</span> '
+      'marks a cell measured on the <b>corrected</b> hash &mdash; hover for its cycles and the delta '
+      'against the pre-fix run. <span class="dgk">degr</span> = livelocked, never a measurement. '
+      '<span class="dimk">&middot;</span> = running, or the arm does not exist because KS does not '
+      'divide B.</p>')
+    for mesh, cores in (("4x4", 256), ("8x8", 1024)):
+        A('<div class="card"><h3>%s mesh &mdash; %d cores</h3>' % (mesh.replace("x","&times;"), cores))
+        for prec in ("fp16", "fp32"):
+            rows = [r for r in SM if r["mesh"] == mesh and r["prec"] == prec]
+            if not rows: continue
+            byB = {}
+            for r in rows: byB.setdefault(r["B"], {})[r["KS"]] = r
+            A('<div class="gsub">%s</div>' % prec)
+            A('<div class="tw"><table><thead><tr><th>B</th><th class="n">D</th><th class="n">I</th>'
+              + "".join('<th class="n">KS=%d</th>' % k for k in _KS)
+              + '</tr></thead><tbody>')
+            for B in sorted(byB):
+                any_r = next(iter(byB[B].values()))
+                A('<tr><td class="mono">%d</td><td class="n dim">%d</td><td class="n dim">%d</td>' % (B, any_r["D"], any_r["I"]))
+                for k in _KS:
+                    A(_cell(byB[B][k]) if k in byB[B] else '<td class="n dim" title="KS does not divide B">&middot;</td>')
+                A('</tr>')
+            A('</tbody></table></div>')
+        A('</div>')
 
 if GU:
     _keys = sorted(GU)
