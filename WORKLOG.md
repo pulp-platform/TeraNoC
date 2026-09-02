@@ -15130,3 +15130,41 @@ reporting loop, not a launcher.
   utilisation section and the new provenance section verified present in the rendered page.
 
 **Status.** Done. 194 done / 2 running / 4 failed on that dashboard.
+
+---
+
+## 2026-09-02 02:35 · 8x8: rebuild the image on current RTL, rebuild all 52 ELFs, dispatch
+
+**Purpose.** Carry the two fixes (MSHR bank-hash derivation + SPATZ_1XVL_LOAD_LMUL derivation) to
+the 8x8 mesh. The existing 8x8 image predated the RTL fix and every 8x8 ELF predated both.
+
+**Why the old image could not be reused.** `build_tgt8x8` is dated 2026-08-30 12:08; the RTL fix
+commits land 2026-09-01 17:43-18:27. Without `BankShiftMin` 5->4 the CSR write of
+`bank_shift_burst=4` -- which the corrected derivation produces for EVERY decode shape -- is
+refused and the reset value stays silently in force. New software on the old image is worse than
+either half alone.
+
+**Implementation.**
+- Trap-protected swap: back up all three `hardware/generated/*.sv` (one is untracked) + MD5SUMS,
+  regenerate for 8x8 with TWO floogen passes (pass 1 leaves the old mesh in one file), assert
+  BOTH `NumMeshX=8` and `GroupX1Y0=8`, build, then restore 4x4 and re-assert on ANY exit path.
+- Built `build_tgt8x8_hashfix` with `-o update-floogen` so the build could not re-run floogen.
+- Rebuilt all 52 8x8 ELFs (`r8_`) with `CONFIG=terapool_spatz4_fpu_8x8`. SERIAL: the shape script
+  writes `matmul.json` + `data_gemm.h` into the SHARED app dir, so concurrent builds race.
+  `MATMUL_REPEAT` taken from the ORIGINAL build logs per shape (B=1->128 ... 128->2); my first
+  draft had 16 across the board, which would have broken the ideal-cycle normalisation.
+
+**Result.**
+- BUILD-OK; RESTORED-OK `NumMeshX=4 GroupX1Y0=4` with RESTORE-CHECKSUMS-MATCH.
+- Define-diff gate PASSED: 107 vs 107 against `build_tgt4x4_hashfix`, differing in exactly the six
+  geometry defines and nothing else -- ROB depths and MSHR knobs pinned.
+- 52 ELFs, 52 DISTINCT md5 (no shared-app-dir race).
+- Dispatched as `teranoc-20260902-021807-9ea6`: 34 running / 18 queued, governor holding at
+  80/100 seats with exactly 20 free.
+- FOUND: the old `build_8x8_ks1.sh` header claims a "split 2x256 B load" but never passed
+  `-DSPATZ_1XVL_LOAD_LMUL=4`, so every existing 8x8 KS=1 B>=8 ELF carried the ROB0 deadlock too.
+
+**Status.** Running. ONE GATE STILL OPEN: the RTL fix is a source change and therefore invisible
+in the define set, so it must be verified at RUN TIME -- `[MSHR] cfg REJECTED` on any r8 arm means
+the image lacks the fix and every r8 result is invalid. Monitor `bi6hr1ue5` checks each arm once
+as it reaches the benchmark and reports GATE PASSED / GATE FAILED.
