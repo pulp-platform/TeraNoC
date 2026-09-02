@@ -57,6 +57,16 @@ try:
 except Exception as _e:
     sys.stderr.write("group-util load failed: %s\n" % _e)
 
+# ---- mesh cards, exported by gen_ks_sweep_artifact.py ---------------------------------------
+# Embedded rather than re-implemented: matrix()/status()/hashdot() live in that generator and this
+# page renders the IDENTICAL markup, so the two can never drift.
+MESH_HTML = MESH_CSS = ""
+try:
+    MESH_HTML = open("/tmp/claude-620771/ks_mesh_cards.html").read()
+    MESH_CSS  = open("/tmp/claude-620771/ks_mesh_cards.css").read()
+except IOError as _e:
+    sys.stderr.write("mesh-card fragment missing (run gen_ks_sweep_artifact.py first): %s\n" % _e)
+
 H = []
 A = H.append
 A('<title>Corrected Hash Re-Runs</title>')
@@ -111,6 +121,25 @@ code{font-family:"IBM Plex Mono",monospace;font-size:.9em;background:var(--bg);
 .ramp{flex:0 0 130px;height:9px;border-radius:5px;
       background:linear-gradient(90deg,color-mix(in oklab,var(--accent) 6%,var(--bg)),var(--accent))}
 .foot{color:var(--ink3);font-size:12px;margin-top:34px;border-top:1px solid var(--line);padding-top:14px}
+</style>''')
+if MESH_CSS:
+    # Scope the fragment's palette to .meshcards so it cannot fight ours -- but the ORDER matters.
+    # A blanket :root -> .meshcards rewrite turns ":root[data-theme=dark]" into
+    # ".meshcards[data-theme=dark]", which can never match: data-theme is stamped on the ROOT
+    # element, not on our wrapper. The cards would then keep the light palette in dark mode.
+    # Rewrite the theme-qualified selectors FIRST, into "<root-condition> .meshcards".
+    # Sentinels: a plain chain would have the final ':root' -> '.meshcards' pass clobber the
+    # output of the first two, producing '.meshcards[data-theme=dark] .meshcards'.
+    _mc = (MESH_CSS
+           .replace(':root[data-theme=dark]', '\x01')
+           .replace(':root:not([data-theme=light])', '\x02')
+           .replace(':root', '.meshcards')
+           .replace('\x01', ':root[data-theme=dark] .meshcards')
+           .replace('\x02', ':root:not([data-theme=light]) .meshcards'))
+    A('<style>' + _mc + '''
+.meshcards{--ground:transparent}
+.meshcards .card{background:var(--surf);border:1px solid var(--line);box-shadow:none}
+.meshcards table{width:100%}
 </style>''')
 A('<div class="wrap">')
 A('<h1>Corrected MSHR bank hash &mdash; re-run results</h1>')
@@ -187,6 +216,14 @@ if RF:
               '<td class="n big good">%s</td><td class="n">&mdash;</td><td class="n">&mdash;</td>'
               '<td class="n">%.2f%%</td></tr>' % (a, format(n["cyc"], ","), n["util"] or 0))
     A('</tbody></table></div></div>')
+
+if MESH_HTML:
+    A('<h2>The full grid, both meshes</h2>')
+    A('<p>Every shape in the sweep. Cells carry <b>efficiency</b> = ideal/actual once measured. '
+      'A red dot marks a cell whose MSHR bank hash reached fewer banks than the shape allows, so '
+      'the number predates the fix; a green dot means the corrected re-run has landed &mdash; hover '
+      'for its cycles and delta. Rendered from the same code as the B&times;KS explorer.</p>')
+    A('<div class="meshcards">' + MESH_HTML + '</div>')
 
 if GU:
     _keys = sorted(GU)

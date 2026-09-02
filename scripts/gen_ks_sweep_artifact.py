@@ -798,6 +798,22 @@ A('<div class="card"><h2>Why the tile is derived, not swept</h2>'
   'their numbers carry a cold-start component the small-B arms do not.</p></div></div>')
 
 # ---- results ---------------------------------------------------------------
+# The two mesh cards are ALSO written to a standalone fragment so the focused results page can
+# embed the identical markup instead of re-implementing matrix()/status()/hashdot(). One source
+# of truth: whatever renders here is exactly what renders there.
+_FRAG = []
+for mesh, cores in (("4x4", 256), ("8x8", 1024)):
+    _FRAG.append('<div class="card"><h2>%s mesh &mdash; %d cores</h2>' % (mesh.replace("x", "&times;"), cores))
+    for _p in ("fp16", "fp32"):
+        _FRAG.append('<h3>%s</h3>' % _p)
+        _FRAG.append(matrix(mesh, _p))
+    _FRAG.append('</div>')
+try:
+    open(os.path.join(SCR, "ks_mesh_cards.html"), "w").write("\n".join(_FRAG))
+    open(os.path.join(SCR, "ks_mesh_cards.css"), "w").write(CSS)
+except IOError:
+    pass
+
 for mesh, cores in (("4x4", 256), ("8x8", 1024)):
     A('<div class="card"><h2>%s mesh &mdash; %d cores</h2>' % (mesh.replace("x", "&times;"), cores))
     for prec in ("fp16", "fp32"):
@@ -1528,6 +1544,55 @@ A('<p>What KS=1 cannot avoid is the register file. <code>KS &times; LMUL = 16</c
   'idle. That waste is inherent to one accumulator, not a missed optimisation.</p></div>')
 
 # ---- open issues -----------------------------------------------------------
+# ---- CORRECTED-HASH RE-RUNS: a VISIBLE table ------------------------------------------------
+# These numbers previously existed ONLY inside the title= tooltip of a red dot, so reading the
+# campaign's headline result meant hovering 16 separate cells. Numbers a reader cannot see are
+# not reported. Split by whether the BASELINE produced a result at all, because those are two
+# different findings and averaging them together hides both.
+_rr_rec, _rr_null = [], []
+for _r in M:
+    _f = RESFIX.get(armname(_r))
+    if not _f or not _f.get("cycles"):
+        continue
+    _got = RES.get(armname(_r), {})
+    _old = next((_got[k]["cycles"] for k in _PREF_RANK
+                 if k in _got and _got[k].get("cycles")), None)
+    _lbl = "%s %s KS=%d %dx%dx%d" % (_r["mesh"], _r["prec"], _r["KS"], _r["B"], _r["D"], _r["I"])
+    _eff = (100.0 * _r["ideal"] / _f["cycles"]) if _r.get("ideal") else None
+    (_rr_null if _old else _rr_rec).append((_lbl, _old, _f["cycles"], _eff))
+if _rr_rec or _rr_null:
+    A('<div class="card"><h2>Corrected MSHR bank hash &mdash; re-run results</h2>')
+    if _rr_rec:
+        A('<p><b>%d arm(s) whose baseline produced NO result at all.</b> These sat in the RH '
+          'livelock at 3&ndash;13%% utilisation until the wall clock killed them; there is no '
+          '&ldquo;before&rdquo; cycle count to compare against because none was ever '
+          'emitted.</p>' % len(_rr_rec))
+        A('<div class="tw"><table><thead><tr><th>arm</th><th class="num">before</th>'
+          '<th class="num">after</th><th class="num">efficiency</th></tr></thead><tbody>')
+        for _l, _o, _c, _e in sorted(_rr_rec, key=lambda x: x[2]):
+            A('<tr><td class="mono">%s</td><td class="num">never completed</td>'
+              '<td class="num"><b>%s</b></td><td class="num">%s</td></tr>'
+              % (_l, format(_c, ","), ("%.1f%%" % _e) if _e else "&mdash;"))
+        A('</tbody></table></div>')
+    if _rr_null:
+        _sb = sum(x[1] for x in _rr_null); _sa = sum(x[2] for x in _rr_null)
+        A('<p style="margin-top:18px"><b>%d arm(s) whose baseline already completed.</b> '
+          'Aggregate %s &rarr; %s cyc = <b>%+.2f%%</b> &mdash; a wash. Rows are sorted by delta; '
+          'a positive delta is SLOWER.</p>'
+          % (len(_rr_null), format(_sb, ","), format(_sa, ","), 100.0 * (_sa - _sb) / _sb))
+        A('<div class="tw"><table><thead><tr><th>arm</th><th class="num">before</th>'
+          '<th class="num">after</th><th class="num">delta</th>'
+          '<th class="num">efficiency</th></tr></thead><tbody>')
+        for _l, _o, _c, _e in sorted(_rr_null, key=lambda x: (x[2] - x[1]) / float(x[1])):
+            _d = 100.0 * (_c - _o) / _o
+            A('<tr><td class="mono">%s</td><td class="num">%s</td><td class="num">%s</td>'
+              '<td class="num"%s>%+.2f%%</td><td class="num">%s</td></tr>'
+              % (_l, format(_o, ","), format(_c, ","),
+                 ' style="color:var(--bad)"' if _d > 1.0 else '', _d,
+                 ("%.1f%%" % _e) if _e else "&mdash;"))
+        A('</tbody></table></div>')
+    A('</div>')
+
 A('<div class="card"><h2>Open issues</h2><ul>'
   '<li><strong>KS=1 above 256&nbsp;B needs the split load</strong> (%d arms) &mdash; decided, not '
   'blocked. <code>SPATZ_1XVL_LOAD_LMUL=4</code> at ROB0=128, measured cost 4.5%% against a '
@@ -1649,18 +1714,22 @@ open(OUT, "w").write("\n".join(H))
 # re-run discovery glob missed the rf_/r8_ prefixes, once because this file read the "cyc" key
 # while scrape() returns "cycles". Both produced a confident "artifact updated" with no data in
 # it. A generator that cannot see its own output is the problem; assert instead.
-_page = open(OUT).read()
+# Check VISIBLE TEXT, not raw HTML. The first version of this guard matched the raw file, so
+# 16 corrected results that existed ONLY inside a title= tooltip on a red dot passed it -- the
+# guard reported success on a page where a reader could not see a single one of them. Strip
+# tags (and with them every attribute) before looking.
+_page = re.sub(r"<[^>]*>", " ", open(OUT).read())
 _missing = [(_k, _v["cycles"]) for _k, _v in sorted(RESFIX.items())
             if _v.get("cycles") and format(_v["cycles"], ",") not in _page]
 if _missing:
     sys.stderr.write(
-        "SELF-CHECK FAILED: %d corrected re-run(s) scraped but ABSENT from %s -- the page does "
-        "not show data it has. Do NOT publish this build.\n" % (len(_missing), OUT))
+        "SELF-CHECK FAILED: %d corrected re-run(s) scraped but not in the VISIBLE TEXT of %s -- "
+        "a reader cannot see them. Do NOT publish this build.\n" % (len(_missing), OUT))
     for _k, _c in _missing[:10]:
         sys.stderr.write("    %s  cycles=%s\n" % (_k, _c))
     sys.exit(3)
 _shown = sum(1 for _v in RESFIX.values() if _v.get("cycles"))
-print("  self-check OK: all %d corrected re-run cycle counts appear in the page" % _shown)
+print("  self-check OK: all %d corrected re-run cycle counts appear in VISIBLE text" % _shown)
 print("wrote %s (%d bytes)" % (OUT, os.path.getsize(OUT)))
 for k in sorted(TALLY, key=lambda x: -TALLY[x]):
     print("  %-40s %d" % (k, TALLY[k]))
