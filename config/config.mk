@@ -21,6 +21,22 @@ ifndef config
 endif
 include $(MEMPOOL_DIR)/config/$(config).mk
 
+##############################
+##  Spatz VLSU burst gate   ##
+##############################
+
+# Set here rather than per flavour so EVERY configuration gets it: mempool_tile.sv $errors on
+# an undefined SPATZ_VLSU_BURST, because spatz_vlsu reads undefined as 1 (burst emission ON) and
+# the tile-side burst lane retag is not implemented yet.
+#
+# spatz_vlsu distributes a burst's beats across its four reorder buffers (beat k -> lane
+# k % NrMemPorts) so a vector register row is written atomically. Spatz chains one cycle after
+# its producer's first VRF write, so the old form -- every beat funnelled into ROB0, a row
+# assembled from four partial writes -- let a consumer read three stale lanes out of four. The
+# memory side has to deliver beats lane-distributed; until it does, keep this 0 and every vector
+# load takes the row-atomic word-interleaved path. See docs/spatz_vpu_burst_adoption_review.md.
+spatz_vlsu_burst ?= 0
+
 #############################
 ##  Address configuration  ##
 #############################

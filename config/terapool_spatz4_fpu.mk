@@ -655,11 +655,18 @@ spatz_vlsu_block_alloc ?= 1
 # "ROB0 deep, rest shallow" (hardware/Makefile:491): bursts use ROB0 alone, so ports 1..N-1
 # need not match its depth. This pair is what build_tgt4x4 / build_tgt8x8 were built with and
 # what every sweep result on this branch was measured on.
-# NOTE robn_depth=16: bursts are LOADS ONLY, so a large STORE goes word-interleaved and may
-# not fit 16 ids. An earlier investigation (2026-08-29) found KS=2 needed robn_depth=32.
-# Raise this first if a non-burst path wedges with no timeout counter moving.
-spatz_vlsu_rob_depth ?= 128
-spatz_vlsu_robn_depth ?= 16
+# 128 -> 32, and robn_depth GONE. Both were consequences of the funnel: ROB0 alone had to hold
+# a whole 512 B burst, and ROBs 1-3 saw no burst data so they were shrunk separately (which then
+# needed a generation tag in the id, because their storage no longer matched the id width).
+# Distributing the beats makes a 512 B burst 128/NrMemPorts = 32 ids in EVERY buffer, so one
+# uniform 32 covers the same admission ceiling (vl <= NrOutstandingLoads*MemDataWidthB*NrMemPorts
+# = 512 B) AND the non-burst path, with no asymmetry and GenBits = 0.
+#
+# This also narrows snitch_pkg::MetaIdWidth = idx_width(RobDepth) from 7 to 5 bits, and meta_id_t
+# reaches every TCDM struct and both FlooNoC flit metas -- so it un-does the ROB64->ROB128 link
+# widening. Re-close PNR on this.
+spatz_vlsu_rob_depth ?= 32
+
 # --- H1 dual-load runahead (REQUIRES spatz_vlsu_rob_depth=64 to have ROB room) ---
 # Unset/1 = legacy: the next load starts only when the previous one fully retires
 # (bit-identical). 2 = the next burst-safe load starts as soon as the previous one's requests

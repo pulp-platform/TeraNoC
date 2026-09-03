@@ -488,18 +488,28 @@ endif
 ifneq ($(strip $(spatz_vlsu_rob_depth)),)
   vlog_defs += -DSPATZ_VLSU_ROB_DEPTH=$(spatz_vlsu_rob_depth)
 endif
-# Per-port ROB depth: ports 1..N-1 only (ROB0 keeps spatz_vlsu_rob_depth). Bursts use ROB0
-# alone -- ParityDrain lands even beats from mem port 0 and odd beats from mem port 1 in ROB0's
-# id range -- so ROBs 1-3 hold no burst data and need not match ROB0's depth. Unset = equal to
-# spatz_vlsu_rob_depth (bit-identical). Shrinking costs NON-burst memory-level parallelism.
-#   "ROB0 deep, rest shallow": spatz_vlsu_rob_depth=128 spatz_vlsu_robn_depth=16
-ifneq ($(strip $(spatz_vlsu_robn_depth)),)
-  vlog_defs += -DSPATZ_VLSU_ROBN_DEPTH=$(spatz_vlsu_robn_depth)
-endif
+# REMOVED: spatz_vlsu_robn_depth. It existed because a burst funnelled every beat into ROB0,
+# so ROBs 1-3 held no burst data and could be shrunk independently. Beats are now distributed
+# one per lane, every buffer holds burst_rows(len) of them, and the depths must be equal -- the
+# single base id every beat is derived from is only valid while the four allocators agree.
+# Passing it now would be silently wrong, so the define is gone rather than ignored.
 # H1 dual-load runahead (validated only with spatz_vlsu_rob_depth=64). Unset = MaxInflight 1
 # (bit-identical). 2 = a 2nd burst-safe load co-resident while the elder drains.
 ifneq ($(strip $(spatz_vlsu_dual_load)),)
   vlog_defs += -DSPATZ_VLSU_DUAL_LOAD=$(spatz_vlsu_dual_load)
+endif
+# Burst EMISSION. Unset/1 = the VLSU emits burst_len>1 requests. 0 = it does not, and every
+# vector load takes the 4-port word-interleaved path.
+#
+# ⚠️ CURRENTLY 0 IN EVERY FLAVOUR, DELIBERATELY. The VLSU now distributes a burst's beats
+# across its four reorder buffers (beat k -> lane k % NrMemPorts) so a vector register row is
+# written atomically; the memory side has to deliver them that way, and the tile-side lane
+# retag that does it is NOT IMPLEMENTED YET (see docs/spatz_vpu_burst_adoption_review.md §5).
+# mempool_tile.sv carries an elaboration tripwire for the combination, so this cannot be
+# turned on by accident. At 0 the word path is correct and row-atomic -- what it costs is the
+# group MSHR's burst class: no burst merging, no ParityDrain, no block allocation.
+ifneq ($(strip $(spatz_vlsu_burst)),)
+  vlog_defs += -DSPATZ_VLSU_BURST=$(spatz_vlsu_burst)
 endif
 # Sub-word burst eligibility. Unset/0 = LEGACY: only vsew == EW_32 may take the port-0 burst
 # path, so a vle16.v never reaches the group MSHR's burst class (no burst merge, no ParityDrain,
@@ -708,12 +718,43 @@ simc: clean-dasm compile
 # instrumentation ([LP], [BP], [CMS], [GroupMerge], [UART]) all report through $display,
 # so it survives here untouched -- only waveform visibility is given up. Use simc when
 # you actually need to look at signals.
+# Pre-elaboration ("image optimisation"). vopt ONCE into a named design; every run then loads
+# that design instead of re-optimising.
+#
+# Why this matters, measured 2026-08-22 on the fleet: naming the MODULE (work.mempool_tb) makes
+# vsim run an IMPLICIT vopt that WRITES a fresh optimised design into the work library. Three
+# runs produced three designs (_opt/_opt1/_opt2) at ~2.6 GB each, and because sweep arms share
+# one build directory read-only, two arms deadlocked on work/_lock -- a killed arm leaves the
+# lock behind naming a dead pid. Naming the pre-elaborated design means no vopt, no lock, no
+# library growth, and no ~10 min per-arm elaboration.
+#
+# Keep this name in sync with QUESTA_OPT in scripts/badist/teranoc_fleet.py, which launches
+# fleet arms as `work.$(questa_opt_top)`.
+questa_opt_top ?= s8_opt
+
+# Sentinel, not a phony: re-optimise only when the library was recompiled. Re-running vopt for
+# every simulation would recreate the growth this target exists to avoid.
+$(buildpath)/.vopt-$(questa_opt_top): $(buildpath)/compile.tcl
+	cd $(buildpath) && $(questa_cmd) vopt -work $(library) $(library).$(top_level) -o $(questa_opt_top)
+	touch $@
+
+.PHONY: vopt
+vopt: compile $(buildpath)/.vopt-$(questa_opt_top)
+
 .PHONY: simc-lean
-simc-lean: clean-dasm compile
+simc-lean: clean-dasm vopt
 	cd $(buildpath) && \
 	ulimit -n $(sim_ulimit_n) 2>/dev/null || true; \
-	$(questa_cmd) vsim -c $(questa_args) $(library).$(top_level) -do "run -a"
+	$(questa_cmd) vsim -c $(questa_args) $(library).$(questa_opt_top) -do "run -a"
 	./scripts/return_status.sh $(buildpath)/transcript
+	@# Probe-survival gate: without +acc, vopt can optimise away the nets the hierarchical TB
+	@# probes reach into, and the run then completes NORMALLY while reporting no data. An empty
+	@# probe is not "the feature is off" -- it is an invalid arm.
+	@n=$$(sed 's/^# //' $(buildpath)/transcript 2>/dev/null | grep -ac '^\[CMS\]'); \
+	if [ "$${n:-0}" -eq 0 ]; then \
+	  echo "WARNING: no [CMS] lines -- TB probes may have been optimised away."; \
+	  echo "         Re-run with questa_voptargs=+acc if the probes are needed."; \
+	fi
 
 # 	$(questa_cmd) vsim -c $(questa_args) $(library).$(top_level) -do "run -a"
 # 	$(questa_cmd) vsim -c -voptargs=$(questa_voptargs) -wlf $(questa_wlf) $(questa_args) $(library).$(top_level) -do "log -r *" -do "run -a"

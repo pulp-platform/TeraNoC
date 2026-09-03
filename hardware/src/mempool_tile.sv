@@ -85,6 +85,45 @@ module mempool_tile
   localparam int unsigned BurstXpdrContexts =
     `ifdef TCDM_BURST_INTERLEAVE ((`TCDM_BURST_INTERLEAVE != 0) ? 2 : 1)
     `else 1 `endif;
+  // ---------------------------------------------------------------------------------------
+  // BURST LANE RETAG -- NOT IMPLEMENTED. Tripwire, not a knob.
+  //
+  // spatz_vlsu now distributes a burst's beats across its four reorder buffers by the ordinary
+  // word->port rule (beat k -> lane k % NrMemPorts), so one element from each buffer fills a
+  // vector register row in ONE write. That replaced funnelling every beat into ROB0, which
+  // assembled a row from NrMemPorts partial writes -- and Spatz chains one cycle after its
+  // producer's first write (spatz_controller.sv wrote_result_q), so a consumer read the row
+  // with three of four lanes stale.
+  //
+  // The memory side has to deliver beats that way: beat b must arrive at core data port
+  // core_id + (b & (NrMemPorts-1)) carrying meta_id = base + (b >> log2(NrMemPorts)). Today
+  // every return path delivers meta_id = base + b on the issuing port, so the retag has to be
+  // added. It belongs at the tile's MASTER RESPONSE boundary (the fall-through register in
+  // gen_tcdm_registers_resp, ahead of postreg_tcdm_master_resp_ini_sel) because that is the
+  // one point where all the return paths have converged:
+  //
+  //   - group-MSHR merged bursts (the MSHR re-emits per requester from meta_id_base + b),
+  //   - MSHR-bypassed bursts (expanded at the destination tile),
+  //   - INTRA-GROUP bursts, which ride master lane 0 through the group LIC and NEVER pass the
+  //     MSHR (mempool_group.sv taps group_mshr_req[t][r] only for r >= 1) -- so the MSHR's
+  //     existing ParityDrain retag cannot reach them, which is why it is not the right place.
+  //
+  // It also needs a burst never to take the OWN-TILE local path: that response returns through
+  // the LIC by structural initiator index, not by core_id, so no retag can re-route it. A burst
+  // to the own tile must be forced out onto the group path instead (its payload is already
+  // formed -- only `valid` differs between the two).
+  //
+  // Until that lands, spatz_vlsu_burst=0 keeps every vector load on the word-interleaved path,
+  // which is row-atomic and correct. This $error exists so the broken pair cannot be built by
+  // passing spatz_vlsu_burst=1 on a command line.
+  // ---------------------------------------------------------------------------------------
+`ifdef SPATZ_VLSU_BURST
+  if (`SPATZ_VLSU_BURST != 0)
+    $error("[mempool_tile] spatz_vlsu_burst=1 needs the tile-side burst lane retag, which is not implemented (see the comment above and docs/spatz_vpu_burst_adoption_review.md). The VLSU would distribute a burst's beats across its reorder buffers while this tile still returns every beat to the issuing port.");
+`else
+  $error("[mempool_tile] SPATZ_VLSU_BURST is undefined, which spatz_vlsu reads as 1 (burst emission ON). The tile-side burst lane retag is not implemented; set spatz_vlsu_burst=0.");
+`endif
+
   // ParityDrain misconfig guards: the core_id+(b&1) retag assumes ONE core per tile whose data
   // port 1 is the burst-issuing VLSU port 0 (flat +1 lands on VLSU port 1); it also needs a
   // second core data port to retag into.

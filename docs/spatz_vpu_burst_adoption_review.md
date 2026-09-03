@@ -253,31 +253,74 @@ against measurement, which is the open KB task *"Generalize ParityDrain to N res
 
 ---
 
-## 5. Changes required on **our** side (they have none of this)
+## 5. Changes required on **our** side — CORRECTED 2026-09-03
 
-Their integration consumes the contract in `spatz_wide_burst_adapter.sv`. Ours must produce it:
-**beat `b` → core data port `base_core + (b & 3)`, `meta_id = base_meta + (b >> 2)`**, replacing
-today's `+ (b & 1)` / `+ b`. Four sites, all small:
+Their integration consumes the contract in `spatz_wide_burst_adapter.sv`. Ours must **produce**
+it: **beat `b` → core data port `base_core + (b & 3)`, `meta_id = base_meta + (b >> 2)`**,
+replacing today's `+ (b & 1)` / `+ b`.
 
-1. `mempool_group_mshr.sv:4068-4077` — MSHR drain retag. `resp_beat_offset[…][0]` → `[1:0]` on
-   `core_id`; `meta_id_base + offset` → `meta_id_base + (offset >> 2)` (a *narrower* adder).
-2. `mempool_group_mshr.sv:4228-4232` — the PD2 second drain slot, same two edits.
-3. `mempool_group_mshr.sv:3576-3584` — the bypass-retag side table (design doc §4.6), same.
-4. `tcdm_burst_expander.sv:114` and `:241` — `req_o[k].wdata.meta_id = base + (beat_base + k)`
-   becomes `base + ((beat_base + k) >> 2)`, **and it must now also retag
-   `wdata.core_id = base_core + ((beat_base + k) & 3)`**, which it does not do at all today. This
-   is the easy one to miss: a *local* (intra-group) burst bypasses the MSHR entirely and this
-   expander is its only convergence point, so leaving it alone would send every local burst's
-   beats to port 0 with ids the VLSU is not expecting.
+**The first version of this section put those edits in the group MSHR. That is wrong, and the
+reason is worth writing down: an intra-group burst never passes the MSHR.** `mempool_group.sv`
+taps `group_mshr_req[t][r]` only for `r >= 1`; lane 0 — every same-group target — rides the group
+LIC straight to the destination tile's slave port and back, so a retag inside the MSHR is
+invisible to it. At 4×4 that is 1/16 of all lines and at 8×8 1/64, i.e. a steady stream of
+silently misplaced beats, not a corner case. Two further paths have the same property: an
+own-tile burst goes through `i_local_burst_expander` to the local banks, and its response
+returns through the LIC **by structural initiator index**, so no core_id retag can re-route it
+at all.
 
-Guards to relax/extend: `mempool_tile.sv:88-95` (`group_mshr_drain_beats=2 requires
+### The single point where every return path has converged
+
+`mempool_tile.sv`, `gen_tcdm_registers_resp` — the master-response fall-through register, ahead
+of `postreg_tcdm_master_resp_ini_sel` (which is `rdata.core_id`, so retagging there *is* the
+re-route). Four kinds of burst response arrive on those ports:
+
+| path | how it gets there | carries |
+|---|---|---|
+| MSHR-merged | the MSHR re-emits per requester from `sub_reqs[].meta_id_base + b` | `base + b`, issuing port |
+| MSHR-bypassed | expanded at the destination tile | `base + b`, issuing port |
+| intra-group | master lane 0 → group LIC → destination slave port → back | `base + b`, issuing port |
+| own-tile | *does not arrive here* — LIC, routed by initiator index | — |
+
+So the work is:
+
+1. **A burst never takes the own-tile local path.** In `gen_core_port_mux`, divert a
+   `burst_len > 1` request from `local_req_interco_valid_raw[idx]` to
+   `remote_req_interco_valid_raw[idx]`, and feed the shim's local `ready` from the remote path
+   while diverted. Cheap because the remote payload is *already fully formed* — the shim
+   computes both and only `valid` differs (`mempool_tile.sv:1169-1195`). The group LIC has all
+   `NumTilesPerGroup` tiles as destinations, the source tile among them. Cost: a group-LIC round
+   trip instead of a direct local access, on the small fraction of lines homed in the core's own
+   tile.
+2. **One retag table per tile.** Allocate on a burst request handshake out of
+   `prereg_tcdm_master_req` (load, `burst_len > 1`), recording `{core_id, meta_base, len}`; match
+   an arriving response by `core_id` and `meta_id - meta_base < len`; rewrite `core_id` and
+   `meta_id` per the lane law; retire on the response handshake. This is the same structure as
+   the MSHR's existing bypass-track table — reuse its shape, including the way-index width trap.
+   Depth bound: `RobDepth / (MaxBurstWords / NrMemPorts)` = 32/4 = **8 ways**. Note a burst
+   occupies `burst_rows` ids per buffer rather than `MaxBurstWords` in one, so this is
+   `NrMemPorts` times the old figure — the shrunken buffers do **not** shrink this table.
+3. **Delete the MSHR's ParityDrain `core_id` retag** (`mempool_group_mshr.sv:4068`, `:4228`) and
+   with it the whole `gen_bypass_retag` table and its assertions. Once the tile retags, the MSHR
+   adding `+ (b & 1)` would double-count. Its per-requester `meta_id_base + b` re-emission
+   stays — that is the multicast, not a retag. This is a net **simplification** and a flop
+   saving; 2-wide delivery still works, because the tile assigns two beats drained in one cycle
+   to different lanes by their own `b`.
+4. **`tcdm_burst_expander` needs no change.** Its `meta_id = base + beat` is the wire encoding
+   the MSHR decodes (`resp_beat_offset = arriving meta_id − sub_reqs[0].meta_id_base`), so
+   changing it there would break the MSHR's beat bookkeeping. The earlier version of this
+   section had this backwards.
+
+**Until this lands, `spatz_vlsu_burst=0`.** `mempool_tile.sv` carries an elaboration `$error` for
+the pair, so the combination cannot be built. At 0 every vector load takes the 4-port
+word-interleaved path, which is row-atomic and correct; what it costs is the group MSHR's burst
+class — no burst merging, no ParityDrain, no block allocation.
+
+Guards to revisit when it lands: `mempool_tile.sv:88-95` (`group_mshr_drain_beats=2 requires
 NumCoresPerTile==1` / `needs core data ports {1,2}`) and `mempool_group_mshr.sv:137-144`.
-
 `mempool_pkg::MaxBurstWords` stays 16 — do **not** import their `SPATZ_MAX_BURST_WORDS`
-parameterisation without also making the TeraNoC-side `MaxBurstWords` follow it; they are the same
-quantity and a mismatch is silent.
-
----
+parameterisation without making the TeraNoC-side constant follow it; they are the same quantity
+and a mismatch is silent.
 
 ## 6. Defects in their tree that must be fixed before adoption
 
