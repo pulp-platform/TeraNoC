@@ -16067,3 +16067,30 @@ ahead of it.
 
 **Status.** SW done, statically verified, A/B in flight (queued behind the licence governor at
 dispatch — 15 free seats against a 20-seat reserve, which is correct behaviour, not a stall).
+
+## 2026-09-04 — Group-MSHR timing & design review (500 MHz placement shakedown)
+
+**Purpose.** The backend flow (Fusion Compiler X-2025.06, TSMC N7, TCK 2.0 ns, block
+`mempool_group_floonoc_wrapper`) reported post-placement WNS **-9.44 ns** with the worst path
+entirely inside `mempool_group_mshr.sv`. Dedicated timing/design review of that module.
+
+**Implementation.** Read the three placement reports plus `qor_data/logic_opto/`, clustered all
+22,776 violating endpoints by terminating register, calibrated the 822-level path against two
+shallower endpoints on the same chain, and audited every synthesised read of the entry array.
+Review written to `docs/mshr_timing_review_500mhz.md`; companion page published as an artifact.
+
+**Result.**
+- **80.8 %** of the block's violating endpoints (18,400 / 22,776) are inside the group MSHR.
+- The cone is **not** a CAM ripple / first-free chain / 64-entry ripple — depth is 808-835 levels
+  *independent of the endpoint entry index*. It is ~10 sequential read-modify-write passes over
+  `mshr_d[64]` in one 1,275-line `always_comb` (`:3175-4450`), several of them 32-deep over lanes.
+- Depth-limited, not drive-limited: 13.4 ps/level dead flat, 1,640/1,648 cells ULVT, all 2-input.
+- The clock gate is a red herring: CG `E` required 1.631 ns vs `D` 1.674-1.795 — **0.10 ns of 9.44**.
+- Not a constraints problem: `base.sdc` is clean and every cone path is a same-cycle handshake.
+- MSHR area **175,428 um2 = 23 % of the group's std-cell area**, comb:seq = **24.3 : 1**.
+- Five fixes proposed in dependency order (F1 dealloc-clear removal is hours/no-area and moves
+  9,055 of 13,071 class-A endpoints off the cone; F4 bank-partition is the area fix at -50..65 %).
+
+**Status.** Review delivered. No RTL changed. Recommended step 0 is three const-fold ablations
+(`drain_beats=1`, `hold_window_*=0`, `cache_self_inval=0`) to attribute the 822 levels per feature
+before any refactor — the netlist restructuring erased all but four RTL names in the cone.
