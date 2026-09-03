@@ -674,22 +674,12 @@ spatz_vlsu_rob_depth ?= 32
 # 3589 -> 3488 cycles (-2.8%), dual_adv on 32/40 instructions, all assertions silent.
 spatz_vlsu_dual_load ?= 2
 
-# --- Sub-word (fp16) burst eligibility -------------------------------------------
-# spatz_vlsu.sv gates the port-0 burst path on vsew == EW_32, so an fp16 vector load
-# (vle16.v) falls back to the 4-port word-interleaved path: it moves the same bytes per
-# cycle, but it never reaches the group MSHR's BURST class, so burst merging, ParityDrain
-# and BlockAlloc are all inactive. 0 = that legacy behaviour, bit-identical netlist.
-# 1 = admit every element width except EW_8.
+# --- Element width and the burst path ---------------------------------------------
+# There is no element-width knob any more. spatz_vlsu_burst_ew16 used to admit e16/e8 to a
+# burst path that was gated on vsew == EW_32; the path is WORD granular end to end now (a
+# word's lane is its word index mod NrMemPorts), so how many elements sit inside a 32-bit
+# word never enters the mapping and EVERY element width bursts unconditionally.
 #
-# The burst LENGTH does not change: a burst is MaxBurstWords(16) 32-bit words = 64 B in both
-# modes, carrying 16 fp32 or 32 fp16 elements. Everything downstream is byte/word-granular
-# and sees an identical stream, so this adds no state and no datapath -- the eligibility
-# test actually gets cheaper (|vsew rather than a 2-bit compare).
-#
-# KEEP fp16 KERNELS AT LMUL <= 4: burst eligibility also caps vl at
-# NrOutstandingLoads*4 = 256 B, and e16,m8 is 512 B -- it would silently take the non-burst
-# path. The gen_burst_ew_vl_ceiling probe warns when that happens.
-# DEFAULT 1 since 2026-08-20 (user request): at 0 an fp16 vector load never reaches the MSHR
-# burst class, so no burst merging, ParityDrain or BlockAlloc happens and an fp16 measurement
-# is not comparable with fp32. Keep fp16 kernels at LMUL <= 4 (see the note above).
-spatz_vlsu_burst_ew16 ?= 1
+# The define was deleted rather than defaulted: it was still being passed into every build
+# while nothing in the RTL read it, so setting it to 0 to get an fp32-only baseline produced
+# an image bit-identical to the one it was meant to differ from.
