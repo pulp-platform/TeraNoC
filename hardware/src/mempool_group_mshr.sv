@@ -1038,7 +1038,26 @@ module mempool_group_mshr
                  [BypassTrackWayW-1:0]                                         bypass_match_way;
   logic          [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]         bypass_beat_parity;
 
-  if (PD2) begin : gen_bypass_retag
+  // BYPASS-TRACK TABLE: DEAD, AND IT COULD NOT RETIRE.
+  //
+  // Its only consumer was the ParityDrain bypass retag, which the lane law replaced --
+  // tcdm_burst_expander now applies the split at the destination, so a bypassed beat reaches
+  // its requester already addressed to the right buffer and there is nothing to fix up here.
+  //
+  // Leaving it standing was not harmless, which is why this is a gate and not a comment. A way
+  // is retired on a matching response, and bypass_match demands
+  // rdata.core_id == tile_core_id_t'(1) -- the issuing port. Under the lane law a burst's beats
+  // come back on core_id 1..BurstLanes, so only the lane-0 beats ever matched: ways were
+  // allocated on every bypassed burst and never fully retired, the table filled, and the
+  // depth assertion killed the run ("bypass-track overflow at tile 6, all 16 ways
+  // outstanding", vector-burst-test cyc ~9674).
+  //
+  // Gated off rather than deleted so this change stays one idea; the else branch below ties
+  // every signal to '0, so the flops and the compare tree fold away and the overflow
+  // assertion's all_ways_valid is constant 0 (never fires). Delete the block outright in the
+  // follow-up cleanup.
+  localparam bit EnableBypassTrack = 1'b0;
+  if (EnableBypassTrack) begin : gen_bypass_retag
     // Loop temporaries for the two always_comb blocks below, at generate scope rather than as
     // procedural `automatic`s. Identical hardware -- each is assigned before it is read on every
     // unrolled iteration -- but visible in a waveform and in the form the backend flow expects.
