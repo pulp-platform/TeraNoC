@@ -44,6 +44,30 @@ module tcdm_burst_expander
 
   localparam int unsigned BurstAlignBits = (MaxBurstWords > 1) ? $clog2(MaxBurstWords) : 1;
 
+  // ------------------------------------------------------------------------------------
+  // BURST LANE LAW. Spatz distributes a burst's beats across its NrMemPorts reorder buffers
+  // by the ordinary word->port rule, so beat b belongs to lane b % BurstLanes and is entry
+  // b / BurstLanes of that buffer. This expander is where a burst becomes individual beats,
+  // so this is where the split is applied:
+  //     core_id <- base core_id + (b % BurstLanes)
+  //     meta_id <- base meta_id + (b / BurstLanes)
+  // tgt_addr is UNCHANGED (base + b): the address sequence is a property of the memory, not
+  // of which buffer the word lands in.
+  //
+  // Identity for b == 0, so a single-word (non-burst) request passes through byte-identically.
+  //
+  // Both instantiation sites apply it, and they must: the source group's MSHR recovers b from
+  // BOTH fields (mempool_group_mshr.sv burst_beat_of), and a bypassed or intra-group burst
+  // reaches its requester with no MSHR in between and so must already be in final form. The
+  // own-tile instance never sees a burst -- mempool_tile.sv diverts those onto the group path,
+  // because a local response is routed back by crossbar initiator index and cannot be steered
+  // by core_id at all.
+  localparam int unsigned BurstLanes = mempool_pkg::NumMemPortsPerSpatz;
+  localparam int unsigned BurstLaneW = (BurstLanes > 1) ? $clog2(BurstLanes) : 1;
+  if (BurstLanes & (BurstLanes - 1))
+    $error("[tcdm_burst_expander] NumMemPortsPerSpatz (%0d) must be a power of two.", BurstLanes);
+  // ------------------------------------------------------------------------------------
+
   if ((NumContexts != 1) && (NumContexts != 2))
     $error("[tcdm_burst_expander] NumContexts (%0d) must be 1 or 2.", NumContexts);
 
@@ -111,7 +135,12 @@ module tcdm_burst_expander
             valid_o[k] = 1'b1;
             req_o[k]   = req_base;
             req_o[k].tgt_addr      = req_base.tgt_addr + (beat_base + k[BurstLenWidth-1:0]);
-            req_o[k].wdata.meta_id = req_base.wdata.meta_id + (beat_base + k[BurstLenWidth-1:0]);
+            // Lane law: the beat index splits into (row, lane) across meta_id and core_id.
+            req_o[k].wdata.meta_id = req_base.wdata.meta_id +
+                                     ((beat_base + k[BurstLenWidth-1:0]) >> BurstLaneW);
+            req_o[k].wdata.core_id = req_base.wdata.core_id +
+                                     ((beat_base + k[BurstLenWidth-1:0]) &
+                                      BurstLenWidth'(BurstLanes - 1));
             req_o[k].burst_len     = BurstLenWidth'(1);
             if (ready_i[k]) begin
               issue_fire_cnt = issue_fire_cnt + BurstLenWidth'(1);
@@ -238,7 +267,12 @@ module tcdm_burst_expander
             valid_o[k] = 1'b1;
             req_o[k]   = req_base;
             req_o[k].tgt_addr      = req_base.tgt_addr + (beat_base + k[BurstLenWidth-1:0]);
-            req_o[k].wdata.meta_id = req_base.wdata.meta_id + (beat_base + k[BurstLenWidth-1:0]);
+            // Lane law: the beat index splits into (row, lane) across meta_id and core_id.
+            req_o[k].wdata.meta_id = req_base.wdata.meta_id +
+                                     ((beat_base + k[BurstLenWidth-1:0]) >> BurstLaneW);
+            req_o[k].wdata.core_id = req_base.wdata.core_id +
+                                     ((beat_base + k[BurstLenWidth-1:0]) &
+                                      BurstLenWidth'(BurstLanes - 1));
             req_o[k].burst_len     = BurstLenWidth'(1);
             if (ready_i[k]) begin
               issue_fire_cnt = issue_fire_cnt + BurstLenWidth'(1);

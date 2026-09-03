@@ -132,6 +132,58 @@ module mempool_group_mshr
     `ifdef GROUP_MSHR_DRAIN_BEATS `GROUP_MSHR_DRAIN_BEATS
     `else 1 `endif;
   localparam bit PD2 = (DrainBeatsPerEntry > 1);
+
+  // ------------------------------------------------------------------------------------
+  // BURST LANE LAW. Spatz distributes a burst's beats across its four reorder buffers by the
+  // ordinary word->port rule, so beat b belongs to VLSU lane b % NrMemPorts and is entry
+  // b / NrMemPorts of THAT buffer. tcdm_burst_expander applies it at the destination, so a
+  // returning beat carries
+  //     core_id = owner core_id + (b % BurstLanes)
+  //     meta_id = owner meta_id  + (b / BurstLanes)
+  // and b is recovered from BOTH fields rather than from meta_id alone. That is the whole
+  // reason this file changed: under the funnel every beat came back on the issuing port with
+  // meta_id base+b, so a vector register row was assembled from BurstLanes partial writes --
+  // and Spatz chains one cycle after its producer's first write, so a consumer read the row
+  // with BurstLanes-1 lanes stale.
+  //
+  // Identity for a single-word entry (b = 0), which is what keeps the response cache and every
+  // scalar reply byte-identical.
+  localparam int unsigned BurstLanes = NumMemPortsPerSpatz;
+  localparam int unsigned BurstLaneW = idx_width(BurstLanes);
+  if (BurstLanes & (BurstLanes - 1))
+    $error("[mempool_group_mshr] NumMemPortsPerSpatz (%0d) must be a power of two: the lane law truncates.",
+           BurstLanes);
+
+  // Rows a burst of `len` words occupies in each buffer: ceil(len / BurstLanes).
+  function automatic logic [BurstLenWidth-1:0] burst_rows(input logic [BurstLenWidth-1:0] len);
+    burst_rows = BurstLenWidth'((len + BurstLenWidth'(BurstLanes - 1)) >> BurstLaneW);
+  endfunction
+
+  // Beat index of a returning response, from the two fields it is split across.
+  function automatic logic [BurstLenWidth-1:0] burst_beat_of(
+      input tile_core_id_t resp_core, input meta_id_t      resp_meta,
+      input tile_core_id_t base_core, input meta_id_t      base_meta);
+    automatic tile_core_id_t lane = resp_core - base_core;
+    automatic meta_id_t      row  = resp_meta - base_meta;
+    burst_beat_of = BurstLenWidth'((row << BurstLaneW) |
+                                   meta_id_t'(lane & tile_core_id_t'(BurstLanes - 1)));
+  endfunction
+
+  // Does this response belong to a burst based at (base_core, base_meta) of length len?
+  // BOTH halves must be in range before the combined index means anything: the subtractions
+  // wrap in their own field widths, so a lane or row from an unrelated request would otherwise
+  // fold into a legal-looking beat.
+  function automatic logic burst_beat_valid(
+      input tile_core_id_t resp_core, input meta_id_t      resp_meta,
+      input tile_core_id_t base_core, input meta_id_t      base_meta,
+      input logic [BurstLenWidth-1:0] len);
+    automatic tile_core_id_t lane = resp_core - base_core;
+    automatic meta_id_t      row  = resp_meta - base_meta;
+    burst_beat_valid = (lane < tile_core_id_t'(BurstLanes)) &&
+                       (row  < meta_id_t'(burst_rows(len)))  &&
+                       (burst_beat_of(resp_core, resp_meta, base_core, base_meta) < len);
+  endfunction
+  // ------------------------------------------------------------------------------------
   // Misconfig guards: the parity datapath is hardwired for 2 beats/cycle and needs both usable
   // resp ports [2:1]; an illegal knob must fail elaboration, not wedge silently at runtime.
   if ((DrainBeatsPerEntry != 1) && (DrainBeatsPerEntry != 2))
@@ -687,8 +739,8 @@ module mempool_group_mshr
     tile_group_id_t tile_id;
     logic [RespPortIdW-1:0] port_id;
     tile_core_id_t  core_id;
-    // Base meta_id of this requester; per-beat meta_id is computed as
-    // (meta_id_base + beat_offset) when draining a returned beat.
+    // Base meta_id of this requester. Per-beat, the drain emits
+    // (meta_id_base + beat/BurstLanes) on (core_id + beat%BurstLanes) -- see BurstLanes.
     meta_id_t       meta_id_base;
     // NOTE: no `amo` field. A sub-request can only exist behind req_can_merge (1057), which
     // requires req_is_load (1006) = valid && ~wen && (wdata.amo == '0). Both the merge and the
@@ -700,16 +752,21 @@ module mempool_group_mshr
   // back out. The drain path builds its reply from sub_reqs, not from the buffer --
   //     .wen           <- resp_buf                                (head drain, 2nd-slot drain)
   //     .rdata.data    <- resp_buf
-  //     .rdata.core_id <- sub_reqs[].core_id + parity retag
-  //     .rdata.meta_id <- sub_reqs[].meta_id_base + beat_offset
+  //     .rdata.core_id <- sub_reqs[].core_id      + beat % BurstLanes
+  //     .rdata.meta_id <- sub_reqs[].meta_id_base + beat / BurstLanes
   //     .rdata.amo     <- constant '0 (sub-requests are loads: req_is_load gate)
   // so core_id, amo and mshr_tag were stored and never used: 14 of 53 bits per slot, x2 slots
-  // x64 entries = 1792 flops per group (114,688 at 8x8). meta_id is kept because the
-  // ParityDrain second-slot path derives its beat offset from it (resp_beat_offset2).
+  // x64 entries = 1792 flops per group (114,688 at 8x8).
   // mshr_tag in particular is the entry's own index -- known from where the slot lives.
+  //
+  // The slot stores the BEAT INDEX, not the meta_id it used to. The beat is now split across
+  // meta_id and core_id (see BurstLanes), so re-deriving it on the drain path would mean
+  // storing both fields; computing it once at capture stores neither. Same width as the
+  // meta_id it replaces whenever BurstLenWidth <= MetaIdWidth, and never wider by more than
+  // the difference.
   typedef struct packed {
-    meta_id_t meta_id;
-    data_t    data;
+    logic [BurstLenWidth-1:0] beat_off;
+    data_t                    data;
   } mshr_resp_slot_t;
 
   typedef struct packed {
@@ -1620,9 +1677,9 @@ module mempool_group_mshr
           (mshr_q_valid[mshr_i] && mshr_q[mshr_i].state == MSHR_DRAIN_RESP) ||
           mshr_resp_inflight[mshr_i] ||
           (resp_head_beat_pending[mshr_i]))
-        else $fatal(1, "MSHR unmatched head beat: mshr=%0d meta=%0d base_meta=%0d subreqs=%0d beat_pending=0x%0x",
+        else $fatal(1, "MSHR unmatched head beat: mshr=%0d beat=%0d base_meta=%0d subreqs=%0d beat_pending=0x%0x",
                     mshr_i,
-                    mshr_d[mshr_i].resp_buf[mshr_d[mshr_i].resp_buf_rd_ptr].meta_id,
+                    mshr_d[mshr_i].resp_buf[mshr_d[mshr_i].resp_buf_rd_ptr].beat_off,
                     mshr_d[mshr_i].sub_reqs[0].meta_id_base,
                     mshr_d[mshr_i].sub_reqs_num,
                     mshr_d[mshr_i].beat_pending);
@@ -1787,11 +1844,11 @@ module mempool_group_mshr
                   ((mshr_q[rsn_tag_cand].state == MSHR_WAIT_RESP) ||
                    (mshr_q[rsn_tag_cand].state == MSHR_DRAIN_RESP)) &&
                   (mshr_q[rsn_tag_cand].sub_reqs[0].tile_id == tile_group_id_t'(tile_i)) &&
-                  (mshr_q[rsn_tag_cand].sub_reqs[0].core_id ==
-                       resp_in[tile_i][port_i].rdata.core_id) &&
-                  ((resp_in[tile_i][port_i].rdata.meta_id -
-                      mshr_q[rsn_tag_cand].sub_reqs[0].meta_id_base) <
-                         mshr_q[rsn_tag_cand].burst_len)) begin
+                  burst_beat_valid(resp_in[tile_i][port_i].rdata.core_id,
+                                   resp_in[tile_i][port_i].rdata.meta_id,
+                                   mshr_q[rsn_tag_cand].sub_reqs[0].core_id,
+                                   mshr_q[rsn_tag_cand].sub_reqs[0].meta_id_base,
+                                   mshr_q[rsn_tag_cand].burst_len)) begin
                 mshr_resp_seen_now[rsn_tag_cand] = 1'b1;
               end
             end
@@ -1801,9 +1858,11 @@ module mempool_group_mshr
                   ((mshr_q[mshr_i].state == MSHR_WAIT_RESP) ||
                    (mshr_q[mshr_i].state == MSHR_DRAIN_RESP)) &&
                   (mshr_q[mshr_i].sub_reqs[0].tile_id == tile_group_id_t'(tile_i)) &&
-                  (mshr_q[mshr_i].sub_reqs[0].core_id == resp_in[tile_i][port_i].rdata.core_id) &&
-                  ((resp_in[tile_i][port_i].rdata.meta_id -
-                    mshr_q[mshr_i].sub_reqs[0].meta_id_base) < mshr_q[mshr_i].burst_len)) begin
+                  burst_beat_valid(resp_in[tile_i][port_i].rdata.core_id,
+                                   resp_in[tile_i][port_i].rdata.meta_id,
+                                   mshr_q[mshr_i].sub_reqs[0].core_id,
+                                   mshr_q[mshr_i].sub_reqs[0].meta_id_base,
+                                   mshr_q[mshr_i].burst_len)) begin
                 mshr_resp_seen_now[mshr_i] = 1'b1;
               end
             end
@@ -3544,11 +3603,11 @@ module mempool_group_mshr
                 ((mshr_q[resp_tag_cand].state == MSHR_WAIT_RESP) ||
                  (mshr_q[resp_tag_cand].state == MSHR_DRAIN_RESP)) &&
                 (mshr_q[resp_tag_cand].sub_reqs[0].tile_id == tile_group_id_t'(tile_i)) &&
-                (mshr_q[resp_tag_cand].sub_reqs[0].core_id ==
-                     resp_in[tile_i][port_i].rdata.core_id) &&
-                ((resp_in[tile_i][port_i].rdata.meta_id -
-                    mshr_q[resp_tag_cand].sub_reqs[0].meta_id_base) <
-                       mshr_q[resp_tag_cand].burst_len)) begin
+                burst_beat_valid(resp_in[tile_i][port_i].rdata.core_id,
+                                 resp_in[tile_i][port_i].rdata.meta_id,
+                                 mshr_q[resp_tag_cand].sub_reqs[0].core_id,
+                                 mshr_q[resp_tag_cand].sub_reqs[0].meta_id_base,
+                                 mshr_q[resp_tag_cand].burst_len)) begin
               resp_is_mshr[tile_i][port_i] = 1'b1;
               resp_mshr_id[tile_i][port_i] = resp_tag_cand;
             end
@@ -3557,8 +3616,10 @@ module mempool_group_mshr
 
         if (resp_is_mshr[tile_i][port_i]) begin
           resp_capture_beat_offset[tile_i][port_i] =
-              resp_in[tile_i][port_i].rdata.meta_id -
-              mshr_q[resp_mshr_id[tile_i][port_i]].sub_reqs[0].meta_id_base;
+              burst_beat_of(resp_in[tile_i][port_i].rdata.core_id,
+                            resp_in[tile_i][port_i].rdata.meta_id,
+                            mshr_q[resp_mshr_id[tile_i][port_i]].sub_reqs[0].core_id,
+                            mshr_q[resp_mshr_id[tile_i][port_i]].sub_reqs[0].meta_id_base);
           mshr_resp_inflight[resp_mshr_id[tile_i][port_i]] = 1'b1;
           resp_in_ready[tile_i][port_i] = (mshr_resp_slots[resp_mshr_id[tile_i][port_i]] != '0);
           if (resp_in_valid[tile_i][port_i] && resp_in_ready[tile_i][port_i]) begin
@@ -3573,16 +3634,16 @@ module mempool_group_mshr
         if (resp_in_valid[tile_i][port_i] && !resp_is_mshr[tile_i][port_i]) begin
           resp_out_valid[tile_i][port_i] = 1'b1;
           resp_out[tile_i][port_i] = resp_in[tile_i][port_i];
-          // ParityDrain bypass retag (design doc §4.6): a beat of a tracked bypassed burst gets
-          // the same parity core_id retag as an MSHR-drained beat, so bypassed bursts also
-          // deliver 2 beats/cycle (both tile resp ports -> both VLSU receive ports). Port choice
-          // is untouched (bypass keeps the M4 non-backpressurable contract); only the xbar
-          // destination changes. PD2=0 const-folds the term away.
-          if (PD2 && bypass_match[tile_i][port_i]) begin
-            resp_out[tile_i][port_i].rdata.core_id =
-                resp_in[tile_i][port_i].rdata.core_id +
-                tile_core_id_t'(bypass_beat_parity[tile_i][port_i]);
-          end
+          // NO RETAG. A bypassed burst -- intra-group, or inter-group without a merge -- is
+          // expanded at the DESTINATION tile, and tcdm_burst_expander applies the lane law
+          // there, relative to this requester's own core_id/meta_id. The beat therefore
+          // arrives already addressed to the right reorder buffer and nothing is left to do.
+          //
+          // The old ParityDrain bypass-retag table (design doc §4.6) lived here and is gone
+          // with its BypassTrackWays state: it existed only because the destination emitted
+          // meta_id_base + b on the issuing port, so the parity had to be re-applied on the
+          // way past. It could never have carried the lane law anyway -- it never saw
+          // intra-group traffic, which rides master lane 0 and does not pass this module.
           resp_from_bypass[tile_i][port_i] = 1'b1;
         end
       end
@@ -3602,8 +3663,8 @@ module mempool_group_mshr
 `endif
           mshr_rb_we[resp_mshr_id[tile_i][port_i]][resp_push_ptr[resp_mshr_id[tile_i][port_i]]] = 1'b1;
           mshr_d[resp_mshr_id[tile_i][port_i]].resp_buf[resp_push_ptr[resp_mshr_id[tile_i][port_i]]] =
-              '{meta_id: resp_in[tile_i][port_i].rdata.meta_id,
-                data:    resp_in[tile_i][port_i].rdata.data};
+              '{beat_off: resp_capture_beat_offset[tile_i][port_i],
+                data:     resp_in[tile_i][port_i].rdata.data};
           if (RespBufWords > 1) begin
             if (resp_push_ptr[resp_mshr_id[tile_i][port_i]] == RespBufPtrW'(RespBufWords - 1)) begin
               resp_push_ptr[resp_mshr_id[tile_i][port_i]] = '0;
@@ -3747,9 +3808,10 @@ module mempool_group_mshr
         if (mshr_d[mshr_i].burst_len == BurstLenWidth'(1)) begin
           resp_beat_offset[mshr_i] = '0;
         end else begin
+          // Computed once at capture (the beat is split across meta_id and core_id, so
+          // re-deriving it here would mean storing both fields).
           resp_beat_offset[mshr_i] =
-              mshr_d[mshr_i].resp_buf[mshr_d[mshr_i].resp_buf_rd_ptr].meta_id -
-              mshr_d[mshr_i].sub_reqs[0].meta_id_base;
+              mshr_d[mshr_i].resp_buf[mshr_d[mshr_i].resp_buf_rd_ptr].beat_off;
         end
       end else begin
         resp_beat_offset[mshr_i] = '0;
@@ -3783,9 +3845,7 @@ module mempool_group_mshr
       if (PD2 && mshr_d_valid[mshr_i] &&
           (mshr_d[mshr_i].burst_len != BurstLenWidth'(1)) &&
           (mshr_d[mshr_i].resp_buf_cnt >= RespBufCountW'(2))) begin
-        resp_beat_offset2[mshr_i] =
-            mshr_d[mshr_i].resp_buf[resp_rd_ptr2[mshr_i]].meta_id -
-            mshr_d[mshr_i].sub_reqs[0].meta_id_base;
+        resp_beat_offset2[mshr_i] = mshr_d[mshr_i].resp_buf[resp_rd_ptr2[mshr_i]].beat_off;
         if ((mshr_d[mshr_i].state == MSHR_DRAIN_RESP) &&
             !mshr_d[mshr_i].beat2_armed &&
             (mshr_d[mshr_i].sub_reqs_num != '0)) begin
@@ -4062,19 +4122,18 @@ module mempool_group_mshr
             resp_out[tile_i][port_i].rdata.data =
                 mshr_d[resp_sel_mshr_id[tile_i][port_i]]
                       .resp_buf[mshr_d[resp_sel_mshr_id[tile_i][port_i]].resp_buf_rd_ptr].data;
-            // ParityDrain core_id retag: odd beats of a burst entry go to the next core data
-            // port (VLSU mem port 1) so the tile xbar delivers 2 beats/cycle into one core.
-            // Identity for single-word entries and when PD2=0 (legacy).
+            // Re-emit beat b for THIS requester under the lane law: lane from the low
+            // BurstLaneW bits, row from the rest. Not gated on PD2 -- this is the lane
+            // MAPPING, not the drain width; DrainBeatsPerEntry only says how many beats may
+            // leave in one cycle. Identity for a single-word entry (b = 0).
             resp_out[tile_i][port_i].rdata.core_id =
                 mshr_d[resp_sel_mshr_id[tile_i][port_i]].sub_reqs[
                     resp_sel_subreq_idx[tile_i][port_i]].core_id +
-                ((PD2 && (mshr_d[resp_sel_mshr_id[tile_i][port_i]].burst_len != BurstLenWidth'(1)))
-                     ? tile_core_id_t'(resp_beat_offset[resp_sel_mshr_id[tile_i][port_i]][0])
-                     : '0);
+                tile_core_id_t'(resp_beat_offset[resp_sel_mshr_id[tile_i][port_i]][BurstLaneW-1:0]);
             resp_out[tile_i][port_i].rdata.meta_id =
                 mshr_d[resp_sel_mshr_id[tile_i][port_i]].sub_reqs[
                     resp_sel_subreq_idx[tile_i][port_i]].meta_id_base +
-                meta_id_t'(resp_beat_offset[resp_sel_mshr_id[tile_i][port_i]]);
+                meta_id_t'(resp_beat_offset[resp_sel_mshr_id[tile_i][port_i]] >> BurstLaneW);
             resp_out[tile_i][port_i].rdata.amo = '0;  // sub-requests are loads by construction (req_is_load)
             resp_from_mshr[tile_i][port_i] = 1'b1;
 `ifndef TARGET_SYNTHESIS
@@ -4224,13 +4283,14 @@ module mempool_group_mshr
               resp_out[tile_i][port_i].wen = 1'b0;  // buffered beats are reads by construction (capture gate)
               resp_out[tile_i][port_i].rdata.data =
                   mshr_d[drain2_sel_e2].resp_buf[resp_rd_ptr2[drain2_sel_e2]].data;
+              // Same lane law as the head slot.
               resp_out[tile_i][port_i].rdata.core_id =
                   mshr_d[drain2_sel_e2].sub_reqs[resp_sel2_subreq_idx[tile_i][port_i]].core_id +
-                  tile_core_id_t'(resp_beat_offset2[drain2_sel_e2][0]);
+                  tile_core_id_t'(resp_beat_offset2[drain2_sel_e2][BurstLaneW-1:0]);
               resp_out[tile_i][port_i].rdata.meta_id =
                   mshr_d[drain2_sel_e2]
                       .sub_reqs[resp_sel2_subreq_idx[tile_i][port_i]].meta_id_base +
-                  meta_id_t'(resp_beat_offset2[drain2_sel_e2]);
+                  meta_id_t'(resp_beat_offset2[drain2_sel_e2] >> BurstLaneW);
               resp_out[tile_i][port_i].rdata.amo = '0;  // sub-requests are loads by construction (req_is_load)
               resp_from_mshr[tile_i][port_i] = 1'b1;
 `ifndef TARGET_SYNTHESIS

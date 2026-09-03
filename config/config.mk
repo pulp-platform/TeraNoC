@@ -25,17 +25,19 @@ include $(MEMPOOL_DIR)/config/$(config).mk
 ##  Spatz VLSU burst gate   ##
 ##############################
 
-# Set here rather than per flavour so EVERY configuration gets it: mempool_tile.sv $errors on
-# an undefined SPATZ_VLSU_BURST, because spatz_vlsu reads undefined as 1 (burst emission ON) and
-# the tile-side burst lane retag is not implemented yet.
+# 1 = the VLSU emits burst_len>1 requests, which is what reaches the group MSHR's burst class
+# (burst merging, ParityDrain, block allocation). 0 = every vector load takes the 4-port
+# word-interleaved path -- also correct, just without any of that.
 #
-# spatz_vlsu distributes a burst's beats across its four reorder buffers (beat k -> lane
-# k % NrMemPorts) so a vector register row is written atomically. Spatz chains one cycle after
-# its producer's first VRF write, so the old form -- every beat funnelled into ROB0, a row
-# assembled from four partial writes -- let a consumer read three stale lanes out of four. The
-# memory side has to deliver beats lane-distributed; until it does, keep this 0 and every vector
-# load takes the row-atomic word-interleaved path. See docs/spatz_vpu_burst_adoption_review.md.
-spatz_vlsu_burst ?= 0
+# The VLSU distributes a burst's beats across its four reorder buffers (beat k -> lane
+# k % NrMemPorts) so a vector register row is written atomically; Spatz chains one cycle after
+# its producer's first VRF write, so the old funnel -- every beat into ROB0, a row assembled
+# from four partial writes -- let a consumer read three stale lanes out of four. The memory
+# side delivers beats lane-distributed to match: tcdm_burst_expander applies the split,
+# mempool_group_mshr recovers the beat index from both fields, and mempool_tile diverts
+# own-tile bursts onto the group path (a local response is routed by crossbar initiator index
+# and cannot be steered by core_id). See docs/spatz_vpu_burst_adoption_review.md.
+spatz_vlsu_burst ?= 1
 
 #############################
 ##  Address configuration  ##

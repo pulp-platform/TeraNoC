@@ -86,43 +86,14 @@ module mempool_tile
     `ifdef TCDM_BURST_INTERLEAVE ((`TCDM_BURST_INTERLEAVE != 0) ? 2 : 1)
     `else 1 `endif;
   // ---------------------------------------------------------------------------------------
-  // BURST LANE RETAG -- NOT IMPLEMENTED. Tripwire, not a knob.
-  //
-  // spatz_vlsu now distributes a burst's beats across its four reorder buffers by the ordinary
-  // word->port rule (beat k -> lane k % NrMemPorts), so one element from each buffer fills a
-  // vector register row in ONE write. That replaced funnelling every beat into ROB0, which
-  // assembled a row from NrMemPorts partial writes -- and Spatz chains one cycle after its
-  // producer's first write (spatz_controller.sv wrote_result_q), so a consumer read the row
-  // with three of four lanes stale.
-  //
-  // The memory side has to deliver beats that way: beat b must arrive at core data port
-  // core_id + (b & (NrMemPorts-1)) carrying meta_id = base + (b >> log2(NrMemPorts)). Today
-  // every return path delivers meta_id = base + b on the issuing port, so the retag has to be
-  // added. It belongs at the tile's MASTER RESPONSE boundary (the fall-through register in
-  // gen_tcdm_registers_resp, ahead of postreg_tcdm_master_resp_ini_sel) because that is the
-  // one point where all the return paths have converged:
-  //
-  //   - group-MSHR merged bursts (the MSHR re-emits per requester from meta_id_base + b),
-  //   - MSHR-bypassed bursts (expanded at the destination tile),
-  //   - INTRA-GROUP bursts, which ride master lane 0 through the group LIC and NEVER pass the
-  //     MSHR (mempool_group.sv taps group_mshr_req[t][r] only for r >= 1) -- so the MSHR's
-  //     existing ParityDrain retag cannot reach them, which is why it is not the right place.
-  //
-  // It also needs a burst never to take the OWN-TILE local path: that response returns through
-  // the LIC by structural initiator index, not by core_id, so no retag can re-route it. A burst
-  // to the own tile must be forced out onto the group path instead (its payload is already
-  // formed -- only `valid` differs between the two).
-  //
-  // Until that lands, spatz_vlsu_burst=0 keeps every vector load on the word-interleaved path,
-  // which is row-atomic and correct. This $error exists so the broken pair cannot be built by
-  // passing spatz_vlsu_burst=1 on a command line.
+  // BURST LANE RETAG -- implemented. Beat b of a burst reaches core data port
+  // core_id + (b % NrMemPorts) carrying meta_id = base + (b / NrMemPorts), which is what lets
+  // the VLSU fill a vector register row from its four reorder buffers in ONE write. It is
+  // applied in tcdm_burst_expander (the point where a burst becomes beats) and understood by
+  // mempool_group_mshr, which recovers b from both fields; the own-tile path is excluded by
+  // burst_divert below, because a local response is routed by crossbar initiator index and
+  // cannot be steered by core_id.
   // ---------------------------------------------------------------------------------------
-`ifdef SPATZ_VLSU_BURST
-  if (`SPATZ_VLSU_BURST != 0)
-    $error("[mempool_tile] spatz_vlsu_burst=1 needs the tile-side burst lane retag, which is not implemented (see the comment above and docs/spatz_vpu_burst_adoption_review.md). The VLSU would distribute a burst's beats across its reorder buffers while this tile still returns every beat to the issuing port.");
-`else
-  $error("[mempool_tile] SPATZ_VLSU_BURST is undefined, which spatz_vlsu reads as 1 (burst emission ON). The tile-side burst lane retag is not implemented; set spatz_vlsu_burst=0.");
-`endif
 
   // ParityDrain misconfig guards: the core_id+(b&1) retag assumes ONE core per tile whose data
   // port 1 is the burst-issuing VLSU port 0 (flat +1 lands on VLSU port 1); it also needs a
@@ -1376,6 +1347,27 @@ module mempool_tile
         assign remote_req_interco_raw[idx].burst_len = BurstLenWidth'(1);
       end
 
+      // OWN-TILE BURSTS ARE DIVERTED ONTO THE GROUP PATH.
+      //
+      // A burst's beats must reach different core data ports (the lane law: beat b -> port
+      // core_id + b % NrMemPorts). A remote response carries core_id and the tile demuxes on
+      // it, so it can be steered. A LOCAL response cannot: it returns through the logarithmic
+      // interconnect to the crossbar INITIATOR that issued it, which is structural, and
+      // local_req_interco_payload_raw[].wdata.core_id is tied to '0 precisely because nothing
+      // reads it. So an own-tile burst would deliver every beat to the issuing port whatever
+      // we retag, which is the funnel this change exists to remove.
+      //
+      // Send it out on the group path instead. The remote payload is ALREADY fully formed --
+      // snitch_addr_demux broadcasts req_payload_i to every output (:83) and only steers
+      // valid -- so nothing has to be recomputed; tgt_group_id is the own group, so
+      // remote_req_interco_tgt_sel picks port 0 and the group LIC routes it straight back to
+      // this tile's slave port, where gen_remote_burst_expander applies the lane law. The cost
+      // is a group-LIC round trip instead of a direct local access, on the fraction of lines
+      // homed in the core's own tile.
+      logic burst_divert;
+      assign burst_divert = local_req_interco_valid_raw[idx] &&
+                            (local_req_interco_payload_raw[idx].burst_len > BurstLenWidth'(1));
+
       // Expand local burst requests before the bank crossbar.
       tcdm_slave_req_t [0:0] local_req_exp_req;
       logic            [0:0] local_req_exp_valid;
@@ -1385,6 +1377,7 @@ module mempool_tile
       assign local_req_interco_valid[idx]   = local_req_exp_valid[0];
       assign local_req_exp_ready[0]         = local_req_interco_ready[idx];
 
+      logic local_exp_ready;
       tcdm_burst_expander #(
         .req_t         (tcdm_slave_req_t ),
         .MaxBurstWords (MaxBurstWords    ),
@@ -1395,8 +1388,8 @@ module mempool_tile
         .clk_i   (clk_i                              ),
         .rst_ni  (rst_ni                             ),
         .req_i   (local_req_interco_payload_raw[idx]),
-        .valid_i (local_req_interco_valid_raw[idx]  ),
-        .ready_o (local_req_interco_ready_raw[idx]  ),
+        .valid_i (local_req_interco_valid_raw[idx] && !burst_divert),
+        .ready_o (local_exp_ready                  ),
         .req_o   (local_req_exp_req                ),
         .valid_o (local_req_exp_valid              ),
         .ready_i (local_req_exp_ready              )
@@ -1404,8 +1397,12 @@ module mempool_tile
 
       // Keep remote requests as bursts on the NoC; expand at the destination.
       assign remote_req_interco[idx]       = remote_req_interco_raw[idx];
-      assign remote_req_interco_valid[idx] = remote_req_interco_valid_raw[idx];
+      assign remote_req_interco_valid[idx] = remote_req_interco_valid_raw[idx] || burst_divert;
       assign remote_req_interco_ready_raw[idx] = remote_req_interco_to_xbar_ready[idx];
+      // The shim raised its LOCAL valid for a diverted burst, so it watches the local ready --
+      // hand it the remote path's instead, or the request is never accepted and the port wedges.
+      assign local_req_interco_ready_raw[idx] =
+          burst_divert ? remote_req_interco_to_xbar_ready[idx] : local_exp_ready;
     end
   end
 
