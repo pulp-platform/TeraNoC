@@ -15840,3 +15840,47 @@ corruption on our tree (needs `MATMUL_VERIFY=1` and a software rebuild — defer
 sims are live and `software/bin` is global), re-validating `dual_load=2` against the new
 `rob_id`-equality SVA, and `655dc50` (dead free-id-bitmap branch, hygiene only — our
 `spatz_rob_cnt_idvalid=1` already means it is not instantiated, so the PPA claim holds without it).
+
+---
+
+## 2026-09-03 (cont. 2) — Tree reduction adopted; PNR re-close hand-off
+
+**Purpose.** User: "we need the word-parallel tree reduction, and we need the PNR re-close."
+
+**Tree reduction.** Cherry-picked `05c6175` (spatz `7a547ba`) — applied CLEAN despite being
+skipped earlier in the series. Verified our three VFU fixes survived the rewrite rather than
+trusting the commit message: the `EW_64` scalar-mask predicate is still on `pending_results`
+(`spatz_vfu.sv:180`), the consume-aligned response still carries `result_ready` (`:320`), and
+`retire_tag` still selects the buffered tag on the reduction writeback path (`:420`).
+Measured cost by diffing the `FF/`FFL register set across the commit: **+363 flops/core**
+(`reduction_q` elen_t[1:0] -> vrf_data_t[1:0] +192, `result_buf_q` +128, `result_buf_tag_q` +27,
+`shift_amnt_q` +7, `lat_count_q` +6, `num_inter_lane_iterations_q` +2, `result_buf_valid_q` +1)
+plus a 128-bit variable shifter and the tree combine stages. Recorded in spatz `232acc8`.
+Compiles clean; **4x4 elaboration vopt exit 0**.
+
+**PNR re-close.** `docs/pnr_reclose_2026-09-03.md`. Key points:
+- `MetaIdWidth` 7 -> 5 is the interface change; `-2 b` exact per `meta_id` field, on every
+  narrow-req and resp flit on every mesh link, every router FIFO, and MSHR
+  `sub_reqs[].meta_id_base` (2,048 b/group -> 32 kb at 4x4, **128 kb at 8x8**). Field widths
+  verified against `mempool_pkg.sv`, not assumed.
+- Both backend flavours inherit `ROB_DEPTH=32` / `BURST=0` through `?=` — verified with `make -n`.
+  `SPATZ_VLSU_ROBN_DEPTH` is deleted, so a stale command-line value is silently ignored.
+- **The re-close is PROVISIONAL.** At `spatz_vlsu_burst=0` the burst allocator and the four
+  block-reservation windows const-fold out of the netlist. §1 (link width) and the
+  reorder-buffer half of §2 are final and can be closed now; area/timing signoff needs a second
+  pass once the tile retag unblocks `spatz_vlsu_burst=1`. Do not tape out the burst-disabled
+  netlist as final.
+- Re-flagged the `TARGET_SYNTHESIS` open item from `docs/mshr_spatz_ppa_review.md` (65,536 flops
+  at 4x4, 262,144 at 8x8) — still worth more than anything else in the note.
+
+**⚠️ Incident: the floogen backup/restore is unreliable.** The second elaboration run's own
+backup captured **4x4**, meaning `hardware/generated/` was already 4x4 when it started even
+though the first run's trap had reported a successful restore and I had verified `NumMeshX=8`
+byte-identical afterwards. Root cause not established. Recovered from the session-start backup
+(`/tmp/genbk.VGjk0t`, mtimes 09-02 19:55) and re-verified all three files byte-identical and
+`NumMeshX=GroupX1Y0=8`. **Lesson: `NumMeshX` must be re-checked after every floogen run and
+again at session end; a trap that PRINTS "restored" is not evidence that it did.**
+
+**Status.** Tree reduction DONE. PNR hand-off DONE (provisional, as above). Still open: the
+tile-side lane retag (which is what turns bursts back on), the funnel-corruption A/B, and
+re-validating `dual_load=2`.
