@@ -668,10 +668,21 @@ int main() {
   {
     const uint32_t stride_e = (uint32_t)(A_REPL_STRIDE_E);   // elements between replica bases
     const uint32_t src_e    = (uint32_t)((A_BYTES) / (GEMM_ELEM_BYTES));
-    for (uint32_t k = 0; k < (uint32_t)(MATMUL_A_REPLICAS); ++k) {
-      elem_t *rep = a_mesh + k * stride_e;
-      for (uint32_t e = cid; e < stride_e; e += num_cores)
-        rep[e] = (e < src_e) ? a[e] : (elem_t)0;
+    // ELEMENT loop outside, REPLICA loop inside -- this nesting is load-bearing, not style.
+    //
+    // The obvious order (replicas outside) leaves the `(e < src_e) ? a[e] : 0` load inside the
+    // replica loop. When A is smaller than one replica stride the branch is loop-INVARIANT, but
+    // LLVM does not unswitch it, so every core re-loads a[e] on all MATMUL_A_REPLICAS iterations.
+    // Measured 2026-09-04 at 8x8: arepN 4x128x32768 (no padding, load hoisted) filled in 7,000
+    // cycles, while arepN 1x128x32768 (A = 256 B, padding, load stuck in the loop) turned 128
+    // loads into 8,192 -- all remote, all aimed at the ONE group that holds a 256-byte A -- and
+    // had not finished after 86,000. Same geometry, 12x apart, entirely due to this nesting.
+    //
+    // This way each element is loaded exactly once and the replica loop is pure stores.
+    for (uint32_t e = cid; e < stride_e; e += num_cores) {
+      const elem_t v = (e < src_e) ? a[e] : (elem_t)0;
+      for (uint32_t k = 0; k < (uint32_t)(MATMUL_A_REPLICAS); ++k)
+        a_mesh[k * stride_e + e] = v;
     }
   }
 #endif
