@@ -159,6 +159,113 @@
 #include "dma.h"
 #endif
 
+// ==========================================================================================
+// A-MATRIX MESH REPLICATION  (decode shapes; automatically inert for prefill)
+// ==========================================================================================
+// L1 is word-interleaved, so a CONTIGUOUS buffer occupies exactly one group per
+//     A_GROUP_STRIDE = 4 * banks_per_tile * tiles_per_group      (1024 B on terapool_spatz4_fpu)
+// of address space -- the same derivation software/runtime/arch.ld.c uses for the linker's
+// barrier window and kernel/sp-fmatmul.c's gbar_base() uses for the barrier address. That is
+// three sites now; keep them in sync. A hardcoded shift here is exactly what turned the group
+// barrier into a silent no-op at 8x8, so this is DERIVED and the _Static_assert below proves it
+// still agrees with the kernel's copy.
+//
+// WHY: a decode-shape A is TINY, so it lands in one CORNER of the mesh. fp16 16x128 = 4 KB =
+// groups 0..3, and with group id = x*NumY + y (terapool_cluster_floonoc_wrapper.sv) that is mesh
+// column x=0, y=0..3. Every one of the 1024 cores then reaches into that corner for each of its
+// scalar A operands, while B (N*P) and C (M*P) are megabytes and cover all NUM_GROUPS groups.
+// Two measured consequences at 8x8:
+//   * per inner-n iteration a core issues KERNEL_SIZE scalar A loads against ONE vector B load,
+//     so A is a minority of the BYTES but the majority of the request PACKETS. At fp16 16x128
+//     an A-holding group fields ~33x the request rate of every other group;
+//   * per-group FPU utilisation falls monotonically with mesh distance from A --
+//     docs/benchmarks/decode_group_util.json run 3, arm d8f32_32x128x8192: 99.1% at x=0 down to
+//     87.6% at x=7, r(util, distance) = -0.80. B and C are spread uniformly, so A is the only
+//     operand that can produce a spatial gradient at all.
+//
+// FIX: replicate A so the copies TILE the mesh, and let each group read the copy that lives on
+// it. The replica array is always exactly ONE FULL MESH SWEEP (NUM_GROUPS * A_GROUP_STRIDE =
+// 64 KB at 8x8, out of 16 MB of L1) whatever the shape: replica k starts at group
+// k * A_GROUPS_PER_REPLICA, and group g reads replica g / A_GROUPS_PER_REPLICA. Mean A hop count
+// at fp16 16x128 drops 6.12 -> 1.25; a sub-1 KB A (B = 1..2, the arms currently sitting at 8-20%
+// efficiency) becomes fully group-local at 0 hops.
+//
+// INERT FOR PREFILL BY CONSTRUCTION: once A >= NUM_GROUPS * A_GROUP_STRIDE it already spans the
+// whole mesh, MATMUL_A_REPLICAS collapses to 1, no array is declared, no copy runs, and the
+// kernel is handed `a` itself -- not one changed instruction. Same shape-derived style as
+// MATMUL_DECODE_SPLIT and mshr_cfg.h: the shape selects the behaviour, nobody hand-picks it.
+//
+// A/B THE FEATURE with -DMATMUL_A_REPLICAS=<k>: 1 forces the un-replicated baseline, and any
+// other divisor of NUM_GROUPS gives a partial tiling (k copies spread evenly, each serving
+// NUM_GROUPS/k groups). Core 0 prints the setting on an [AREP] line so an arm's replication can
+// be read off its log rather than inferred from the build command.
+
+// Preprocessor-safe restatements: #if arithmetic cannot evaluate a cast, so these cannot simply
+// reuse the kernel's GBAR_* macros (which carry uint32_t casts).
+#define A_GROUP_STRIDE  (4 * (N_FU) * (BANKING_FACTOR) * (NUM_CORES_PER_TILE) * (NUM_TILES_PER_GROUP))
+#define A_BYTES         ((GEMM_M) * (GEMM_N) * (GEMM_ELEM_BYTES))
+// Groups covered by ONE replica: A padded up to a whole number of groups, never less than one.
+#define A_SPAN          ((((A_BYTES) + (A_GROUP_STRIDE) - 1) / (A_GROUP_STRIDE)))
+
+// Which engine fills the replicas: 1 = core 0 issues MATMUL_A_REPLICAS blocking DMA transfers
+// from DRAM (default), 0 = every core stores its own slice. See the fill site for the trade.
+//
+// The DMA loop is SAFE despite dma.h's `done` register being documented as "ID of finished
+// transactions": mempool_dma.sv:61-72 implements it as a sticky 1-bit flag that a LAUNCH clears
+// (`if (valid_o) trans_complete_d = 1'b0`) and a completion sets. So `while (!dma_done())` does
+// block per transfer under strict launch->wait->launch->wait, which is what blocking memcpy in a
+// loop does. It would NOT be safe to make these non-blocking and wait once at the end -- the
+// single global frontend at DMA_BASE has one {src,dst,len} register set, so the second launch
+// would overwrite the first transfer's descriptor.
+#ifndef MATMUL_A_FILL_DMA
+#define MATMUL_A_FILL_DMA 1
+#endif
+#ifndef MATMUL_A_REPLICAS
+#  if (A_SPAN) >= (NUM_GROUPS)
+     // A already spans the whole mesh (prefill). Nothing to gain, nothing to pay.
+#    define MATMUL_A_REPLICAS 1
+#  elif ((NUM_GROUPS) % (A_SPAN)) != 0
+     // The replicas would not tile the mesh evenly. Do NOT guess a partial tiling -- some group
+     // would silently read a copy that is not its nearest. Stay on the baseline instead.
+#    define MATMUL_A_REPLICAS 1
+#  else
+#    define MATMUL_A_REPLICAS ((NUM_GROUPS) / (A_SPAN))
+#  endif
+#endif
+
+// Groups served by each replica, i.e. the group stride between replica bases. At the default
+// MATMUL_A_REPLICAS this equals A_SPAN and the array is exactly packed; at a smaller hand-set
+// value the replicas are padded apart so they stay evenly SPREAD over the mesh rather than
+// bunching at group 0.
+#define A_GROUPS_PER_REPLICA ((NUM_GROUPS) / (MATMUL_A_REPLICAS))
+#define A_REPL_STRIDE_B      ((A_GROUPS_PER_REPLICA) * (A_GROUP_STRIDE))
+#define A_REPL_STRIDE_E      ((A_REPL_STRIDE_B) / (GEMM_ELEM_BYTES))
+
+#if ((NUM_GROUPS) % (MATMUL_A_REPLICAS)) != 0
+#  error "MATMUL_A_REPLICAS must divide NUM_GROUPS, or the replicas cannot tile the mesh."
+#endif
+#if (MATMUL_A_REPLICAS) > 1 && (A_SPAN) > (A_GROUPS_PER_REPLICA)
+#  error "MATMUL_A_REPLICAS too large: one replica of A spans more groups than it is given."
+#endif
+#if ((A_BYTES) % (GEMM_ELEM_BYTES)) != 0
+#  error "A_BYTES must be a whole number of elements."
+#endif
+#if GROUP_BARRIER || GBAR_PLOOP
+// The kernel derives the very same stride for the barrier address. If these ever disagree, one
+// of the two is addressing the wrong mesh -- fail the build rather than the measurement.
+_Static_assert((unsigned long)(A_GROUP_STRIDE) == (unsigned long)(GBAR_GROUP_STRIDE),
+               "A_GROUP_STRIDE disagrees with kernel/sp-fmatmul.c GBAR_GROUP_STRIDE");
+#endif
+
+#if MATMUL_A_REPLICAS > 1
+// One full mesh sweep. The k -> group mapping above is only exact if the array itself starts on
+// a group-0 boundary, hence the alignment to NUM_GROUPS * A_GROUP_STRIDE (== the WORD_STRIDE
+// arch.ld.c derives). Misaligned, the tiling is merely ROTATED: every group would read a copy up
+// to A_GROUPS_PER_REPLICA groups away and the optimisation would silently do nothing.
+static float a_mesh[((NUM_GROUPS) * (A_GROUP_STRIDE)) / (GEMM_ELEM_BYTES)]
+    __attribute__((section(".l1_prio"), aligned((NUM_GROUPS) * (A_GROUP_STRIDE))));
+#endif
+
 //==========================================================
 // MATRIX INITIALIZATION
 //==========================================================
@@ -507,6 +614,69 @@ int main() {
   mempool_barrier(num_cores);
 
   //========================================================--
+  // STEP 3b: FAN A OUT ACROSS THE MESH
+  //========================================================--
+  // Runs AFTER the barrier that publishes `a`, and in parallel over every core: the whole
+  // replica set is one mesh sweep (64 KB at 8x8), i.e. ~16 elements per core, against the
+  // megabytes of B the transfer above already moved. Outside the timed region either way.
+  //
+  // Pad elements (present when A is smaller than one replica's stride, e.g. fp16 1x128 = 256 B
+  // against a 1 KB group) are ZEROED rather than left alone. Nothing reads them, but an RTL sim
+  // reading an untouched L1 bank returns X, and X propagates.
+  //
+  // Copied as elements, not as words: `a` is float/_Float16 and punning it through uint32_t*
+  // would be a strict-aliasing violation at -O3.
+#if MATMUL_A_REPLICAS > 1
+  // WHICH ENGINE FILLS THE REPLICAS -- measured, not assumed. -DMATMUL_A_FILL_DMA=1 selects the
+  // DMA variant. Both are correct; they differ only in cost, and the [AREP] line reports the
+  // measured cycles so the choice never has to rest on anyone's arithmetic again.
+  //
+  //   cores (default): ONE load of a[cid] from L1 + MATMUL_A_REPLICAS posted stores, on all
+  //     1024 cores at once. The replica set is always one mesh sweep, so this is a
+  //     shape-INDEPENDENT NUM_GROUPS*A_GROUP_STRIDE/GEMM_ELEM_BYTES/num_cores stores per core
+  //     (32 at fp16). Reads L1, which already holds `a`.
+  //   dma: K linear transfers from DRAM through the single global frontend at DMA_BASE
+  //     (dma.h exposes one {src,dst,len} register set and one done bit -- there is no stride or
+  //     broadcast descriptor, so K copies mean K SERIALISED transfers). Reads L2, not L1, and
+  //     does not need `a` to have been filled first.
+  //
+  // The DMA path leaves the pad elements untouched rather than zeroing them. Nothing reads the
+  // pad -- A is addressed only at indices < M*N -- but note the asymmetry when comparing.
+  const uint32_t a_fill_t0 = (uint32_t)mempool_get_timer();
+#if MATMUL_A_FILL_DMA
+  if (cid == 0) {
+    for (uint32_t k = 0; k < (uint32_t)(MATMUL_A_REPLICAS); ++k)
+      dma_memcpy_blocking(a_mesh + k * (uint32_t)(A_REPL_STRIDE_E),
+                          gemm_A_dram, (size_t)(A_BYTES));
+  }
+#else
+  {
+    const uint32_t stride_e = (uint32_t)(A_REPL_STRIDE_E);   // elements between replica bases
+    const uint32_t src_e    = (uint32_t)((A_BYTES) / (GEMM_ELEM_BYTES));
+    for (uint32_t k = 0; k < (uint32_t)(MATMUL_A_REPLICAS); ++k) {
+      float *rep = a_mesh + k * stride_e;
+      for (uint32_t e = cid; e < stride_e; e += num_cores)
+        rep[e] = (e < src_e) ? a[e] : (float)0;
+    }
+  }
+#endif
+  mempool_barrier(num_cores);
+  const uint32_t a_fill_cyc = (uint32_t)mempool_get_timer() - a_fill_t0;
+  // The replica this core's GROUP owns. Every core of a group picks the same one, so the group
+  // MSHR still sees the identical A addresses it merged before (share_a is unchanged) -- only
+  // the distance those merged requests travel changes.
+  const float *const a_use = a_mesh + (gid / (uint32_t)(A_GROUPS_PER_REPLICA))
+                                           * (uint32_t)(A_REPL_STRIDE_E);
+#else
+  const float *const a_use = a;
+#endif
+  if (cid == 0)
+    printf("[AREP] replicas=%u span=%u groups_per_replica=%u a_bytes=%u fill=%s fill_cyc=%u\n",
+           (unsigned)(MATMUL_A_REPLICAS), (unsigned)(A_SPAN),
+           (unsigned)(A_GROUPS_PER_REPLICA), (unsigned)(A_BYTES),
+           (MATMUL_A_FILL_DMA) ? "dma" : "cores", (unsigned)a_fill_cyc);
+
+  //========================================================--
   // STEP 4: MATRIX MULTIPLICATION
   //========================================================--
   // Each core computes its portion of C = A * B
@@ -563,13 +733,13 @@ int main() {
   if (is_core_active) {
     const uint32_t warmup_n = MIN(ICACHE_WARMUP_N, gemm_l.N);
     if (kernel_size == 1) {
-      matmul_1xVL(c, a, b, m_start, m_end, warmup_n, gemm_l.P, p_start, p_end);
+      matmul_1xVL(c, a_use, b, m_start, m_end, warmup_n, gemm_l.P, p_start, p_end);
     } else if (kernel_size == 2) {
-      matmul_2xVL(c, a, b, m_start, m_end, warmup_n, gemm_l.P, p_start, p_end);
+      matmul_2xVL(c, a_use, b, m_start, m_end, warmup_n, gemm_l.P, p_start, p_end);
     } else if (kernel_size == 4) {
-      matmul_4xVL(c, a, b, m_start, m_end, warmup_n, gemm_l.P, p_start, p_end);
+      matmul_4xVL(c, a_use, b, m_start, m_end, warmup_n, gemm_l.P, p_start, p_end);
     } else if (kernel_size == 8) {
-      matmul_8xVL(c, a, b, m_start, m_end, warmup_n, gemm_l.P, p_start, p_end);
+      matmul_8xVL(c, a_use, b, m_start, m_end, warmup_n, gemm_l.P, p_start, p_end);
     }
   }
   mempool_barrier(num_cores);
@@ -681,13 +851,13 @@ int main() {
       for (uint32_t rep_i = 0; rep_i < (uint32_t)MATMUL_REPEAT; ++rep_i) {
         // Dispatch to appropriate kernel based on kernel_size
         if (kernel_size == 1) {
-          matmul_1xVL(c, a, b, m_start, m_end, gemm_l.N, gemm_l.P, p_start, p_end);
+          matmul_1xVL(c, a_use, b, m_start, m_end, gemm_l.N, gemm_l.P, p_start, p_end);
         } else if (kernel_size == 2) {
-          matmul_2xVL(c, a, b, m_start, m_end, gemm_l.N, gemm_l.P, p_start, p_end);
+          matmul_2xVL(c, a_use, b, m_start, m_end, gemm_l.N, gemm_l.P, p_start, p_end);
         } else if (kernel_size == 4) {
-          matmul_4xVL(c, a, b, m_start, m_end, gemm_l.N, gemm_l.P, p_start, p_end);
+          matmul_4xVL(c, a_use, b, m_start, m_end, gemm_l.N, gemm_l.P, p_start, p_end);
         } else if (kernel_size == 8) {
-          matmul_8xVL(c, a, b, m_start, m_end, gemm_l.N, gemm_l.P, p_start, p_end);
+          matmul_8xVL(c, a_use, b, m_start, m_end, gemm_l.N, gemm_l.P, p_start, p_end);
         } else {
           return -2;  // Invalid kernel size
         }

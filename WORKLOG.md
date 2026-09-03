@@ -15945,3 +15945,125 @@ as a WRITE, and verify the BACKUP's mesh, not just the restore's exit status.
 `run_vbt.sh` backed up 4x4, so `hardware/generated/` needs restoring to 8x8 by hand when it exits.
 
 **Status.** Bursts ON, everything compiles and elaborates, validation in flight.
+
+---
+
+## 2026-09-03 — A-matrix mesh replication for decode shapes (SW)
+
+**Purpose.** A decode-shape A is far smaller than the machine, so it occupies a CORNER of the
+mesh and every core reaches into that corner for each scalar operand. L1 is word-interleaved, so
+a contiguous buffer covers exactly one group per `4 * banks_per_tile * tiles_per_group` = **1024 B**
+(the stride `arch.ld.c` and `gbar_base()` already derive; CLAUDE.md's `addr[11:8]` group field is
+stale — it describes a 4-banks/tile config, and `banking_factor=4 x n_fpu=4` makes it `addr[15:10]`
+at 64 groups). fp16 16x128 = 4 KB = **groups 0..3**, which with `group_id = x*NumY + y` is mesh
+column x=0, y=0..3.
+
+**Evidence it costs something.**
+- `docs/benchmarks/decode_group_util.json`, run 3, `d8f32_32x128x8192`: steady-state per-group
+  FPU utilisation falls monotonically with mesh column — 99.1 / 99.4 / 99.0 / 98.5 / 96.5 / 94.4 /
+  91.0 / **87.6** for x=0..7, r(util, distance-to-A) = **-0.80**. `d8f32_32x256x8192` -0.69,
+  `dec8_32x128x16384` -0.60. B (N*P) and C (M*P) are megabytes and spread over all 64 groups, so
+  **A is the only operand that can produce a spatial gradient at all**.
+- Runs 1 and 2 (before the merge fix) show the same effect INVERTED — x=0 lowest, 23.9 vs 48.5 —
+  i.e. the A-holding groups buried serving everyone else. Either sign, 12–25 pp of spread.
+- Request-rate accounting: per inner-n iteration a core issues KERNEL_SIZE scalar A loads against
+  ONE vector B load, so A is a minority of the BYTES but the majority of the request PACKETS. At
+  fp16 16x128 on 8x8 (`share_w=2`, 8 p_blocks/group) an A-holding group fields 64x16/4 = 256 A
+  requests per iteration against 8 B bursts elsewhere — **~33x** the request rate of any other group.
+
+**Implementation.** `software/apps/spatz_apps/sp-fmatmul-opt-burst-merge{,-fp16}/main.c` only; no
+kernel and no RTL change. Shape-derived at compile time, in the style of `MATMUL_DECODE_SPLIT` and
+`mshr_cfg.h`:
+- `A_GROUP_STRIDE = 4*N_FU*BANKING_FACTOR*NUM_CORES_PER_TILE*NUM_TILES_PER_GROUP`, restated
+  preprocessor-safe (`#if` cannot evaluate a cast) and `_Static_assert`-ed equal to the kernel's
+  `GBAR_GROUP_STRIDE`, so the two derivations cannot drift.
+- `A_SPAN` = groups one replica covers; `MATMUL_A_REPLICAS = NUM_GROUPS / A_SPAN`, falling back to
+  1 when A already spans the mesh (prefill) or when the replicas would not tile it evenly.
+- `a_mesh` is always exactly one mesh sweep (`NUM_GROUPS * A_GROUP_STRIDE` = 64 KB of 16 MB L1),
+  `aligned` to that same size so replica k really starts at group `k*A_GROUPS_PER_REPLICA` — a
+  misaligned array would merely ROTATE the tiling and the optimisation would silently do nothing.
+- Filled in parallel by every core after the existing data-transfer barrier, copied as ELEMENTS
+  (punning `float*`/`_Float16*` through `uint32_t*` is a strict-aliasing violation at -O3) and
+  zero-padded so an RTL sim never reads an untouched bank as X.
+- Group g reads replica `g / A_GROUPS_PER_REPLICA`; all 16 cores of a group pick the same one, so
+  the group MSHR still sees the identical A addresses it merged before (`share_a` unchanged) —
+  only the distance those merged requests travel changes.
+- `-DMATMUL_A_REPLICAS=<k>` forces the baseline (1) or a partial tiling; core 0 prints an `[AREP]`
+  line so an arm's setting is readable off its log rather than inferred from the build command.
+
+Predicted mean A hop count at fp16 16x128, 8x8: **6.12 -> 1.25**. A sub-1 KB A (B=1..2, the arms
+currently at 8–20% efficiency, two of which livelocked) becomes fully group-local at **0 hops**.
+
+**Result.** Builds clean on both apps at `terapool_spatz4_fpu_8x8`, no new warnings (the one
+`core_gid` unused-variable warning is pre-existing). Verified from the ELFs:
+- fp16 8x128x32768 → `A_SPAN=2`, 32 replicas; `a_mesh` at `0x890000` (64 KB-aligned, group 0),
+  size 0x10000. Disassembly confirms the fill stores `a[cid]` to `a_mesh[cid + k*1024]` for k=0..31
+  (2048 B apart) after the transfer barrier, and `a_use = a_mesh + (cid>>5)*2048` = replica `gid/2`.
+- fp32 32x128x8192 → `A_SPAN=16`, 4 replicas, `a_mesh` 64 KB at `0x490000`.
+- fp32 prefill 512x1024x1024 → `MATMUL_A_REPLICAS=1`, **no `a_mesh` symbol emitted at all** — the
+  inert path costs nothing.
+
+**Bank-hash gate.** Cleared by CONSTRUCTION, not by measurement. Replication adds a constant
+per-group offset to every A address, and the MSHR bank index is a field-select
+`word_addr[sh_single +: 4]` — adding a constant is a bijection on that field, so the per-group
+CONCURRENT bank spread is invariant. For the 16x128 shape the offset (1024 words) does not even
+reach the selected bits, so the bank assignment is bit-identical to the baseline.
+`scripts/mshr_bank_hash_explore.py --M 16 --N 128 --P 16384 --ks 8 --elem-bytes 2 --groups 64
+--cores 1024 --split decode` confirms the shape itself is healthy: A (single) reaches **16/16 banks
+concurrently** at `sh_single=6`.
+
+**Fleet A/B dispatched** 2026-09-03 21:42, batch `teranoc-20260903-214205-4ce7`, 8 arms, VCS,
+image `build_tgt8x8_hashfix/mempool_simvopt`, results to `hardware/ab_<arm>/`. Four fp16 8x8
+decode shapes x {`-DMATMUL_A_REPLICAS=1`, default}, `MATMUL_REPEAT` normalised to R = 2^29/(M*N*P)
+exactly as `build_rb.sh` does, so the only variable between the arms of a pair is the replication:
+
+| shape | KS | R | A bytes | span | replicas | note |
+|---|---|---|---|---|---|---|
+| 1x128x32768  | 1 | 128 |   256 |  1 | 64 | A in ONE group -> 0 hops; validated baseline eff 8.2% |
+| 4x128x32768  | 4 |  32 |  1024 |  1 | 64 | 0 hops; previously livelocked -- recovery test |
+| 16x128x16384 | 8 |  16 |  4096 |  4 | 16 | the motivating shape; validated baseline eff 41.1% |
+| 32x256x8192  | 8 |   8 | 16384 | 16 |  4 | least concentrated -> dose-response control, eff 43.6% |
+
+ELFs verified before dispatch: `a` = 0x100 / 0x400 / 0x1000 / 0x4000 exactly as the shapes predict;
+`a_mesh` absent from every `arep1_` arm and a constant 0x10000 (one mesh sweep) in every `arepN_`
+arm, group-0 aligned.
+
+`scripts/arep_ab_report.py` pairs the arms when they land. It reports cycles and efficiency on the
+same conventions as `collect_decode_results.py` (per-pass `execution took`, ideal = B*D*I/8192,
+per-period `+N` counters SUMMED not last-read), plus the metric this hypothesis actually predicts
+and no existing scraper computes: the mean `grp_max - grp_min` FPU utilisation over the steady-state
+window. **The prediction is that the SPATIAL SPREAD narrows**; a cycle win without a spread change
+would mean the mechanism is not the one claimed.
+
+**Replica fill: DMA is now the default** (`MATMUL_A_FILL_DMA=1`, 2026-09-04, user's call). Core 0
+issues `MATMUL_A_REPLICAS` blocking `dma_memcpy_blocking` transfers straight from `gemm_A_dram`,
+so the fill no longer depends on `a` being staged first. `MATMUL_A_FILL_DMA=0` keeps the original
+core fill (one L1 load + K posted stores per core, 1024-way parallel, a shape-INDEPENDENT 32
+stores per core at fp16).
+
+The loop is SAFE, which was not obvious and had to be read out of the RTL. `dma.h`'s `done`
+register is documented in `mempool_dma_frontend.hjson` as "Get ID of finished transactions", and
+`dma_wait()` spins on `while (!dma_done())` -- if `done` really were a monotonically rising ID it
+would latch non-zero after the first transfer and every later wait would return IMMEDIATELY,
+silently racing 64 descriptor writes against in-flight transfers. It is not an ID:
+`deps/idma/src/frontends/mempool/mempool_dma.sv:61-72` makes it a sticky 1-bit flag that a LAUNCH
+clears (`if (valid_o) trans_complete_d = 1'b0`) and a completion sets, so blocking memcpy in a
+loop is correct. Corollary recorded at the call site: these must stay BLOCKING -- the single
+global frontend at `DMA_BASE` has one `{src,dst,len}` register set, so a non-blocking variant that
+waited once at the end would have the second launch overwrite the first descriptor.
+
+Asymmetry to remember when comparing the two fills: the DMA path does not zero the pad elements
+(present when A is smaller than one replica stride). Nothing reads them -- the kernel addresses A
+only at indices < M*N -- but the core fill does that extra work and the DMA path does not.
+
+**Cost: NOT yet measured.** Both fills now time themselves with `mempool_get_timer()` and the
+`[AREP]` line reports `fill=cores|dma fill_cyc=N`, so the choice stops resting on anyone's
+arithmetic. Probe pair `probeC64/probeD64_1x128x2048` (K=64, the worst case for a serialised DMA
+loop) and `probeC16/probeD16_16x128x2048` are built; the K=64 pair is running. P is shrunk to 2048
+deliberately -- the replica set is always one mesh sweep, so fill cost depends on M*N only and a
+small P just makes the probe cheap. My own estimate was that 64 serialised L2 transfers would lose
+badly to 1024-way parallel L1 stores; that estimate is unverified and the default was changed
+ahead of it.
+
+**Status.** SW done, statically verified, A/B in flight (queued behind the licence governor at
+dispatch — 15 free seats against a 20-seat reserve, which is correct behaviour, not a stall).
