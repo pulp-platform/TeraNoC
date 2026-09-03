@@ -11,14 +11,14 @@ arm	mesh	prec	KS	shape	class	hash_affected	cycles_before	cycles_after	delta_pct	
 4x4_fp16_ks1_1x128x8192	4x4	fp16	1	1x128x8192	valid	no	3559	3559	-	14.4	18.79	4	0	0	0	0	4
 4x4_fp16_ks1_2x128x8192	4x4	fp16	1	2x128x8192	livelocked	yes	-	-	-	-	12.47	1569	71	70	304	0	4378
 4x4_fp16_ks1_32x256x2048	4x4	fp16	1	32x256x2048	rerun	yes	62772	62009	-1.22	13.2	13.67	0	0	0	0	0	0
-4x4_fp16_ks1_4x128x8192	4x4	fp16	1	4x128x8192	livelocked	yes	-	-	-	-	14.47	2199	95	95	344	0	5626
+4x4_fp16_ks1_4x128x8192	4x4	fp16	1	4x128x8192	recovered	yes	-	7416	-	27.6	45.73	16	0	0	0	0	16
 4x4_fp16_ks1_64x512x1024	4x4	fp16	1	64x512x1024	rerun	yes	89637	88573	-1.19	18.5	19.12	0	0	0	0	0	0
 4x4_fp16_ks1_8x128x8192	4x4	fp16	1	8x128x8192	rerun	yes	-	12956	-	31.6	32.80	0	0	0	0	0	0
 4x4_fp16_ks2_128x1024x512	4x4	fp16	2	128x1024x512	rerun	yes	84083	83299	-0.93	39.3	68.93	0	0	0	0	0	0
 4x4_fp16_ks2_16x128x4096	4x4	fp16	2	16x128x4096	rerun	yes	13728	14391	+4.83	28.5	47.82	0	0	0	0	0	0
 4x4_fp16_ks2_2x128x8192	4x4	fp16	2	2x128x8192	valid	no	3824	3824	-	26.8	31.09	8	0	0	0	0	8
 4x4_fp16_ks2_32x256x2048	4x4	fp16	2	32x256x2048	rerun	yes	38179	38293	+0.30	21.4	37.06	0	0	0	0	0	0
-4x4_fp16_ks2_4x128x8192	4x4	fp16	2	4x128x8192	livelocked	yes	-	-	-	-	6.57	2170	377	370	1396	0	6737
+4x4_fp16_ks2_4x128x8192	4x4	fp16	2	4x128x8192	recovered	yes	-	5139	-	39.9	53.42	16	0	0	0	0	16
 4x4_fp16_ks2_64x512x1024	4x4	fp16	2	64x512x1024	rerun	yes	51675	51612	-0.12	31.7	55.55	0	0	0	0	0	0
 4x4_fp16_ks2_8x128x8192	4x4	fp16	2	8x128x8192	recovered	yes	-	7798	-	52.5	72.04	16	0	0	0	0	16
 4x4_fp16_ks4_128x1024x512	4x4	fp16	4	128x1024x512	stale	yes	-	-	-	-	-	-	-	-	-	-	-
@@ -36,7 +36,7 @@ arm	mesh	prec	KS	shape	class	hash_affected	cycles_before	cycles_after	delta_pct	
 4x4_fp32_ks1_16x128x2048	4x4	fp32	1	16x128x2048	rerun	yes	44492	44587	+0.21	9.2	9.52	0	0	0	0	0	0
 4x4_fp32_ks1_1x128x4096	4x4	fp32	1	1x128x4096	valid	no	5810	5810	-	8.8	11.32	4	0	0	0	0	4
 4x4_fp32_ks1_2x128x4096	4x4	fp32	1	2x128x4096	noresult	yes	-	-	-	-	5.03	985	0	0	0	0	2612
-4x4_fp32_ks1_32x256x1024	4x4	fp32	1	32x256x1024	stale	yes	-	-	-	-	-	-	-	-	-	-	-
+4x4_fp32_ks1_32x256x1024	4x4	fp32	1	32x256x1024	rerun	yes	63781	63858	+0.12	12.8	13.29	0	0	0	0	0	0
 4x4_fp32_ks1_4x128x4096	4x4	fp32	1	4x128x4096	livelocked	yes	-	-	-	-	12.08	8462	389	384	1045	0	19730
 4x4_fp32_ks1_64x512x512	4x4	fp32	1	64x512x512	stale	yes	-	-	-	-	-	-	-	-	-	-	-
 4x4_fp32_ks2_128x1024x256	4x4	fp32	2	128x1024x256	rerun	yes	84710	85105	+0.47	38.5	66.85	0	0	0	0	0	0
@@ -86,6 +86,7 @@ arm	mesh	prec	KS	shape	class	hash_affected	cycles_before	cycles_after	delta_pct	
 8x8_fp32_ks1_8x128x16384	8x8	fp32	1	8x128x16384	noresult	yes	-	-	-	-	-	0	None	None	None	None	0
 8x8_fp32_ks2_128x1024x1024	8x8	fp32	2	128x1024x1024	noresult	yes	-	-	-	-	74.72	0	0	0	0	0	0
 8x8_fp32_ks2_16x128x8192	8x8	fp32	2	16x128x8192	noresult	yes	-	-	-	-	12.98	0	0	0	0	0	0
+8x8_fp32_ks2_2x128x16384	8x8	fp32	2	2x128x16384	valid	no	10288	10288	-	10.0	12.72	8	0	0	0	0	8
 8x8_fp32_ks2_32x256x4096	8x8	fp32	2	32x256x4096	noresult	yes	-	-	-	-	77.17	0	0	0	0	0	0
 8x8_fp32_ks2_4x128x16384	8x8	fp32	2	4x128x16384	livelocked	yes	-	-	-	-	6.67	3265	0	0	0	0	17100
 8x8_fp32_ks2_64x512x2048	8x8	fp32	2	64x512x2048	noresult	yes	-	-	-	-	7.08	0	0	0	0	0	0
@@ -93,6 +94,7 @@ arm	mesh	prec	KS	shape	class	hash_affected	cycles_before	cycles_after	delta_pct	
 8x8_fp32_ks4_128x1024x1024	8x8	fp32	4	128x1024x1024	noresult	yes	-	-	-	-	63.01	0	0	0	0	0	0
 8x8_fp32_ks4_16x128x8192	8x8	fp32	4	16x128x8192	livelocked	yes	-	-	-	-	8.92	12476	0	0	0	0	18338
 8x8_fp32_ks4_32x256x4096	8x8	fp32	4	32x256x4096	noresult	yes	-	-	-	-	64.94	0	0	0	0	0	0
+8x8_fp32_ks4_4x128x16384	8x8	fp32	4	4x128x16384	valid	no	10188	10188	-	20.1	23.30	16	0	0	0	0	16
 8x8_fp32_ks4_64x512x2048	8x8	fp32	4	64x512x2048	noresult	yes	-	-	-	-	28.93	0	0	0	0	0	0
 8x8_fp32_ks4_8x128x16384	8x8	fp32	4	8x128x16384	noresult	yes	-	-	-	-	25.06	596	0	0	0	0	2425
 8x8_fp32_ks8_128x1024x1024	8x8	fp32	8	128x1024x1024	valid	no	97494	97494	-	33.6	43.01	0	0	0	0	0	0

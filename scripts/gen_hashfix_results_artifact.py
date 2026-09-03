@@ -224,6 +224,9 @@ td{padding:7px 10px 7px 0;border-bottom:1px solid var(--line);font-variant-numer
 td.n,th.n{text-align:right}
 .mono{font-family:"IBM Plex Mono",monospace;font-size:12px}
 .good{color:var(--good);font-weight:600}.bad{color:var(--bad);font-weight:600}
+p.warn{border-left:3px solid var(--bad);background:var(--surf);padding:.7em 1em;
+       margin:1em 0;border-radius:0 4px 4px 0;color:var(--ink2)}
+p.warn b{color:var(--ink)}
 .big{font-weight:600}.dim,td.dim{color:var(--ink3)}
 .none{color:var(--ink3);font-style:italic}
 .note{border-left:3px solid var(--accent);padding:2px 0 2px 15px;margin:18px 0;color:var(--ink2)}
@@ -334,6 +337,52 @@ if VALID:
 
 # ---- the grid, from the SAME ARMS dict -----------------------------------------------------------
 KSS = sorted({a["ks"] for a in ARMS.values()})
+# ---- the 8x8 half-mesh wake-up defect ----------------------------------------------------------
+# Sourced from the harvested transcripts, so the page reports what was measured, not a re-derivation.
+WK = []
+for _f in sorted(glob.glob(os.path.join(ROOT, "docs/benchmarks/wakeup_halfmesh_evidence/*.txt"))):
+    _t = open(_f).read()
+    _s = re.findall(r"\[FPUG\] bench cyc=(\d+) denom=\d+ busy=\s*([0-9,\s]+)", _t)
+    if not _s:
+        continue
+    _cyc, _busy = _s[-1]
+    _v = [x.strip() for x in _busy.split(",") if x.strip()]
+    _idle = set(i for i, x in enumerate(_v) if x == "0")
+    _upper = set(range(len(_v) // 2, len(_v)))
+    WK.append(dict(arm=os.path.basename(_f)[:-4], n=len(_v), idle=len(_idle),
+                   confined=_idle <= _upper, exact=_idle == _upper))
+
+if WK:
+    _conf = sum(1 for w in WK if w["confined"])
+    _exact = sum(1 for w in WK if w["exact"])
+    A('<h2>The 8&times;8 half-mesh wake-up defect <span class="dim">&mdash; %d arms killed and re-run</span></h2>' % len(WK))
+    A('<p><code>wake_up_group</code> is a single 32-bit register, but <code>ctrl_registers.sv</code> '
+      'indexed it with <code>i &lt; NumGroups</code>. At 64 groups <code>q[32..63]</code> is an '
+      'out-of-range bit-select &mdash; <code>1\'bx</code> &mdash; and <code>{NumCoresPerGroup{q[i]}}</code> '
+      'replicated that <b>x across all 512 upper-half wake-up lines</b> on every group barrier.</p>')
+    A('<p>The measured idle sets say the same thing independently. In <b>%d of the %d</b> arms every idle '
+      'group lies in the upper half of the mesh, and in <b>%d</b> the idle set is <i>exactly</i> groups '
+      '32&ndash;63 &mdash; the precise range of the out-of-range slice. Each arm was sampled twice, 90&nbsp;s '
+      'apart, with the same groups dark both times: a frozen set, not a transient.</p>'
+      % (_conf, len(WK), _exact))
+    A('<p>A directed testbench at NumGroups=64 confirms the mechanism and the fix: a <code>1&lt;&lt;10</code> '
+      'wake produced <b>512 x-bits</b> before and <b>0</b> after, and the all-ones sentinel woke 512 of 1024 '
+      'cores before and all 1024 after. The re-runs switch the cold-start barrier to '
+      '<code>mempool_log_barrier</code>, which releases through <code>wake_up_all()</code> and never touches '
+      'the broken register.</p>')
+    A('<p class="warn"><b>Necessary, not sufficient.</b> 19 other arms ran all 64 groups busy on this same '
+      'buggy image, so a shape-dependent accomplice remains unidentified. The one arm below whose idle set '
+      'escapes the upper half is the visible edge of that gap. The re-run is the test.</p>')
+    A('<div class="card"><div class="tw"><table><thead><tr><th>arm</th><th class="n">idle groups</th>'
+      '<th>idle set</th></tr></thead><tbody>')
+    for w in sorted(WK, key=lambda x: (x["confined"], -x["idle"])):
+        _lab = ("exactly the upper half" if w["exact"]
+                else ("within the upper half" if w["confined"] else "spills into the lower half"))
+        _cls = "" if w["confined"] else ' class="bad"'
+        A('<tr><td class="mono">%s</td><td class="n">%d / %d</td><td%s>%s</td></tr>'
+          % (w["arm"], w["idle"], w["n"], _cls, _lab))
+    A('</tbody></table></div></div>')
+
 A('<h2>The full grid, both meshes</h2>')
 A('<p>Cells carry <b>efficiency</b> = ideal/actual. '
   '<span class="good">green</span> = measured on the corrected hash &middot; '
@@ -465,4 +514,14 @@ print("wrote %s  (scrape cache: %d hits, %d misses)" % (OUT, _CACHE_HITS[0], _CA
 print("  shown %d (recovered %d, rerun %d, valid %d) | withheld-stale %d | livelocked %d"
       % (len(SHOWN), len(REC), len(RERUN), len(VALID), len(HIDDEN),
          len([a for a in ARMS.values() if a["cls"] == "livelocked"])))
-print("  self-check OK: every shown number visible, no stale number leaked, %d group series" % len(GU))
+# Every class the body uses must have a CSS rule. An undefined class renders as unstyled text
+# rather than erroring, which is how a broken page ships looking fine to the generator.
+_page = open(OUT).read()
+_css = _page[:_page.find("</style>")] if "</style>" in _page else _page
+_used = set(w for c in re.findall(r'class="([^"]+)"', _page) for w in c.split())
+_undef = [n for n in sorted(_used) if not re.search(r"\.%s\s*[,{: .]" % re.escape(n), _css)]
+if _undef:
+    sys.exit("SELF-CHECK FAILED: classes used but never defined in CSS: %s" % ", ".join(_undef))
+
+print("  self-check OK: every shown number visible, no stale number leaked, %d group series, "
+      "%d CSS classes all defined" % (len(GU), len(_used)))

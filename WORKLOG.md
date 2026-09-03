@@ -15208,3 +15208,529 @@ grid produced no result at all.
 
 **Status.** 11 of 36 4x4 arms delivered; artifact republished (self-check: all 11 present).
 8x8 r8 batch running, config gate clean.
+
+## 2026-09-02 19:40 — 8x8 half-mesh wake-up: 14 arms rebuilt and re-dispatched
+
+**Purpose.** Re-run the 14 8x8 decode arms invalidated by the `wake_up_group`
+out-of-range bit-select, and record the defect in the results artifact.
+
+**Implementation.**
+- Rebuilt 14 ELFs as `rb_8x8_*` off the fixed tree (`mempool_log_barrier` for
+  COLDSTART, `NUM_GROUPS <= 32` runtime guard, `ctrl_registers.sv` mask clamp),
+  per-shape `MATMUL_REPEAT` recovered from the original build matrix.
+- Added a "half-mesh wake-up defect" section to
+  `scripts/gen_hashfix_results_artifact.py`, sourced from the harvested
+  transcripts in `docs/benchmarks/wakeup_halfmesh_evidence/`.
+- Added a permanent self-check: every CSS class used in the body must have a
+  rule. An undefined class renders as unstyled text instead of erroring, which
+  is how the earlier broken pages shipped looking fine to the generator.
+  Negative-tested by renaming `.good` -> the check fires.
+
+**Result.**
+- Binary discriminator for the fix: stores to `wake_up_group` (+264) are present
+  in **104 / 104** old ELFs and **0 / 14** rebuilt ones.
+- Independent confirmation of the mechanism from the measured idle sets: in
+  **13 of 14** arms every idle group lies in the upper half of the mesh, and in
+  **6** the idle set is exactly groups 32-63 -- the precise range of the
+  out-of-range slice. Each arm sampled twice 90 s apart, same groups dark.
+- All 14 dispatched (batch `teranoc-20260902-194058-ce23`), 11 running / 3 held
+  by the licence governor at the 20-seat reserve floor.
+
+**Caveat (open).** 19 other arms ran all 64 groups busy on the same buggy image,
+so the defect is necessary but not sufficient; a shape-dependent accomplice is
+unidentified. The one arm whose idle set escapes the upper half is the visible
+edge of that gap.
+
+**Status.** Dispatched, awaiting results. 18 arms of the old `r8_` batch are
+still queued on buggy ELFs -- pending a decision on cancelling them.
+
+### 2026-09-02 20:10 — Roofline model, step 1: ceiling table + router count pinned
+
+**Purpose.** Start a hierarchical roofline for the design. The obvious two-level
+cut (core↔L1, L1↔L2) misses the level the design is about — core ↔ *remote* L1
+over the TCDM mesh, where the MSHR acts and where the 8x8 loss lives — so the
+model has three bandwidth levels (local L1, remote L1/NoC, L2) plus compute.
+Everything for the effort lives in a new root folder `roofline/`.
+
+**Implementation.**
+- `roofline/peaks.py`: resolves a config flavour by letting GNU make evaluate
+  `config/config.mk` (so `?=`, the `channel_config_mode` `ifeq` blocks, the
+  8x8→terapool include chain and `$(shell)` arithmetic behave exactly as in a
+  build; `-o var=value` overrides go to make the same way), then derives every
+  ceiling per clock cycle with its RTL anchor. Writes `peaks/<flavour>.{md,json}`.
+- `roofline/README.md`: the model, the pinned facts with file:line anchors, what
+  must be measured rather than derived, and the 7-step plan with status.
+- Pinned by reading the RTL: TCDM routers are **per tile × per channel** (5
+  routes each; `mempool_group_floonoc_wrapper.sv:811/869/927`), so a mesh
+  boundary carries 16 tiles × 2 resp × 4 B = 128 B/cyc per direction; one flit
+  = one 32-bit word (`tcdm_payload_t.data`); the L2 path is a separate AXI
+  FlooNoC (one 512-bit master per group → chimney → `floo_nw_router` → perimeter
+  → `tc_sram` per channel, `NumL2Channels = l2_banks`); fp16 is packed 2-wide
+  per lane (`spatz_pkg.sv:402-418`); 16 banks × 1 KiB per tile.
+
+**Result.** Tables for `terapool_spatz4_fpu` and `_8x8`. Two statements fall
+out before any measurement: (1) 4x4 is balanced at the NoC level — the per-core
+receive cap (8 B/cyc, 2 resp channels) equals the uniform-random bisection
+share — while 8x8 halves the bisection share to 4 B/cyc/core (fp16 ridge 2 →
+4 FLOP/B): the roofline form of the scale-up loss, and exactly what placement
+and the MSHR merge factor m move. (2) L2 (2 KiB/cyc at 8x8, fp16 ridge 8
+FLOP/B) is a decode roof (AI_L2 = B), not a GEMM roof — every existing GEMM
+number has zero L2 bytes inside its timed window because the DMA prologue
+precedes it (`main.c:479`).
+
+**Status.** Step 1 done. Next: step 2, four microbenchmarks to validate each
+ceiling empirically (local-L1 burst, remote burst m=1, shared-address m=16,
+DMA stream), seeded from `vector-burst-test`, 4x4 first.
+
+## 2026-09-02 20:14 — 18 buggy queued arms retired; 21 re-dispatched
+
+**Purpose.** Retire the 18 queued `r8_` arms still carrying the wake-up defect and
+re-run them fixed, per user instruction.
+
+**Implementation / findings.**
+- `badist cancel` **cannot cancel a queued job**: `cmd_cancel` (`cli.py:~360`) skips
+  any job where `not st["node"]`, and a queued job has no node. It prints
+  `0 job(s) cancelled` and **exits 0** — a silent no-op that an `&&` success counter
+  reports as 18/18 success. Retired them via `ledger.note(..., STATE_CANCELLED)`.
+- **The badist scheduler is in-process.** `Scheduler` is built inside `cmd_submit`
+  (`cli.py:164`) and `_pending()` (`scheduler.py:62`) reads in-memory state, not the
+  ledger; there is no daemon. **No live `submit` => no dispatch, ever.** So the 18
+  were already dead, and the earlier `timeout 600` on my own submit permanently
+  stranded 3 of the 14 `rb_` arms. CLAUDE.md was right; my reading that the
+  `spec["license"]` block made the governor badist-side was wrong — that spec is
+  consumed by the same in-process scheduler.
+- Built 18 fixed fp32 KS in {2,4,8} ELFs (18/18 matched in the authoritative matrix,
+  per-shape `MATMUL_REPEAT`); 18/18 distinct md5, 0/18 contain a `wake_up_group`
+  store.
+- Re-dispatched **21** (18 new + the 3 stranded) under `nohup`, no timeout,
+  batch `teranoc-20260902-201411-0db8`.
+
+**Result.** r8 batch now 32 cancelled / 19 running (running arms untouched).
+Fix still holding on the live arms: 64/64 groups active, upper half included.
+
+**Status.** 21 queued at the 20-seat reserve floor; controller alive.
+
+### 2026-09-02 21:05 — Roofline: first figure from the sweeps already on disk
+
+**Purpose.** Answer "can we already draw it" — yes: roofs from `roofline/peaks.py`,
+measured points from the existing 4x4 and 8x8 GEMM sweeps, no new simulation.
+
+**Implementation.**
+- `roofline/scrape.py`: 224 runs (29-shape 4x4 `gemm_results_table.txt` +
+  `mx_phaseE1_*` logs; 195 `done` rows of `8x8_scaleup/results.tsv` +
+  `hardware/s8_*/transcript`). Per arm: FLOPs = 2·M·N·P, cycles from the sweep
+  table (the app's per-pass timer), bytes from `[LP] delta` tile-port counts
+  summed over the traced span — `mst_resp` = words delivered to cores (demand),
+  `slv_resp` = words that crossed the mesh — so m = demand/mesh is the measured
+  MSHR multiplier. Window rules learned the hard way: the timer starts before the
+  alignment barrier and tracing after it; the trace runs on into the verify tail
+  at 4x4 (130 k traced vs 67 k timed), so cut at the timed length; the last
+  partial profile period is never flushed (≤ 25 % bias on ~5 k-cycle arms,
+  flagged hollow); reject truncation by span coverage, not by `[FPU FINAL]` —
+  55 arms died in the epilogue spot-check with a complete kernel. One partial
+  re-run transcript (`s8_fp16_8192x64x256`) rejected. 217 points.
+- `roofline/plot.py`: two panels (4x4 | 8x8), log-log chip FLOP/cyc vs FLOP/B,
+  roofs merged when coincident (4x4 per-core receive = bisection), slope-aligned
+  labels, tails to mesh-side AI, dataviz palette. `plots/roofline.{png,svg}`.
+- 4x4 probe lines preserved under `roofline/data/mx_phaseE1/` (the logs are in
+  node-local `/tmp`); scraper defaults to that copy.
+
+**Result.** Every point sits right of every bandwidth knee on both meshes: the
+lowest 8x8 arm is 1.16× the uniform-traffic bisection ridge before merging and
+2–4× after; 4x4 has 3× margin. Yet 8x8 delivers a median 42–45 % of peak vs 84 %
+at 4x4 at the same demand AI (fp32 3.1 vs 3.4 FLOP/B). corr(eff, log AI) drops
+0.56 → 0.32–0.43 from 4x4 to 8x8, corr(eff, log m) ≈ 0 at both, corr(eff, log N)
+0.62–0.93. So the 8x8 loss is not bandwidth and a bandwidth roofline cannot show
+it: the missing roof is a concurrency (Little's-law) ceiling — 512 B in flight
+per core tolerates ≤ 200 cycles of latency at the measured intensity, against
+hold windows of 2047/8191. m is flat at median 2.3 (fp32) / 2.8 (fp16), max 4.8.
+
+**Status.** Steps 1, 4 and a first cut of 3/7 done. Next: the concurrency
+ceiling with per-arm latency (MSHR `avg_req_cycle` / NoC tracer), the TB flush
+of the last profile period, and the L1/L2 levels' bytes.
+
+### 2026-09-02 21:40 — Roofline: the design as OFF→ON arrows
+
+**Purpose.** Answer "how do we show merge/multicast/burst on the roofline".
+
+**Implementation.** `roofline/scrape.py` gained two families: `decode-merge-off`
+(`hardware/dec_*`, MSHR merge bypassed by the prefill-derived config) → `decode`
+(`hardware/fix_*`, merge on) — same image, same ELF shape, `[LP]` on both ends —
+and `nofeature-baseline` (`gemm_results_vs_nofeature.tsv`: no burst, no MSHR,
+ori tree; perf measured, bytes assumed = ours, flagged `ai_assumed`). Cycles now
+come from the app's `[UART] The execution took N cycles.` line where present; it
+agrees with the sweep tables to 0.000 on 194 arms. `plot.py` draws family markers
+and OFF→ON arrows. `README.md` has the numbers and the three-figure recipe.
+
+**Result.** Merge off→on at unchanged demand AI (≤ 5 %): m 1.0–1.4 → 3.5–4.1,
+efficiency 1.24–1.52× at 4x4 and **2.1–3.8× at 8x8** (fp16 32x128x16384:
+0.17 → 0.64). Baseline → ours at 4x4: median 0.67 → 0.84. Every OFF point is
+also right of every bandwidth knee, so the win is a concurrency/latency effect:
+bursts cut request flits and MSHR entries per byte 16×, multicast delivers m×
+bytes per mesh transaction — the numerator of a Little's-law ceiling, which is
+the roof to draw next. Bursts do not reduce bytes; multicast does.
+
+**Status.** Figure updated (`plots/roofline.png`, 256 points). Next: the
+4-arm ablation ladder on one image, per-arm latency for the concurrency roofs,
+and B ≤ 8 decode arms where the bandwidth roof itself binds.
+
+### 2026-09-02 22:30 — Roofline: analytic OI, merge factor and effective ridge (`gemm_oi.py`)
+
+**Purpose.** Closed-form OI/m/ridge from data size and kernel size, validated.
+
+**Implementation.** `roofline/gemm_oi.py`: OI_demand = 2kVL/(4k + wVL); the split
+rule s_B = M/(G·k) (prefill, M/G ≥ k) or M/k (decode), s_A = 16/s_B; ideal
+m = (k + VL_w)/(k/s_A + VL_w/s_B); OI_mesh = OI_demand·m; ridge_eff = ridge/m.
+`--check` compares with every measured arm in `data/points.tsv`. Per-kernel table
+(8/4/2/1xVL: 3.20/1.88/0.98/0.50 fp32, 6.40/3.76/1.97/0.99 fp16) added to README.
+
+**Result.** 225 arms: the split rule reproduces the sweep tables' Ash/Bsh exactly;
+measured/predicted OI_demand median 0.98, m median 0.96. m realised per family:
+s_A=16 1.00, s_A=8 0.98, s_A=4 0.94–1.02 at N ≥ 128, but s_A=2/s_B=8 only 0.63 and
+s_A=1/s_B=16 0.88 (8x8), and 0.5–0.9 for N ≤ 64 — the wide B-sharing cohorts
+realise the least of their ideal m, so measured m saturates ~3–3.2 against an ideal
+5.0. Also: at the optimal split any 256-accumulator tile gives OI_mesh = √(k·VL) =
+16 FLOP/B; the tile shape only splits it between demand OI and multicast. 1xVL
+cross-check: two ks1 arms within 8 %, five others carry 2–3.5× more bytes per pass
+than the formula (unexplained, provenance unrecorded).
+
+**Status.** Formula validated; README updated. Open: the ks1 byte excess, the
+A-share=16 OI excess (+10–15 %), TB flush of the last profile period.
+
+### 2026-09-02 23:20 — Roofline generator (`roofline/roofline.py`)
+
+**Purpose.** One generator for every roofline variant of the design: clean roofs by
+default, everything else an opt-in, composable layer.
+
+**Implementation.** `roofline/roofline.py` — layers: `--mesh`, `--roofs` (subset of
+compute,l1,recv,bisection,l2), `--prec`; analytic: `--kernel K[:PREC]` (OI guide of
+matmul_KxVL), `--shape MxNxP[:PREC[:K]]` with `--merge off|on|both` (demand-OI point →
+mesh-OI point at ideal m, roofline-predicted perf), `--merged-roof` (bisection × ideal m),
+`--latency L[:BYTES]` (Little's-law roof, default 512 B in flight per core); measured:
+`--measured FAMILY` (gemm, decode, decode-merge-off, nofeature-baseline, all) with
+`--only-prec/--only-shape/--min-n/--max-n`, `--tails`, `--arrows`, `--label-points`;
+`--per-core`, `--xlim`, `--title`, `--out`, `--list`. Accent roofs are tagged in the free
+band above the ceiling with a leader, base roofs labelled along the slope. Five examples
+under `plots/examples/` (clean, design_8x8, latency_fp32, measured_all, decode_8x8).
+`plot.py` is now the fixed preset `--measured all --arrows --tails`.
+
+**Result.** The latency example brackets the effective latency: at 200 cycles the
+Little's-law roof sits just above the 4x4 fp32 points and above the whole 8x8 cloud,
+at 2047 it is far below them. The decode example shows the analytic merge-on point at
+the roof with the measured OFF→ON diamonds ending at the same mesh OI (m 3.8–4.1 vs
+ideal 4.0) at 64–76 % of peak.
+
+**Status.** Generator done. Shell gotcha hit again: zsh does not word-split `$cmd`;
+call the script with explicit arguments in loops.
+
+### 2026-09-02 23:50 — Roofline: add a point from your own RTL sim
+
+**Implementation.** `scrape.py --add LOG --mesh --prec --shape [--family NAME] [--cycles N]`
+measures one QuestaSim transcript / VCS log exactly like the sweep arms (window = timed
+pass, bytes from `[LP] delta`, cycles from the app's `execution took` line or `--cycles`)
+and upserts the row into `data/points.tsv` (keyed on family/mesh/prec/shape); user rows
+survive a full re-scrape; `--drop FAMILY` removes them. `roofline.py --measured NAME`
+draws any family (custom ones as triangles); `--point LABEL:OI:FLOP_PER_CYC[:PREC[:MESH]]`
+draws a hand-computed point (star). Tested on `s8_fp16_2048x512x512`: 0.828 eff, OI
+6.42 → 27.4, m 4.26, identical to the sweep row.
+
+**Status.** Done. A log needs `[FPU] bench` (trace CSR on around the kernel) and
+`[LP] delta` lines (link profiling compiled in, the default) — see README.
+
+### 2026-09-03 00:30 — Roofline: paper figure plan (`roofline/PAPER_FIGURES.md`)
+
+**Purpose.** Six roofline figures mapped onto the paper storyline, each with its claim,
+data status, the sims still needed and the generator command. Pre-rendered what can be
+drawn today into `roofline/plots/paper/`.
+
+**Implementation.** Generator gained `--pair FROM:TO` (arrows between any two measured
+families, for the ablation ladder) and `--shape-labels full|compact|none`.
+
+**Result.** The analytic decode ladder (Qwen3.8 FFN 5120x17408, 8x8 fp16, k=1) is the
+sharpest claim so far: OI_demand is fixed at 0.99 by the kernel, m = B up to 16, so the
+effective bisection ridge falls as 4/B — NoC-bound 4x below peak at B=1 with or
+without merging, exactly at the ridge at B=4, compute-bound from B=8; without multicast
+(m=1) decode never leaves the NoC roof. The L2 level says B ≥ 8 independently (ridge
+16384/2048). No MSHR profile logs exist for the s8 arms, so the latency roofs use
+assumed latencies until a run with `group_merge_profiling` output (or the NoC tracer).
+
+**Status.** Plan written; F1/F2/F4(assumed L)/F5(analytic + B=32 measured)/F6(analytic)
+rendered; F3 (ablation ladder) and the B = 1..16 decode arms need sims.
+
+### 2026-09-03 01:30 — Roofline: JSSC'25 paper style + plan assessment
+
+**Purpose.** Make our rooflines look like Verhelst/Benini/Verma, "How to Keep Pushing ML
+Accelerator Performance? Know Your Rooflines!" (JSSC 60(6), 2025), and check whether the
+paper improves the figure plan.
+
+**Implementation.** `roofline.py --style paper`: decade log axes, "Attainable Performance
+[OPs/cycle]" vs "Arithmetic Intensity [OPs/byte]", one thick solid *aggregated* roofline
+= min over levels on the reference (NoC-demand) axis with the mesh level scaled by m
+(their AI_L2 = AI_L1 × reuse), thin dashed per-level "AI·B_L" lines and dashed "N_op"
+peaks, the memory-bound ↔ compute-bound band at the knee, and one star per memory level
+for a workload (AI_NoC hollow, AI_mesh and AI_L2 = B filled, coincident levels merged)
+with dashed ticks. `--pair FROM:TO[:label]` arrows are now colour-coded with an
+"impact of: …" legend (their Fig. 5). Rendered F1/F2/F5 in the style.
+
+**Assessment (in PAPER_FIGURES.md).** Adopted: per-level stars + aggregated roofline
+(replaces our marker+tail), utilisation decomposition U = SU·TU·CU with U_MAC arrows,
+technique-coloured impact arrows, design alternatives vs workload-AI lines (their Fig.
+10) for the channel/mesh what-ifs, "effective AI" vocabulary. Not applicable yet: the
+energy roofline (needs post-synthesis power) — listed as future work.
+
+### 2026-09-03 02:10 — Roofline: decode-vs-systolic framing (F7)
+
+**Purpose.** Test the proposed story "vector manycore wins at decode because systolic
+arrays have low efficiency at small batch" against the roofline.
+
+**Implementation.** `roofline.py --alt-roof LABEL:PEAK:BW` overlays another
+architecture's roofline (their Fig. 10), `--ai-line LABEL:AI` draws workload-AI guides,
+`--ylim`/`--xlabel` overrides. F7: TeraNoC 8x8 fp16 (16384 OPs/cyc) vs 128² (32768) and
+256² (131072) fp16 arrays at the same 2048 B/cyc L2 bandwidth, AI_L2 = B.
+
+**Result.** In the memory-bound region absolute decode throughput is identical for all
+three (2048·B OPs/cyc up to each peak); the array's lower utilisation at small B is a
+consequence of being memory-bound, not a throughput deficit. So the defensible decode
+claims are: (1) merge+multicast is what lets the manycore *reach* the L2 roof at all — the
+NoC roof binds 4x below it without m (F5); (2) provisioned-silicon efficiency and energy
+per token (no idle array, m-fold fewer on-chip bytes); (3) the non-GEMM layer parts run
+on all 1024 cores instead of serialising on a side vector unit (Amdahl); (4) resident
+state (GDN 3 MiB/seq/layer, KV slices) at L1 bandwidth. Not defensible: higher decode
+GEMM throughput than an array at the same bandwidth.
+
+**Status.** F7 added to PAPER_FIGURES.md with the reframing.
+
+### 2026-09-03 03:00 — Related-work research + LaTeX paper skeleton (`paper/`)
+
+**Purpose.** Verified related-work survey and a compilable paper skeleton for the
+MSHR-multicast + burst + roofline/LLM story.
+
+**Implementation.** `paper/related_work.md`: 7 sections (our own prior publications and
+what they do NOT claim — TeraNoC arXiv:2508.02446 has no MSHR/multicast/bursts, TeraPool
+arXiv:2603.01629; shared-L1/scratchpad manycores; multicast & merging in NoCs; vector
+units; LLM inference & decode accelerators; roofline models; positioning sentence and
+gaps). Every entry checked against arXiv/DOI/publisher on 2026-09-03; two flagged ⚠
+(Switch MSHR venue; Dynamically Linked MSHRs authors) and kept OUT of the bib.
+`paper/refs.bib`: 46 verified entries. `paper/main.tex` + `sections/` (abstract, intro
+with contributions, background, architecture, roofline model with the closed-form OI/m
+equations, methodology, evaluation with F1/F2/F5 figures wired via `figures ->
+../roofline/plots/paper`, related work, conclusion), `\todo/\data/\fig` markers,
+IEEEtran conference class (TeX Live 2011 on this host), `Makefile` (latexmk). Builds
+to 4 pages, no undefined citations.
+
+**Positioning (the sentence).** Prior on-chip multicast is sender-declared (VCTM, RPM,
+BOOM, Torrent, Hopper TMA multicast, accelerator NoCs); ours is receiver-coalesced —
+independent vector loads, the group MSHR discovers the overlap, one request, multicast
+response, transparent to software. Closest industrial analogue: Hopper cluster
+multicast (explicit instruction, programmer-named cluster).
+
+**Status.** Skeleton ready for writing; figure hooks point at the generator output.
+
+### 2026-09-03 03:40 — Roofline docs: hold window is a CAP, not the latency (correction)
+
+**Purpose.** User review of PAPER_FIGURES.md F4: (1) "every point compute-bound by
+bandwidth" needed qualification; (2) the 2047/8191 hold window is an upper bound on the
+hold, not the wait a request pays — with aligned sharers the hold is short.
+
+**Result.** Both right. (1) Reworded: the arms are ≥ 2.3× right of the receive ridge
+(demand bytes) and ≥ 1.6× (median 3.6–4.1×) right of the ideal-bisection ridge (mesh
+bytes); the roofs cannot produce a 2× loss, but the lowest 8x8 arms have only 1.6×
+margin on an upper-bound roof. (2) `mempool_group_mshr.sv:3429`: a held entry issues
+when `sub_reqs_num >= hold_subs` (4 shipping) OR `hold_cnt == 0`; the window
+(`hold_window_* = 8191`, prescaled ticks) only caps the wait. Implied latency from the
+measured arms (512 B × OI / perf-per-core, upper bound assuming a full ROB): 259 cyc
+median at 4x4, 414–431 at 8x8 (p90 1100–1270) — far below the window, and a 1.6× rise
+consistent with the 2× efficiency drop. Fixed in PAPER_FIGURES.md (F4) and README
+(findings #2, design table).
+
+**Status.** F4's real content is now "the price of merging is skew, not the window";
+needs the MSHR profile's actual hold time per arm to draw it.
+
+### 2026-09-03 05:00 — Paper draft filled (sections written from RTL-verified facts) + spec corrections
+
+**Purpose.** Fill every paper TODO that does not need new measurements; check the real RTL
+as the source for §III; correct the architecture docs where they lag the design.
+
+**Implementation.** `paper/sections/*`: abstract, introduction (+contributions), background
+(ceilings table, the 32/k law, prefill/decode regimes, Qwen3-Next), architecture (fabric;
+group MSHR: banks/ways, admission and per-class bank hash, no-late-join, hold with early
+release at `hold_subs`, tag-indexed response path and multicast fan-out, ParityDrain,
+response cache with self-invalidate, bank-full back-pressure, head-of-line hazard status,
+runtime CSRs; burst VLSU: 16-word bursts fp32/fp16, ROB 128+16, dual-load), roofline model
+(aggregated roofline, OI/m/s_A/s_B derivation, per-kernel table, sqrt(kVL) bound, m=B,
+Little's-law roof with the hold-as-skew reading, U = SU·TU·CU, what the model says about
+arrays), methodology, evaluation (measured numbers in, `\data{}` for the missing arms),
+related work (prose from related_work.md), conclusion. 9 pages, 0 undefined citations,
+0 overfull boxes. All §III facts read from `mempool_group_mshr.sv`, `spatz_vlsu.sv`,
+`spatz.sv`, `mempool_tile.sv`, `mempool_group.sv`, the group wrapper and the config.
+
+**Spec corrections (dated inline, 2026-09-03).** `docs/teranoc_architecture.md`: five-state
+FSM (RESP_HOLD was missing), single-word merging and `merge_reqs=16` ship ON (doc said
+off / 8), bank hash 3 field-select (doc described the legacy fold), hold + ParityDrain +
+response cache + bank-full back-pressure + runtime CSRs added to §5.4/§5.6, response-sink
+status (depth-32 FIFO reverted, `StallOnResp` protects the coalesced path, bypass path
+open), §6.3 ROB depth is the `SPATZ_VLSU_ROB_DEPTH` define (128) + ROBN 16 + dual-load 2
++ fp16 bursts (doc said 16/32 hardcoded). `hardware/ARCHITECTURE.md` §3.3 same fix.
+`docs/mshr_runtime_csr_design.md` status "not yet implemented" → IMPLEMENTED.
+
+**Status.** Draft ready for the user's review; remaining `\data{}`: ablation ladder (F3),
+measured latency/hold (F4), decode B<32 (F5), DMA-timed L2 arms (F6), end-to-end layer
+(F8), PPA, fleet size and per-arm runtime.
+
+### 2026-09-03 06:10 — Paper: editable architecture figure (TikZ)
+
+**Implementation.** `paper/tikz/arch.tex` — a three-panel TikZ figure: (a) the cluster (G
+groups on a mesh, L2 channels on the perimeter), (b) one group (16 tiles with Snitch+Spatz
+and 16 banks, the single-cycle logarithmic crossbar, the group MSHR on the mesh-bound lanes
+only, per-tile×channel req/resp routers, the AXI chimney + wide router to L2), (c) the group
+MSHR request path (admit → bank hash → hit/join or miss/allocate+hold → one request) and
+response path (tag-indexed entry → response buffer → multicast to all sub-requests at 2
+beats/cycle → Cached), with the entry-table icon and the entry fields. pgf 2.10-compatible
+(TeX Live 2011); `tikz/arch_standalone.tex` builds it alone (preview package); the paper
+includes it as `figure*` via `\resizebox{\textwidth}{!}{\input{tikz/arch.tex}}` (page 4).
+Content matches §III as verified in the RTL (5 states, 16 sub-requests, 16×4 table,
+hold_subs release, ParityDrain port rule, bank-full back-pressure).
+
+**Status.** Figure in the draft; everything is plain TikZ text — coordinates in cm, styles
+at the top of the file, one `\node` per box — so it can be edited without tooling.
+
+### 2026-09-03 07:30 — Paper: decode-first story (abstract + intro rewritten), claims table, model name fix
+
+**Purpose.** Restructure the story to lead with the workload (user review: the cluster-scaling
+lead made readers ask "why bother"), and produce the claim→evidence table from the codex plan.
+
+**Implementation.** `sections/abstract.tex` and `01_introduction.tex` rewritten in five
+moves: (1) LLM serving is two workloads, decode's intensity at the weight memory is B and
+decode sets latency/cost; (2) array-centric accelerators are shaped for prefill — at small
+batch they idle the array, serialise the non-GEMM half, need batching; the industry answer is
+heterogeneity (PIM+NPU, phase splitting); (3) what a decode machine should be — programmable,
+bandwidth-first, resident state, and on-chip reuse of the batch's shared weights; (4) a
+shared-L1 vector manycore fits the first three and fails the fourth — the 32/k bisection law
+and "at B=1 the raw network caps the cluster 4× below its L2 roof"; an array gets reuse for
+free, a fabric must earn it; (5) this paper earns it. Built into the lead: at equal bandwidth
+an array's low utilisation is the memory-bound regime, not a throughput deficit (the F7
+result), so no "faster than an array" claim anywhere. Working title switched to "The Array's
+Reuse Without the Array: …" (alternatives kept in 00_title_options.tex).
+`paper/claims.md`: 17 claims × (section/figure, experiment, metric, expected, status, what a
+miss means). Model name corrected to Qwen3.8-27B (was "Qwen3-Next", my web-search import);
+`qwen2026qwen38` model-card citation added.
+
+**Codex plan assessment (given to the user).** Keep: decode-first, pure vector, no density
+claim, claim table, ~67 configs with gates, hop-flits/P95 congestion, double-buffer vs
+persistent accumulation separated, "no merge benefit at B=1". Change: "FPU utilisation" →
+efficiency = ideal/actual; no GVSoC exists (RTL only); its bank count is the Snitch config's.
+Audit before building adaptive bursts: the wire already carries burst_len 1–16 and the MSHR
+merges partial bursts; only the VLSU tail issues single words; and at B=1 the down projection
+is L2-bound regardless — do the all-group/active-group/split-K mapping study first.
+
+**Status.** Draft 10 pages, 0 undefined, 0 overfull. Next: dispatch the 24-arm decode/NoC
+wave (C6–C8, C10), one profiling run per mesh (C9), then the layer-level kernels (C13–C14).
+
+### 2026-09-03 09:00 — Decode ladder B = 1..128 on the roofline; model corrected (column budget, L2 level, best k)
+
+**Purpose.** User asked where the decode kernel sits on the roofline for B = 1..128.
+
+**Implementation.** `gemm_oi.analyse` now applies the column budget (a core owns P/s_A
+columns in prefill, P/(G·s_A) in decode; the vector is cut to VL_eff, which lowers OI and
+shortens the burst), adds the L2 level (AI_L2 = 2M/w, weights streamed, decode only), a
+merge=False mode (m = 1) and the roofline-predicted attainable performance with the binding
+level; `best_kernel()` picks k ∈ {1,2,4,8} per shape. Validation unchanged/better
+(OI median 0.98, p10 0.83 → 0.91; m 0.95). `roofline/decode_ladder.py` prints the table and
+draws one star per level per B (`plots/paper/decode_ladder_{8x8,4x4}_fp16.png`).
+
+**Result (8x8 fp16, Qwen3.8 FFN, best k).** B = 1/2/4: L2-bound at 12/25/50 %; B ≥ 8:
+compute-bound. With merging AI_mesh ≈ B = AI_L2 (1.0, 2.0, 3.9, 7.6, 14, 26): the mesh
+carries each weight once per group as L2 delivers it once per cluster. Without merging at
+the same mapping the mesh binds at 24/45/81/89/94 % (B = 2..32) → bandwidth predicts
+≤ 1.25× from merging; the measured 2.1–3.8× at B = 32 is therefore a concurrency effect.
+The 1-row mapping (m = B) is receive-port-bound at ~50 % for B ≥ 4 because multicast
+does not help the per-core port; best mapping = 2–4 rows per core, m ≈ B/4. Column
+budget at 1024 cores: 17–272 columns per core → 17–128-element vectors and 9–17-word
+bursts at B ≤ 8 (the codex plan's short-segment concern, quantified). 4x4: L2-bound
+25/50 % at B = 1/2, compute from B = 4.
+
+**Corrections.** The claim "without multicast decode never leaves the NoC roof at any
+batch" held only for the 1-row mapping; replaced in the abstract, intro, §IV.B, §V.E,
+conclusion, claims.md (C6–C8) and PAPER_FIGURES (F5) with the statements above; a ladder
+table added to §V.E.
+
+**Status.** Draft rebuilt. Open experiment implied by C8: two mappings (k=1 vs k=4) at
+B = 8 on 8x8 — decides both the mapping and the adaptive-burst question.
+
+---
+
+## 2026-09-03 — Review: adopting msc26f31's `spatz_vpu` VLSU burst / ROB redesign
+
+**Purpose.** User asked whether Yinrong Li's Spatz fork
+(`/usr/scratch/badile48/msc26f31/spatz_vpu-teranoc` @ `a209a8f`, branch `teranoc`) can be adopted
+into `working_dir/spatz`, and what its backend PPA impact is. Code review only — no RTL changed.
+
+**Implementation.** Established provenance: their branch is a *replay* of our history with paths
+moved `hw/ip/spatz/src/` → `hw/src/`; fork point `9c6b498` is blob-identical to our `58c56d0` for
+`spatz_vlsu.sv`, `reorder_buffer.sv`, `spatz_vfu.sv`. 27 commits theirs, 6 ours. Read every commit,
+traced the burst datapath in both trees, cross-checked their claims against our RTL, extracted their
+build defines from `TeraNoC-spatz-burst/hardware/build_dmy/compile.tcl`, and counted flops/muxes for
+the PPA estimate. Wrote `docs/spatz_vpu_burst_adoption_review.md`; published
+https://claude.ai/code/artifact/41662bde-17e9-4b6e-91b6-0acf306a74ac
+
+**Result — two findings that stand on their own.**
+
+1. **Our port-0 burst path silently corrupts vector registers.** Spatz chains at ONE-CYCLE
+   granularity: `spatz_controller.sv:257` `wrote_result_q[id]` = "did instruction id write the VRF
+   last cycle", and `sb_enable_o` IS `vrf_re` (`spatz.sv:285`). `prevent_chaining` covers only
+   `{VSLIDEUP, VLSE, VLXE, VSSE, VSXE}` — a unit-stride `VLE`, i.e. the burst path, chains. That
+   contract requires each VLSU write to be a WHOLE VRF row; the funnel writes ONE LANE per cycle
+   (`spatz_vlsu.sv:1642-1644`), so `wrote_result_q` stays high continuously while the producer fills
+   a quarter row and the consumer reads a full row per cycle — 4:1 overrun, 3 stale lanes in 4.
+   Their `spatz_wide_burst_adapter.sv` header states they MEASURED this as "wrong results on every
+   8th output row". This is a mechanism for `project_matmul_build1_epilogue_hang`'s unexplained
+   "genuine DEVICE bug" (host replay clean, worst diff 4.3e-4), which we parked by setting
+   `MATMUL_VERIFY=0`. **Cycle counts unaffected; results with `commit_use_port0_burst` active are
+   not.**
+2. **`dae5a9e` is 6 lines that fix our known `pwrite=0` hang.** Our `spatz_fpu_sequencer.sv:729-733`
+   builds `fp_move_result_i` with `default: '0`, so `write=0`; MemPool's Snitch retires an
+   accelerator response only on `acc_pwrite=1`, so `fmv.x.w`'s GPR result is never written back.
+   Verbatim our `project_matmul_build1_epilogue_hang`. Adopting it lets us delete the C
+   `f32_to_bits` workaround and re-enable device-side verification.
+
+**Their redesign.** Beat k → lane k mod NrMemPorts (the ordinary word→port rule), so one element
+from each of the 4 ROBs fills a VRF row in ONE write and the burst commits through the ordinary
+path; the dedicated burst commit branch, TwinROB0's second ROB0 port and `burst_odd_expected_q` all
+disappear. Held together by dummy ROB entries (`id_dummy_i` / `dummy_o`) that keep all four
+allocators at the same next-free id, so a single base id still describes the whole burst.
+
+**PPA (structural; no netlist in this repo).** Uniform depth 32 keeps our 512 B burst ceiling:
+6150 → 4433 flops/core (−28%, −1717) and 9568 → 3968 2:1 mux cells/core (−5600, ≈−14 kGE) because
+depth enters the ROB read head linearly and TwinROB0's second 128:1 head goes away. The generation
+tag (`GenBits`) deletes entirely. `MetaIdWidth = idx_width(SPATZ_VLSU_ROB_DEPTH)` narrows **7 → 5
+bits**, and `meta_id_t` reaches every TCDM struct and both FlooNoC flit metas — reversing the
+ROB64→ROB128 link widening. MSHR `sub_reqs[].meta_id_base` alone: −2048 b/group = −131 kb at 8x8.
+**Counterweight:** 4 words/cycle needs `noc_resp_channel_num` 2 → 4 (~doubling response-side NoC
+area) for a kernel our own `project_sp_fmatmul_compute_bound` puts on an FPU floor — so adopt at
+`group_mshr_drain_beats=2`, where beat b → lane b&3 still yields 2 words/cycle, identical to today.
+
+**Required on OUR side** (they have none — their bursts come from a wide 512-bit TCDM plane, ours
+from the 32-bit mesh + group MSHR): retag `core_id += offset[1:0]` and `meta_id = base + (offset>>2)`
+at `mempool_group_mshr.sv:4068`, `:4228`, `:3576`, and — easy to miss — add a `core_id` retag to
+`tcdm_burst_expander.sv:114/:241`, which today only increments `meta_id` and is the sole convergence
+point for MSHR-bypassing local bursts.
+
+**Defects found in their tree (dead in their config, live defaults in ours).**
+- `SPATZ_VLSU_BLOCK_ALLOC=1` **hangs**: `c868298` deleted the only setter of `burst_reserved_d`, so
+  `rob_req_block[0]` stays asserted, the ROB grants a fresh 16-id block every cycle, the VLSU never
+  captures the base, and ROB0 wedges. Our shipped default is 1.
+- Inferred latch on `pad_init[1..3]` (`a209a8f`) — assigned only in the `else` arm of the per-port
+  `always_comb`, the exact SYNTH_12608 shape the neighbouring comment guards against.
+- `dual_load=2` (our default) never exercised against the new `rob_id`-equality invariant.
+- `switch_to_tail_phase` still live although a tail is now a short burst — two paths race.
+- Do NOT take their `Bender.yml` (drops `spatz_mempool_cc` from the compile — we instantiate it) or
+  `2212318` (rebinds `i_fp_lsu` to a unified `snitch_lsu` only their fork has; ours still has the
+  upstream `rst_i`/`dreq_t`/`lsu_qwrite_i` interface — verified).
+
+**Superseded on our side:** `e3030c3` (`NO_VL_CEILING`) and `baf447d` (`ROBN_DEPTH` + widened
+request id) — drop both; `e845ac3` (gen stamp) becomes dead at `GenBits=0`.
+
+**Status.** Review complete, recommendation = adopt in three stages (correctness set → prove the
+corruption A/B with `MATMUL_VERIFY=1` and `spatz_vlsu_burst_ew16` on/off → burst redesign at
+`drain_beats=2`, `rob_depth=32`, `robn_depth` unset). No code changed yet. `05c6175` (word-parallel
+tree reduction, +~420 flops/core) deferred to its own track under the Qwen3.8 decode kernels.
