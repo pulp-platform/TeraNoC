@@ -15734,3 +15734,109 @@ request id) — drop both; `e845ac3` (gen stamp) becomes dead at `GenBits=0`.
 corruption A/B with `MATMUL_VERIFY=1` and `spatz_vlsu_burst_ew16` on/off → burst redesign at
 `drain_beats=2`, `rob_depth=32`, `robn_depth` unset). No code changed yet. `05c6175` (word-parallel
 tree reduction, +~420 flops/core) deferred to its own track under the Qwen3.8 decode kernels.
+
+### 2026-09-03 10:00 — Decode "elastic subset" claim: quantified from the ceilings (C18)
+
+**Purpose.** User proposed the decode framing: both vector and array designs are
+bandwidth-bound at small batch; TeraNoC-Spatz reaches the roof with a subset of groups
+while the rest run attention / recurrent state / reductions on the same fabric.
+
+**Result (fp16, best mapping per B).** 8x8: the unique weight stream is 2048 B/cyc =
+50 % of every group's L2 link; consuming it through 8 B/cyc receive ports needs 287 cores
+(28 %) at B=1 (at 45 % of their peak), 543 (53 %) at B=2, 573 (56 %) at B=4; free groups
+46 / 30 / 28 of 64; none from B=8 (compute-bound). 4x4: 132–136 cores (52 %) consume it
+at B=1–2, 7 of 16 groups free — but the L2 roof takes **every group's link at 100 %**, so
+nothing else may use L2 concurrently at 4x4. Provisos for the claim: (1) the free groups
+can run only L1-resident work (DeltaNet state, norms, gating, reductions); KV-cache
+attention and weight prefetch consume the same L2 links; (2) overlap needs independent
+work (a second sequence or the next layer's resident operators), since one sequence's
+operators are dependent; (3) "elastic" is a scheduling choice, not a partition — the
+same cores switch roles. Added as C18 in claims.md; proposed F9 (group budget vs B).
+
+---
+
+## 2026-09-03 (cont.) — Implement the `spatz_vpu` adoption
+
+**Purpose.** User: "do the implementation as your plan". Execute the three-stage plan from
+`docs/spatz_vpu_burst_adoption_review.md`.
+
+**Implementation.** Fetched Yinrong's objects into `working_dir/spatz` as remote `yinrong` (needed
+`safe.directory` on `/usr/scratch/badile48/msc26f31/spatz_vpu/.git`) so `git am -3` has the blobs
+for a real 3-way merge; patches exported through a path rewrite `hw/src/` -> `hw/ip/spatz/src/`
+(`scratchpad/mkpatch.sh`). Authorship preserved.
+
+**Stage 1 — the correctness set that never touches the burst datapath. 13 commits, all applied.**
+`e32ace8` (FLB/FSB vs VLE8_V mis-route), `dae5a9e` (fp16 scalar-FP-extract: the `fmv.x.w`
+`pwrite=0` hang + `VMV_X_S` vsew + the `EW_64` scalar-mask predicate), `22637ee`, `f38eac2`,
+`61a3fef`, `9fd733b`, `5ec9732` (store counter -> 10 b, counted at the spill input),
+`0645440`, `54f6c9e` + `84b5060` (writeback gated on `commit_finished_q`, `|mem_pending`
+qualifier kept), `5bbcd5a`, `315f234`, `549f242`. Conflicts: only `0645440` (kept our
+`IdWidthExt` expression, took their `int unsigned`).
+`549f242` needed a producer, so **`snitch_lsu` gained `lsu_pwrite_o`** (`id_table_pop &&
+resp_metadata.write`) — additive, `lsu_pvalid_o`/`data_pready_o` untouched, integer Snitch
+bit-identical and ties it off. `deps/` change, main-repo commit `7e340653`.
+
+**Stage 3 — the burst redesign. 5 commits + 3 repairs.**
+`fe49caa`, `23f785e`, `c868298`, `3e35ea9`, `a209a8f`. Conflicts resolved as the review predicted:
+`e3030c3` (`NO_VL_CEILING`) and `baf447d` (`ROBN_DEPTH` + widened request id) taken as
+**superseded**; the comment-trimming half of `c868298` rejected; `reorder_buffer` resolved as a
+**union** of our generation-tag/bitmap lines and their dummy lines.
+
+Repairs (`2dca0d1`):
+- **`SPATZ_VLSU_BLOCK_ALLOC=1` hang.** `c868298` deleted the only setter of `burst_reserved_d`.
+  Restored, but per LANE: `BlockWords` is now `MaxBurstWords/NrMemPorts`, EVERY reorder buffer
+  carries the block logic, `burst_block_fire` is the all-ports reduction of request AND room, and
+  the grant is taken only for a FULL-length burst (the ROB grants exactly `BlockWords`; a tail
+  needs fewer and the surplus is never pushed, so the lane would hang — and every lane
+  over-allocates equally, so the alignment SVA stays silent). Elaboration check that
+  `MaxBurstWords % NrMemPorts == 0`. A5/A4 and the walk-vs-block SVAs generalised to `|`
+  reductions; BURSTWHY still printed the pre-distribution vl ceiling.
+- **Inferred latch on `pad_init[1..3]`** (`a209a8f` assigned it only in the else arm).
+- Non-burst capacity guard restored (`a8b5528`), sized off the uniform depth instead of the
+  removed `ROBN_DEPTH`; const-folds away at ROB32 (32*4*4 = 512 B == MAXVL).
+
+**⚠️ THE REVIEW'S §5 WAS WRONG, and this is the main finding of the implementation pass.**
+The retag does NOT belong in the group MSHR: **an intra-group burst never passes it.**
+`mempool_group.sv` taps `group_mshr_req[t][r]` only for `r >= 1`; lane 0 — every same-group
+target — rides the group LIC straight to the destination tile's slave port and back. At 4x4 that
+is 1/16 of all lines. Worse, an **own-tile** burst returns through the LIC by *structural
+initiator index*, so no `core_id` retag can re-route it at all. I built the MSHR version first
+(parked at `scratchpad/mshr_lanelaw_attempt.sv`), found this, and reverted it.
+Corrected design, now written up in §5: **one retag table at the tile's master-response
+boundary** (`gen_tcdm_registers_resp`, ahead of `postreg_tcdm_master_resp_ini_sel`, which *is*
+`rdata.core_id`) — the one point where MSHR-merged, MSHR-bypassed and intra-group responses have
+all converged; plus **divert a burst off the own-tile local path** onto the group LIC (its remote
+payload is already fully formed, only `valid` differs); plus **delete** the MSHR's ParityDrain
+`core_id` retag and the whole `gen_bypass_retag` table, which then double-count — a net
+simplification and flop saving. `tcdm_burst_expander` must NOT change: `meta_id = base + beat` is
+the wire encoding the MSHR decodes (`resp_beat_offset = arriving meta_id - sub_reqs[0].meta_id_base`).
+
+**Safe landing (`cd07439a`).** `spatz_vlsu_rob_depth` 128 -> **32**, `spatz_vlsu_robn_depth`
+**define deleted** (passing it is now silently wrong), and `spatz_vlsu_burst ?= 0` in
+**`config/config.mk`** so every flavour inherits it. `mempool_tile.sv` `$error`s on the pair.
+At 0 every vector load takes the 4-port word-interleaved path, which is row-atomic and therefore
+correct — the funnel corruption is gone either way; the cost is the MSHR's burst class until the
+tile retag lands.
+
+**Result.**
+- `make compile config=terapool_spatz4_fpu` clean at every stage; all five touched modules
+  confirmed actually compiled (`grep "Compiling module"`, per the false-Errors:0 trap).
+- **Tripwire proven, not assumed:** `vopt` with `spatz_vlsu_burst=1` exits **2** with the
+  `[mempool_tile]` message; `hardware/guardtest.log`.
+- Shipped defines verified from `build_adopt/compile.tcl`: `SPATZ_VLSU_BURST=0`,
+  `SPATZ_VLSU_ROB_DEPTH=32`, no `ROBN_DEPTH`.
+- 4x4 elaboration: `hardware/generated/` was 8x8, so it was backed up, regenerated (two floogen
+  passes, `NumMeshX=4` and `GroupX1Y0=4` both asserted), elaborated, and restored from a trap.
+  All three running sims verified past time 0 first.
+- **Live corroboration of `dae5a9e`:** `hardware/run_fmvbench/` has been wedged since 2026-08-21
+  at 16,772,000 cycles with `acc=1000` on group 0, last retired instruction
+  `0x800001d8 fcvt.h.s` — one of the two ops that commit names as deadlocking on the
+  `vsew == EW_32` scalar mask.
+
+**Status.** Stage 1 and the Spatz half of Stage 3 are DONE and compiling; the burst path is gated
+off behind a proven tripwire, so the tree is coherent and cannot be built into the broken pair.
+NOT done: the tile-side lane retag (§5 as corrected), the A/B that demonstrates the funnel
+corruption on our tree (needs `MATMUL_VERIFY=1` and a software rebuild — deferred because three
+sims are live and `software/bin` is global), re-validating `dual_load=2` against the new
+`rob_id`-equality SVA, and `655dc50` (dead free-id-bitmap branch, hygiene only — our
+`spatz_rob_cnt_idvalid=1` already means it is not instantiated, so the PPA claim holds without it).

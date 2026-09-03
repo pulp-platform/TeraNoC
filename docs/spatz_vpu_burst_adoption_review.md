@@ -435,6 +435,13 @@ The same commit carries two more of the same family:
   *width source* (`result_tag` vs live `spatz_req`); this fixes the *predicate*. `5bbcd5a`'s only
   content is a comment recording that neither subsumes the other, which is worth taking as-is.
 
+**Corroborated on our own tree, 2026-09-03.** `hardware/run_fmvbench/` holds a QuestaSim run
+that has been wedged since 2026-08-21 at **16,772,000 cycles** with `acc=1000` on group 0 — every
+one of core 0's stall cycles attributed to `stall_acc`. Its last retired instruction is
+`0x800001d8 fcvt.h.s ft1, ft1`, and `dae5a9e` names `fcvt.h.s` explicitly as one of the two ops
+the `vsew == EW_32` scalar mask deadlocks. So the third hunk of that commit is not a
+theoretical fix: it unwedges a run sitting in our build tree.
+
 `f38eac2` extends `5b3136f` to the three remaining `spatz_req`-instead-of-`result_tag` reads
 (`pending_results` width, `scalar_result`'s `is_scalar` gate — which can report `wb=1` with data 0
 for `vmv.x.s`/`vfmv.f.s` — and `ipu_result_pnt_d`'s reduction reset). Same root cause as our
