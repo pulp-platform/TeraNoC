@@ -253,74 +253,58 @@ against measurement, which is the open KB task *"Generalize ParityDrain to N res
 
 ---
 
-## 5. Changes required on **our** side — CORRECTED 2026-09-03
+## 5. The memory side — IMPLEMENTED 2026-09-03 (design corrected twice)
 
-Their integration consumes the contract in `spatz_wide_burst_adapter.sv`. Ours must **produce**
-it: **beat `b` → core data port `base_core + (b & 3)`, `meta_id = base_meta + (b >> 2)`**,
-replacing today's `+ (b & 1)` / `+ b`.
+Their integration consumes the contract in `spatz_wide_burst_adapter.sv`. Ours has to **produce**
+it: **beat `b` → core data port `base_core + (b % NrMemPorts)` carrying
+`meta_id = base_meta + (b / NrMemPorts)`.**
 
-**The first version of this section put those edits in the group MSHR. That is wrong, and the
-reason is worth writing down: an intra-group burst never passes the MSHR.** `mempool_group.sv`
-taps `group_mshr_req[t][r]` only for `r >= 1`; lane 0 — every same-group target — rides the group
-LIC straight to the destination tile's slave port and back, so a retag inside the MSHR is
-invisible to it. At 4×4 that is 1/16 of all lines and at 8×8 1/64, i.e. a steady stream of
-silently misplaced beats, not a corner case. Two further paths have the same property: an
-own-tile burst goes through `i_local_burst_expander` to the local banks, and its response
-returns through the LIC **by structural initiator index**, so no core_id retag can re-route it
-at all.
+This section was wrong twice before it was right, and both corrections are worth keeping because
+each was found by building the previous one.
 
-### The single point where every return path has converged
+**Wrong #1 — "put it in the group MSHR".** An intra-group burst never passes it.
+`mempool_group.sv` taps `group_mshr_req[t][r]` only for `r >= 1`; master lane 0 — every
+same-group target — rides the group LIC straight to the destination tile's slave port and back.
+At 4×4 that is 1/16 of all lines.
 
-`mempool_tile.sv`, `gen_tcdm_registers_resp` — the master-response fall-through register, ahead
-of `postreg_tcdm_master_resp_ini_sel` (which is `rdata.core_id`, so retagging there *is* the
-re-route). Four kinds of burst response arrive on those ports:
+**Wrong #2 — "put a retag table at the tile's master-response boundary".** That reaches every
+path the MSHR misses, but the match key (`core_id`, `meta_id ∈ [base, base+len)`) **aliases**.
+Under the funnel a burst owned all `MaxBurstWords` ids in ROB0, so the window was genuinely its
+own; distributed, it owns only `rows = len/NrMemPorts` per buffer while the wire encoding still
+spans `len`. With `spatz_vlsu_dual_load=2` — our shipped default — the next load's port-0
+requests take ids `base+4 …`, inside the tracked window. Silent misrouting.
 
-| path | how it gets there | carries |
-|---|---|---|
-| MSHR-merged | the MSHR re-emits per requester from `sub_reqs[].meta_id_base + b` | `base + b`, issuing port |
-| MSHR-bypassed | expanded at the destination tile | `base + b`, issuing port |
-| intra-group | master lane 0 → group LIC → destination slave port → back | `base + b`, issuing port |
-| own-tile | *does not arrive here* — LIC, routed by initiator index | — |
+### What was built
 
-So the work is:
+**One law, applied where a burst becomes beats.** `tcdm_burst_expander` splits the beat index
+across the two fields it has — `meta_id += b >> BurstLaneW`, `core_id += b & (BurstLanes-1)` —
+with `tgt_addr` unchanged at `base + b`. Identity at `b == 0`, so single-word requests pass
+through byte-identically. **Both** instances apply it: a bypassed or intra-group burst reaches
+its requester with no MSHR in between, so it must already be in final form.
 
-1. **A burst never takes the own-tile local path.** In `gen_core_port_mux`, divert a
-   `burst_len > 1` request from `local_req_interco_valid_raw[idx]` to
-   `remote_req_interco_valid_raw[idx]`, and feed the shim's local `ready` from the remote path
-   while diverted. Cheap because the remote payload is *already fully formed* — the shim
-   computes both and only `valid` differs (`mempool_tile.sv:1169-1195`). The group LIC has all
-   `NumTilesPerGroup` tiles as destinations, the source tile among them. Cost: a group-LIC round
-   trip instead of a direct local access, on the small fraction of lines homed in the core's own
-   tile.
-2. **One retag table per tile.** Allocate on a burst request handshake out of
-   `prereg_tcdm_master_req` (load, `burst_len > 1`), recording `{core_id, meta_base, len}`; match
-   an arriving response by `core_id` and `meta_id - meta_base < len`; rewrite `core_id` and
-   `meta_id` per the lane law; retire on the response handshake. This is the same structure as
-   the MSHR's existing bypass-track table — reuse its shape, including the way-index width trap.
-   Depth bound: `RobDepth / (MaxBurstWords / NrMemPorts)` = 32/4 = **8 ways**. Note a burst
-   occupies `burst_rows` ids per buffer rather than `MaxBurstWords` in one, so this is
-   `NrMemPorts` times the old figure — the shrunken buffers do **not** shrink this table.
-3. **Delete the MSHR's ParityDrain `core_id` retag** (`mempool_group_mshr.sv:4068`, `:4228`) and
-   with it the whole `gen_bypass_retag` table and its assertions. Once the tile retags, the MSHR
-   adding `+ (b & 1)` would double-count. Its per-requester `meta_id_base + b` re-emission
-   stays — that is the multicast, not a retag. This is a net **simplification** and a flop
-   saving; 2-wide delivery still works, because the tile assigns two beats drained in one cycle
-   to different lanes by their own `b`.
-4. **`tcdm_burst_expander` needs no change.** Its `meta_id = base + beat` is the wire encoding
-   the MSHR decodes (`resp_beat_offset = arriving meta_id − sub_reqs[0].meta_id_base`), so
-   changing it there would break the MSHR's beat bookkeeping. The earlier version of this
-   section had this backwards.
+**The MSHR recovers `b` from both fields.** `burst_beat_of()` / `burst_beat_valid()` replace the
+old `meta_id − meta_id_base` derivation at all four sites (the tagged and scanning response-seen
+matches, and the capture-side re-validation). Both halves are range-checked before the combined
+index means anything — the subtractions wrap in their own field widths, so a lane or row from an
+unrelated request would otherwise fold into a legal-looking beat. The response-buffer slot now
+stores the **computed beat index** rather than the `meta_id` it only ever kept in order to
+re-derive that offset: the same width whenever `BurstLenWidth ≤ MetaIdWidth`, and the two drain
+paths read it instead of subtracting. The drain re-emits beat `b` for each merged requester under
+the same law, **not** gated on `PD2` — the lane mapping is not the drain width.
 
-**Until this lands, `spatz_vlsu_burst=0`.** `mempool_tile.sv` carries an elaboration `$error` for
-the pair, so the combination cannot be built. At 0 every vector load takes the 4-port
-word-interleaved path, which is row-atomic and correct; what it costs is the group MSHR's burst
-class — no burst merging, no ParityDrain, no block allocation.
+**The ParityDrain bypass retag is deleted.** It existed only because the destination emitted
+`meta_id_base + b` on the issuing port. Its `BypassTrackWays` state is now inert and should be
+removed in a follow-up.
 
-Guards to revisit when it lands: `mempool_tile.sv:88-95` (`group_mshr_drain_beats=2 requires
-NumCoresPerTile==1` / `needs core data ports {1,2}`) and `mempool_group_mshr.sv:137-144`.
-`mempool_pkg::MaxBurstWords` stays 16 — do **not** import their `SPATZ_MAX_BURST_WORDS`
-parameterisation without making the TeraNoC-side constant follow it; they are the same quantity
-and a mismatch is silent.
+**Own-tile bursts are diverted onto the group path.** A local response returns through the LIC to
+the crossbar **initiator** that issued it — structural, and
+`local_req_interco_payload_raw[].wdata.core_id` is tied to `'0` precisely because nothing reads
+it — so no retag can steer it. The remote payload is already fully formed
+(`snitch_addr_demux:83` broadcasts `req_payload_i` to every output and steers only `valid`), and
+`tgt_group_id` is the own group, so the group LIC routes it back to this tile's slave port. The
+shim's local `ready` is fed from the remote path while diverted, or the port wedges.
+
+`spatz_vlsu_burst` is **1** and the `mempool_tile` tripwire is gone.
 
 ## 6. Defects in their tree that must be fixed before adoption
 

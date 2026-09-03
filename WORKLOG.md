@@ -15884,3 +15884,64 @@ again at session end; a trap that PRINTS "restored" is not evidence that it did.
 **Status.** Tree reduction DONE. PNR hand-off DONE (provisional, as above). Still open: the
 tile-side lane retag (which is what turns bursts back on), the funnel-corruption A/B, and
 re-validating `dual_load=2`.
+
+---
+
+## 2026-09-03 (cont. 3) — Tile-side lane retag; bursts back ON
+
+**Purpose.** User: "do the tile-side lane retag and turn bursts back on."
+
+**The design was wrong twice more before it was right.** Both corrections came from building the
+previous one, and both are recorded in `docs/spatz_vpu_burst_adoption_review.md` §5.
+1. *In the group MSHR* — refuted earlier: an intra-group burst never passes it.
+2. *A retag table at the tile's master-response boundary* — reaches every path the MSHR misses,
+   but the match key **aliases**. Under the funnel a burst owned all `MaxBurstWords` ids in ROB0
+   so the window was genuinely its own; distributed, it owns only `len/NrMemPorts` ids per buffer
+   while the WIRE encoding still spans `len`. With `spatz_vlsu_dual_load=2` (our shipped default)
+   the next load's port-0 requests take ids inside that window -> silent misrouting. Abandoned.
+
+**What was built — one law, applied where a burst becomes beats.**
+- `tcdm_burst_expander`: split the beat index across the two fields it has --
+  `meta_id += b >> BurstLaneW`, `core_id += b & (BurstLanes-1)`, `tgt_addr` unchanged at
+  `base + b`. Identity at b==0 so single-word requests are byte-identical. BOTH instances, and
+  they must: a bypassed or intra-group burst reaches its requester with no MSHR in between.
+- `mempool_group_mshr`: `burst_beat_of()` / `burst_beat_valid()` recover b from BOTH fields at
+  all four sites (tagged + scanning response-seen match, capture re-validation). Both halves are
+  range-checked first -- the subtractions wrap in their own field widths, so a lane or row from
+  an unrelated request would fold into a legal-looking beat. `mshr_resp_slot_t` now stores the
+  COMPUTED BEAT instead of the `meta_id` it only kept in order to re-derive that offset (same
+  width whenever BurstLenWidth <= MetaIdWidth), so both drain paths read instead of subtract.
+  The drain re-emits per requester under the same law, **no longer gated on PD2** -- the lane
+  mapping is not the drain width.
+- `mempool_group_mshr`: ParityDrain bypass retag DELETED (the expander does the whole job now).
+  Its `BypassTrackWays` state is inert -- follow-up removal, kept out of this change.
+- `mempool_tile`: **own-tile bursts diverted onto the group path.** A local response returns
+  through the LIC to the crossbar INITIATOR -- structural, and `wdata.core_id` is tied to '0
+  because nothing reads it -- so no retag can steer it. The remote payload is already fully
+  formed (`snitch_addr_demux:83` broadcasts `req_payload_i` and steers only `valid`), and the
+  shim's local `ready` is fed from the remote path while diverted or the port wedges.
+- `config/config.mk`: `spatz_vlsu_burst` **0 -> 1**; the `mempool_tile` tripwire removed.
+
+**Result.** Compiles clean (`mempool_group_mshr`, `tcdm_burst_expander`, `mempool_tile` all
+confirmed recompiled) and **elaborates at 4x4, vopt exit 0, with bursts ON**. Image defines
+verified from `compile.tcl`: `SPATZ_VLSU_BURST=1 ROB_DEPTH=32 DUAL_LOAD=2 BLOCK_ALLOC=1
+GROUP_MSHR_DRAIN_BEATS=2 BURST_EW16=1` -- the full production configuration, including the
+`dual_load=2` Yinrong never validated. Commit `12af16bc`.
+
+**vector-burst-test is RUNNING** on `hardware/vbt_4x4_adopt.elf` (~2.5 h at the observed rate).
+At cyc=5000: zero MSHR timeouts, zero bypasses, zero `[CMS WARN]` stuck requests, and **none of
+the new assertions has fired** -- neither the MSHR's `resp beat_offset out of range` nor the
+VLSU's `rob_id`-equality SVA, both of which would fire almost immediately if the lane law were
+wrong. Encouraging, NOT a verdict: no retval yet.
+
+**⚠️ ROOT CAUSE of the `hardware/generated/` corruption (two incidents).** `make -n` REWRITES it.
+`update-floogen`'s recipe is a `$(MAKE)` line, and GNU make executes recipe lines containing
+`$(MAKE)` even under `-n` so recursive dry-runs work. Both incidents were preceded by a `make -n`
+on a 4x4 config (the `simc-lean` dry-run, then the backend define check); real
+`make -o update-floogen compile` runs never regenerated -- proved by a later vopt failing on the
+mesh tripwire. **Consequence: a backup/restore trap is not enough**, because it captures whatever
+is there when it starts -- the second elab run faithfully restored the corruption. Treat `make -n`
+as a WRITE, and verify the BACKUP's mesh, not just the restore's exit status.
+`run_vbt.sh` backed up 4x4, so `hardware/generated/` needs restoring to 8x8 by hand when it exits.
+
+**Status.** Bursts ON, everything compiles and elaborates, validation in flight.
