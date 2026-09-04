@@ -16654,3 +16654,24 @@ ports, `free_way` 272, `req_decode` 4835), so the black-box linking problem is g
 Relaunched on the fixed scripts.
 
 **Status.** Runs relaunched; no trustworthy WNS yet under the corrected SDC.
+
+---
+
+## 2026-09-04 23:30 — killed four SDC-contaminated OOC runs; the F-series numbers are const-prop
+
+**Purpose.** Free fenga3 (90 GB free, 137 GB of swap in use) for the three runs under the corrected
+`base_ooc.sdc`, and salvage anything the doomed runs had learned.
+
+**Implementation.** Harvested first, then killed by PID (each verified against `/proc/<pid>/cmdline`),
+then removed `save/`, `reports/`, `out/` and logs for `rt_f4all_8p0`, `gate_6fee18d8_2p0`,
+`rt_f3a_8p0`, `rt_clean_8p0`. Older completed runs (`rt_f1/f2/f5/f6`, `rt_final*`, `v_*`) left alone.
+
+**Result.** free 90 -> 391 GB, available 375 -> 678 GB, 3.3 GB disk. Only the three intended runs
+remain. The harvest (`docs/ooc_stale_runs_harvest.md`) showed the quoted F-series instance counts
+are **constant-propagation** values: technology mapping adds +20% (f3a) to +26% (f6), and the F6-vs-F3a
+gap narrows from -32.9% to -29.2%. Those post-mapping numbers also ran under the 15 pF SDC, so they
+are contaminated and are kept only as a reference point.
+
+**Status.** `base2_8p0` / `fix2_head_8p0` / `fix2_head_2p0` all in technology mapping, 0 errors.
+At const-prop, under the corrected SDC: baseline 1,269,127 vs HEAD 843,935 = **-33.5%**, and the
+baseline reproduces its historical figure exactly.
