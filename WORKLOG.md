@@ -16328,3 +16328,19 @@ means the arm did NOT verify F3c and must not be read as if it had.
 
 **Status.** Committed with the arm in flight (both arms tracking the 3,117-cycle reference at
 the time of writing). Revert if the arm or the coverage counter disagrees.
+
+## 2026-09-04 — F3d: apply the drain drive clears once per entry
+
+**Purpose.** Last of the four 32-lane read-modify-write scatters. The head-beat and
+ParityDrain drive loops each cleared beat_pending / beat_pending2 (and sub_reqs[].valid for
+single-beat entries) by writing mshr_d[e] from inside the (tile, port) loop, so lane k+1 read
+the entry lane k had just modified.
+
+**Implementation.** Record the requested clears into per-entry masks, then apply one AND-NOT
+per entry after BOTH drive loops close.
+
+**Why it is exact.** Every write on this path is a bit CLEAR, and bit clears commute -- the
+order they were recorded in cannot change the result. The apply is placed before the finalize
+pass, which is where the sequential writes landed.
+
+**Status.** Committed with its arm in flight. Revert if it disagrees.

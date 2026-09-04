@@ -1075,6 +1075,10 @@ module mempool_group_mshr
   logic [MshrNum-1:0][NumRespLanes-1:0]                                        cap_first, cap_second;
   logic [NumRespLanes-1:0]                                                     cap_rest;
   logic [MshrNum-1:0]                                                          cap_g1, cap_g2;
+  // F3d: per-entry masks of what the two drain DRIVE loops want cleared. Both loops only ever
+  // clear BITS, and bit clears commute -- so ORing the requests and applying one AND-NOT per entry
+  // is identical to letting 32 lanes each read-modify-write the entry in turn.
+  logic [MshrNum-1:0][MshrMergeReqs-1:0]                                       bp_clr, bp2_clr, sv_clr;
   mshr_resp_slot_t [MshrNum-1:0]                                               cap_d0, cap_d1;
   logic [RespBufPtrW-1:0]                                                      cap_s0, cap_s1, cap_n0, cap_n1;
   logic [RespLaneW-1:0]                                                        cap_lane;
@@ -4165,6 +4169,7 @@ module mempool_group_mshr
     // ------------------------------------------------------------
     // Drain captured responses to all recorded sub-requests
     // ------------------------------------------------------------
+    bp_clr = '0; bp2_clr = '0; sv_clr = '0;
     if (DrainMultiPort) begin
       // Use all available response ports per cycle.
       for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
@@ -4446,8 +4451,10 @@ module mempool_group_mshr
 `endif
 
             if (resp_out_ready[tile_i][port_i]) begin
-              mshr_d[resp_sel_mshr_id[tile_i][port_i]].beat_pending[
-                  resp_sel_subreq_idx[tile_i][port_i]] = 1'b0;
+              // F3d: record, do not write. Writing here made lane k+1 read the entry that
+              // lane k had just modified -- a 32-deep chain for what is only ever a bit clear.
+              bp_clr[resp_sel_mshr_id[tile_i][port_i]][
+                  resp_sel_subreq_idx[tile_i][port_i]] = 1'b1;
               // Root-cause fix (WAL-verified): clear sub_req.valid on drain
               // handshake to prevent init from re-including it in next
               // cycle's beat_pending mask. Without this, MSHR delivers the
@@ -4459,8 +4466,8 @@ module mempool_group_mshr
               // the same set of sub_reqs (mass-clear / full-dealloc
               // handles cleanup at end of burst).
               if (mshr_d[resp_sel_mshr_id[tile_i][port_i]].burst_len == BurstLenWidth'(1)) begin
-                mshr_d[resp_sel_mshr_id[tile_i][port_i]].sub_reqs[
-                    resp_sel_subreq_idx[tile_i][port_i]].valid = 1'b0;
+                sv_clr[resp_sel_mshr_id[tile_i][port_i]][
+                    resp_sel_subreq_idx[tile_i][port_i]] = 1'b1;
               end
             end
           end
@@ -4616,7 +4623,7 @@ module mempool_group_mshr
 `endif
               port_taken[tile_i][port_i] = 1'b1;
               if (resp_out_ready[tile_i][port_i]) begin
-                mshr_d[drain2_sel_e2].beat_pending2[resp_sel2_subreq_idx[tile_i][port_i]] = 1'b0;
+                bp2_clr[drain2_sel_e2][resp_sel2_subreq_idx[tile_i][port_i]] = 1'b1;
               end
             end
           end
@@ -4627,6 +4634,17 @@ module mempool_group_mshr
         resp_sel2_subreq_idx = '0;
       end
 
+    end
+
+    // F3d: apply the recorded clears, once per entry. Both drive loops have closed, so this sees
+    // every request from both, and because they are bit clears the order they were recorded in
+    // cannot matter. Placed before the finalize pass, which is where the sequential writes landed.
+    for (int e = 0; e < MshrNum; e++) begin
+      mshr_d[e].beat_pending  = mshr_d[e].beat_pending  & ~bp_clr[e];
+      mshr_d[e].beat_pending2 = mshr_d[e].beat_pending2 & ~bp2_clr[e];
+      for (int s = 0; s < MshrMergeReqs; s++) begin
+        if (sv_clr[e][s]) mshr_d[e].sub_reqs[s].valid = 1'b0;
+      end
     end
 
     // Finalize response draining per beat.
