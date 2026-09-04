@@ -321,6 +321,12 @@ group_mshr_drain_from_q ?= 1
 # selector still halves 64 -> 32) -- see docs/mshr_ppa_plan.md B0.3.
 group_mshr_bank_publish ?= 1
 
+# Accept at most one MERGE per MSHR bank per cycle, mirroring the per-bank single ALLOCATION the
+# arbiter has always enforced. Removes the NumAllocSlots^2 merge-rank comparator network from the
+# request door (see OneMergePerBank in mempool_group_mshr.sv). Losers stall one cycle and retry
+# against the same resident entry, so coalescing is preserved; set 0 to restore the old form.
+group_mshr_one_merge_per_bank ?= 1
+
 # C2: bypass the request-input spill register. The tile already registers its request output, and
 # only wire assigns separate the two -- so this stage is a second register back-to-back with the
 # first, costing 32 x 166 = 5,312 flops/group (~85k cluster) for no data-path benefit.

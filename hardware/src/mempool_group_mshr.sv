@@ -412,6 +412,31 @@ module mempool_group_mshr
   // zero, so this still defaults OFF.
   localparam bit ReplayFromQ =
       `ifdef GROUP_MSHR_REPLAY_FROM_Q `GROUP_MSHR_REPLAY_FROM_Q `else 1'b0 `endif;
+  // F4: accept at most ONE merge per bank per cycle, mirroring the per-bank single ALLOCATION
+  // that the arbiter above has always enforced. Losers get req_merge_ready = 0, which deasserts
+  // req_in_ready and stalls them for a cycle; they retry against the same still-resident entry and
+  // merge then, so coalescing is preserved, just spread over more cycles.
+  //
+  // This is not a new stall path: the capacity check below (merge_slot + 1 <= MshrMergeReqs) already
+  // deasserts req_in_ready on a merge hit and is exercised on every shipping merge_reqs. The lane
+  // takes the merge branch either way, so a stalled requester never leaks to the NoC.
+  //
+  // What it buys: merge_rank exists ONLY to give several lanes merging into the SAME entry distinct
+  // sub_reqs slots, and it costs NumAllocSlots^2 (1024 here) mshr_id comparators plus NumAllocSlots
+  // population counts, feeding merge_slot -> merge_new_idx -> the sub_reqs write index, i.e. sitting
+  // directly on the request door. One merge per bank means at most one merge per ENTRY (an entry
+  // belongs to exactly one bank), so the rank is identically zero and the whole network drops out.
+  //
+  // NOT an equivalent transformation: peak merge acceptance falls from NumAllocSlots per cycle to
+  // MshrBankNum. A refused lane is not a lost merge -- it retries next cycle against the same
+  // resident entry -- so a cohort still assembles fully, just over more cycles, against a hold
+  // window of thousands. [MRGARB] merge_grants / merge_arb_stalls reports the retries.
+  //
+  // DEFAULT ON. The RTL default (not just the config value) is 1 deliberately: the backend define
+  // list does not carry this knob, so a 0 here would silently synthesise the expensive form. Any
+  // arm compared against a reference built before this knob existed must PIN it explicitly.
+  localparam bit OneMergePerBank =
+      `ifdef GROUP_MSHR_ONE_MERGE_PER_BANK `GROUP_MSHR_ONE_MERGE_PER_BANK `else 1'b1 `endif;
   // NOT DONE: the two aging sweeps (cache self-invalidate, and the serve-timeout / cache age-out
   // countdown) are also whole-array passes on mshr_d and were the obvious third knob here. They are
   // deliberately left alone.
@@ -2254,6 +2279,20 @@ module mempool_group_mshr
   logic [NumAllocSlots-1:0]                  alloc_hi_lsb;    // lowest set bit of each half
   logic [NumAllocSlots-1:0]                  alloc_lo_lsb;
 
+  // Per-bank merge arbiter (OneMergePerBank). Same shape as the allocation arbiter above and sharing
+  // its rotation base, so a high-index tile is not perpetually beaten to a contended bank. Separate
+  // signals rather than reuse: a module-scope variable may have only one combinational driver.
+  logic [NumAllocSlots-1:0]                  merge_arb_cand_flat;
+  logic [NumAllocSlots-1:0][BankIdW-1:0]     merge_arb_bank_flat;
+  logic [MshrBankNum-1:0][NumAllocSlots-1:0] bank_merge_win_oh;   // one-hot merge winner per bank
+  logic [AllocRrW-1:0]                       merge_arb_slot_idx;      // flatten block
+  logic [AllocRrW-1:0]                       merge_arb_scatter_slot;  // scatter block
+  logic [NumAllocSlots-1:0]                  merge_arb_rq;
+  logic [NumAllocSlots-1:0]                  merge_arb_hi;
+  logic [NumAllocSlots-1:0]                  merge_arb_lo;
+  logic [NumAllocSlots-1:0]                  merge_arb_hi_lsb;
+  logic [NumAllocSlots-1:0]                  merge_arb_lo_lsb;
+  logic [NumAllocSlots-1:0]                  merge_arb_grant_flat_dbg; // granted lanes, for coverage
 
   always_comb begin
     alloc_cand_flat = '0;
@@ -2315,7 +2354,52 @@ module mempool_group_mshr
         req_merge_valid[tile_i][port_i] =
             req_can_merge[tile_i][port_i] && req_hit_mshr_sel_valid[tile_i][port_i];
         req_merge_mshr_id[tile_i][port_i] = req_hit_mshr_sel_id[tile_i][port_i];
-        req_merge_ready[tile_i][port_i]   = 1'b1; // an existing entry is always ready to accept a merge
+      end
+    end
+  end
+
+  // Per-bank merge arbiter. The hit search is already bank-scoped (a hit entry always lies in
+  // req_bank -- asserted by mshr_entry_in_its_bank), so the merge target's bank is req_bank and no
+  // decode of the entry id is needed. Structurally identical to the allocation arbiter: split each
+  // bank's request vector at the shared rotation base, take the lowest set bit of the high half,
+  // else of the low half.
+  always_comb begin
+    merge_arb_cand_flat = '0;
+    merge_arb_bank_flat = '0;
+    for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
+      for (int port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin
+        merge_arb_slot_idx = AllocRrW'(tile_i * NumReqPortsActive + (port_i - 1));
+        merge_arb_cand_flat[merge_arb_slot_idx] = req_merge_valid[tile_i][port_i];
+        merge_arb_bank_flat[merge_arb_slot_idx] = req_bank[tile_i][port_i];
+      end
+    end
+    for (int b = 0; b < MshrBankNum; b++) begin
+      merge_arb_rq = '0;
+      for (int s = 0; s < NumAllocSlots; s++) begin
+        merge_arb_rq[s] = merge_arb_cand_flat[s] && (int'(merge_arb_bank_flat[s]) == b);
+      end
+      // alloc_rr_mask is the shared thermometer mask from the rotation base; it is a pure function
+      // of alloc_rr_q, driven once in the allocation block above and only READ here.
+      merge_arb_hi     = merge_arb_rq &  alloc_rr_mask;
+      merge_arb_lo     = merge_arb_rq & ~alloc_rr_mask;
+      merge_arb_hi_lsb = merge_arb_hi & (~merge_arb_hi + NumAllocSlots'(1));
+      merge_arb_lo_lsb = merge_arb_lo & (~merge_arb_lo + NumAllocSlots'(1));
+      bank_merge_win_oh[b] = (merge_arb_hi != '0) ? merge_arb_hi_lsb : merge_arb_lo_lsb;
+    end
+    merge_arb_grant_flat_dbg = '0;
+    for (int b = 0; b < MshrBankNum; b++) begin
+      merge_arb_grant_flat_dbg = merge_arb_grant_flat_dbg | bank_merge_win_oh[b];
+    end
+  end
+
+  always_comb begin
+    for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
+      for (int port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin
+        merge_arb_scatter_slot = AllocRrW'(tile_i * NumReqPortsActive + (port_i - 1));
+        // OneMergePerBank = 0: an existing entry is always ready to accept a merge (legacy).
+        req_merge_ready[tile_i][port_i] =
+            !OneMergePerBank ? 1'b1
+                             : bank_merge_win_oh[req_bank[tile_i][port_i]][merge_arb_scatter_slot];
       end
     end
   end
@@ -2691,20 +2775,34 @@ module mempool_group_mshr
   logic [31:0] stb_ovl_cnt_dbg;
   logic [31:0] cap_two_grant_cnt_dbg;   // cycles-with-entries where a second lane was granted
   logic [31:0] cap_one_grant_cnt_dbg;   // ... where only the first was, for a ratio
+  // OneMergePerBank cost, measured rather than argued: merges the per-bank arbiter refused this
+  // cycle (the lane is a valid merge hit but lost its bank), against merges it granted. A stalled
+  // lane is not a lost merge -- it retries next cycle against the same resident entry -- so this is
+  // the RETRY count, i.e. exactly the throughput being traded for the rank network's removal.
+  logic [31:0] merge_arb_stall_cnt_dbg;
+  logic [31:0] merge_arb_grant_cnt_dbg;
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       cap_two_grant_cnt_dbg <= '0;
       cap_one_grant_cnt_dbg <= '0;
       stb_ovl_cnt_dbg       <= '0;
+      merge_arb_stall_cnt_dbg <= '0;
+      merge_arb_grant_cnt_dbg <= '0;
     end else begin
       cap_two_grant_cnt_dbg <= cap_two_grant_cnt_dbg + 32'($countones(cap_g2));
       cap_one_grant_cnt_dbg <= cap_one_grant_cnt_dbg + 32'($countones(cap_g1 & ~cap_g2));
       stb_ovl_cnt_dbg       <= stb_ovl_cnt_dbg       + 32'($countones(stb_ovl));
+      merge_arb_stall_cnt_dbg <= merge_arb_stall_cnt_dbg +
+          32'($countones(merge_arb_cand_flat & ~merge_arb_grant_flat_dbg));
+      merge_arb_grant_cnt_dbg <= merge_arb_grant_cnt_dbg +
+          32'($countones(merge_arb_cand_flat &  merge_arb_grant_flat_dbg));
     end
   end
   final begin
     $display("[F3cCOV] group=%0d two_lane_grants=%0d one_lane_grants=%0d store_byte_overlaps=%0d",
              group_id_i, cap_two_grant_cnt_dbg, cap_one_grant_cnt_dbg, stb_ovl_cnt_dbg);
+    $display("[MRGARB] group=%0d merge_grants=%0d merge_arb_stalls=%0d",
+             group_id_i, merge_arb_grant_cnt_dbg, merge_arb_stall_cnt_dbg);
   end
 
   // ------------------------------------------------------------------------
@@ -3390,22 +3488,32 @@ module mempool_group_mshr
     // C1: rank each merging port against the earlier ports targeting the same entry. Built as a
     // mask + population count rather than an accumulate-in-a-loop, so it maps to an adder tree
     // instead of reintroducing the 32-deep serial chain this change exists to remove.
-    for (int t = 0; t < NumTilesPerGroup; t++) begin
-      for (int p = 1; p < NumRemoteReqPortsPerTile; p++) begin
-        merge_same_mask = '0;
-        for (int t2 = 0; t2 < NumTilesPerGroup; t2++) begin
-          for (int p2 = 1; p2 < NumRemoteReqPortsPerTile; p2++) begin
-            if (((t2 < t) || ((t2 == t) && (p2 < p))) &&
-                req_merge_valid[t2][p2] && req_merge_ready[t2][p2] &&
-                (req_merge_mshr_id[t2][p2] == req_merge_mshr_id[t][p])) begin
-              merge_same_mask[t2 * NumReqPortsActive + (p2 - 1)] = 1'b1;
+    // OneMergePerBank: the arbiter grants at most one merge per bank, and an entry belongs to
+    // exactly one bank, so no two granted lanes can target the same entry and the rank is
+    // identically zero. The mask/popcount network below is then dead and, because the knob is an
+    // elaboration constant, is removed rather than merely left unused.
+    if (OneMergePerBank) begin
+      merge_same_mask = '0;
+      merge_rank_raw  = '0;
+      merge_rank      = '0;
+    end else begin
+      for (int t = 0; t < NumTilesPerGroup; t++) begin
+        for (int p = 1; p < NumRemoteReqPortsPerTile; p++) begin
+          merge_same_mask = '0;
+          for (int t2 = 0; t2 < NumTilesPerGroup; t2++) begin
+            for (int p2 = 1; p2 < NumRemoteReqPortsPerTile; p2++) begin
+              if (((t2 < t) || ((t2 == t) && (p2 < p))) &&
+                  req_merge_valid[t2][p2] && req_merge_ready[t2][p2] &&
+                  (req_merge_mshr_id[t2][p2] == req_merge_mshr_id[t][p])) begin
+                merge_same_mask[t2 * NumReqPortsActive + (p2 - 1)] = 1'b1;
+              end
             end
           end
+          // Saturate rather than truncate -- see MergeRankW above for why this is exact.
+          merge_rank_raw   = MergeCountW'($countones(merge_same_mask));
+          merge_rank[t][p] = (merge_rank_raw >= MergeCountW'(MshrMergeReqs)) ?
+                             MergeRankW'(MshrMergeReqs) : MergeRankW'(merge_rank_raw);
         end
-        // Saturate rather than truncate -- see MergeRankW above for why this is exact.
-        merge_rank_raw   = MergeCountW'($countones(merge_same_mask));
-        merge_rank[t][p] = (merge_rank_raw >= MergeCountW'(MshrMergeReqs)) ?
-                           MergeRankW'(MshrMergeReqs) : MergeRankW'(merge_rank_raw);
       end
     end
 
