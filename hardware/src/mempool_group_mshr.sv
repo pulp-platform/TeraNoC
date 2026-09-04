@@ -437,6 +437,58 @@ module mempool_group_mshr
   // arm compared against a reference built before this knob existed must PIN it explicitly.
   localparam bit OneMergePerBank =
       `ifdef GROUP_MSHR_ONE_MERGE_PER_BANK `GROUP_MSHR_ONE_MERGE_PER_BANK `else 1'b1 `endif;
+  // F4b: compute the meta-range overlap ONCE PER ENTRY instead of once per (lane, entry).
+  //
+  // req_meta_ovlp_map is the last [lane][MshrNum] structure in the module: 32 lanes x 64 entries =
+  // 2048 replications of a tile compare, a core compare and a two-sided modular range test. But the
+  // relation is SPARSE -- the test is gated on sub_reqs[0].tile_id == tile_i, and an entry has
+  // exactly ONE owner tile, so 63 of every 64 replications are structurally dead.
+  //
+  // Owner-indexed form: per (entry, req port), mux in the OWNER tile's request (a NumTilesPerGroup:1
+  // select of core_id / meta_id / len / bank / can_merge / addr-hit-way), run ONE range test, then
+  // scatter with a 4-to-16 owner decode. MshrNum x ports = 128 tests replace 2048.
+  //
+  // EXACT, not a trade. For t != owner the old form's tile compare is false and the new form's
+  // owner decode is false, both giving 0; for t == owner the muxed operands ARE req_*[t][p], so the
+  // expression is identical term for term. An invalid entry has garbage sub_reqs[0].tile_id, but
+  // mshr_q_valid[e] gates the per-entry result to 0, so every lane still reads 0.
+  localparam bit MetaOvlpByOwner =
+      `ifdef GROUP_MSHR_META_OVLP_BY_OWNER `GROUP_MSHR_META_OVLP_BY_OWNER `else 1'b1 `endif;
+  // F4c: extend the head-beat drain's BankPublish narrowing to the SECOND-slot (drain2) selector.
+  //
+  // The comment at the drain2 arbiter says it plainly: the head-beat MshrNum-wide selector is the
+  // else-arm of `if (BankPublish)` and folds away at the shipping default, whereas drain2 is
+  // ungated and runs MshrNum-wide in every config, x NumTilesPerGroup x (ports-1) = 32 instances
+  // of a 64-entry x MshrMergeReqs candidate build plus a 64-bit mask and LSB-isolate.
+  //
+  // With publication, at most one entry per bank is selectable, so each lane builds a
+  // MshrBankNum-wide candidate vector (16 x MshrMergeReqs tests) and runs a 16-bit arbiter -- the
+  // per-lane work drops 4x. The published entry is addressed as b*MshrWaysPerBank + pub_w[b] with b
+  // a loop constant, so the sub-request lookup stays a MshrWaysPerBank:1 mux, never MshrNum:1.
+  //
+  // Same class of trade the project already accepted next door: a lane whose target sits in a bank
+  // that published a DIFFERENT entry waits a cycle. Publication rotates (drain_mshr_rr_q), so it
+  // reaches every way, and a drain2 candidate is continuous (held in DRAIN_RESP until drained).
+  localparam bit Drain2BankPublish =
+      `ifdef GROUP_MSHR_DRAIN2_BANK_PUBLISH `GROUP_MSHR_DRAIN2_BANK_PUBLISH `else 1'b1 `endif;
+  // F4d: arbitrate response capture per BANK instead of per entry.
+  //
+  // The capture grant runs MshrNum arbiters of NumRespLanes bits (three LSB-isolates each, 64 x 32
+  // here). Per bank that is MshrBankNum arbiters -- a 4x cut.
+  //
+  // DEFAULT OFF, unlike the other F4 items, and the reason is worth stating rather than leaving to
+  // a future reader to rediscover:
+  //   * The saving is the smallest of the F4 set (~13k gates of arbiter), and it is partly given
+  //     back: selecting the winning lanes' entries needs a NumRespLanes:1 mux of mshr_id per bank
+  //     per slot, and the slot check then indexes mshr_resp_slots by that dynamic id (MshrNum:1),
+  //     where the per-entry form indexes it by a loop constant. Net is nearer ~0.5% of the module.
+  //   * The trade lands on the RESPONSE path, which is already the documented bandwidth ceiling for
+  //     burst loads. Unlike the merge case there is no multi-thousand-cycle hold window to absorb a
+  //     one-cycle deferral, so a refusal costs response throughput directly.
+  // Turn it on only if synthesis says the arbiters matter more than the muxes; [CAPARB] measures
+  // the refusals either way.
+  localparam bit CapPerBank =
+      `ifdef GROUP_MSHR_CAP_PER_BANK `GROUP_MSHR_CAP_PER_BANK `else 1'b0 `endif;
   // NOT DONE: the two aging sweeps (cache self-invalidate, and the serve-timeout / cache age-out
   // countdown) are also whole-array passes on mshr_d and were the obvious third knob here. They are
   // deliberately left alone.
@@ -1021,6 +1073,9 @@ module mempool_group_mshr
   // only address-dependent term is the same-address exclusion, and a same-address entry is provably in
   // the request's own bank, so that term reuses the bank-scoped req_addr_hit_way bit (see below).
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrNum-1:0]         req_meta_ovlp_map;
+  // F4b owner-indexed meta overlap: one result per (entry, req port), plus the owner one-hot.
+  logic      [MshrNum-1:0][NumRemoteReqPortsPerTile-1:1]                             mo_ovlp;
+  logic      [MshrNum-1:0][NumTilesPerGroup-1:0]                                     mo_owner_oh;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_hit_mshr;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_addr_hit_drain;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_meta_conflict;
@@ -1100,6 +1155,14 @@ module mempool_group_mshr
   logic [MshrNum-1:0][NumRespLanes-1:0]                                        cap_first, cap_second;
   logic [NumRespLanes-1:0]                                                     cap_rest;
   logic [MshrNum-1:0]                                                          cap_g1, cap_g2;
+  // F4d: per-bank capture arbitration (CapPerBank).
+  logic [MshrBankNum-1:0][NumRespLanes-1:0]                                    capb_want;
+  logic [MshrBankNum-1:0][NumRespLanes-1:0]                                    capb_l1, capb_l2;
+  logic [NumRespLanes-1:0]                                                     capb_rest;
+  mshr_id_t [MshrBankNum-1:0]                                                  capb_e1, capb_e2;
+  logic [MshrBankNum-1:0]                                                      capb_g1, capb_g2;
+  logic [MshrBankNum-1:0]                                                      capb_same;
+  logic [RespLaneW-1:0]                                                        capb_lane;
   // F3d: per-entry masks of what the two drain DRIVE loops want cleared. Both loops only ever
   // clear BITS, and bit clears commute -- so ORing the requests and applying one AND-NOT per entry
   // is identical to letting 32 lanes each read-modify-write the entry in turn.
@@ -2094,37 +2157,47 @@ module mempool_group_mshr
         // The same-address exclusion (!addr_hit) is bank-local -- a same-address entry must be in this
         // request's bank -- so it reuses req_addr_hit_way[way] (no extra address comparator). For an
         // out-of-bank entry the bank-equality term is false, leaving the original !addr_hit == 1.
-        for (genvar mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin : gen_req_meta_ovlp
-          logic same_addr_excl;
-          assign same_addr_excl =
-              (req_bank[tile_i][port_i] == BankIdW'(mshr_i / MshrWaysPerBank)) &&
-              req_addr_hit_way[tile_i][port_i][mshr_i % MshrWaysPerBank];
-          assign req_meta_ovlp_map[tile_i][port_i][mshr_i] =
-              req_can_merge[tile_i][port_i] &&
-              mshr_q_valid[mshr_i] &&
-              ((mshr_q[mshr_i].state == MSHR_WAIT_RESP) ||
-               (mshr_q[mshr_i].state == MSHR_DRAIN_RESP) ||
-               (mshr_q[mshr_i].state == MSHR_RESP_HOLD)) &&
-              (mshr_q[mshr_i].sub_reqs[0].tile_id == tile_group_id_t'(tile_i)) &&
-              (mshr_q[mshr_i].sub_reqs[0].core_id == req_in[tile_i][port_i].wdata.core_id) &&
-              // Keep same-entry hits legal; block only cross-entry overlaps.
-              !same_addr_excl &&
-              // B2 (F7): two-sided modular range test in place of a MetaSpace-wide mask AND +
-              // OR-reduce.  Two cyclic intervals intersect iff one's start lies inside the other.
-              // Proven exhaustively (scripts/proof_meta_overlap.py, 1,183,744 cases at M=64, also
-              // checked at M=32 and M=8) -- matching the precedent set for the mask form itself.
-              //
-              // The LENGTH GUARDS ARE LOAD-BEARING.  Without them the test reports overlap when
-              // either length is zero, where the mask correctly reports none (an empty interval
-              // intersects nothing).  Today an invalid entry cannot reach here because the test is
-              // already gated on mshr_q_valid and on the entry state -- but that is a non-local
-              // invariant, and burst_len is 0 for a cleared entry, so the guards stay.
-              (mshr_q[mshr_i].burst_len != '0) &&
-              (req_len[tile_i][port_i] != '0) &&
-              ((meta_id_t'(mshr_q[mshr_i].sub_reqs[0].meta_id_base -
-                           req_in[tile_i][port_i].wdata.meta_id) < req_len[tile_i][port_i]) ||
-               (meta_id_t'(req_in[tile_i][port_i].wdata.meta_id -
-                           mshr_q[mshr_i].sub_reqs[0].meta_id_base) < mshr_q[mshr_i].burst_len));
+        // F4b: owner-indexed (default). mo_ovlp is computed once per (entry, port) below; the
+        // owner decode zeroes it for every lane that does not own the entry, which is exactly the
+        // tile compare the per-lane form did.
+        if (MetaOvlpByOwner) begin : gen_req_meta_ovlp_owner
+          for (genvar mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin : gen_map
+            assign req_meta_ovlp_map[tile_i][port_i][mshr_i] =
+                mo_owner_oh[mshr_i][tile_i] && mo_ovlp[mshr_i][port_i];
+          end
+        end else begin : gen_req_meta_ovlp_perlane
+          for (genvar mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin : gen_req_meta_ovlp
+            logic same_addr_excl;
+            assign same_addr_excl =
+                (req_bank[tile_i][port_i] == BankIdW'(mshr_i / MshrWaysPerBank)) &&
+                req_addr_hit_way[tile_i][port_i][mshr_i % MshrWaysPerBank];
+            assign req_meta_ovlp_map[tile_i][port_i][mshr_i] =
+                req_can_merge[tile_i][port_i] &&
+                mshr_q_valid[mshr_i] &&
+                ((mshr_q[mshr_i].state == MSHR_WAIT_RESP) ||
+                 (mshr_q[mshr_i].state == MSHR_DRAIN_RESP) ||
+                 (mshr_q[mshr_i].state == MSHR_RESP_HOLD)) &&
+                (mshr_q[mshr_i].sub_reqs[0].tile_id == tile_group_id_t'(tile_i)) &&
+                (mshr_q[mshr_i].sub_reqs[0].core_id == req_in[tile_i][port_i].wdata.core_id) &&
+                // Keep same-entry hits legal; block only cross-entry overlaps.
+                !same_addr_excl &&
+                // B2 (F7): two-sided modular range test in place of a MetaSpace-wide mask AND +
+                // OR-reduce.  Two cyclic intervals intersect iff one's start lies inside the other.
+                // Proven exhaustively (scripts/proof_meta_overlap.py, 1,183,744 cases at M=64, also
+                // checked at M=32 and M=8) -- matching the precedent set for the mask form itself.
+                //
+                // The LENGTH GUARDS ARE LOAD-BEARING.  Without them the test reports overlap when
+                // either length is zero, where the mask correctly reports none (an empty interval
+                // intersects nothing).  Today an invalid entry cannot reach here because the test is
+                // already gated on mshr_q_valid and on the entry state -- but that is a non-local
+                // invariant, and burst_len is 0 for a cleared entry, so the guards stay.
+                (mshr_q[mshr_i].burst_len != '0) &&
+                (req_len[tile_i][port_i] != '0) &&
+                ((meta_id_t'(mshr_q[mshr_i].sub_reqs[0].meta_id_base -
+                             req_in[tile_i][port_i].wdata.meta_id) < req_len[tile_i][port_i]) ||
+                 (meta_id_t'(req_in[tile_i][port_i].wdata.meta_id -
+                             mshr_q[mshr_i].sub_reqs[0].meta_id_base) < mshr_q[mshr_i].burst_len));
+          end
         end
         assign req_hit_mshr[tile_i][port_i] = |req_hit_way[tile_i][port_i];
         assign req_addr_hit_drain[tile_i][port_i] = |req_addr_hit_drain_way[tile_i][port_i];
@@ -2132,6 +2205,48 @@ module mempool_group_mshr
       end
     end
   endgenerate
+
+  // ------------------------------------------------------------------------
+  // F4b: meta-range overlap, computed ONCE PER ENTRY (see MetaOvlpByOwner).
+  //
+  // An entry's owner is sub_reqs[0].tile_id, written at allocation and stable for as long as the
+  // entry is valid, so the request operands can be selected by it and the whole test run once per
+  // (entry, req port) instead of once per (lane, entry).
+  // ------------------------------------------------------------------------
+  generate
+    for (genvar e = 0; e < MshrNum; e++) begin : gen_mo_entry
+      // Owner one-hot. Only read where mo_ovlp is non-zero, which requires mshr_q_valid[e].
+      for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_mo_owner
+        assign mo_owner_oh[e][t] =
+            mshr_q_valid[e] && (mshr_q[e].sub_reqs[0].tile_id == tile_group_id_t'(t));
+      end
+      for (genvar p = 1; p < NumRemoteReqPortsPerTile; p++) begin : gen_mo_port
+        // NumTilesPerGroup:1 select of the owner tile's request on this port.
+        tile_group_id_t mo_ot;
+        assign mo_ot = mshr_q[e].sub_reqs[0].tile_id;
+        assign mo_ovlp[e][p] =
+            req_can_merge[mo_ot][p] &&
+            mshr_q_valid[e] &&
+            ((mshr_q[e].state == MSHR_WAIT_RESP) ||
+             (mshr_q[e].state == MSHR_DRAIN_RESP) ||
+             (mshr_q[e].state == MSHR_RESP_HOLD)) &&
+            (mshr_q[e].sub_reqs[0].core_id == req_in[mo_ot][p].wdata.core_id) &&
+            // Same-address exclusion, bank-local exactly as in the per-lane form: a same-address
+            // entry must lie in the request's own bank, so req_addr_hit_way (already bank-scoped)
+            // carries it and no extra address comparator appears here.
+            !((req_bank[mo_ot][p] == BankIdW'(e / MshrWaysPerBank)) &&
+              req_addr_hit_way[mo_ot][p][e % MshrWaysPerBank]) &&
+            // Length guards are load-bearing -- see the per-lane form for why.
+            (mshr_q[e].burst_len != '0) &&
+            (req_len[mo_ot][p] != '0) &&
+            ((meta_id_t'(mshr_q[e].sub_reqs[0].meta_id_base -
+                         req_in[mo_ot][p].wdata.meta_id) < req_len[mo_ot][p]) ||
+             (meta_id_t'(req_in[mo_ot][p].wdata.meta_id -
+                         mshr_q[e].sub_reqs[0].meta_id_base) < mshr_q[e].burst_len));
+      end
+    end
+  endgenerate
+
 
   // mshr_hit_req[e]: is entry e address-hit by some request this cycle? Used by the per-bank free-way
   // reclaim guard to avoid evicting a CACHED entry that a request is about to merge into. Scatter the
@@ -2781,6 +2896,11 @@ module mempool_group_mshr
   // the RETRY count, i.e. exactly the throughput being traded for the rank network's removal.
   logic [31:0] merge_arb_stall_cnt_dbg;
   logic [31:0] merge_arb_grant_cnt_dbg;
+  // F4d cost, comparable ACROSS the knob: lanes that wanted to capture a response this cycle
+  // (resp_is_mshr) against lanes that actually did (resp_capture_fire). The difference is the
+  // deferral the capture arbiter imposed, whichever form is compiled in.
+  logic [31:0] cap_want_cnt_dbg;
+  logic [31:0] cap_fire_cnt_dbg;
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       cap_two_grant_cnt_dbg <= '0;
@@ -2788,6 +2908,8 @@ module mempool_group_mshr
       stb_ovl_cnt_dbg       <= '0;
       merge_arb_stall_cnt_dbg <= '0;
       merge_arb_grant_cnt_dbg <= '0;
+      cap_want_cnt_dbg        <= '0;
+      cap_fire_cnt_dbg        <= '0;
     end else begin
       cap_two_grant_cnt_dbg <= cap_two_grant_cnt_dbg + 32'($countones(cap_g2));
       cap_one_grant_cnt_dbg <= cap_one_grant_cnt_dbg + 32'($countones(cap_g1 & ~cap_g2));
@@ -2796,6 +2918,8 @@ module mempool_group_mshr
           32'($countones(merge_arb_cand_flat & ~merge_arb_grant_flat_dbg));
       merge_arb_grant_cnt_dbg <= merge_arb_grant_cnt_dbg +
           32'($countones(merge_arb_cand_flat &  merge_arb_grant_flat_dbg));
+      cap_want_cnt_dbg        <= cap_want_cnt_dbg + 32'($countones(resp_is_mshr));
+      cap_fire_cnt_dbg        <= cap_fire_cnt_dbg + 32'($countones(resp_capture_fire));
     end
   end
   final begin
@@ -2803,6 +2927,8 @@ module mempool_group_mshr
              group_id_i, cap_two_grant_cnt_dbg, cap_one_grant_cnt_dbg, stb_ovl_cnt_dbg);
     $display("[MRGARB] group=%0d merge_grants=%0d merge_arb_stalls=%0d",
              group_id_i, merge_arb_grant_cnt_dbg, merge_arb_stall_cnt_dbg);
+    $display("[CAPARB] group=%0d cap_wanted=%0d cap_fired=%0d",
+             group_id_i, cap_want_cnt_dbg, cap_fire_cnt_dbg);
   end
 
   // ------------------------------------------------------------------------
@@ -3429,6 +3555,17 @@ module mempool_group_mshr
   // This is the arbiter that still matters: the head-beat MshrNum-wide selector is the else-arm of
   // `if (BankPublish)` and folds away at the shipping default, whereas drain2 is ungated and runs
   // MshrNum-wide in every config, x NumTilesPerGroup x (ports-1) instances.
+  // F4c: bank-published drain2 (Drain2BankPublish). Publication is lane-independent, so it is
+  // built once per cycle above the (tile, resp port) loops; the per-lane work is then 16-wide.
+  logic [MshrNum-1:0]       drain2_ent_any;                        // entry offers any 2nd-slot beat
+  logic [MshrBankNum-1:0]                  drain2_pub_v;           // bank published an entry
+  logic [MshrBankNum-1:0][VictimPtrW-1:0]  drain2_pub_w;           // ... which way
+  logic [VictimPtrW-1:0]    drain2_scan_w;                         // way scan temporary
+  logic [MshrBankNum-1:0]   drain2_bank_cand;                      // per-lane bank candidates
+  logic [MshrBankNum-1:0]   drain2_bank_rr_mask;
+  logic [MshrBankNum-1:0]   drain2_bhi, drain2_blo, drain2_bfirst;
+  logic [BankIdW-1:0]       drain2_bank_base;
+  logic                     drain2_any;                            // a candidate exists, either form
   logic [MshrNum-1:0]       drain2_rr_mask;                        // 1 = entry is at/above the base
   logic [MshrNum-1:0]       drain2_hi, drain2_lo;
   logic [MshrIdxW-1:0]      drain2_idx;                            // A: index within the rotation
@@ -4000,12 +4137,65 @@ module mempool_group_mshr
         end
       end
     end
-    for (int e = 0; e < MshrNum; e++) begin
-      cap_first[e]  = cap_want[e] & (~cap_want[e] + NumRespLanes'(1));
-      cap_rest      = cap_want[e] & ~cap_first[e];
-      cap_second[e] = cap_rest    & (~cap_rest    + NumRespLanes'(1));
-      cap_g1[e] = (cap_first[e]  != '0) && (mshr_resp_slots[e] >= RespBufCountW'(1));
-      cap_g2[e] = (cap_second[e] != '0) && (mshr_resp_slots[e] >= RespBufCountW'(2));
+    if (CapPerBank) begin
+      // One arbiter per bank over the union of its ways' wanters. The two winners may target
+      // DIFFERENT entries of the bank, which is the common case and costs nothing: each is then
+      // simply "first" for its own entry. Only when they target the SAME entry does the second
+      // become that entry's second slot and need two free buffer words.
+      for (int b = 0; b < MshrBankNum; b++) begin
+        capb_want[b] = '0;
+        for (int w = 0; w < MshrWaysPerBank; w++) begin
+          capb_want[b] = capb_want[b] | cap_want[b * MshrWaysPerBank + w];
+        end
+        capb_l1[b] = capb_want[b] & (~capb_want[b] + NumRespLanes'(1));
+        capb_rest  = capb_want[b] & ~capb_l1[b];
+        capb_l2[b] = capb_rest    & (~capb_rest    + NumRespLanes'(1));
+        capb_e1[b] = '0;
+        capb_e2[b] = '0;
+        for (int t = 0; t < NumTilesPerGroup; t++) begin
+          for (int pp = 1; pp < NumRemoteRespPortsPerTile; pp++) begin
+            capb_lane = RespLaneW'(t * NumRespPortsActive + (pp - 1));
+            if (capb_l1[b][capb_lane]) capb_e1[b] = resp_mshr_id[t][pp];
+            if (capb_l2[b][capb_lane]) capb_e2[b] = resp_mshr_id[t][pp];
+          end
+        end
+        capb_same[b] = (capb_e1[b] == capb_e2[b]);
+        capb_g1[b] = (capb_l1[b] != '0) &&
+                     (mshr_resp_slots[capb_e1[b]] >= RespBufCountW'(1));
+        capb_g2[b] = (capb_l2[b] != '0) &&
+                     (capb_same[b] ? (mshr_resp_slots[capb_e1[b]] >= RespBufCountW'(2))
+                                   : (mshr_resp_slots[capb_e2[b]] >= RespBufCountW'(1)));
+      end
+      // Map back onto the per-entry vectors the rest of the pass reads, so nothing downstream
+      // changes. The guards matter: a bank with no wanter must not write entry 0 and clobber
+      // bank 0's grant, since capb_e* default to 0.
+      cap_first  = '0;
+      cap_second = '0;
+      cap_g1     = '0;
+      cap_g2     = '0;
+      for (int b = 0; b < MshrBankNum; b++) begin
+        if (capb_l1[b] != '0) begin
+          cap_first[capb_e1[b]] = capb_l1[b];
+          cap_g1[capb_e1[b]]    = capb_g1[b];
+        end
+        if (capb_l2[b] != '0) begin
+          if (capb_same[b]) begin
+            cap_second[capb_e1[b]] = capb_l2[b];
+            cap_g2[capb_e1[b]]     = capb_g2[b];
+          end else begin
+            cap_first[capb_e2[b]] = capb_l2[b];
+            cap_g1[capb_e2[b]]    = capb_g2[b];
+          end
+        end
+      end
+    end else begin
+      for (int e = 0; e < MshrNum; e++) begin
+        cap_first[e]  = cap_want[e] & (~cap_want[e] + NumRespLanes'(1));
+        cap_rest      = cap_want[e] & ~cap_first[e];
+        cap_second[e] = cap_rest    & (~cap_rest    + NumRespLanes'(1));
+        cap_g1[e] = (cap_first[e]  != '0) && (mshr_resp_slots[e] >= RespBufCountW'(1));
+        cap_g2[e] = (cap_second[e] != '0) && (mshr_resp_slots[e] >= RespBufCountW'(2));
+      end
     end
     for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
       for (int port_i = 1; port_i < NumRemoteRespPortsPerTile; port_i++) begin
@@ -4678,6 +4868,26 @@ module mempool_group_mshr
             drain2_sub_tile[e][s]  = drain2_scan_ent[e].sub_reqs[s].tile_id;
           end
         end
+        // F4c: publish at most one second-slot entry per bank. Lane-independent, so it is built
+        // once here rather than 32 times inside the (tile, resp port) loops below. The way scan is
+        // rotated by the shared drain RR pointer, so publication reaches every way over time.
+        drain2_bank_base = BankIdW'(EnableRrFairness ? (drain_mshr_rr_q / MshrWaysPerBank) : '0);
+        for (int e = 0; e < MshrNum; e++) begin
+          drain2_ent_any[e] = |drain2_sub_ready[e];
+        end
+        for (int b = 0; b < MshrBankNum; b++) begin
+          drain2_pub_v[b] = 1'b0;
+          drain2_pub_w[b] = '0;
+          // Descending scan so the LAST match written is the one closest to the rotation base,
+          // matching the head-beat publication's form exactly.
+          for (int k = MshrWaysPerBank - 1; k >= 0; k--) begin
+            drain2_scan_w = VictimPtrW'((EnableRrFairness ? int'(drain_mshr_rr_q) : 0) + k);
+            if (drain2_ent_any[b * MshrWaysPerBank + int'(drain2_scan_w)]) begin
+              drain2_pub_v[b] = 1'b1;
+              drain2_pub_w[b] = drain2_scan_w;
+            end
+          end
+        end
         for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
           for (int port_i = 1; port_i < NumRemoteRespPortsPerTile; port_i++) begin
             resp_sel2_valid[tile_i][port_i]      = 1'b0;
@@ -4713,31 +4923,72 @@ module mempool_group_mshr
               // reads, so all iterations see identical state. Verified by enumerating every
               // left-hand side in the select loop body.
               drain2_cand = '0;
-              for (int e = 0; e < MshrNum; e++) begin
-                for (int s = 0; s < MshrMergeReqs; s++) begin
-                  if (drain2_sub_ready[e][s] &&
-                      (drain2_sub_tile[e][s] == tile_group_id_t'(tile_i)) &&
-                      (drain2_sub_port[e] == port_i[RespPortIdW-1:0])) begin
-                    drain2_cand[e] = 1'b1;
+              drain2_bank_cand = '0;
+              drain2_any = 1'b0;
+              if (Drain2BankPublish) begin
+                // Only the published entry of each bank is selectable. b is a loop constant, so
+                // b*MshrWaysPerBank + pub_w[b] is a MshrWaysPerBank:1 select, not MshrNum:1.
+                for (int b = 0; b < MshrBankNum; b++) begin
+                  for (int s = 0; s < MshrMergeReqs; s++) begin
+                    if (drain2_pub_v[b] &&
+                        drain2_sub_ready[b * MshrWaysPerBank + int'(drain2_pub_w[b])][s] &&
+                        (drain2_sub_tile[b * MshrWaysPerBank + int'(drain2_pub_w[b])][s] ==
+                         tile_group_id_t'(tile_i)) &&
+                        (drain2_sub_port[b * MshrWaysPerBank + int'(drain2_pub_w[b])] ==
+                         port_i[RespPortIdW-1:0])) begin
+                      drain2_bank_cand[b] = 1'b1;
+                    end
                   end
                 end
+                drain2_any = |drain2_bank_cand;
+              end else begin
+                for (int e = 0; e < MshrNum; e++) begin
+                  for (int s = 0; s < MshrMergeReqs; s++) begin
+                    if (drain2_sub_ready[e][s] &&
+                        (drain2_sub_tile[e][s] == tile_group_id_t'(tile_i)) &&
+                        (drain2_sub_port[e] == port_i[RespPortIdW-1:0])) begin
+                      drain2_cand[e] = 1'b1;
+                    end
+                  end
+                end
+                drain2_any = |drain2_cand;
               end
               // B1: hi/lo split about the rotation base, then isolate the lowest set bit of each.
               // hi holds candidates at-or-above the base, so its lowest bit is the first candidate
               // at-or-after it; if hi is empty the scan wraps and lo's lowest bit wins. Identical
               // selection to the rotate-then-prefix form, and the winner is already absolute.
-              for (int e = 0; e < MshrNum; e++) begin
-                drain2_rr_mask[e] = EnableRrFairness ? (MshrIdxW'(e) >= drain2_base) : 1'b1;
+              drain2_first = '0;
+              if (Drain2BankPublish) begin
+                for (int b = 0; b < MshrBankNum; b++) begin
+                  drain2_bank_rr_mask[b] =
+                      EnableRrFairness ? (BankIdW'(b) >= drain2_bank_base) : 1'b1;
+                end
+                drain2_bhi    = drain2_bank_cand &  drain2_bank_rr_mask;
+                drain2_blo    = drain2_bank_cand & ~drain2_bank_rr_mask;
+                drain2_bfirst = (drain2_bhi != '0)
+                                    ? (drain2_bhi & (~drain2_bhi + MshrBankNum'(1)))
+                                    : (drain2_blo & (~drain2_blo + MshrBankNum'(1)));
+                // Re-expand the winning bank to the absolute entry one-hot so everything
+                // downstream (drain2_idx, drain2_mshr_i, the sub-request scan) is unchanged.
+                for (int b = 0; b < MshrBankNum; b++) begin
+                  if (drain2_bfirst[b]) begin
+                    drain2_first[b * MshrWaysPerBank + int'(drain2_pub_w[b])] = 1'b1;
+                  end
+                end
+              end else begin
+                for (int e = 0; e < MshrNum; e++) begin
+                  drain2_rr_mask[e] = EnableRrFairness ? (MshrIdxW'(e) >= drain2_base) : 1'b1;
+                end
+                drain2_hi    = drain2_cand &  drain2_rr_mask;
+                drain2_lo    = drain2_cand & ~drain2_rr_mask;
+                drain2_first = (drain2_hi != '0) ? (drain2_hi & (~drain2_hi + MshrNum'(1)))
+                                                 : (drain2_lo & (~drain2_lo + MshrNum'(1)));
               end
-              drain2_hi    = drain2_cand &  drain2_rr_mask;
-              drain2_lo    = drain2_cand & ~drain2_rr_mask;
-              drain2_first = (drain2_hi != '0) ? (drain2_hi & (~drain2_hi + MshrNum'(1)))
-                                               : (drain2_lo & (~drain2_lo + MshrNum'(1)));
               drain2_idx   = '0;
               for (int b = 0; b < MshrNum; b++) begin
                 if (drain2_first[b]) drain2_idx |= MshrIdxW'(b);
               end
-              if (|drain2_cand) begin
+              if (drain2_any) begin
                 drain2_mshr_i = drain2_idx;   // already absolute -- no base add
                 // First eligible sub-request inside the winning entry, same rotated order.
                 for (int ks = 0; ks < MshrMergeReqs; ks++) begin

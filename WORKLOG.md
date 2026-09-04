@@ -16391,3 +16391,55 @@ gmrg1 (knob on, the throughput measurement).
 
 **Status.** Committed 86709984 with both arms still in flight, the speculative-commit protocol
 agreed for this pass. Revert or set the config knob to 0 if gmrg1 shows a material regression.
+
+## 2026-09-04 — F4b/F4c/F4d: three more sparsity/banking cuts in the MSHR
+
+Found by ranking every loop nest in the module by iteration count and classifying each by
+synthesis visibility. Result worth recording: after the per-bank merge arbiter there is **no
+other all-pairs lane x lane structure left** -- the only remaining t2/p2 nest is the merge-rank
+one, now gated. The two largest nests in the file are sim-only assertions, `req_addr_hit_way` is
+already bank-scoped, `mshr_resp_seen_now` already has an O(1) path, and `bypass_track` is dead
+(EnableBypassTrack = 1'b0).
+
+### F4b — meta-range overlap once per ENTRY (MetaOvlpByOwner, default ON)
+
+`req_meta_ovlp_map` was the last [lane][MshrNum] signal: 32 lanes x 64 entries = 2048
+replications of a tile compare, a core compare and a two-sided modular range test. The relation
+is SPARSE -- the test is gated on `sub_reqs[0].tile_id == tile_i` and an entry has exactly one
+owner tile, so 63 of every 64 replications are structurally dead. Owner-indexed form: per
+(entry, req port) mux in the owner tile's request and run ONE test, then scatter with a 4-to-16
+owner decode. **128 tests replace 2048.**
+
+EXACT, not a trade: for t != owner the old tile compare is false and the new owner decode is
+false; for t == owner the muxed operands ARE req_*[t][p], so the expression is identical term
+for term. An invalid entry has garbage tile_id but mshr_q_valid[e] zeroes the per-entry result.
+
+### F4c — bank-published drain2 (Drain2BankPublish, default ON)
+
+The RTL comment made the case itself: the head-beat MshrNum-wide selector is the else-arm of
+`if (BankPublish)` and folds away at the shipping default, whereas drain2 is ungated and runs
+MshrNum-wide in every config x 32 (tile, resp port) instances. With publication each lane builds
+a MshrBankNum-wide candidate vector and runs a 16-bit arbiter: **per-lane work drops 4x**. The
+published entry is addressed as `b*MshrWaysPerBank + pub_w[b]` with b a loop constant, so the
+sub-request lookup stays a MshrWaysPerBank:1 mux, never MshrNum:1.
+
+Same trade already accepted next door: a lane whose target sits in a bank that published a
+different entry waits a cycle. Publication rotates on drain_mshr_rr_q and a drain2 candidate is
+continuous (held in DRAIN_RESP until drained), so it is reached.
+
+### F4d — per-bank capture arbitration (CapPerBank, **default OFF**)
+
+Implemented and verified to elaborate, but NOT enabled, and the reason is recorded so it is not
+rediscovered: the saving is the smallest of the set (~13k gates of arbiter) and is partly given
+back -- selecting the winning lanes' entries needs a NumRespLanes:1 mux of mshr_id per bank per
+slot, and the slot check then indexes mshr_resp_slots by that dynamic id (MshrNum:1) where the
+per-entry form indexes by a loop constant. Net nearer ~0.5% of the module. And the trade lands
+on the RESPONSE path, already the documented bandwidth ceiling for burst loads, with no hold
+window to absorb a deferral. Enable only if synthesis says the arbiters beat the muxes.
+
+`[CAPARB] cap_wanted / cap_fired` measures the deferral in BOTH forms, so the two are comparable.
+
+**Verification.** gf4b (F4b on, F4c off -- must equal gmrg1 exactly, F4b is exact), gf4 (F4b+F4c),
+gf4d (all three). All against vg_fp16_256x32x256, cfg_runtime=1.
+
+**Status.** All three elaborate clean. Arms in flight.
