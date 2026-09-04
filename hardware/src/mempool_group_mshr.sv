@@ -1079,6 +1079,26 @@ module mempool_group_mshr
   // clear BITS, and bit clears commute -- so ORing the requests and applying one AND-NOT per entry
   // is identical to letting 32 lanes each read-modify-write the entry in turn.
   logic [MshrNum-1:0][MshrMergeReqs-1:0]                                       bp_clr, bp2_clr, sv_clr;
+  // F3b: store byte-merge into CACHED lines, decided per entry instead of chained across lanes.
+  //   stb_hit   which request lanes hit this entry as a store-to-CACHED
+  //   stb_be    each lane's byte enables, and stb_wd its write data, captured once
+  // The merge below ORs each hitting lane's ENABLED BYTES together. That is exactly the sequential
+  // result whenever the hitting lanes touch DISJOINT bytes, which is the only case the memory
+  // model gives a defined answer for anyway: two stores to the same byte in the same cycle are
+  // unordered, so the old "last lane in index order wins" was one arbitrary choice among several.
+  // stb_ovl flags the overlapping case so it is measured rather than assumed away -- see the
+  // assertion and counter in the translate_off region.
+  localparam int unsigned NumReqPortsActiveF3 = (NumRemoteReqPortsPerTile > 1) ?
+                                                (NumRemoteReqPortsPerTile - 1) : 1;
+  localparam int unsigned NumReqLanes         = NumTilesPerGroup * NumReqPortsActiveF3;
+  localparam int unsigned StrbW               = $bits(strb_t);
+  logic [MshrNum-1:0][NumReqLanes-1:0]                                         stb_hit;
+  logic [NumReqLanes-1:0][StrbW-1:0]                                           stb_be;
+  data_t [NumReqLanes-1:0]                                                     stb_wd;
+  logic [RespLaneW-1:0]                                                        stb_lane;
+  logic [MshrNum-1:0][StrbW-1:0]                                               stb_bytes;
+  logic [MshrNum-1:0]                                                          stb_ovl;
+  logic [StrbW-1:0]                                                            stb_seen;
   mshr_resp_slot_t [MshrNum-1:0]                                               cap_d0, cap_d1;
   logic [RespBufPtrW-1:0]                                                      cap_s0, cap_s1, cap_n0, cap_n1;
   logic [RespLaneW-1:0]                                                        cap_lane;
@@ -2234,6 +2254,7 @@ module mempool_group_mshr
   logic [NumAllocSlots-1:0]                  alloc_hi_lsb;    // lowest set bit of each half
   logic [NumAllocSlots-1:0]                  alloc_lo_lsb;
 
+
   always_comb begin
     alloc_cand_flat = '0;
     alloc_bank_flat = '0;
@@ -2662,20 +2683,28 @@ module mempool_group_mshr
   // Declared and used entirely inside this translate_off region; simulators compile it, synthesis
   // never sees it. (The converse -- declaring here and using outside -- is what broke synthesis
   // in 467fa6c7.)
+  // F3b's per-entry merge ORs each hitting lane's ENABLED bytes. That reproduces the sequential
+  // last-lane-wins exactly while the hitting lanes touch DISJOINT bytes. When they overlap, the
+  // two forms can differ -- both are architecturally valid (simultaneous stores to one byte are
+  // unordered), but the difference would break a cycle-identity comparison, so it must be
+  // measured, not assumed. Non-zero here means the equivalence arm's verdict needs interpreting.
+  logic [31:0] stb_ovl_cnt_dbg;
   logic [31:0] cap_two_grant_cnt_dbg;   // cycles-with-entries where a second lane was granted
   logic [31:0] cap_one_grant_cnt_dbg;   // ... where only the first was, for a ratio
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       cap_two_grant_cnt_dbg <= '0;
       cap_one_grant_cnt_dbg <= '0;
+      stb_ovl_cnt_dbg       <= '0;
     end else begin
       cap_two_grant_cnt_dbg <= cap_two_grant_cnt_dbg + 32'($countones(cap_g2));
       cap_one_grant_cnt_dbg <= cap_one_grant_cnt_dbg + 32'($countones(cap_g1 & ~cap_g2));
+      stb_ovl_cnt_dbg       <= stb_ovl_cnt_dbg       + 32'($countones(stb_ovl));
     end
   end
   final begin
-    $display("[F3cCOV] group=%0d two_lane_grants=%0d one_lane_grants=%0d",
-             group_id_i, cap_two_grant_cnt_dbg, cap_one_grant_cnt_dbg);
+    $display("[F3cCOV] group=%0d two_lane_grants=%0d one_lane_grants=%0d store_byte_overlaps=%0d",
+             group_id_i, cap_two_grant_cnt_dbg, cap_one_grant_cnt_dbg, stb_ovl_cnt_dbg);
   end
 
   // ------------------------------------------------------------------------
@@ -3380,6 +3409,14 @@ module mempool_group_mshr
       end
     end
 
+    stb_hit = '0;
+    for (int t = 0; t < NumTilesPerGroup; t++) begin
+      for (int pp = 1; pp < NumRemoteReqPortsPerTile; pp++) begin
+        stb_be[t * NumReqPortsActiveF3 + (pp - 1)] = req_in[t][pp].be;
+        stb_wd[t * NumReqPortsActiveF3 + (pp - 1)] = req_in[t][pp].wdata.data;
+      end
+    end
+
     // ------------------------------------------------------------
     // Request path: merge loads, allocate MSHR, or bypass to NoC
     // ------------------------------------------------------------
@@ -3581,49 +3618,62 @@ module mempool_group_mshr
                 end
               end
             end
+            // F3b: RECORD the store's byte-merge; the merge itself happens once per entry after
+            // this loop. Writing mshr_d[e].resp_buf here made lane k+1 read the entry lane k had
+            // just rewritten -- a 32-deep chain of 64-entry indexed writes inside the request door,
+            // which is measured at 3.77 ns and is ~70% of what is left after F3a/F3c/F3d.
             if (EnableRespCache && !amo_invalidate &&
                 req_is_store[tile_i][port_i] &&
                 (req_len[tile_i][port_i] == BurstLenWidth'(1)) &&
                 req_in_ready[tile_i][port_i]) begin
-              // Bank-scoped (3b): a store can only hit a CACHED entry in its own bank, so scan only
-              // this request's MshrWaysPerBank ways; hit_e reconstructs the absolute entry id.
+              // Bank-scoped: a store can only hit a CACHED entry in its OWN bank, so only this
+              // request's MshrWaysPerBank ways are examined and hit_e reconstructs the absolute id.
               for (int way_i = 0; way_i < MshrWaysPerBank; way_i++) begin
                 cache_hit_e =
                     int'(req_bank[tile_i][port_i]) * MshrWaysPerBank + way_i;
+                // Reads only. None of state / resp_buf_cnt / resp_buf_rd_ptr is written by this
+                // pass any more, so all 32 lanes evaluate against the same entry state.
                 if (mshr_d_valid[cache_hit_e] &&
                     (mshr_d[cache_hit_e].state == MSHR_CACHED) &&
                     req_addr_hit_way[tile_i][port_i][way_i]) begin
-                  // H3 fix: merge under byte-enables — a sub-word store must update only the
-                  // enabled byte lanes and keep the existing cached bytes (writing the full word
-                  // would corrupt the non-written bytes that a later cache-hit load would read).
-                  for (int b = 0; b < $bits(req_in[tile_i][port_i].be); b++) begin
-                    if (req_in[tile_i][port_i].be[b]) begin
-                      mshr_d[cache_hit_e].resp_buf[mshr_d[cache_hit_e].resp_buf_rd_ptr]
-                            .data[b*8 +: 8] =
-                          req_in[tile_i][port_i].wdata.data[b*8 +: 8];
-                    end
-                  end
-                  // CLOCK-GATE ENABLE for the byte-merge above -- REQUIRED, not an optimisation.
-                  // mshr_rb_en = mshr_wr_all | mshr_rb_we, and this path raised NEITHER, so the
-                  // `FFL holding resp_buf stayed gated while its D input changed. FFL models the
-                  // enable in simulation too, so the merged store bytes were dropped in SIM as
-                  // well as in synthesis: the CACHED line kept stale data and a later cache hit
-                  // on it returned that stale word. Caught by mshr_gate_rb_no_lost_write (:2247),
-                  // which fired as "clock gate dropped a resp_buf write: entry=8 slot=0".
-                  // resp_buf_cnt below needs no equivalent: mshr_ctl_en is (q_valid | d_valid),
-                  // already high for a live entry.
-                  if (|req_in[tile_i][port_i].be) begin
-                    mshr_rb_we[cache_hit_e][mshr_d[cache_hit_e].resp_buf_rd_ptr] = 1'b1;
-                  end
-                  if (mshr_d[cache_hit_e].resp_buf_cnt == '0) begin
-                    mshr_d[cache_hit_e].resp_buf_cnt = RespBufCountW'(1);
-                  end
+                  stb_lane = RespLaneW'(tile_i * NumReqPortsActive + (port_i - 1));
+                  stb_hit[cache_hit_e][stb_lane] = 1'b1;
                 end
               end
             end
           end
         end else begin
           req_in_ready[tile_i][port_i] = 1'b1;
+        end
+      end
+    end
+
+    // F3b: one byte-merge per entry. Each hitting lane contributes only its enabled bytes, so
+    // disjoint byte sets merge exactly as the sequential loop did. The clock-gate enable is
+    // REQUIRED, not an optimisation: mshr_rb_en is (mshr_wr_all | mshr_rb_we) and this path raises
+    // neither otherwise, so the `FFL holding resp_buf stays gated while its D changes -- which
+    // drops the merged bytes in SIMULATION as well as synthesis, leaving the CACHED line stale for
+    // the next hit. That bug was caught historically by mshr_gate_rb_no_lost_write.
+    stb_bytes = '0; stb_ovl = '0;
+    for (int e = 0; e < MshrNum; e++) begin
+      stb_seen = '0;
+      for (int l = 0; l < NumReqLanes; l++) begin
+        if (stb_hit[e][l]) begin
+          if (|(stb_seen & stb_be[l])) stb_ovl[e] = 1'b1;   // two lanes, same byte, same cycle
+          stb_seen              = stb_seen | stb_be[l];
+          stb_bytes[e]          = stb_bytes[e] | stb_be[l];
+          for (int b = 0; b < StrbW; b++) begin
+            if (stb_be[l][b]) begin
+              mshr_d[e].resp_buf[mshr_d[e].resp_buf_rd_ptr].data[b*8 +: 8] =
+                  stb_wd[l][b*8 +: 8];
+            end
+          end
+        end
+      end
+      if (|stb_bytes[e]) begin
+        mshr_rb_we[e][mshr_d[e].resp_buf_rd_ptr] = 1'b1;
+        if (mshr_d[e].resp_buf_cnt == '0) begin
+          mshr_d[e].resp_buf_cnt = RespBufCountW'(1);
         end
       end
     end
