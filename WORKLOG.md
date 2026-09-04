@@ -16450,3 +16450,52 @@ and off are directly comparable, and gf4 (F4d off) vs gf4d (F4d on) isolates exa
 gf4d (all three). All against vg_fp16_256x32x256, cfg_runtime=1.
 
 **Status.** All three elaborate clean. Arms in flight.
+
+## 2026-09-04 — F5a/F5b: apply the door's entry writes ONCE PER BANK, not once per lane
+
+**Purpose.** After F1-F4 the estimated critical path was still dominated by the request door, and
+the reason was two 32-deep read-modify-write chains that none of the earlier stages touched:
+
+| loop | writes to mshr_d[...] inside the (tile,port) loop |
+|---|---|
+| merge apply | 25, indexed by req_merge_mshr_id[tile_i][port_i] |
+| allocation   | 22, indexed by req_alloc_found_mshr_id[tile_i][port_i] |
+
+Each lane read the array the previous lane had just written, so synthesis built a 32-stage chain
+(~7 levels each, ~220 levels) sitting directly on req_in_ready / req_out_valid.
+
+**F5a (merge), gated on OneMergePerBank.** The lane loop now only RECORDS the merge -- six narrow
+values per bank (way, tile, port, core, meta, valid). A second loop applies them ONE ITERATION PER
+BANK after the lane loop closes. Legal because OneMergePerBank grants at most one merge per bank
+and an entry belongs to exactly one bank, so no two writes can target the same entry. The slot
+needs no carrying: rank is identically zero under the knob, so it is just mshr_q[e].sub_reqs_num,
+recomputed per bank. The old 25 writes are kept verbatim in the knob-off arm (audited: all 25 are
+inside it, so they fold away entirely when the knob is on).
+
+**F5b (allocation), NO knob.** The same transformation, and it needs no new guarantee: the
+allocator has always granted at most one allocation per bank (bank_win_oh), and bank_free_id[b] is
+by construction a way of bank b. The code already said so at the allocation site -- "At most one
+alloc fires per bank per cycle (bank_alloc_taken), so this per-bank write never conflicts". The
+per-lane loop simply could not express it, because a lane's write went to "any of MshrNum".
+Two things stay in the lane loop deliberately: req_out[].mshr_tag (a per-LANE output) and the RR
+victim advance (writes victim_rr_d, not mshr_d, so it is not part of the entry-array chain).
+
+**Both are exact, not trades.** Same writes, same values, only the order changes -- and nothing in
+the lane loop reads what they wrote: the slot and capacity tests read mshr_q, and allocation takes
+a FREE way while a merge requires a RESIDENT hit, so the two never target the same entry. The
+apply order is alloc-then-merge, matching the original.
+
+**Second win, free:** in the apply loops b is a loop constant, so b*MshrWaysPerBank + way is a
+MshrWaysPerBank:1 select. The per-lane form indexed "any of MshrNum" -- a 64:1 mux per write.
+
+**Still per-lane on the RESPONSE side** (not the door): 10 synthesised writes via resp_mshr_id and
+5 via resp_sel_mshr_id. Next candidates if the tail turns out to matter.
+
+**Verification.** gf5a (F5a) and gf5 (F5a+F5b) on vg_fp16_256x32x256 against the 3,117-cycle
+reference. Plus three LARGER shapes built fresh today (the existing fp16_* ELFs are from
+2026-08-21 and mshr_cfg.h derives MSHR tuning from GEMM_M/N/P at compile time, so a stale ELF
+would silently mistune the run): vg_fp16_256x128x256, vg_fp16_256x256x256, vg_fp16_512x64x256.
+Motivation: at 256x32x256 the merge arbiter recorded merge_grants=240, merge_arb_stalls=0 per
+group -- the restriction is never exercised, so "costs nothing" is unproven there.
+
+**Status.** Committed with arms in flight, per the speculative protocol. Revert if any disagrees.

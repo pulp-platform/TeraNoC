@@ -3565,6 +3565,32 @@ module mempool_group_mshr
   logic [MshrBankNum-1:0]                  drain2_pub_v;           // bank published an entry
   logic [MshrBankNum-1:0][VictimPtrW-1:0]  drain2_pub_w;           // ... which way
   logic [VictimPtrW-1:0]    drain2_scan_w;                         // way scan temporary
+  // F5a: per-bank merge apply. OneMergePerBank guarantees at most one merge per bank, and an entry
+  // belongs to exactly one bank, so the 32 lanes never collide -- the writes can all happen at once
+  // instead of chaining through mshr_d one lane at a time. Only the operands that cannot be
+  // recovered from mshr_q are recorded; slot, served_cnt and the state tests are recomputed per
+  // bank, which keeps this vector narrow.
+  logic [MshrBankNum-1:0]                    mgb_v;
+  logic [MshrBankNum-1:0][VictimPtrW-1:0]    mgb_way;
+  tile_group_id_t [MshrBankNum-1:0]          mgb_tile;
+  logic [MshrBankNum-1:0][RespPortIdW-1:0]   mgb_port;
+  tile_core_id_t [MshrBankNum-1:0]           mgb_core;
+  meta_id_t [MshrBankNum-1:0]                mgb_meta;
+  mshr_id_t                                  mgb_e;      // b*Ways + way, rebuilt per bank
+  // F5b: per-bank ALLOCATION apply. The guarantee here is older than F5a and already stated at the
+  // allocation site -- "At most one alloc fires per bank per cycle (bank_alloc_taken), so this
+  // per-bank write never conflicts" -- so this needs no knob: it is unconditionally true.
+  logic [MshrBankNum-1:0]                    agb_v;
+  logic [MshrBankNum-1:0][VictimPtrW-1:0]    agb_way;
+  tcdm_addr_t [MshrBankNum-1:0]              agb_addr;
+  group_id_t [MshrBankNum-1:0]               agb_grp;
+  logic [MshrBankNum-1:0][BurstLenWidth-1:0] agb_len;
+  tile_group_id_t [MshrBankNum-1:0]          agb_tile;
+  logic [MshrBankNum-1:0][RespPortIdW-1:0]   agb_port;
+  tile_core_id_t [MshrBankNum-1:0]           agb_core;
+  meta_id_t [MshrBankNum-1:0]                agb_meta;
+  mshr_id_t                                  agb_e;
+  logic [MergeRankW-1:0]                     mgb_slot;   // recomputed from mshr_q
   logic [MshrBankNum-1:0]   drain2_bank_cand;                      // per-lane bank candidates
   logic [MshrBankNum-1:0]   drain2_bank_rr_mask;
   logic [MshrBankNum-1:0]   drain2_bhi, drain2_blo, drain2_bfirst;
@@ -3579,6 +3605,25 @@ module mempool_group_mshr
   always_comb begin
     int unsigned merge_new_idx;
     // Defaults
+    // F5a per-bank merge record (see the apply after the request loop).
+    mgb_v    = '0;
+    mgb_way  = '0;
+    mgb_tile = '0;
+    mgb_port = '0;
+    mgb_core = '0;
+    mgb_meta = '0;
+    mgb_e    = '0;
+    mgb_slot = '0;
+    agb_v    = '0;
+    agb_way  = '0;
+    agb_addr = '0;
+    agb_grp  = '0;
+    agb_len  = '0;
+    agb_tile = '0;
+    agb_port = '0;
+    agb_core = '0;
+    agb_meta = '0;
+    agb_e    = '0;
     mshr_d      = mshr_q;
     // Clock-gate write flags. Set on the same line as the write they describe (see the entry
     // register block), never from a restatement of the write's condition.
@@ -3688,63 +3733,75 @@ module mempool_group_mshr
                 ((merge_slot + MergeRankW'(1)) <= MergeRankW'(MshrMergeReqs));
             if (req_in_ready[tile_i][port_i]) begin
               if ((merge_slot + MergeRankW'(1)) <= MergeRankW'(MshrMergeReqs)) begin
-`ifndef TARGET_SYNTHESIS
-                if (EnableRespCache &&
-                    (mshr_q[req_merge_mshr_id[tile_i][port_i]].state == MSHR_CACHED)) begin
-                  mshr_d[req_merge_mshr_id[tile_i][port_i]].cache_hit_cnt =
-                      mshr_d[req_merge_mshr_id[tile_i][port_i]].cache_hit_cnt + 1'b1;
-                end
-`endif
-                merge_new_idx = merge_slot;
-                mshr_id_we[req_merge_mshr_id[tile_i][port_i]] = 1'b1;
-                mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[merge_new_idx].valid = 1'b1;
-                mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[merge_new_idx].tile_id = tile_i;
-                mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[merge_new_idx].port_id = port_i;
-                mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[merge_new_idx].core_id =
-                    req_in[tile_i][port_i].wdata.core_id;
-                mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[merge_new_idx].meta_id_base =
-                    req_in[tile_i][port_i].wdata.meta_id;
-                // Ports are visited in increasing order, so the LAST accepted port -- the one with the
-                // highest rank -- writes the correct final count. No separate accumulator needed.
-                // Guarded by the capacity check above, so this always fits SubReqCountW.
-                mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num =
-                    SubReqCountW'(merge_slot + MergeRankW'(1));
-                // Cache self-invalidate: count this merged sub-request toward the sharing target.
-                mshr_d[req_merge_mshr_id[tile_i][port_i]].served_cnt =
-                    mshr_q[req_merge_mshr_id[tile_i][port_i]].served_cnt +
-                    ServedCntW'(merge_rank[tile_i][port_i]) + ServedCntW'(1);
-                if (EnableRespCache &&
-                    (mshr_q[req_merge_mshr_id[tile_i][port_i]].state == MSHR_CACHED)) begin
-                  mshr_d[req_merge_mshr_id[tile_i][port_i]].state = MSHR_DRAIN_RESP;
-                  mshr_d[req_merge_mshr_id[tile_i][port_i]].beats_left = BurstLenWidth'(1);
-                  mshr_d[req_merge_mshr_id[tile_i][port_i]].beat_pending = '0;
-                  mshr_d[req_merge_mshr_id[tile_i][port_i]].beat_pending2 = '0;
-                  mshr_d[req_merge_mshr_id[tile_i][port_i]].beat2_armed = 1'b0;
-`ifndef TARGET_SYNTHESIS
-                  mshr_d[req_merge_mshr_id[tile_i][port_i]].beat_seen = '0;
-                  mshr_d[req_merge_mshr_id[tile_i][port_i]].beat_seen[0] = 1'b1;
-`endif
-`ifndef TARGET_SYNTHESIS
-                  mshr_d[req_merge_mshr_id[tile_i][port_i]].beat_done = '0;
-`endif
-                end else if (
-                    RespWaitSubsSingle &&
-                    (mshr_q[req_merge_mshr_id[tile_i][port_i]].state == MSHR_RESP_HOLD) &&
-                    ((merge_slot + MergeRankW'(1)) >=
-                     SubReqCountW'(cfg_hold_subs_single))) begin
-                  // The merge that landed this cycle reached the response-release target.
-                  mshr_d[req_merge_mshr_id[tile_i][port_i]].state = MSHR_DRAIN_RESP;
-                  mshr_d[req_merge_mshr_id[tile_i][port_i]].beats_left = BurstLenWidth'(1);
-                  mshr_d[req_merge_mshr_id[tile_i][port_i]].beat_pending = '0;
-                  mshr_d[req_merge_mshr_id[tile_i][port_i]].beat_pending2 = '0;
-                  mshr_d[req_merge_mshr_id[tile_i][port_i]].beat2_armed = 1'b0;
-`ifndef TARGET_SYNTHESIS
-                  mshr_d[req_merge_mshr_id[tile_i][port_i]].beat_seen = '0;
-                  mshr_d[req_merge_mshr_id[tile_i][port_i]].beat_seen[0] = 1'b1;
-`endif
-`ifndef TARGET_SYNTHESIS
-                  mshr_d[req_merge_mshr_id[tile_i][port_i]].beat_done = '0;
-`endif
+                if (OneMergePerBank) begin
+                  // F5a: RECORD only. The apply runs once per bank after this loop closes, so no
+                  // lane reads what an earlier lane wrote and the 32-deep chain disappears.
+                  mgb_v   [req_bank[tile_i][port_i]] = 1'b1;
+                  mgb_way [req_bank[tile_i][port_i]] =
+                      req_merge_mshr_id[tile_i][port_i][VictimPtrW-1:0];
+                  mgb_tile[req_bank[tile_i][port_i]] = tile_group_id_t'(tile_i);
+                  mgb_port[req_bank[tile_i][port_i]] = RespPortIdW'(port_i);
+                  mgb_core[req_bank[tile_i][port_i]] = req_in[tile_i][port_i].wdata.core_id;
+                  mgb_meta[req_bank[tile_i][port_i]] = req_in[tile_i][port_i].wdata.meta_id;
+                end else begin
+  `ifndef TARGET_SYNTHESIS
+                  if (EnableRespCache &&
+                      (mshr_q[req_merge_mshr_id[tile_i][port_i]].state == MSHR_CACHED)) begin
+                    mshr_d[req_merge_mshr_id[tile_i][port_i]].cache_hit_cnt =
+                        mshr_d[req_merge_mshr_id[tile_i][port_i]].cache_hit_cnt + 1'b1;
+                  end
+  `endif
+                  merge_new_idx = merge_slot;
+                  mshr_id_we[req_merge_mshr_id[tile_i][port_i]] = 1'b1;
+                  mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[merge_new_idx].valid = 1'b1;
+                  mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[merge_new_idx].tile_id = tile_i;
+                  mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[merge_new_idx].port_id = port_i;
+                  mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[merge_new_idx].core_id =
+                      req_in[tile_i][port_i].wdata.core_id;
+                  mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs[merge_new_idx].meta_id_base =
+                      req_in[tile_i][port_i].wdata.meta_id;
+                  // Ports are visited in increasing order, so the LAST accepted port -- the one with the
+                  // highest rank -- writes the correct final count. No separate accumulator needed.
+                  // Guarded by the capacity check above, so this always fits SubReqCountW.
+                  mshr_d[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num =
+                      SubReqCountW'(merge_slot + MergeRankW'(1));
+                  // Cache self-invalidate: count this merged sub-request toward the sharing target.
+                  mshr_d[req_merge_mshr_id[tile_i][port_i]].served_cnt =
+                      mshr_q[req_merge_mshr_id[tile_i][port_i]].served_cnt +
+                      ServedCntW'(merge_rank[tile_i][port_i]) + ServedCntW'(1);
+                  if (EnableRespCache &&
+                      (mshr_q[req_merge_mshr_id[tile_i][port_i]].state == MSHR_CACHED)) begin
+                    mshr_d[req_merge_mshr_id[tile_i][port_i]].state = MSHR_DRAIN_RESP;
+                    mshr_d[req_merge_mshr_id[tile_i][port_i]].beats_left = BurstLenWidth'(1);
+                    mshr_d[req_merge_mshr_id[tile_i][port_i]].beat_pending = '0;
+                    mshr_d[req_merge_mshr_id[tile_i][port_i]].beat_pending2 = '0;
+                    mshr_d[req_merge_mshr_id[tile_i][port_i]].beat2_armed = 1'b0;
+  `ifndef TARGET_SYNTHESIS
+                    mshr_d[req_merge_mshr_id[tile_i][port_i]].beat_seen = '0;
+                    mshr_d[req_merge_mshr_id[tile_i][port_i]].beat_seen[0] = 1'b1;
+  `endif
+  `ifndef TARGET_SYNTHESIS
+                    mshr_d[req_merge_mshr_id[tile_i][port_i]].beat_done = '0;
+  `endif
+                  end else if (
+                      RespWaitSubsSingle &&
+                      (mshr_q[req_merge_mshr_id[tile_i][port_i]].state == MSHR_RESP_HOLD) &&
+                      ((merge_slot + MergeRankW'(1)) >=
+                       SubReqCountW'(cfg_hold_subs_single))) begin
+                    // The merge that landed this cycle reached the response-release target.
+                    mshr_d[req_merge_mshr_id[tile_i][port_i]].state = MSHR_DRAIN_RESP;
+                    mshr_d[req_merge_mshr_id[tile_i][port_i]].beats_left = BurstLenWidth'(1);
+                    mshr_d[req_merge_mshr_id[tile_i][port_i]].beat_pending = '0;
+                    mshr_d[req_merge_mshr_id[tile_i][port_i]].beat_pending2 = '0;
+                    mshr_d[req_merge_mshr_id[tile_i][port_i]].beat2_armed = 1'b0;
+  `ifndef TARGET_SYNTHESIS
+                    mshr_d[req_merge_mshr_id[tile_i][port_i]].beat_seen = '0;
+                    mshr_d[req_merge_mshr_id[tile_i][port_i]].beat_seen[0] = 1'b1;
+  `endif
+  `ifndef TARGET_SYNTHESIS
+                    mshr_d[req_merge_mshr_id[tile_i][port_i]].beat_done = '0;
+  `endif
+                  end
                 end
               end
             end
@@ -3797,16 +3854,15 @@ module mempool_group_mshr
                 // bank-full mergeable misses fall through here as a plain bypass).
                 if (req_alloc_found[tile_i][port_i] &&
                     req_in_ready[tile_i][port_i]) begin
-                mshr_d_valid[req_alloc_found_mshr_id[tile_i][port_i]] = 1'b1;
+                // Tier-b: stamp the egress NoC request with (allocated entry id + 1) so the returning
+                // response routes back to this entry by direct index (tag 0 stays the bypass sentinel).
+                // Per-LANE output, so it stays here.
+                req_out[tile_i][port_i].mshr_tag =
+                    MshrTagWidth'(req_alloc_found_mshr_id[tile_i][port_i]) + MshrTagWidth'(1);
                 // RR victim advance: firing on a still-valid CACHED way IS a reclaim -- move
                 // that bank's scan start just past the evicted way. Invalid-way allocs (the
-                // common case) leave the pointer alone. Reads the _q view: the fresh entry's
-                // own fields are only in mshr_d, so this cycle's alloc cannot mask the reclaim.
-                // At most one alloc fires per bank per cycle (bank_alloc_taken), so this
-                // per-bank write never conflicts. /,% are shift/bit-select for the power-of-two
-                // ways-per-bank here, not a divider.
-                // ... and only when pass 2 can actually consume the pointer: the RR victim start is
-                // read exclusively by the reclaim scan, which is gated on CacheReclaimable.
+                // common case) leave the pointer alone. Reads the _q view, and writes victim_rr_d
+                // (not mshr_d), so it is not part of the entry-array chain and stays here.
                 if (CacheVictimRR && CacheReclaimable) begin
                   evict_vid = int'(req_alloc_found_mshr_id[tile_i][port_i]);
                   evict_vw  = evict_vid & unsigned'(MshrWaysPerBank - 1);
@@ -3815,55 +3871,17 @@ module mempool_group_mshr
                         (evict_vw + 1 >= MshrWaysPerBank) ? '0 : VictimPtrW'(evict_vw + 1);
                   end
                 end
-                // Tier-b: stamp the egress NoC request with (allocated entry id + 1) so the returning
-                // response routes back to this entry by direct index (tag 0 stays the bypass sentinel).
-                req_out[tile_i][port_i].mshr_tag =
-                    MshrTagWidth'(req_alloc_found_mshr_id[tile_i][port_i]) + MshrTagWidth'(1);
-                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]] = '0;
-                mshr_wr_all[req_alloc_found_mshr_id[tile_i][port_i]] = 1'b1;
-                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].base_addr =
-                    req_addr_key[tile_i][port_i];
-                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].tgt_group_id =
-                    req_in[tile_i][port_i].tgt_group_id;
-                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].burst_len =
-                    req_len[tile_i][port_i];
-                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].state      = MSHR_WAIT_RESP;
-                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].cacheable  = 1'b1;
-                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].beats_left =
-                    req_len[tile_i][port_i];
-                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].beat_pending = '0;
-                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].beat_pending2 = '0;
-                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].beat2_armed = 1'b0;
-`ifndef TARGET_SYNTHESIS
-                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].beat_seen = '0;
-`endif
-`ifndef TARGET_SYNTHESIS
-                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].beat_done = '0;
-`endif
-                // Owner request is always stored in sub_reqs[0].
-                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].sub_reqs[0].valid = 1'b1;
-                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].sub_reqs[0].tile_id = tile_i;
-                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].sub_reqs[0].port_id = port_i;
-                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].sub_reqs[0].core_id =
-                    req_in[tile_i][port_i].wdata.core_id;
-                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].sub_reqs[0].meta_id_base =
-                    req_in[tile_i][port_i].wdata.meta_id;
-`ifndef TARGET_SYNTHESIS
-                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].cache_hit_cnt = '0;
-`endif
-                // Hold-the-fetch: arm the per-type hold window (single vs burst). A 0 window (or
-                // the feature off) means the fetch went out this same cycle on the passthrough, so
-                // mark it issued immediately.
-                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].hold_cnt =
-                    hold_ticks((req_len[tile_i][port_i] == BurstLenWidth'(1)) ?
-                               cfg_hold_window_single : cfg_hold_window_burst);
-                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].issued =
-                    (((req_len[tile_i][port_i] == BurstLenWidth'(1)) ?
-                      cfg_hold_window_single : cfg_hold_window_burst) == 0);
-                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].sub_reqs_num =
-                    SubReqCountW'(1);
-                // Cache self-invalidate: the owner is the first served sub-request.
-                mshr_d[req_alloc_found_mshr_id[tile_i][port_i]].served_cnt = ServedCntW'(1);
+                // F5b: RECORD the allocation; the entry write happens once per bank after the loop.
+                agb_v   [req_bank[tile_i][port_i]] = 1'b1;
+                agb_way [req_bank[tile_i][port_i]] =
+                    req_alloc_found_mshr_id[tile_i][port_i][VictimPtrW-1:0];
+                agb_addr[req_bank[tile_i][port_i]] = req_addr_key[tile_i][port_i];
+                agb_grp [req_bank[tile_i][port_i]] = req_in[tile_i][port_i].tgt_group_id;
+                agb_len [req_bank[tile_i][port_i]] = req_len[tile_i][port_i];
+                agb_tile[req_bank[tile_i][port_i]] = tile_group_id_t'(tile_i);
+                agb_port[req_bank[tile_i][port_i]] = RespPortIdW'(port_i);
+                agb_core[req_bank[tile_i][port_i]] = req_in[tile_i][port_i].wdata.core_id;
+                agb_meta[req_bank[tile_i][port_i]] = req_in[tile_i][port_i].wdata.meta_id;
                 end
               end
             end
@@ -3896,6 +3914,115 @@ module mempool_group_mshr
         end
       end
     end
+
+    // F5b: apply the allocations recorded above, ONE ITERATION PER BANK. The guarantee is the
+    // allocator's own, and predates F5a: bank_win_oh grants at most one allocation per bank per
+    // cycle, and bank_free_id[b] is by construction a way of bank b. So these MshrBankNum writes
+    // target distinct entries and need no ordering between them -- exactly the property the old
+    // per-lane loop had but could not express, since a lane's write went to "any of MshrNum".
+    // Runs BEFORE the merge apply, matching the original order (both lived in the same lane loop,
+    // and a freshly allocated entry is never also a merge target this cycle: merge requires a
+    // resident hit, allocation takes a free way).
+    for (int b = 0; b < MshrBankNum; b++) begin
+      if (agb_v[b]) begin
+        agb_e = mshr_id_t'(b * MshrWaysPerBank + int'(agb_way[b]));
+        mshr_d_valid[agb_e] = 1'b1;
+        mshr_d[agb_e]       = '0;
+        mshr_wr_all[agb_e]  = 1'b1;
+        mshr_d[agb_e].base_addr    = agb_addr[b];
+        mshr_d[agb_e].tgt_group_id = agb_grp[b];
+        mshr_d[agb_e].burst_len    = agb_len[b];
+        mshr_d[agb_e].state        = MSHR_WAIT_RESP;
+        mshr_d[agb_e].cacheable    = 1'b1;
+        mshr_d[agb_e].beats_left   = agb_len[b];
+        mshr_d[agb_e].beat_pending  = '0;
+        mshr_d[agb_e].beat_pending2 = '0;
+        mshr_d[agb_e].beat2_armed   = 1'b0;
+`ifndef TARGET_SYNTHESIS
+        mshr_d[agb_e].beat_seen = '0;
+        mshr_d[agb_e].beat_done = '0;
+`endif
+        // Owner request is always stored in sub_reqs[0].
+        mshr_d[agb_e].sub_reqs[0].valid        = 1'b1;
+        mshr_d[agb_e].sub_reqs[0].tile_id      = agb_tile[b];
+        mshr_d[agb_e].sub_reqs[0].port_id      = agb_port[b];
+        mshr_d[agb_e].sub_reqs[0].core_id      = agb_core[b];
+        mshr_d[agb_e].sub_reqs[0].meta_id_base = agb_meta[b];
+`ifndef TARGET_SYNTHESIS
+        mshr_d[agb_e].cache_hit_cnt = '0;
+`endif
+        // Hold-the-fetch: arm the per-type hold window (single vs burst). A 0 window (or the
+        // feature off) means the fetch went out this same cycle on the passthrough, so mark it
+        // issued immediately.
+        mshr_d[agb_e].hold_cnt =
+            hold_ticks((agb_len[b] == BurstLenWidth'(1)) ?
+                       cfg_hold_window_single : cfg_hold_window_burst);
+        mshr_d[agb_e].issued =
+            (((agb_len[b] == BurstLenWidth'(1)) ?
+              cfg_hold_window_single : cfg_hold_window_burst) == 0);
+        mshr_d[agb_e].sub_reqs_num = SubReqCountW'(1);
+        // Cache self-invalidate: the owner is the first served sub-request.
+        mshr_d[agb_e].served_cnt = ServedCntW'(1);
+      end
+    end
+
+    // F5a: apply the merges recorded above, ONE ITERATION PER BANK. OneMergePerBank guarantees at
+    // most one merge per bank and an entry lies in exactly one bank, so no two of these writes can
+    // target the same entry -- the 32-deep lane chain becomes MshrBankNum independent writes.
+    // b is a loop constant here, so b*MshrWaysPerBank + way is a MshrWaysPerBank:1 select and the
+    // write is bank-local as well as parallel (the per-lane form was MshrNum:1).
+    // Placed immediately after the request loop, which is where the per-lane writes landed, so
+    // every later pass sees exactly the same mshr_d.
+    if (OneMergePerBank) begin
+      for (int b = 0; b < MshrBankNum; b++) begin
+        if (mgb_v[b]) begin
+          mgb_e = mshr_id_t'(b * MshrWaysPerBank + int'(mgb_way[b]));
+          // merge_rank is identically zero under this knob, so the slot is just the registered
+          // count -- no need to have carried it out of the lane loop.
+          mgb_slot = MergeRankW'(mshr_q[mgb_e].sub_reqs_num);
+          mshr_id_we[mgb_e] = 1'b1;
+          mshr_d[mgb_e].sub_reqs[mgb_slot].valid        = 1'b1;
+          mshr_d[mgb_e].sub_reqs[mgb_slot].tile_id      = mgb_tile[b];
+          mshr_d[mgb_e].sub_reqs[mgb_slot].port_id      = mgb_port[b];
+          mshr_d[mgb_e].sub_reqs[mgb_slot].core_id      = mgb_core[b];
+          mshr_d[mgb_e].sub_reqs[mgb_slot].meta_id_base = mgb_meta[b];
+          mshr_d[mgb_e].sub_reqs_num = SubReqCountW'(mgb_slot + MergeRankW'(1));
+          mshr_d[mgb_e].served_cnt   = mshr_q[mgb_e].served_cnt + ServedCntW'(1);
+`ifndef TARGET_SYNTHESIS
+          if (EnableRespCache && (mshr_q[mgb_e].state == MSHR_CACHED)) begin
+            mshr_d[mgb_e].cache_hit_cnt = mshr_d[mgb_e].cache_hit_cnt + 1'b1;
+          end
+`endif
+          if (EnableRespCache && (mshr_q[mgb_e].state == MSHR_CACHED)) begin
+            mshr_d[mgb_e].state         = MSHR_DRAIN_RESP;
+            mshr_d[mgb_e].beats_left    = BurstLenWidth'(1);
+            mshr_d[mgb_e].beat_pending  = '0;
+            mshr_d[mgb_e].beat_pending2 = '0;
+            mshr_d[mgb_e].beat2_armed   = 1'b0;
+`ifndef TARGET_SYNTHESIS
+            mshr_d[mgb_e].beat_seen     = '0;
+            mshr_d[mgb_e].beat_seen[0]  = 1'b1;
+            mshr_d[mgb_e].beat_done     = '0;
+`endif
+          end else if (RespWaitSubsSingle &&
+                       (mshr_q[mgb_e].state == MSHR_RESP_HOLD) &&
+                       ((mgb_slot + MergeRankW'(1)) >=
+                        SubReqCountW'(cfg_hold_subs_single))) begin
+            mshr_d[mgb_e].state         = MSHR_DRAIN_RESP;
+            mshr_d[mgb_e].beats_left    = BurstLenWidth'(1);
+            mshr_d[mgb_e].beat_pending  = '0;
+            mshr_d[mgb_e].beat_pending2 = '0;
+            mshr_d[mgb_e].beat2_armed   = 1'b0;
+`ifndef TARGET_SYNTHESIS
+            mshr_d[mgb_e].beat_seen     = '0;
+            mshr_d[mgb_e].beat_seen[0]  = 1'b1;
+            mshr_d[mgb_e].beat_done     = '0;
+`endif
+          end
+        end
+      end
+    end
+
 
     // F3b: one byte-merge per entry. Each hitting lane contributes only its enabled bytes, so
     // disjoint byte sets merge exactly as the sequential loop did. The clock-gate enable is
