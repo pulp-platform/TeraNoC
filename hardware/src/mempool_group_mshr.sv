@@ -386,6 +386,49 @@ module mempool_group_mshr
 
   localparam bit DrainFromQ =
       `ifdef GROUP_MSHR_DRAIN_FROM_Q `GROUP_MSHR_DRAIN_FROM_Q `else 1'b0 `endif;
+  // F2: source the ParityDrain SECOND-SLOT scan from the registered array instead of the in-cycle
+  // next state -- the same discipline DrainFromQ already applies to the head-beat scan, extended to
+  // the one scan that was left behind.
+  //
+  // drain2 is the deepest block in the tail of the main process: it builds a 64-bit candidate
+  // vector from mshr_d and LSB-isolates it, once per (tile, resp port) = 32 instances, AFTER the
+  // response capture and the PD2 arm sweep have already rewritten mshr_d. Reading mshr_q takes all
+  // of that off the critical cone (post-placement: 822 levels / 11.07 ns at 2.0 ns TCK).
+  //
+  // NOT an equivalent transformation when enabled: a beat captured this cycle becomes second-slot
+  // drainable NEXT cycle. With RespBufWords = 2 that can cost drain throughput, so it defaults OFF
+  // (bit-identical) and the default must not move without a measured number.
+  localparam bit Drain2FromQ =
+      `ifdef GROUP_MSHR_DRAIN2_FROM_Q `GROUP_MSHR_DRAIN2_FROM_Q `else 1'b0 `endif;
+  // F2: source the hold-the-fetch REPLAY walker from the registered array. The walker reads mshr_d
+  // after the 32-lane request door has rewritten it, then runs a 64-wide priority encode and a
+  // 64:1 field mux per lane -- which is what puts req_out (class C, 3.77 ns post-placement) where
+  // it is.
+  //
+  // Semantic cost when enabled, stated exactly: a FRESH allocation is already never replay-ready
+  // (hold_ticks never rounds a non-zero window down to 0, so hold_cnt != 0, and sub_reqs_num = 1 is
+  // below any legal target), so only the MERGE-triggered early release moves -- it fires one cycle
+  // later. Against a hold window of thousands of cycles that is a rounding error, but it is not
+  // zero, so this still defaults OFF.
+  localparam bit ReplayFromQ =
+      `ifdef GROUP_MSHR_REPLAY_FROM_Q `GROUP_MSHR_REPLAY_FROM_Q `else 1'b0 `endif;
+  // NOT DONE: the two aging sweeps (cache self-invalidate, and the serve-timeout / cache age-out
+  // countdown) are also whole-array passes on mshr_d and were the obvious third knob here. They are
+  // deliberately left alone.
+  //
+  // The serve-timeout sweep is PLACED after response capture on purpose -- its own comment says so
+  // -- because it must observe the hold_cnt that the capture path arms when an entry enters
+  // MSHR_RESP_HOLD this cycle. Reading mshr_q would show that entry a hold_cnt left over from a
+  // previous life, quite possibly 0, and expire it immediately: a returned word delivered to
+  // whoever had subscribed so far instead of to its cohort. That is a correctness change, not a
+  // one-cycle latency change, and it is not worth taking blind.
+  //
+  // The self-invalidate sweep is benign by the same analysis (it would just self-invalidate a
+  // cycle later), but it is the shallower of the two and not worth a knob on its own.
+  //
+  // Revisit once the drain2 and replay numbers are in and the remaining depth is known.
+  if (Drain2FromQ && !PD2)
+    $error("[mempool_group_mshr] group_mshr_drain2_from_q needs group_mshr_drain_beats=2; the second-slot scan does not exist otherwise.");
   localparam int unsigned HoldCntTicks =
       (HoldPrescaleW == 0) ? HoldCntMax : (HoldCntMax >> HoldPrescaleW);
   localparam int unsigned HoldCntW = (HoldCntTicks > 1) ? $clog2(HoldCntTicks + 1) : 1;
@@ -1007,6 +1050,15 @@ module mempool_group_mshr
              [idx_width(MshrMergeReqs)-1:0]                                    resp_sel2_subreq_idx;
   logic      [MshrNum-1:0][BurstLenWidth-1:0]                                  resp_beat_offset2;
   logic      [MshrNum-1:0][RespBufPtrW-1:0]                                    resp_rd_ptr2;
+  // F2 (Drain2FromQ): the entry view the second-slot scan reads, and the second-slot read pointer
+  // and beat offset derived from THAT view. Const-folds away entirely at Drain2FromQ = 0.
+  mempool_group_mshr_t [MshrNum-1:0]                                           drain2_scan_ent;
+  logic      [MshrNum-1:0]                                                     drain2_scan_valid;
+  // F2 (ReplayFromQ): the entry view the hold-the-fetch replay walker reads.
+  mempool_group_mshr_t [MshrNum-1:0]                                           replay_scan_ent;
+  logic      [MshrNum-1:0]                                                     replay_scan_valid;
+  logic      [MshrNum-1:0][RespBufPtrW-1:0]                                    drain2_rd_ptr;
+  logic      [MshrNum-1:0][BurstLenWidth-1:0]                                  drain2_beat_off;
 
   // ------------------------------------------------------------------------------------------
   // ParityDrain bypass-retag table (design doc §4.6). An MSHR-BYPASSED multi-beat load (bank
@@ -3526,14 +3578,18 @@ module mempool_group_mshr
       // C3 step 1: hold-done and owner lane per ENTRY -- lane-independent, so computed once
       // instead of re-derived inside a chain.
       for (int e = 0; e < MshrNum; e++) begin
-        replay_ready[e] = mshr_d_valid[e] && (mshr_d[e].state == MSHR_WAIT_RESP) &&
-                          !mshr_d[e].issued &&
-                          ((mshr_d[e].hold_cnt == '0) ||
-                           (mshr_d[e].sub_reqs_num >=
-                            SubReqCountW'((mshr_d[e].burst_len == BurstLenWidth'(1)) ?
+        // Elaboration-constant select: one arm is built, and at ReplayFromQ = 0 every term is
+        // literally the mshr_d expression it replaced.
+        replay_scan_valid[e] = ReplayFromQ ? mshr_q_valid[e] : mshr_d_valid[e];
+        replay_scan_ent[e]   = ReplayFromQ ? mshr_q[e]       : mshr_d[e];
+        replay_ready[e] = replay_scan_valid[e] && (replay_scan_ent[e].state == MSHR_WAIT_RESP) &&
+                          !replay_scan_ent[e].issued &&
+                          ((replay_scan_ent[e].hold_cnt == '0) ||
+                           (replay_scan_ent[e].sub_reqs_num >=
+                            SubReqCountW'((replay_scan_ent[e].burst_len == BurstLenWidth'(1)) ?
                                           cfg_hold_subs_single : cfg_hold_subs_burst)));
-        replay_own_t[e] = mshr_d[e].sub_reqs[0].tile_id;
-        replay_own_p[e] = mshr_d[e].sub_reqs[0].port_id;
+        replay_own_t[e] = replay_scan_ent[e].sub_reqs[0].tile_id;
+        replay_own_p[e] = replay_scan_ent[e].sub_reqs[0].port_id;
         replay_rr_mask[e] = MshrIdxW'(e) >= MshrIdxW'(hold_replay_rr_q);
       end
       // C3 step 2: each lane picks its own winner, in parallel. Lanes are disjoint by construction
@@ -3559,13 +3615,17 @@ module mempool_group_mshr
               end
               req_out_valid[t][p]               = 1'b1;
               req_out[t][p]                     = '0;
-              req_out[t][p].wdata.meta_id       = mshr_d[replay_win_e].sub_reqs[0].meta_id_base;
-              req_out[t][p].wdata.core_id       = mshr_d[replay_win_e].sub_reqs[0].core_id;
+              // Read the payload from the SAME view the winner was selected from; mixing them
+              // would put the 64:1 field mux back on the d-side cone for no benefit. Safe either
+              // way: these are identity fields, written only by alloc and merge, and an entry that
+              // is replay_ready was allocated in an earlier cycle.
+              req_out[t][p].wdata.meta_id       = replay_scan_ent[replay_win_e].sub_reqs[0].meta_id_base;
+              req_out[t][p].wdata.core_id       = replay_scan_ent[replay_win_e].sub_reqs[0].core_id;
               req_out[t][p].wen                 = 1'b0;
               req_out[t][p].be                  = '1;
-              req_out[t][p].tgt_group_id        = mshr_d[replay_win_e].tgt_group_id;
-              req_out[t][p].tgt_addr            = mshr_d[replay_win_e].base_addr;
-              req_out[t][p].burst_len           = mshr_d[replay_win_e].burst_len;
+              req_out[t][p].tgt_group_id        = replay_scan_ent[replay_win_e].tgt_group_id;
+              req_out[t][p].tgt_addr            = replay_scan_ent[replay_win_e].base_addr;
+              req_out[t][p].burst_len           = replay_scan_ent[replay_win_e].burst_len;
               req_out[t][p].mshr_tag            = MshrTagWidth'(replay_win_e) + MshrTagWidth'(1);
               mshr_d[replay_win_e].issued       = 1'b1;
             end
@@ -4231,17 +4291,30 @@ module mempool_group_mshr
         // burst_len==1 entries, and hoisting to the top of the process would freeze the predicate
         // ahead of that. Here it captures exactly the state the per-port scan used to read.
         for (int e = 0; e < MshrNum; e++) begin
-          drain2_ent_ok[e]   = mshr_d_valid[e] &&
-                               (mshr_d[e].state == MSHR_DRAIN_RESP) &&
-                               (mshr_d[e].burst_len != BurstLenWidth'(1)) &&
-                               (mshr_d[e].resp_buf_cnt >= RespBufCountW'(2)) &&
-                               mshr_d[e].beat2_armed;
+          // Drain2FromQ is an elaboration constant, so exactly one arm is built and there is no
+          // runtime mux -- and at 0 every term below is literally the mshr_d expression it replaced.
+          drain2_scan_valid[e] = Drain2FromQ ? mshr_q_valid[e] : mshr_d_valid[e];
+          drain2_scan_ent[e]   = Drain2FromQ ? mshr_q[e]       : mshr_d[e];
+          drain2_ent_ok[e]   = drain2_scan_valid[e] &&
+                               (drain2_scan_ent[e].state == MSHR_DRAIN_RESP) &&
+                               (drain2_scan_ent[e].burst_len != BurstLenWidth'(1)) &&
+                               (drain2_scan_ent[e].resp_buf_cnt >= RespBufCountW'(2)) &&
+                               drain2_scan_ent[e].beat2_armed;
+          // The parity port comes from the second slot's beat offset, which must be derived from
+          // the SAME view as the eligibility test above -- resp_beat_offset2 is mshr_d-based and
+          // would drag the whole d-side cone back in through the port select alone.
+          drain2_rd_ptr[e]   = (RespBufWords > 1) ?
+              ((drain2_scan_ent[e].resp_buf_rd_ptr == RespBufPtrW'(RespBufWords - 1))
+                   ? '0 : RespBufPtrW'(drain2_scan_ent[e].resp_buf_rd_ptr + 1'b1))
+              : '0;
+          drain2_beat_off[e] = drain2_scan_ent[e].resp_buf[drain2_rd_ptr[e]].beat_off;
           // Entry-level, not per-sub-request: both beats of an entry share one parity port.
-          drain2_sub_port[e] = RespPortIdW'(1) + RespPortIdW'(resp_beat_offset2[e][0]);
+          drain2_sub_port[e] = RespPortIdW'(1) +
+              RespPortIdW'(Drain2FromQ ? drain2_beat_off[e][0] : resp_beat_offset2[e][0]);
           for (int s = 0; s < MshrMergeReqs; s++) begin
-            drain2_sub_ready[e][s] = drain2_ent_ok[e] && mshr_d[e].sub_reqs[s].valid &&
-                                     mshr_d[e].beat_pending2[s];
-            drain2_sub_tile[e][s]  = mshr_d[e].sub_reqs[s].tile_id;
+            drain2_sub_ready[e][s] = drain2_ent_ok[e] && drain2_scan_ent[e].sub_reqs[s].valid &&
+                                     drain2_scan_ent[e].beat_pending2[s];
+            drain2_sub_tile[e][s]  = drain2_scan_ent[e].sub_reqs[s].tile_id;
           end
         end
         for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin

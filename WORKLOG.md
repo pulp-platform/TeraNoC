@@ -16242,3 +16242,33 @@ depth model: WNS roughly flat (the control group keeps its deep D pins) with ~9,
 
 **Status.** Committed on functional equivalence. Timing measurement pending and will be
 recorded separately rather than asserted here.
+
+## 2026-09-04 09:35 — F2: knobs to source the tail scans from mshr_q (default OFF)
+
+**Purpose.** Extend the discipline group_mshr_drain_from_q already applies to the head-beat
+drain scan to the two passes that were left reading the in-cycle mshr_d.
+
+**Implementation.** Two elaboration-constant knobs, both defaulting to 0 (bit-identical):
+  - group_mshr_drain2_from_q : the ParityDrain second-slot scan. It is the deepest block in
+    the tail -- a 64-bit candidate vector built from mshr_d and LSB-isolated, once per
+    (tile, resp port) = 32 instances, AFTER response capture and the PD2 arm have rewritten
+    mshr_d. The second-slot beat offset is derived from the SAME view, or the port select
+    alone would drag the d-side cone back in.
+  - group_mshr_replay_from_q : the hold-the-fetch replay walker, which reads mshr_d after the
+    32-lane door then runs a 64-wide priority encode and a 64:1 field mux per lane.
+An elaboration $error rejects drain2_from_q without drain_beats=2.
+
+**NOT included: the aging sweeps.** The serve-timeout sweep is placed after response capture
+ON PURPOSE -- its own comment says so -- because it must see the hold_cnt the capture path
+arms when an entry enters MSHR_RESP_HOLD that cycle. Reading mshr_q would show it a stale
+count, possibly 0, and expire the entry immediately: a returned word delivered to whoever had
+subscribed so far instead of to its cohort. That is a correctness change, not a latency one.
+
+**Semantic cost when a knob is ON.** drain2: a beat captured this cycle becomes second-slot
+drainable next cycle -- with RespBufWords=2 this may cost drain throughput and MUST be
+measured. replay: only the merge-triggered early release moves a cycle later (a fresh alloc
+is never replay-ready), against a hold window of thousands of cycles.
+
+**Status.** Committed speculatively with the knobs OFF, where the change is bit-identical by
+construction (elaboration constants). Equivalence arm in flight; revert if it disagrees. No
+default may move without a measured throughput number.
