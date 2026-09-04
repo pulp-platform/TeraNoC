@@ -969,13 +969,6 @@ module mempool_group_mshr
     .amo_invalidate_o    (amo_invalidate)
   );
 
-  // // pragma translate_off `ifndef VERILATOR generate for (genvar tile_i = 0; tile_i <
-  // NumTilesPerGroup; tile_i++) begin : gen_meta_id_check_tile for (genvar port_i = 1; port_i <.
-
-
-  // NOTE: two valid MSHR entries CAN legitimately share an address and that is
-  // NOT a duplicate-allocation bug: when a later same-address request cannot
-  // Merge into an already-draining entry (the no_late_join_burst rule), it
 
   // Detect whether any response beat on input already targets each MSHR entry.
   localparam bit RespSeenByTag = `ifdef GROUP_MSHR_RESP_SEEN_BY_TAG `GROUP_MSHR_RESP_SEEN_BY_TAG `else 1'b1 `endif;
@@ -1053,8 +1046,10 @@ module mempool_group_mshr
               mshr_q_valid[e_abs] &&
               (mshr_q[e_abs].base_addr == req_addr_key[tile_i][port_i]) &&
               (mshr_q[e_abs].tgt_group_id == req_in[tile_i][port_i].tgt_group_id);
-          // A same-address entry that cannot be merged into RIGHT NOW makes the request WAIT
-          // Rather than allocate a second entry for the same line.
+          // A same-address entry that cannot be merged into right now makes the request wait
+          // rather than allocate a second entry for the same line. Two valid entries CAN still
+          // share an address (a request refused by no_late_join_burst allocates its own), so a
+          // same-address pair is not by itself a duplicate-allocation bug.
           assign req_addr_hit_drain_way[tile_i][port_i][way_i] =
               req_addr_hit_way[tile_i][port_i][way_i] &&
               ((mshr_q[e_abs].state == MSHR_DRAIN_RESP) ||

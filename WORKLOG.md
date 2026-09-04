@@ -16625,3 +16625,32 @@ non-comment, non-blank line is byte-identical (3,733 lines), and vopt clean.
   restored with a path-scoped checkout. Cause never identified -- neither reaper loop touches it.
 
 **Status.** gmod3 verifying all four submodules against the 3,117-cycle reference.
+
+---
+
+## 2026-09-04 20:30 — OOC flow: two blockers found by actually running it
+
+**Purpose.** Get an out-of-context synthesis number for the current MSHR under the fixed
+`base_ooc.sdc` (0.015 pF outputs, was 15 pF).
+
+**Implementation.**
+1. `mempool_group_mshr.sv` — dropped a comment block that the earlier compression pass had
+   wrapped into nonsense, and restated the one fact it carried (two valid entries may legitimately
+   share an address; `no_late_join_burst` is why) as one line next to `req_addr_hit_drain_way`.
+2. Backend `ooc/` (not this repo): every stage in `ooc_steps.tcl` / `ooc_small.tcl` is a Tcl
+   **proc**, and a bare `source` inside a proc runs in the proc's *local* scope — `analyze_ref.tcl`
+   reads the global `$search_path` on its first line and died. All such sources now go through
+   `uplevel #0 [list source ...]`. `ooc_constraints` had the same latent bug via `view_ooc.tcl`
+   (`TECHDIR`, `SBOCVDIR`, `PDDIR`, `TCK`, `TOP_MODULE`).
+3. Backend `ooc/`: `rename_module ${DESIGN}_* ${DESIGN}` now matches **five** designs, because the
+   split created `mempool_group_mshr_{bank_arb,free_way,req_decode,cfg}`. NDMUI-624, thrown *after*
+   a 22-minute elaboration. Fixed in all three flows by matching the parent's named-parameter
+   mangling (`${DESIGN}_NumGroups*`) and asserting exactly one hit.
+4. `run_ooc.sh` referenced `$START` unset under `set -u`, aborting the summary in the error path.
+
+**Result.** `sdcfix_head_8p0` and `sdcfix_head_2p0` both died at rename_module after full
+elaboration; the logs confirm all three submodules elaborated as real designs (`bank_arb` 720
+ports, `free_way` 272, `req_decode` 4835), so the black-box linking problem is genuinely gone.
+Relaunched on the fixed scripts.
+
+**Status.** Runs relaunched; no trustworthy WNS yet under the corrected SDC.
