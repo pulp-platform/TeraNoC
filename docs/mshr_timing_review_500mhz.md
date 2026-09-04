@@ -631,3 +631,54 @@ Both made correct work look broken, which is the safer direction, but both cost 
    `CapPerBank=0` baseline arm read as "the override silently failed", nearly discarding the B2.1
    result. Verify defines from the vopt log's real `vlog` line:
    `grep -a 'mempool_group_mshr.sv' <vopt.log> | head -1 | grep -oE '\+define\+GROUP_MSHR_[A-Z0-9_]+=[0-9]+'`
+
+## B4. The 256x128x256 regression, decomposed
+
+Zexin's `docs/benchmarks/gemm_results_4x4_idea2_bankfull.md` (2026-08-23) gave the reference that
+exposed this. `256x128x256` is a healthy, stable shape there: idea-2 and +bankfull-bp both 6,267
+cycles (+0.0%), RH=0, timeout=0 -- not one of the bimodal ones.
+
+Four arms, same mesh/precision/config, isolating one variable each:
+
+| arm | cycles | attributed |
+|---|---|---:|
+| Aug-23 baseline (Aug RTL + Aug ELF) | 6,267 | -- |
+| current RTL + **Aug ELF** + banking knobs OFF | 6,814 | **RTL drift +8.7%** |
+| current RTL + **new ELF** + banking knobs OFF | 7,181 | **ELF drift +5.4%** |
+| current RTL + new ELF + knobs ON (shipping) | 7,686 | **banking knobs +7.0%** |
+| | | **total +22.6%** |
+
+All healthy: RH STUCK = 0, zero assertion failures, defines verified off the real `vlog` line.
+
+**The banking knobs own only about a third of it.** Per-knob, on this shape: F4a (one merge per
+bank) +7.5%, F4d (capture per bank) +0.8%, F4c ~0. On `512x64x256` F4a costs +4.5%, and with F4a
+off that shape is 3.8% FASTER than the August baseline -- so the rest of the F-series is a net win
+there and a net loss here.
+
+**What this corrects.** Every "verified, 3,117 cycles, equivalent" result in B2 came from
+`256x32x256`, which issues only 240 merges per group and NEVER triggers the merge restriction
+(`merge_arb_stalls = 0` on seven arms). Correctness was verified thoroughly; **throughput was
+verified narrowly**. The RTL-drift share (+8.7%) is changes that were all cycle-identical on the
+small shape.
+
+**Still open:** which change owns the +8.7% RTL drift. Candidates are F1, F2 (knobs off), F3a-d,
+F5a/b, F6 -- of which only F3b (store byte-merge, ORs enabled bytes where the old form was
+last-lane-wins) is not exact by construction.
+
+## B5. Default changes (2026-09-04, Zexin's decision)
+
+`Drain2FromQ`, `ReplayFromQ` and `BankfullBackpressure` are now ON by default, in the RTL as well
+as the config -- **the backend define list carries none of them**, so the RTL default is what the
+next placement run synthesises.
+
+* The from-q pair decouples the tail from the request door (path becomes max(door+capture, tail)
+  instead of their sum). Measured cost: free on `256x32x256`, **+2.7% on `256x256x256`**. The
+  timing benefit is still model-derived; `rt_fromq_8p0` is synthesising to supply the other half.
+  Rationale for accepting the cost: if the estimate holds it is -2.7% IPC for a large frequency
+  gain, and the campaign exists to buy frequency.
+* `BankfullBackpressure` was 1 in simulation (via config) but **0 in every backend run**, because
+  the OOC list does not carry it and the RTL default was 0 -- we were synthesising a configuration
+  the simulations never verified. Now consistent.
+* `Drain2FromQ`'s default is `PD2`, not a constant: `if (Drain2FromQ && !PD2) $error(...)` because
+  the second-slot scan does not exist at `DRAIN_BEATS=1`. A constant 1 made a define-less
+  elaboration illegal. Both cases now build clean.

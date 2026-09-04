@@ -1,0 +1,40 @@
+{
+ "ts": 1787662730,
+ "arms": {
+  "d4f32_32x256x2048": {
+   "node": "fenga8",
+   "cyc": 39000,
+   "util": 80.29,
+   "cum": 75.37,
+   "state": "running"
+  },
+  "d8f32_32x128x8192": {
+   "node": "badile10",
+   "cyc": 53000,
+   "util": 50.48,
+   "cum": 31.04,
+   "state": "running"
+  },
+  "d8f32_32x256x8192": {
+   "node": "fenga8",
+   "cyc": 60000,
+   "util": 43.66,
+   "cum": 22.48,
+   "state": "running"
+  },
+  "dec8_32x128x16384": {
+   "node": "badile19",
+   "cyc": 69000,
+   "util": 33.06,
+   "cum": 27.17,
+   "state": "running"
+  },
+  "dec8_32x256x16384": {
+   "node": "fenga8",
+   "cyc": 73000,
+   "util": 47.39,
+   "cum": 28.82,
+   "state": "running"
+  }
+ }
+}
