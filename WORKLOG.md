@@ -16344,3 +16344,50 @@ order they were recorded in cannot change the result. The apply is placed before
 pass, which is where the sequential writes landed.
 
 **Status.** Committed with its arm in flight. Revert if it disagrees.
+
+## 2026-09-04 — F4a: accept at most one merge per MSHR bank per cycle (knob, default off)
+
+**Purpose.** Zexin's observation: per bank the door could accept ONE new request per cycle
+instead of accepting all of them and merging. Allocation has always worked that way
+(`bank_win_oh`, "Per-bank single allocation per cycle"); merging never did, and that asymmetry
+is what pays for `merge_rank`.
+
+**What merge_rank costs.** It exists only so that several lanes merging into the SAME entry in
+one cycle get distinct `sub_reqs[]` slots. Building it is NumAllocSlots^2 = 1024 six-bit
+mshr_id comparators plus 32 population counts, and it feeds
+merge_rank -> merge_slot -> merge_new_idx -> the sub_reqs write index, i.e. it sits directly on
+the request door (class C, 3.77 ns post-placement). One merge per bank means at most one merge
+per ENTRY, because an entry belongs to exactly one bank -- so the rank is identically zero and
+the whole network is dead.
+
+**Implementation.** A per-bank merge arbiter structurally identical to the allocation arbiter
+(flatten to slots, per-bank request vector, split at the shared `alloc_rr_q` rotation base,
+LSB-isolate the high half else the low half, scatter back). The merge target's bank needs no
+decode: the hit search is already bank-scoped, so it IS `req_bank` (asserted by
+`mshr_entry_in_its_bank`). The three-way split of the old single always_comb keeps one
+combinational driver per signal. `merge_rank` is then constant-folded to 0 under the knob, and
+the mask/popcount network is removed rather than left unused.
+
+**Why the stall is safe.** `req_merge_ready` already gates `req_in_ready` (:3437), and the
+merge apply is inside `if (req_in_ready)`, so a refused lane neither merges nor leaks to the
+NoC -- it stalls and retries next cycle against the same still-resident entry. This is not a
+new mechanism: the capacity check (`merge_slot + 1 <= MshrMergeReqs`) deasserts the same signal
+today and is exercised on every shipping merge_reqs.
+
+**NOT equivalent.** Peak merge acceptance falls from 32/cycle to MshrBankNum = 16. Coalescing is
+preserved (a refused lane retries next cycle against the same resident entry, and the hold window
+is thousands of cycles) but a cohort assembles over more cycles. `[MRGARB] merge_grants /
+merge_arb_stalls` counts the retries it actually causes.
+
+**DEFAULT ON** at Zexin's request (2026-09-04), in the RTL default as well as
+config/terapool_spatz4_fpu.mk -- the backend define list does not carry this knob, so an RTL
+default of 0 would silently synthesise the expensive form. Consequence: every reference arm built
+before this commit (including the 3,117-cycle build_g1) was effectively knob=0, so any comparison
+against them must PIN group_mshr_one_merge_per_bank explicitly.
+
+**Verification.** Two arms on vg_fp16_256x32x256 (tuned, cfg_runtime=1) against the 3,117-cycle
+F1 reference: gmrg0 (knob off, must be cycle-identical -- proves the refactor is inert) and
+gmrg1 (knob on, the throughput measurement).
+
+**Status.** Committed 86709984 with both arms still in flight, the speculative-commit protocol
+agreed for this pass. Revert or set the config knob to 0 if gmrg1 shows a material regression.
