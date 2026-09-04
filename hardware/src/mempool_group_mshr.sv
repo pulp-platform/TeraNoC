@@ -177,7 +177,7 @@ module mempool_group_mshr
   localparam int unsigned CacheTimeout = `ifdef GROUP_MSHR_CACHE_TIMEOUT `GROUP_MSHR_CACHE_TIMEOUT `else 0 `endif;
   // Bank-full policy: 0 = bypass (legacy), 1 = backpressure. Reset value only when
   // MshrCfgRuntime=1; software owns it thereafter.
-  localparam int unsigned BankfullBackpressure = `ifdef GROUP_MSHR_BANKFULL_BACKPRESSURE `GROUP_MSHR_BANKFULL_BACKPRESSURE `else 0 `endif;
+  localparam int unsigned BankfullBackpressure = `ifdef GROUP_MSHR_BANKFULL_BACKPRESSURE `GROUP_MSHR_BANKFULL_BACKPRESSURE `else 1 `endif;
   // RR cache-victim selection (group_mshr_cache_victim_rr): per-bank round-robin start pointer for
   // The pass-2 CACHED-reclaim scan, instead of always taking the lowest-index reclaimable.
   localparam bit CacheVictimRR = `ifdef GROUP_MSHR_CACHE_VICTIM_RR `GROUP_MSHR_CACHE_VICTIM_RR `else 1'b0 `endif;
@@ -215,9 +215,9 @@ module mempool_group_mshr
   localparam bit DrainFromQ = `ifdef GROUP_MSHR_DRAIN_FROM_Q `GROUP_MSHR_DRAIN_FROM_Q `else 1'b0 `endif;
   // Source the ParityDrain SECOND-SLOT scan from the registered array instead of the in-cycle
   // Next state -- the same discipline DrainFromQ already applies to the head-beat scan, extended.
-  localparam bit Drain2FromQ = `ifdef GROUP_MSHR_DRAIN2_FROM_Q `GROUP_MSHR_DRAIN2_FROM_Q `else 1'b0 `endif;
+  localparam bit Drain2FromQ = `ifdef GROUP_MSHR_DRAIN2_FROM_Q `GROUP_MSHR_DRAIN2_FROM_Q `else PD2 `endif;
   // Source the hold-the-fetch REPLAY walker from the registered array.
-  localparam bit ReplayFromQ = `ifdef GROUP_MSHR_REPLAY_FROM_Q `GROUP_MSHR_REPLAY_FROM_Q `else 1'b0 `endif;
+  localparam bit ReplayFromQ = `ifdef GROUP_MSHR_REPLAY_FROM_Q `GROUP_MSHR_REPLAY_FROM_Q `else 1'b1 `endif;
   // Accept at most ONE merge per bank per cycle, mirroring the per-bank single ALLOCATION the
   // Arbiter has always enforced. A loser gets req_merge_ready = 0, stalls a cycle, and retries
   // Against the same still-resident entry -- coalescing is preserved, just spread out. Not a new

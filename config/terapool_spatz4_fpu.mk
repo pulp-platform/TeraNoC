@@ -339,6 +339,13 @@ group_mshr_drain2_bank_publish ?= 1
 # response throughput; [CAPARB] cap_wanted/cap_fired measures it. Set 0 to restore per-entry.
 group_mshr_cap_per_bank ?= 1
 
+# Source the ParityDrain second-slot scan and the hold-the-fetch replay walker from the REGISTERED
+# array. This decouples the tail from the request door: the critical path becomes
+# max(door+capture, tail) instead of their sum. Cost measured on 256x256x256: +2.7% cycles (a beat
+# captured this cycle becomes second-slot drainable next cycle); free on 256x32x256.
+group_mshr_drain2_from_q ?= 1
+group_mshr_replay_from_q ?= 1
+
 # C2: bypass the request-input spill register. The tile already registers its request output, and
 # only wire assigns separate the two -- so this stage is a second register back-to-back with the
 # first, costing 32 x 166 = 5,312 flops/group (~85k cluster) for no data-path benefit.

@@ -340,6 +340,14 @@ group_mshr_cap_per_bank ?=
 ifneq ($(strip $(group_mshr_cap_per_bank)),)
   vlog_defs += -DGROUP_MSHR_CAP_PER_BANK=$(group_mshr_cap_per_bank)
 endif
+group_mshr_drain2_from_q ?=
+ifneq ($(strip $(group_mshr_drain2_from_q)),)
+  vlog_defs += -DGROUP_MSHR_DRAIN2_FROM_Q=$(group_mshr_drain2_from_q)
+endif
+group_mshr_replay_from_q ?=
+ifneq ($(strip $(group_mshr_replay_from_q)),)
+  vlog_defs += -DGROUP_MSHR_REPLAY_FROM_Q=$(group_mshr_replay_from_q)
+endif
 group_mshr_spill_req_in ?=
 ifneq ($(strip $(group_mshr_spill_req_in)),)
   vlog_defs += -DGROUP_MSHR_SPILL_REQ_IN=$(group_mshr_spill_req_in)
