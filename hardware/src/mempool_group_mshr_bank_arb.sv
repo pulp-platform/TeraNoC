@@ -25,32 +25,34 @@ module mempool_group_mshr_bank_arb #(
   output logic [NumBanks-1:0][NumSlots-1:0]  win_oh_o     // one-hot winner per bank
 );
 
-  logic [NumBanks-1:0][NumSlots-1:0] rq;
-  logic [NumSlots-1:0] hi, lo;
+  logic [NumBanks-1:0][NumSlots-1:0] req_per_bank;
+  logic [NumBanks-1:0][NumSlots-1:0] req_per_bank_rr_high, req_per_bank_rr_low;
+  logic [NumBanks-1:0]               req_per_bank_rr_high_non_empty, req_per_bank_rr_low_non_empty;
+  logic [NumBanks-1:0][NumSlots-1:0] req_per_bank_rr_high_oh, req_per_bank_rr_low_oh;
+
+  genvar b, s;
 
   generate
-    for (int b = 0; b < NumBanks; b++) begin : gen_rq_b
-      for (int s = 0; s < NumSlots; s++) begin : gen_rq_s
-        assign rq[s] = cand_i[s] && (int'(bank_i[s]) == b);
+    for (b = 0; b < NumBanks; b++) begin : gen_req_per_bank_b
+      for (s = 0; s < NumSlots; s++) begin : gen_req_per_bank_s
+        assign req_per_bank[b][s] = cand_i[s] && (bank_i[s] == b);
       end
     end
   endgenerate
 
-  always_comb begin
-    rq = '0;
-    hi = '0;
-    lo = '0;
-    for (int b = 0; b < NumBanks; b++) begin
-      for (int s = 0; s < NumSlots; s++) begin
-        rq[s] = cand_i[s] && (int'(bank_i[s]) == b);
-      end
-      hi = rq &  rr_mask_i;
-      lo = rq & ~rr_mask_i;
-      win_oh_o[b] = !bank_gate_i[b]
-                  ? '0
-                  : ((hi != '0) ? (hi & (~hi + NumSlots'(1)))
-                                : (lo & (~lo + NumSlots'(1))));
+  generate
+    for (b = 0; b < NumBanks; b++) begin : gen_req_per_bank_rr_b
+      assign req_per_bank_rr_high[b] = req_per_bank[b] &  rr_mask_i;
+      assign req_per_bank_rr_low[b]  = req_per_bank[b] & ~rr_mask_i;
+      assign req_per_bank_rr_high_non_empty[b] = (|req_per_bank_rr_high[b] == 1'b1);
+      assign req_per_bank_rr_low_non_empty [b] = (|req_per_bank_rr_low [b] == 1'b1);
+      assign req_per_bank_rr_high_oh[b] = req_per_bank_rr_high[b] & (~req_per_bank_rr_high[b] + 1);
+      assign req_per_bank_rr_low_oh [b] = req_per_bank_rr_low [b] & (~req_per_bank_rr_low [b] + 1);
+
+      assign win_oh_o[b] = {NumSlots{bank_gate_i[b]}} &
+                           (req_per_bank_rr_high_non_empty[b] ? req_per_bank_rr_high_oh[b]
+                                                              : req_per_bank_rr_low_oh[b]);
     end
-  end
+  endgenerate
 
 endmodule
