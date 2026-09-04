@@ -404,3 +404,138 @@ delivery. **No knob closes this block at 500 MHz.**
   NHV 38,339, leakage 225.1 mW, area 1,118,561 µm² (macros 277,915), instances 7,089,284.
 * Area: `i_mempool_group` 1,041,898 µm² → `gen_group_mshr_i_group_mshr` **175,428 µm²**
   (comb 163,207 / seq 6,705) = **23.0 % of the group's standard-cell area**.
+
+---
+
+# Addendum — 2026-09-04: corrections from standing the work up
+
+Four things in the review above are wrong or incomplete once the real target and the real flow are
+taken into account. This section supersedes them; the body is left as written so the change is
+visible.
+
+## A1. The target is 800 MHz, not 500 — the budget is ~4× tighter than §5 implies
+
+The 2.0 ns of the shakedown was a first-pass convenience. At the real target, TCK = 1.25 ns:
+
+| | TCK | logic budget | levels @ 13.4 ps |
+|---|---|---|---|
+| this run | 2.00 ns | ~1.53–1.70 ns | 115–127 |
+| real target | 1.25 ns | ~0.78–0.95 ns | **58–71** |
+| today | — | 11.07 ns | **822** |
+
+Derived from the report itself: required times were 1.631–1.795 ns against a 0.044 ns clock
+network, so the fixed setup + POCV overhead is 0.25–0.41 ns and does **not** shrink with the
+period. So the required depth reduction is **12–14×**, not the ~6× a 2.0 ns target implies.
+
+Two consequences the body does not draw:
+
+* **F5 is not optional and is not one stage.** After F2+F3+F4 the door alone is ~42–44 levels
+  (CAM ≈13, allocation arbitration ≈13, merge-slot arithmetic ≈8, output mux ≈8). That fits 58 but
+  not the ~35 levels that ordinary 20–25 ps/level logic gets. The MSHR likely needs to become a
+  3–4 stage pipeline, which brings a **merge shadow**: an entry allocated in stage 1 is invisible to
+  the CAM for 2–3 cycles, so two cores asking for the same line a cycle apart would each allocate
+  and each fetch. That needs a small in-flight scoreboard designed in, not discovered.
+* **Classes E and F stop being minor.** At 1.25 ns the same arrivals give ≈ −1.1 to −1.3 ns on the
+  Spatz VRF write path in **all 16 tiles**, the L1 SRAM D pins, the routers, the DMA mux and the
+  TCDM adapter. And this report cannot scope that: it lists only endpoints above ~1.63 ns, so
+  everything between 1.05 and 1.63 ns is invisible here and fails at 800 MHz.
+
+## A2. Class E is a placement outlier, not an RTL defect
+
+§1 lists class E (Spatz VRF `wdata_q`, −2.05 ns) as a separate closure item. It is one — but not an
+RTL one. The identical register in all 16 tiles reports:
+
+| | arrival |
+|---|---|
+| tile 10 | **4.207 ns** |
+| the other 15 tiles | 2.137 – 2.255 ns (worst slack −0.087) |
+
+Sixteen copies of the same RTL; fifteen close, one is 2 ns off. That is one tile being squeezed —
+very plausibly by the MSHR's own 175,428 µm² of ULVT logic sitting next to it. The genuine logic
+shortfall on that path is only ~0.15–0.25 ns. **Shrink the MSHR (F4) and re-measure before spending
+any effort in `i_spatz/i_vrf`.**
+
+## A3. RETRACTED: "Step 0 — attribute with three const-fold ablations"
+
+§5 recommends three full re-syntheses to attribute the 822 levels per feature. At two weeks each
+that is six weeks, and the recommendation is withdrawn.
+
+Replaced by **out-of-context synthesis of `mempool_group_mshr` alone**
+(`tsmc7/fusion/ooc/` in the backend repo: `ooc_mshr.tcl`, `view_ooc.tcl`, `base_ooc.sdc`,
+`run_ooc.sh`, `continue_place.sh`). The module instantiates only `spill_register` and imports
+`mempool_pkg` / `cf_math_pkg` — no macros, no SRAM, no cores — so it needs standard cells only.
+Traps worth knowing, all of which cost time to find:
+
+* The module's own `NumRemote{Req,Resp}PortsPerTile` defaults are **2**; `mempool_pkg` computes
+  **3** and **3** for this configuration. Elaborating with bare defaults silently builds a smaller,
+  wrong MSHR — the script derives them and asserts a port-count floor.
+* UPF must be committed **before** `set_corners`, whose `set_voltage` needs `[get_supply_nets VDD]`.
+* `base.sdc` errors on four block-only statements (`wake_up_i*`, the two I$ multicycles); `ooc/`
+  carries a trimmed copy.
+* `config=terapool_spatz4_fpu` yields `GROUP_MSHR_ENABLE_STATS=1` where the placed build used 0 —
+  the define set is otherwise identical, and the script pins it. Ground truth is
+  `fusion/tmp/analyze.tcl` from the placed run, not either repo's `?=` defaults.
+* **The backend has its own `mempool/` clone**, at `6fee18d8`, which does not carry the frontend's
+  commits. `run_ooc.sh` swaps the source under an EXIT/INT/TERM trap and prints the md5 in use.
+  This checkout must be synced before the next block run, independently of this work.
+
+## A4. `logic_opto` is not a trustworthy yardstick for this design
+
+The obvious cheap loop — synthesise to `logic_opto` and compare — would have ranked the fixes with
+a broken ruler. The 500 MHz run has QoR at both labels for the same design:
+
+| label | m40c WNS | m40c TNS | 125c WNS |
+|---|---|---|---|
+| `logic_opto` | **−19.517** | −287,642 | **−262.772** |
+| `placed` | **−9.436** | −131,421 | **−1.564** |
+
+Placement did not refine the number, it **halved it** (+10.08 ns), and the hot corner moved by
+**168×**. Before placement there are no buffer trees and no real wire estimates, so a huge-fanout
+net gets an absurd delay — and a 64-entry array broadcast is exactly that shape. `logic_opto` is
+therefore pessimistic on **precisely the structures F1–F3 restructure**.
+
+So the OOC flow stops at **`initial_opto`** by default, with the floorplan utilization pinned to
+**0.4626** (what the placed block actually reached) rather than left to auto-floorplan.
+`logic_opto` is kept only as a fast screen for **logic depth**, which is placement-independent and
+is the primary quantity being reduced. One `final_opto` run before the block run.
+
+**Caveat:** a placed *standalone* MSHR is still optimistic versus in-block — standalone it gets its
+own floorplan at comfortable utilization, in the group it competes with 16 tiles and 293 macros
+(see A2). Treat OOC-placed WNS as a lower bound; the **relative ranking** and the **depth** are what
+transfer.
+
+## A5. Verification: the MSHR is bypassed by default in simulation
+
+Not a timing point, but it invalidates any functional check made without it.
+
+`config/terapool_spatz4_fpu.mk` sets `group_mshr_cfg_runtime ?= 1`, and with that define
+`cfg_mshr_enable` comes from a CSR that **resets to 0** (`mempool_group_mshr.sv:588`). Neither
+`vector-burst-test` nor `sp-mshr-burst-test` calls `mshr_cfg_apply_group` — only the GEMM apps do.
+So a burst-test run on the stock config exercises the **bypass** path end to end while reporting
+`retval = 0`.
+
+Measured, same workload, same host:
+
+| | `[CMS]` at ~cycle 5,000 |
+|---|---|
+| `cfg_runtime=1` (MSHR bypassed) | `inflight=142133 orphan=141684 dup_alloc=37623` — wedged |
+| `cfg_runtime=0` (MSHR live) | `req=179682 resp=178240 inflight=1442 orphan=0 dup_alloc=0` |
+
+The two verification arms therefore mean different things, and both are wanted:
+
+* **`cfg_runtime=0` + burst tests** — MSHR live but at its *untuned* static defaults. The bank hash
+  spreads badly and entries miss their sharing target, so this is a deliberate stress point with
+  good corner coverage. Its `orphan`/`total_stuck` counts are not a design signal.
+* **`cfg_runtime=1` + a small GEMM** — the tuned operating point (`mshr_cfg.h` derives the bank
+  shifts and merge targets from `GEMM_M/N/P` and the app writes the CSRs). The only arm whose cycle
+  count is meaningful for a performance call.
+
+`scripts/check_arm_equivalence.py` is the cycle-identity gate — it compares every probe line at
+every period and localises the first divergence, and exits 2 rather than passing vacuously when
+there is no overlap. A matching final cycle count is not sufficient: two runs can diverge and
+reconverge.
+
+**Unrelated bug found and fixed while standing this up** (`7aa98559`): `a_fill_cyc` was declared
+inside `#if MATMUL_A_REPLICAS > 1` but read outside it, and that macro collapses to 1 exactly when
+`A_SPAN >= NUM_GROUPS` — the definition of a prefill shape. Every prefill shape failed to compile in
+both GEMM apps; only decode shapes built, which hid it.
