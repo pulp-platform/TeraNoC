@@ -16173,3 +16173,31 @@ by diffing HEAD against the fixed file.
 **Status.** Fixed. Same shape as the a_fill_cyc prefill bug fixed earlier today: a declaration
 inside a guard, used outside it. Worth a lint rule -- both were invisible to simulation and
 both would have failed a two-week backend run in its first minute.
+
+## 2026-09-04 04:20 — scripts/check_synth_guards.py: catch the sim-only-declaration bug class
+
+**Purpose.** Two bugs of the SAME SHAPE surfaced today, both invisible to simulation and both
+fatal to a build that costs two weeks:
+  - `a_fill_cyc` declared inside `#if MATMUL_A_REPLICAS > 1`, printed outside it (7aa98559)
+  - `mshr_*_timeout_dbg` declared inside `pragma translate_off`, set outside it (467fa6c7)
+A simulator compiles translate_off regions and defines neither TARGET_SYNTHESIS nor
+SYNTHESIS, so the declaration is always present in a sim. Synthesis drops it and the use
+dangles. Full elaboration was the only other detector, which is the wait this avoids.
+
+**Implementation.** Per line, decide whether synthesis sees it (`pragma translate_off` regions
+and `ifndef TARGET_SYNTHESIS/SYNTHESIS` arms, with `else` inverting and `endif` popping).
+Collect names declared ONLY in sim-only lines, then report any use from a synthesis-visible
+line. Syntactic on purpose: no elaboration, no licence, no config.
+
+**One trap worth recording.** translate_off is a FLAG, not a nestable scope.
+mempool_group_mshr.sv has two `translate_off` in a row; counting nesting (the obvious first
+implementation) meant one `translate_on` left the counter at 1, marking ~600 later lines
+sim-only and reporting the file CLEAN -- it hid the exact bug it was written to find. Caught
+only because the script was tested against the known-bad file first.
+
+**Result.** Catches all 4 use sites in the pre-fix MSHR (exit 1); clean on the fixed file.
+Sweep: 33 files in hardware/src and 74 in working_dir/spatz/hw are clean. Skips unreadable
+files with a message rather than crashing (spatz has a dangling testharness.sv symlink; a
+crash mid-sweep would have read as "clean so far").
+
+**Status.** Done. Worth wiring into `make lint` or CI.
