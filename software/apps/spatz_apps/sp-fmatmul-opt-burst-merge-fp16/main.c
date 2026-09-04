@@ -208,10 +208,25 @@
 // Groups covered by ONE replica: A padded up to a whole number of groups, never less than one.
 #define A_SPAN          ((((A_BYTES) + (A_GROUP_STRIDE) - 1) / (A_GROUP_STRIDE)))
 
-// Which engine fills the replicas: 1 = core 0 issues MATMUL_A_REPLICAS blocking DMA transfers
-// from DRAM (default), 0 = every core stores its own slice. See the fill site for the trade.
+// Which engine fills the replicas: 0 = every core stores its own slice (default), 1 = core 0
+// issues MATMUL_A_REPLICAS blocking DMA transfers from DRAM.
 //
-// The DMA loop is SAFE despite dma.h's `done` register being documented as "ID of finished
+// MEASURED 2026-09-04 at 8x8. Controlled pair -- 4x128x2048, K=64, no padding so both fills move
+// the same 64 KB, same host, only the fill differs:
+//
+//     cores 2,203 cycles      dma 9,065 cycles      -> the core fill is 4.1x cheaper
+//
+// DMA cost is ~140 cycles per transfer and nearly independent of transfer SIZE (64 x 1 KB =
+// 9,065 against 64 x 256 B = 8,357, i.e. 8% more for 4x the bytes), so at the K this feature
+// actually uses, serialisation through the single global frontend dominates. The core fill is
+// 32,768 stores in 2,203 cycles, ~15 per cycle machine-wide -- the 1024-way parallelism working.
+//
+// Beware measuring these against each other on a PADDED shape (A_BYTES < A_REPL_STRIDE_B): the
+// DMA path does not write the pad, so it moves strictly less data and the comparison flatters it.
+// An earlier round did exactly that on M=1 and reached the opposite, wrong conclusion.
+//
+// The DMA path is KEPT: it is simpler, needs no ordering against `a` being staged first, and
+// would close the gap at small K. It is SAFE despite dma.h's `done` register being documented as "ID of finished
 // transactions": mempool_dma.sv:61-72 implements it as a sticky 1-bit flag that a LAUNCH clears
 // (`if (valid_o) trans_complete_d = 1'b0`) and a completion sets. So `while (!dma_done())` does
 // block per transfer under strict launch->wait->launch->wait, which is what blocking memcpy in a
@@ -219,7 +234,7 @@
 // single global frontend at DMA_BASE has one {src,dst,len} register set, so the second launch
 // would overwrite the first transfer's descriptor.
 #ifndef MATMUL_A_FILL_DMA
-#define MATMUL_A_FILL_DMA 1
+#define MATMUL_A_FILL_DMA 0
 #endif
 #ifndef MATMUL_A_REPLICAS
 #  if (A_SPAN) >= (NUM_GROUPS)

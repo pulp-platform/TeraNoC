@@ -16035,7 +16035,9 @@ and no existing scraper computes: the mean `grp_max - grp_min` FPU utilisation o
 window. **The prediction is that the SPATIAL SPREAD narrows**; a cycle win without a spread change
 would mean the mechanism is not the one claimed.
 
-**Replica fill: DMA is now the default** (`MATMUL_A_FILL_DMA=1`, 2026-09-04, user's call). Core 0
+**Replica fill: the CORE fill is the default** (`MATMUL_A_FILL_DMA=0`). It was briefly set to
+DMA on 2026-09-04 ahead of the measurement, then set back once the controlled pair below put
+the core fill 4.1x ahead. Core 0
 issues `MATMUL_A_REPLICAS` blocking `dma_memcpy_blocking` transfers straight from `gemm_A_dram`,
 so the fill no longer depends on `a` being staged first. `MATMUL_A_FILL_DMA=0` keeps the original
 core fill (one L1 load + K posted stores per core, 1024-way parallel, a shape-INDEPENDENT 32
@@ -16056,7 +16058,32 @@ Asymmetry to remember when comparing the two fills: the DMA path does not zero t
 (present when A is smaller than one replica stride). Nothing reads them -- the kernel addresses A
 only at indices < M*N -- but the core fill does that extra work and the DMA path does not.
 
-**Cost: NOT yet measured.** Both fills now time themselves with `mempool_get_timer()` and the
+**Cost: MEASURED 2026-09-04, and the core fill wins by 4.1x.** Controlled pair, same shape
+(4x128x2048), same P, same host, K=64 both, and no padding so both fills move the same 64 KB:
+
+| fill  | M=4 (no padding) | M=1 (padded) before the nesting fix | M=1 after the fix |
+|-------|-----------------:|------------------------------------:|------------------:|
+| cores | **2,203**        | >31,000 (never printed)             | **2,239**         |
+| dma   | **9,065**        | 8,357                               | --                |
+
+Two conclusions. (1) DMA cost is ~140 cycles per transfer and essentially independent of transfer
+SIZE -- 64 transfers of 1 KB cost 9,065 against 64 of 256 B at 8,357, 8% more for 4x the bytes --
+so at K=64 the serialisation dominates exactly as predicted, just with a much smaller constant
+than the 500-1000 cycles/transfer I guessed. (2) The core fill is 2,203 cycles for 32,768 stores,
+about 15 stores/cycle machine-wide, which is the 1024-way parallelism doing its job.
+
+The loop-nesting fix is validated independently: M=1 goes >31,000 -> 2,239, landing on top of
+M=4's 2,203. Padded and unpadded shapes now cost the same, which is what the root cause predicts.
+
+MEASUREMENT HISTORY, because two of the three rounds were wrong and the reasons are instructive:
+an initial ESTIMATE said cores would win (right answer, wrong numbers -- 500-1000 vs the real
+2,203). Then a first measurement said DMA won by 1.7x and that conclusion was RETRACTED: both its
+probes were M=1, i.e. the padded shape carrying the nesting bug, and at M=1 the DMA also moved a
+quarter of the bytes (16 KB vs 64 KB) because it does not write the pad. Benchmarking a bug and
+reading it as a property of the approach is the error to avoid repeating; the fix is to vary ONE
+thing, which the M=4 pair finally does.
+
+**Cost history (superseded):** Both fills now time themselves with `mempool_get_timer()` and the
 `[AREP]` line reports `fill=cores|dma fill_cyc=N`, so the choice stops resting on anyone's
 arithmetic. Probe pair `probeC64/probeD64_1x128x2048` (K=64, the worst case for a serialised DMA
 loop) and `probeC16/probeD16_16x128x2048` are built; the K=64 pair is running. P is shrunk to 2048
