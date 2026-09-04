@@ -16300,3 +16300,31 @@ Those are the shapes where a bug passes a short test and corrupts data under con
 
 **Status.** Committed speculatively; compiles clean at the PnR config (MERGE_REQS=4,
 CFG_RUNTIME=0), equivalence arm in flight. Revert if it disagrees.
+
+## 2026-09-04 — F3c: response capture decided per entry, not chained across lanes
+
+**Purpose.** The two capture loops were the largest single block on the 822-level cone. Loop 1
+decremented mshr_resp_slots[id] so lane k+1's readiness depended on lane k; loop 2
+read-modify-wrote resp_push_ptr[id], resp_buf_cnt and the 186-bit entry. Measured directly:
+resp_in_ready (class B) sits at 6.94 ns against the door's 3.77 ns, and this is the gap.
+
+**Implementation.** Build the per-entry mask of lanes wanting it, take the lowest two by
+index, grant against free slots, write once per entry.
+
+**Why it is exact.** Three facts, none of them assumptions about traffic:
+  1. resp_is_mshr / resp_mshr_id derive from mshr_q alone, so every lane's target is known
+     independently of the others.
+  2. The sequential form granted lanes in increasing index order until slots ran out, so its
+     granted set is exactly the first slots[e] lanes by index.
+  3. The state decision reads only burst_len and sub_reqs_num, neither written by this pass,
+     so it cannot depend on WHICH lane won.
+resp_is_mshr is only set inside `if (resp_in_valid ...)`, so grant and ready cannot diverge.
+
+**Coverage, not just equivalence.** The whole difficulty is TWO lanes capturing into one entry
+in a cycle -- the only path where slot order, the pointer advance and the saturating count can
+differ between the forms. A cycle-identity pass on a workload that never produces it would be
+vacuous for exactly the hazard at issue. cap_two_grant_cnt_dbg counts it; zero across a run
+means the arm did NOT verify F3c and must not be read as if it had.
+
+**Status.** Committed with the arm in flight (both arms tracking the 3,117-cycle reference at
+the time of writing). Revert if the arm or the coverage counter disagrees.

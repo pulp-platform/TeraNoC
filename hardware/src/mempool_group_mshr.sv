@@ -1059,6 +1059,30 @@ module mempool_group_mshr
   logic      [MshrNum-1:0]                                                     replay_scan_valid;
   // F3a: one bit per entry, "some store lane forced this RESP_HOLD entry to drain this cycle".
   logic      [MshrNum-1:0]                                                     st_force_drain;
+  // F3c: response capture decided per ENTRY instead of chained across lanes.
+  //   cap_want          which response lanes want this entry (derived from mshr_q only, so all
+  //                     lanes are evaluated independently of one another)
+  //   cap_first/_second lowest and next-lowest wanting lane, one-hot. The sequential loop granted
+  //                     lanes in increasing index order until the entry ran out of slots, so
+  //                     "the first N by index" is exactly the same set it produced.
+  //   cap_g1/cap_g2     whether those two are granted, against the entry's free slots
+  //   cap_d0/cap_d1     the beat each granted lane contributes
+  localparam int unsigned NumRespPortsActive = (NumRemoteRespPortsPerTile > 1) ?
+                                               (NumRemoteRespPortsPerTile - 1) : 1;
+  localparam int unsigned NumRespLanes       = NumTilesPerGroup * NumRespPortsActive;
+  localparam int unsigned RespLaneW          = idx_width(NumRespLanes);
+  logic [MshrNum-1:0][NumRespLanes-1:0]                                        cap_want;
+  logic [MshrNum-1:0][NumRespLanes-1:0]                                        cap_first, cap_second;
+  logic [NumRespLanes-1:0]                                                     cap_rest;
+  logic [MshrNum-1:0]                                                          cap_g1, cap_g2;
+  mshr_resp_slot_t [MshrNum-1:0]                                               cap_d0, cap_d1;
+  logic [RespBufPtrW-1:0]                                                      cap_s0, cap_s1, cap_n0, cap_n1;
+  logic [RespLaneW-1:0]                                                        cap_lane;
+  // The grant takes at most TWO lanes per entry, exact only while an entry cannot have more than
+  // two free slots. RespBufWords is NumRemoteRespPortsPerTile-1 and the resp channel count is
+  // already restricted to 1 or 2, so this holds -- but fail loudly rather than drop a third beat.
+  if (RespBufWords > 2)
+    $error("[mempool_group_mshr] F3c grants at most 2 response lanes per entry per cycle; RespBufWords=%0d needs it generalised.", RespBufWords);
   logic      [MshrNum-1:0][RespBufPtrW-1:0]                                    drain2_rd_ptr;
   logic      [MshrNum-1:0][BurstLenWidth-1:0]                                  drain2_beat_off;
 
@@ -2617,6 +2641,40 @@ module mempool_group_mshr
   end
 
   // ------------------------------------------------------------------------
+  // F3c COVERAGE. The whole difficulty of the per-entry response capture is the case where TWO
+  // response lanes capture into the SAME entry in one cycle -- that is the only path where slot
+  // ordering, the resp_buf pointer advance and the saturating count can disagree between the
+  // sequential and parallel forms. A cycle-identity result on a workload that never produces it
+  // proves only that the one-lane path still works, which is not the thing at risk.
+  //
+  // So count it. Zero across a whole run means the equivalence check did NOT cover the hazard and
+  // the arm must not be read as verifying F3c -- an identically-zero telemetry counter is a
+  // finding, not background.
+  //
+  // Reachable in principle: resp_is_mshr requires sub_reqs[0].tile_id == tile_i, so both lanes
+  // must be the two response ports of ONE tile -- which is exactly what ParityDrain produces when
+  // consecutive beats of a burst return together.
+  //
+  // Declared and used entirely inside this translate_off region; simulators compile it, synthesis
+  // never sees it. (The converse -- declaring here and using outside -- is what broke synthesis
+  // in 467fa6c7.)
+  logic [31:0] cap_two_grant_cnt_dbg;   // cycles-with-entries where a second lane was granted
+  logic [31:0] cap_one_grant_cnt_dbg;   // ... where only the first was, for a ratio
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      cap_two_grant_cnt_dbg <= '0;
+      cap_one_grant_cnt_dbg <= '0;
+    end else begin
+      cap_two_grant_cnt_dbg <= cap_two_grant_cnt_dbg + 32'($countones(cap_g2));
+      cap_one_grant_cnt_dbg <= cap_one_grant_cnt_dbg + 32'($countones(cap_g1 & ~cap_g2));
+    end
+  end
+  final begin
+    $display("[F3cCOV] group=%0d two_lane_grants=%0d one_lane_grants=%0d",
+             group_id_i, cap_two_grant_cnt_dbg, cap_one_grant_cnt_dbg);
+  end
+
+  // ------------------------------------------------------------------------
   // RESP_HOLD stall probe (simulation-only, group_mshr_resp_hold_probe = age threshold).
   // Diagnoses WHY an entry holding a returned scalar response never reaches HoldSubsSingle
   // subscribers. It does not assume a cause -- it records, per held entry, the evidence that
@@ -3729,12 +3787,9 @@ module mempool_group_mshr
                             mshr_q[resp_mshr_id[tile_i][port_i]].sub_reqs[0].core_id,
                             mshr_q[resp_mshr_id[tile_i][port_i]].sub_reqs[0].meta_id_base);
           mshr_resp_inflight[resp_mshr_id[tile_i][port_i]] = 1'b1;
-          resp_in_ready[tile_i][port_i] = (mshr_resp_slots[resp_mshr_id[tile_i][port_i]] != '0);
-          if (resp_in_valid[tile_i][port_i] && resp_in_ready[tile_i][port_i]) begin
-            resp_capture_fire[tile_i][port_i] = 1'b1;
-            mshr_resp_slots[resp_mshr_id[tile_i][port_i]] =
-                mshr_resp_slots[resp_mshr_id[tile_i][port_i]] - 1'b1;
-          end
+          // F3c: ready and fire come from the per-entry grant below, not from walking the lanes
+          // and decrementing a slot counter as we go -- that decrement made lane k+1's readiness
+          // depend on lane k, which is half of why the class-B endpoint sits at 6.94 ns.
         end else begin
           resp_in_ready[tile_i][port_i] = resp_out_ready[tile_i][port_i];
         end
@@ -3757,7 +3812,122 @@ module mempool_group_mshr
       end
     end
 
-    // Capture MSHR responses
+    // ------------------------------------------------------------
+    // F3c: grant response slots per ENTRY, then capture once per entry.
+    //
+    // Both halves of the capture used to walk 16 tiles x 2 resp ports sequentially: the first
+    // loop decremented mshr_resp_slots[id], and the second read-modify-wrote resp_push_ptr[id],
+    // resp_buf_cnt and the 186-bit entry. A 32-deep chain of 64-entry indexed accesses in the
+    // MIDDLE of the process -- the measured class-B endpoint (resp_in_ready) sits at 6.94 ns
+    // against the door's 3.77 ns, and this chain is the difference between them.
+    //
+    // Equivalent by construction. resp_is_mshr / resp_mshr_id derive from mshr_q alone, so every
+    // lane's target is known independently of the others. The sequential form granted lanes in
+    // increasing index order until the slots ran out, so its granted set is exactly the first
+    // slots[e] lanes by index. And the state decision reads only burst_len and sub_reqs_num,
+    // neither of which this pass writes -- so it cannot depend on WHICH lane won.
+    // ------------------------------------------------------------
+    cap_want = '0;
+    for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
+      for (int port_i = 1; port_i < NumRemoteRespPortsPerTile; port_i++) begin
+        // resp_is_mshr is only set inside `if (resp_in_valid ...)`, so it implies valid: no lane
+        // can be granted here that the old code would have skipped.
+        if (resp_is_mshr[tile_i][port_i]) begin
+          cap_lane = RespLaneW'(tile_i * NumRespPortsActive + (port_i - 1));
+          cap_want[resp_mshr_id[tile_i][port_i]][cap_lane] = 1'b1;
+        end
+      end
+    end
+    for (int e = 0; e < MshrNum; e++) begin
+      cap_first[e]  = cap_want[e] & (~cap_want[e] + NumRespLanes'(1));
+      cap_rest      = cap_want[e] & ~cap_first[e];
+      cap_second[e] = cap_rest    & (~cap_rest    + NumRespLanes'(1));
+      cap_g1[e] = (cap_first[e]  != '0) && (mshr_resp_slots[e] >= RespBufCountW'(1));
+      cap_g2[e] = (cap_second[e] != '0) && (mshr_resp_slots[e] >= RespBufCountW'(2));
+    end
+    for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
+      for (int port_i = 1; port_i < NumRemoteRespPortsPerTile; port_i++) begin
+        if (resp_is_mshr[tile_i][port_i]) begin
+          cap_lane = RespLaneW'(tile_i * NumRespPortsActive + (port_i - 1));
+          resp_in_ready[tile_i][port_i] =
+              (cap_first [resp_mshr_id[tile_i][port_i]][cap_lane] && cap_g1[resp_mshr_id[tile_i][port_i]]) ||
+              (cap_second[resp_mshr_id[tile_i][port_i]][cap_lane] && cap_g2[resp_mshr_id[tile_i][port_i]]);
+          resp_capture_fire[tile_i][port_i] =
+              resp_in_valid[tile_i][port_i] && resp_in_ready[tile_i][port_i];
+        end
+      end
+    end
+    // Scatter each granted lane's beat to its entry. cap_first / cap_second are one-hot, so at
+    // most one lane writes each of cap_d0 / cap_d1. Scattering by lane costs 32 iterations;
+    // gathering per entry would cost MshrNum x 32 and blow up an already slow elaboration.
+    cap_d0 = '0; cap_d1 = '0;
+    for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
+      for (int port_i = 1; port_i < NumRemoteRespPortsPerTile; port_i++) begin
+        if (resp_capture_fire[tile_i][port_i]) begin
+          cap_lane = RespLaneW'(tile_i * NumRespPortsActive + (port_i - 1));
+`ifndef TARGET_SYNTHESIS
+          if (mshr_d[resp_mshr_id[tile_i][port_i]].beat_seen[resp_capture_beat_offset[tile_i][port_i]]) begin
+            dup_beat_detected = 1'b1;
+            dup_beat_mshr     = resp_mshr_id[tile_i][port_i];
+            dup_beat_beat     = resp_capture_beat_offset[tile_i][port_i];
+            dup_beat_meta     = resp_in[tile_i][port_i].rdata.meta_id;
+          end
+          mshr_d[resp_mshr_id[tile_i][port_i]].beat_seen[resp_capture_beat_offset[tile_i][port_i]] = 1'b1;
+`endif
+          if (cap_first[resp_mshr_id[tile_i][port_i]][cap_lane]) begin
+            cap_d0[resp_mshr_id[tile_i][port_i]] =
+                '{beat_off: resp_capture_beat_offset[tile_i][port_i],
+                  data:     resp_in[tile_i][port_i].rdata.data};
+          end else begin
+            cap_d1[resp_mshr_id[tile_i][port_i]] =
+                '{beat_off: resp_capture_beat_offset[tile_i][port_i],
+                  data:     resp_in[tile_i][port_i].rdata.data};
+          end
+        end
+      end
+    end
+    // One write per entry. Slot order, the pointer and the saturating count reproduce the
+    // sequential form: the first grant lands on resp_buf_wr_ptr, the second on the slot after
+    // it, and the two guarded increments saturate at RespBufWords exactly as they did.
+    for (int e = 0; e < MshrNum; e++) begin
+      if (cap_g1[e] || cap_g2[e]) begin
+        cap_s0 = mshr_d[e].resp_buf_wr_ptr;
+        cap_n0 = (RespBufWords > 1) ?
+                 ((cap_s0 == RespBufPtrW'(RespBufWords - 1)) ? '0 : RespBufPtrW'(cap_s0 + 1'b1))
+                 : cap_s0;
+        cap_s1 = cap_n0;
+        cap_n1 = (RespBufWords > 1) ?
+                 ((cap_s1 == RespBufPtrW'(RespBufWords - 1)) ? '0 : RespBufPtrW'(cap_s1 + 1'b1))
+                 : cap_s1;
+        if (cap_g1[e]) begin
+          mshr_rb_we[e][cap_s0]      = 1'b1;
+          mshr_d[e].resp_buf[cap_s0] = cap_d0[e];
+          if (mshr_d[e].resp_buf_cnt < RespBufWords) begin
+            mshr_d[e].resp_buf_cnt = mshr_d[e].resp_buf_cnt + 1'b1;
+          end
+        end
+        if (cap_g2[e]) begin
+          mshr_rb_we[e][cap_s1]      = 1'b1;
+          mshr_d[e].resp_buf[cap_s1] = cap_d1[e];
+          if (mshr_d[e].resp_buf_cnt < RespBufWords) begin
+            mshr_d[e].resp_buf_cnt = mshr_d[e].resp_buf_cnt + 1'b1;
+          end
+        end
+        mshr_d[e].resp_buf_wr_ptr = cap_g2[e] ? cap_n1 : cap_n0;
+        if (RespWaitSubsSingle && !amo_invalidate &&
+            (mshr_d[e].burst_len == BurstLenWidth'(1)) &&
+            (mshr_d[e].sub_reqs_num < SubReqCountW'(cfg_hold_subs_single))) begin
+          mshr_d[e].state    = MSHR_RESP_HOLD;
+          mshr_d[e].hold_cnt = hold_ticks(cfg_serve_timeout);
+        end else begin
+          mshr_d[e].state    = MSHR_DRAIN_RESP;
+        end
+      end
+    end
+
+    // Superseded by the per-entry capture above. Kept compiled-out rather than deleted until the
+    // equivalence arm confirms the rewrite, so the two forms can be diffed side by side.
+    if (1'b0) begin
     for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
       for (int port_i = 1; port_i < NumRemoteRespPortsPerTile; port_i++) begin
         if (resp_capture_fire[tile_i][port_i]) begin
@@ -3801,6 +3971,7 @@ module mempool_group_mshr
 `endif
         end
       end
+    end
     end
 
     // A buffered response predates any store/AMO observed after it returned. Release the old value
