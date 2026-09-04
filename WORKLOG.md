@@ -16145,3 +16145,31 @@ printable for every shape, which is what makes it usable as a sweep probe.
 **Status.** Fixed. Found while standing up a small tuned-CSR GEMM arm as the representative
 workload for the MSHR timing rework -- the burst tests run the MSHR at its untuned static
 defaults, which is a stress point, not the operating point.
+
+## 2026-09-04 04:05 — mempool_group_mshr does not analyze under TARGET_SYNTHESIS
+
+**Purpose.** Standing up out-of-context synthesis of the MSHR surfaced that the module at
+HEAD fails Presto analysis in 18 seconds:
+```
+Error: The symbol 'mshr_resp_hold_timeout_dbg' is not defined. (VER-956)
+Error: The symbol 'mshr_cache_timeout_dbg' is not defined. (VER-956)
+```
+
+**Cause.** Both are declared inside the `// pragma translate_off` region that opens at
+:2437, but cleared at the top of the main always_comb and set at the two response-side death
+sites -- all three outside any off-region. Simulators ignore translate_off and compile
+everything, so this is invisible in simulation; synthesis drops the declarations and the uses
+dangle. Introduced by b6bff0bc (2026-08-21). The 500 MHz backend run never saw it because
+teranoc_spatz_backend/mempool is a separate clone at 6fee18d8, which predates that commit --
+verified 6fee18d8 has neither the declaration nor the unguarded use.
+
+**Implementation.** Wrap the three use sites in `ifndef TARGET_SYNTHESIS, matching how
+dup_beat_detected is handled three lines below the first of them.
+
+**Result.** Analysis clean; elaboration proceeds. The diff is PURE ADDITION of guard lines, so
+the guarded code is still compiled in simulation and behaviour there is unchanged -- verified
+by diffing HEAD against the fixed file.
+
+**Status.** Fixed. Same shape as the a_fill_cyc prefill bug fixed earlier today: a declaration
+inside a guard, used outside it. Worth a lint rule -- both were invisible to simulation and
+both would have failed a two-week backend run in its first minute.

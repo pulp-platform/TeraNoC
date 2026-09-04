@@ -3182,8 +3182,12 @@ module mempool_group_mshr
     mshr_id_we  = '0;
     mshr_rb_we  = '0;
     // One-cycle pulses; set only at the two response-side death sites below.
+    // Guarded because the DECLARATIONS live in a `pragma translate_off` region: unguarded, these
+    // reference undefined symbols under synthesis and the module does not analyze at all.
+`ifndef TARGET_SYNTHESIS
     mshr_resp_hold_timeout_dbg = '0;
     mshr_cache_timeout_dbg     = '0;
+`endif
 `ifndef TARGET_SYNTHESIS
     dup_beat_detected = 1'b0;
     dup_beat_mshr = 0; dup_beat_beat = 0; dup_beat_meta = 0;
@@ -3784,7 +3788,9 @@ module mempool_group_mshr
           end else begin
             // Expired: stop waiting for subscribers that are not coming and deliver the buffered
             // word to whoever HAS subscribed. Same re-arm the merge-target path performs.
+`ifndef TARGET_SYNTHESIS
             mshr_resp_hold_timeout_dbg[e] = 1'b1;
+`endif
             mshr_d[e].state         = MSHR_DRAIN_RESP;
             mshr_d[e].beats_left    = BurstLenWidth'(1);
             mshr_d[e].beat_pending  = '0;
@@ -3809,7 +3815,9 @@ module mempool_group_mshr
             // Cache line aged out WITHOUT reaching its reuse target: its second cohort never
             // completed in time. Distinct from self-invalidate, and the number that says whether
             // the residency is too SHORT.
+`ifndef TARGET_SYNTHESIS
             mshr_cache_timeout_dbg[e] = 1'b1;
+`endif
             mshr_d_valid[e] = 1'b0;
             mshr_d[e]       = '0;
             mshr_wr_all[e] = 1'b1;
