@@ -16499,3 +16499,31 @@ Motivation: at 256x32x256 the merge arbiter recorded merge_grants=240, merge_arb
 group -- the restriction is never exercised, so "costs nothing" is unproven there.
 
 **Status.** Committed with arms in flight, per the speculative protocol. Revert if any disagrees.
+
+## 2026-09-04 — F6: hoist the head-beat drive operands; delete the compiled-out capture form
+
+**F6 (purpose).** With every per-lane mshr_d WRITE chain gone (F3/F5), the largest remaining
+per-lane structure on the response path was the head-beat drive, which read
+`mshr_d[resp_sel_mshr_id[tile_i][port_i]]` directly. That is a full-entry MshrNum:1 STRUCT mux per
+lane, 32 of them, plus a second MshrNum:1 for the nested `resp_buf[...resp_buf_rd_ptr]` index and a
+burst_len comparator per lane.
+
+**Implementation.** Four per-entry vectors built once in the existing drain hoist loop --
+`drv_data` (resp_buf word at rd_ptr), `drv_sub_core`, `drv_sub_meta`, `drv_burst_one` -- so each
+per-lane read becomes a MshrNum:1 over a NARROW field instead of over a whole entry. This is F8's
+second half, which drain2 already does; the head-beat path had never been given the same treatment.
+Result: `mshr_d[resp_sel_mshr_id[tile_i][port_i]]` occurrences drop from 5 to **0**.
+
+**Sourced from mshr_d, deliberately NOT from drain_scan_ent.** The drain SELECTION may read mshr_q
+(DrainFromQ ships 1) but the DRIVE must see this cycle's writes: F3b can byte-merge into resp_buf
+in the very cycle the entry drains, and a q-sourced read would emit the pre-merge word. Hoisting
+from the wrong view would have been a silent data corruption, not a timing regression.
+
+**Dead-code deletion.** F3c kept the old per-lane capture form compiled out under `if (1'b0)` so
+the two could be diffed while its equivalence arm ran. That arm passed (gf3c: EQUIVALENT over 455
+probe-periods, 3,117 cycles), and gf4b/gf4/gf4d have since confirmed the same at EOC, so the 48
+lines are deleted. Synthesis already removed them, so this is not an area change -- it removes
+elaboration bloat and, more usefully, a trap: those 12 writes made a per-lane-chain audit read
+"12 live writes" when every one of them was unreachable.
+
+**Status.** Both compile clean. Committed; F6 is exact by construction (same expressions, hoisted).

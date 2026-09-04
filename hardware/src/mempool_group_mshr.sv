@@ -3536,6 +3536,18 @@ module mempool_group_mshr
   logic [MshrNum-1:0][MshrMergeReqs-1:0]                      drain_sub_ready;
   tile_group_id_t [MshrNum-1:0][MshrMergeReqs-1:0]            drain_sub_tile;
   logic [MshrNum-1:0][MshrMergeReqs-1:0][RespPortIdW-1:0]     drain_sub_port;
+  // F6: head-beat DRIVE operands, hoisted per entry (F8's second half, applied to the head beat).
+  // The drive read mshr_d[resp_sel_mshr_id[t][p]] directly -- a full-entry MshrNum:1 STRUCT mux per
+  // lane, 32 of them, plus a second MshrNum:1 for the nested resp_buf_rd_ptr and a burst_len
+  // comparator per lane. Hoisting turns each into a MshrNum:1 over a NARROW field, computed once.
+  //
+  // Sourced from mshr_d, NOT drain_scan_ent: the selection may read mshr_q (DrainFromQ ships 1)
+  // but the drive must see this cycle's writes -- F3b can byte-merge into resp_buf in the very
+  // cycle the entry drains, and reading mshr_q would emit the pre-merge word.
+  data_t [MshrNum-1:0]                                        drv_data;
+  tile_core_id_t [MshrNum-1:0][MshrMergeReqs-1:0]             drv_sub_core;
+  meta_id_t [MshrNum-1:0][MshrMergeReqs-1:0]                  drv_sub_meta;
+  logic [MshrNum-1:0]                                         drv_burst_one;
   // ParityDrain second-slot equivalents. drain2_sub_port is indexed by ENTRY only: both beats of an
   // entry share one parity port, so it does not vary per sub-request.
   logic [MshrNum-1:0]                                         drain2_ent_ok;
@@ -4408,54 +4420,9 @@ module mempool_group_mshr
       end
     end
 
-    // Superseded by the per-entry capture above. Kept compiled-out rather than deleted until the
-    // equivalence arm confirms the rewrite, so the two forms can be diffed side by side.
-    if (1'b0) begin
-    for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
-      for (int port_i = 1; port_i < NumRemoteRespPortsPerTile; port_i++) begin
-        if (resp_capture_fire[tile_i][port_i]) begin
-`ifndef TARGET_SYNTHESIS
-          if (mshr_d[resp_mshr_id[tile_i][port_i]].beat_seen[resp_capture_beat_offset[tile_i][port_i]]) begin
-            dup_beat_detected = 1'b1;
-            dup_beat_mshr     = resp_mshr_id[tile_i][port_i];
-            dup_beat_beat     = resp_capture_beat_offset[tile_i][port_i];
-            dup_beat_meta     = resp_in[tile_i][port_i].rdata.meta_id;
-          end
-`endif
-          mshr_rb_we[resp_mshr_id[tile_i][port_i]][resp_push_ptr[resp_mshr_id[tile_i][port_i]]] = 1'b1;
-          mshr_d[resp_mshr_id[tile_i][port_i]].resp_buf[resp_push_ptr[resp_mshr_id[tile_i][port_i]]] =
-              '{beat_off: resp_capture_beat_offset[tile_i][port_i],
-                data:     resp_in[tile_i][port_i].rdata.data};
-          if (RespBufWords > 1) begin
-            if (resp_push_ptr[resp_mshr_id[tile_i][port_i]] == RespBufPtrW'(RespBufWords - 1)) begin
-              resp_push_ptr[resp_mshr_id[tile_i][port_i]] = '0;
-            end else begin
-              resp_push_ptr[resp_mshr_id[tile_i][port_i]] =
-                  resp_push_ptr[resp_mshr_id[tile_i][port_i]] + 1'b1;
-            end
-          end
-          if (mshr_d[resp_mshr_id[tile_i][port_i]].resp_buf_cnt < RespBufWords) begin
-            mshr_d[resp_mshr_id[tile_i][port_i]].resp_buf_cnt =
-                mshr_d[resp_mshr_id[tile_i][port_i]].resp_buf_cnt + 1'b1;
-          end
-          mshr_d[resp_mshr_id[tile_i][port_i]].resp_buf_wr_ptr = resp_push_ptr[resp_mshr_id[tile_i][port_i]];
-          if (RespWaitSubsSingle && !amo_invalidate &&
-              (mshr_d[resp_mshr_id[tile_i][port_i]].burst_len == BurstLenWidth'(1)) &&
-              (mshr_d[resp_mshr_id[tile_i][port_i]].sub_reqs_num <
-               SubReqCountW'(cfg_hold_subs_single))) begin
-            mshr_d[resp_mshr_id[tile_i][port_i]].state = MSHR_RESP_HOLD;
-            // Arm the serve-target timeout (0 => never expires; the countdown below is skipped).
-            mshr_d[resp_mshr_id[tile_i][port_i]].hold_cnt = hold_ticks(cfg_serve_timeout);
-          end else begin
-            mshr_d[resp_mshr_id[tile_i][port_i]].state = MSHR_DRAIN_RESP;
-          end
-`ifndef TARGET_SYNTHESIS
-          mshr_d[resp_mshr_id[tile_i][port_i]].beat_seen[resp_capture_beat_offset[tile_i][port_i]] = 1'b1;
-`endif
-        end
-      end
-    end
-    end
+    // The per-lane capture form that this replaced was kept compiled-out here under
+    // `if (1'b0)` while its equivalence arm ran; it is deleted now that the arm passed.
+    // Recover it from git history (F3c, commit 14489c5e) if the rewrite ever needs diffing.
 
     // A buffered response predates any store/AMO observed after it returned. Release the old value
     // to its already-recorded subscribers, but prohibit the entry from becoming a stale cache line.
@@ -4692,6 +4659,9 @@ module mempool_group_mshr
         // earlier. drain_ent_ok is a module-scope packed vector instead.
         drain_scan_valid[e] = DrainFromQ ? mshr_q_valid[e] : mshr_d_valid[e];
         drain_scan_ent[e]   = DrainFromQ ? mshr_q[e]       : mshr_d[e];
+        // F6: drive operands, always from mshr_d (see the declaration for why).
+        drv_data[e]      = mshr_d[e].resp_buf[mshr_d[e].resp_buf_rd_ptr].data;
+        drv_burst_one[e] = (mshr_d[e].burst_len == BurstLenWidth'(1));
         drain_ent_ok[e] = drain_scan_valid[e] && (drain_scan_ent[e].resp_buf_cnt != '0) &&
                           (drain_scan_ent[e].state == MSHR_DRAIN_RESP);
         // BOTH entry-level terms must be assigned BEFORE the sub-request loop that reads them --
@@ -4701,6 +4671,8 @@ module mempool_group_mshr
           drain_sub_ready[e][s] = drain_ent_ok[e] && drain_scan_ent[e].sub_reqs[s].valid &&
                                   drain_scan_ent[e].beat_pending[s];
           drain_sub_tile[e][s]  = drain_scan_ent[e].sub_reqs[s].tile_id;
+          drv_sub_core[e][s]    = mshr_d[e].sub_reqs[s].core_id;
+          drv_sub_meta[e][s]    = mshr_d[e].sub_reqs[s].meta_id_base;
           // Effective destination port: the ParityDrain pin for multi-beat entries, otherwise the
           // requester's own mapped port. Independent of s in the PD2 arm, but kept per-s so the
           // consumer is a single uniform compare.
@@ -4908,20 +4880,18 @@ module mempool_group_mshr
             // responses with wen == 0 (resp_is_mshr stays 0 otherwise and the beat takes the
             // bypass path), so the stored bit could never be anything but 0.
             resp_out[tile_i][port_i].wen = 1'b0;
-            resp_out[tile_i][port_i].rdata.data =
-                mshr_d[resp_sel_mshr_id[tile_i][port_i]]
-                      .resp_buf[mshr_d[resp_sel_mshr_id[tile_i][port_i]].resp_buf_rd_ptr].data;
+            resp_out[tile_i][port_i].rdata.data = drv_data[resp_sel_mshr_id[tile_i][port_i]];
             // Re-emit beat b for THIS requester under the lane law: lane from the low
             // BurstLaneW bits, row from the rest. Not gated on PD2 -- this is the lane
             // MAPPING, not the drain width; DrainBeatsPerEntry only says how many beats may
             // leave in one cycle. Identity for a single-word entry (b = 0).
             resp_out[tile_i][port_i].rdata.core_id =
-                mshr_d[resp_sel_mshr_id[tile_i][port_i]].sub_reqs[
-                    resp_sel_subreq_idx[tile_i][port_i]].core_id +
+                drv_sub_core[resp_sel_mshr_id[tile_i][port_i]]
+                            [resp_sel_subreq_idx[tile_i][port_i]] +
                 tile_core_id_t'(resp_beat_offset[resp_sel_mshr_id[tile_i][port_i]][BurstLaneW-1:0]);
             resp_out[tile_i][port_i].rdata.meta_id =
-                mshr_d[resp_sel_mshr_id[tile_i][port_i]].sub_reqs[
-                    resp_sel_subreq_idx[tile_i][port_i]].meta_id_base +
+                drv_sub_meta[resp_sel_mshr_id[tile_i][port_i]]
+                            [resp_sel_subreq_idx[tile_i][port_i]] +
                 meta_id_t'(resp_beat_offset[resp_sel_mshr_id[tile_i][port_i]] >> BurstLaneW);
             resp_out[tile_i][port_i].rdata.amo = '0;  // sub-requests are loads by construction (req_is_load)
             resp_from_mshr[tile_i][port_i] = 1'b1;
@@ -4944,7 +4914,7 @@ module mempool_group_mshr
               // valid to persist across beats so the full burst lands at
               // the same set of sub_reqs (mass-clear / full-dealloc
               // handles cleanup at end of burst).
-              if (mshr_d[resp_sel_mshr_id[tile_i][port_i]].burst_len == BurstLenWidth'(1)) begin
+              if (drv_burst_one[resp_sel_mshr_id[tile_i][port_i]]) begin
                 sv_clr[resp_sel_mshr_id[tile_i][port_i]][
                     resp_sel_subreq_idx[tile_i][port_i]] = 1'b1;
               end
