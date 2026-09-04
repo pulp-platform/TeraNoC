@@ -539,3 +539,95 @@ reconverge.
 inside `#if MATMUL_A_REPLICAS > 1` but read outside it, and that macro collapses to 1 exactly when
 `A_SPAN >= NUM_GROUPS` — the definition of a prefill shape. Every prefill shape failed to compile in
 both GEMM apps; only decode shapes built, which hid it.
+
+---
+
+# Addendum B — 2026-09-04: MEASURED results
+
+Everything above §5 was analysis. This section is data. Two classes of it: RTL-change verification
+from simulation, and the first out-of-context synthesis numbers.
+
+## B1. Out-of-context synthesis — instance count, −34.4 %
+
+Seven OOC runs of `mempool_group_mshr` on fenga3 (Fusion Compiler 2025.06, `compile_fusion -to
+initial_opto`). The six below are at **matched TCK = 8.0 ns** and were each read at the *identical*
+stage — `Ending initial_map / Logic Simplification (1)` — with the same INSTCNT sequence shape, so
+the comparison is apples-to-apples.
+
+| run | RTL under test | pre-simplification | post-simplification | vs baseline |
+|---|---|---:|---:|---:|
+| `rt_base_head_8p0` | HEAD before F3a | 1,981,738 | 1,269,127 | — |
+| `rt_f3a_8p0` | + F3a | 1,953,353 | 1,240,806 | −2.2 % |
+| `rt_f4all_8p0` | + F3b–d, F4a–d | 2,265,183 | 1,088,754 | −14.2 % |
+| `rt_f5_8p0` | + F5a, F5b | 2,013,203 | 836,774 | −34.1 % |
+| `rt_f6_8p0` | + F6, dead-code delete | 2,009,363 | **832,934** | **−34.4 %** |
+
+**−436,193 instances.** Per-stage deltas: F3a −2.2 %; F3b–d + F4a–d −12.3 %;
+**F5a+F5b −23.1 %**; F6 −0.5 %.
+
+**F5 dominates, and that is the expected shape.** F5 replaced the two 32-deep per-lane
+read-modify-write chains on the request door (merge apply, 25 writes; allocation, 22 writes) with
+`MshrBankNum` independent per-bank writes. It is worth more than F3 and F4 combined. The enabling
+condition was `OneMergePerBank` — at most one merge per bank, and an entry belongs to exactly one
+bank, so the writes provably cannot collide. Allocation needed no knob: `bank_win_oh` has always
+granted at most one allocation per bank, and the RTL comment at the allocation site already said so.
+
+**The knob gating is confirmed to fold, not merely to be unused.** `rt_f4all_8p0`'s
+*pre*-simplification count (2,265,183) is HIGHER than the baseline's (1,981,738), because both arms
+of every `if (Knob)` exist before constant propagation; simplification then drops it to 1,088,754.
+That is direct evidence the dead arms are removed — previously asserted, now shown.
+
+**What this is NOT.** Instance count after logic simplification, not final area, and **not timing**.
+No run has produced a WNS or a logic-depth figure yet; every ns figure in this document remains
+model-derived from the 13.4 ps/level constant and the measured prefix taps.
+
+## B2. Simulation verification
+
+All arms: `vg_fp16_256x32x256` (sp-fmatmul-opt-burst-merge-fp16, 256×32×256, fp16),
+`GROUP_MSHR_CFG_RUNTIME=1`, with `[MSHRCFG] all 16 groups ENABLED (runtime, software-configured)`
+confirming the software actually programs the CSRs. Reference: **3,117 cycles**.
+
+| change | arm | result |
+|---|---|---|
+| F3b store→CACHED byte merge | `gf3b` | 3,117, equivalent, `store_byte_overlaps = 0` |
+| F3c response capture | `gf3c` | 3,117, equivalent over 455 periods |
+| F3d drain clears | `gf3d` | 3,117, equivalent |
+| F4a one merge per bank | `gmrg1` | 3,117, equivalent |
+| F4b/F4c | `gf4b`, `gf4` | 3,117, equivalent |
+| F4d per-bank capture | `gf4d` vs `gcap0` | 3,117 both; counters **byte-identical** |
+| F5a per-bank merge apply | `gf5a` | 3,117, equivalent over 455 periods |
+| F5a+F5b | `gf5` | 3,117, equivalent over 455 periods |
+| `Drain2FromQ`+`ReplayFromQ` | `gfromq` | 3,117, equivalent over 455 periods |
+
+Zero assertion failures anywhere.
+
+### B2.1 Two counters that changed the conclusions
+
+* **`[F3cCOV] two_lane_grants = 15,496`** (34 % of grant cycles). The two-beats-in-one-cycle hazard
+  F3c had to preserve is exercised heavily, so F3c's equivalence result is NOT vacuous. Had this
+  read zero, the arm would have proved nothing about the hazard it was written for.
+* **`[CAPARB]`, F4d on vs off: `wanted=89847 fired=61448` in BOTH.** The 31.6 % capture deferral is
+  entirely the pre-existing response-buffer-full case, not bank contention. F4d's cost is measurably
+  zero here.
+
+### B2.2 The claim that is still NOT established
+
+**`[MRGARB] merge_arb_stalls = 0` on every GEMM arm** (seven of them), with `merge_grants = 3,840`
+across 16 groups. The per-bank merge restriction has **never once fired** on this workload — only
+240 merges per group across 3,117 cycles. So "F4a costs nothing" is a statement about the workload,
+not about the design. The structural win is unconditional (the NumAllocSlots² rank network is
+removed at elaboration, and B1 measures it), but the throughput trade is untested. Larger shapes
+(256×128×256, 256×256×256, 512×64×256) and the burst stress test are in flight to break that.
+
+## B3. Two audit errors worth recording
+
+Both made correct work look broken, which is the safer direction, but both cost time:
+
+1. **A begin/end counter miscounts `end else begin`** — it nets to zero, so a span search reports
+   the block closing immediately. This made an audit claim 25 merge writes sat outside their
+   knob-gated branch when all 25 were inside it.
+2. **`compile.tcl` does not carry `extra_vlog_defs`.** It is generated from the config defines only,
+   so grepping it to confirm a knob override reports the *config* value. This made a valid
+   `CapPerBank=0` baseline arm read as "the override silently failed", nearly discarding the B2.1
+   result. Verify defines from the vopt log's real `vlog` line:
+   `grep -a 'mempool_group_mshr.sv' <vopt.log> | head -1 | grep -oE '\+define\+GROUP_MSHR_[A-Z0-9_]+=[0-9]+'`
