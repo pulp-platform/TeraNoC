@@ -48,6 +48,69 @@ module mempool_group_mshr_req_decode
   output logic                                                                         amo_invalidate_o
 );
 
+  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] req_is_amo;
+  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] req_no_amo;
+  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] req_burst_misaligned;
+  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] req_len_is_burst;
+  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] req_can_merge_class;
+
+  genvar t, p;
+
+  generate
+    for (t = 0; t < NumTilesPerGroup; t++) begin : gen_req_decode_t
+      for (p = 1; p < NumRemoteReqPortsPerTile; p++) begin : gen_req_decode_p
+
+        assign req_is_amo[t][p] = req_valid_i[t][p] && (req_i[t][p].wdata.amo != '0);
+        assign req_no_amo[t][p] = req_valid_i[t][p] && (req_i[t][p].wdata.amo == '0);
+
+        assign is_load_o [t][p] = req_no_amo[t][p] && ~req_i[t][p].wen;
+        assign is_store_o[t][p] = req_no_amo[t][p] &&  req_i[t][p].wen;
+
+        assign tile_id_o  [t][p] = req_valid_i[t][p] ? req_i[t][p].tgt_addr[TileIdBits-1:0] : '0;
+        assign tile_addr_o[t][p] = req_valid_i[t][p]
+                                 ? req_i[t][p].tgt_addr[$bits(tcdm_addr_t)-1:TileIdBits] : '0;
+
+        assign len_raw_o[t][p] = (!req_valid_i[t][p] || (req_i[t][p].burst_len == '0))
+                               ? BurstLenWidth'(1) : req_i[t][p].burst_len;
+
+        // A burst whose tile address is not BurstAlignBits-aligned is clamped to a single word.
+        assign req_burst_misaligned[t][p] = (len_raw_o[t][p] > 1) &&
+                                            (tile_addr_o[t][p][BurstAlignBits-1:0] != '0);
+        assign len_o[t][p] = (!req_valid_i[t][p] || !is_load_o[t][p] ||
+                              req_burst_misaligned[t][p]) ? BurstLenWidth'(1) : len_raw_o[t][p];
+        assign req_len_is_burst[t][p] = req_valid_i[t][p] && (len_o[t][p] > 1);
+
+        assign tile_addr_key_o[t][p] = req_len_is_burst[t][p]
+            ? {tile_addr_o[t][p][$bits(tcdm_addr_t)-TileIdBits-1:BurstAlignBits],
+               {BurstAlignBits{1'b0}}}
+            : '0;
+        assign addr_key_o[t][p] = !req_valid_i[t][p] ? '0
+                                : req_len_is_burst[t][p]
+                                    ? {tile_addr_key_o[t][p], tile_id_o[t][p]}
+                                    : merge_addr_key(req_i[t][p].tgt_addr);
+
+        assign is_single_o    [t][p] = req_valid_i[t][p] &&
+                                       (len_o[t][p] == BurstLenWidth'(1));
+        assign is_full_burst_o[t][p] = req_valid_i[t][p] &&
+                                       (len_o[t][p] == BurstLenWidth'(MshrFullBurstWords));
+        assign is_non_full_burst_o[t][p] = req_valid_i[t][p] && !is_single_o[t][p] &&
+                                           !is_full_burst_o[t][p];
+
+        // A misaligned burst has is_single set but len_raw > 1; it must not take the single arm.
+        assign req_can_merge_class[t][p] =
+            (EnableMshrSingleReq       && is_single_o[t][p] &&
+             (len_raw_o[t][p] == BurstLenWidth'(1)))                 ||
+            (EnableMshrNonFullBurstReq && is_non_full_burst_o[t][p]) ||
+            (EnableMshrFullBurstReq    && is_full_burst_o[t][p]);
+        assign can_merge_o[t][p] = is_load_o[t][p] && req_can_merge_class[t][p] &&
+                                   !(is_single_o[t][p] ? cfg_bypass_single_i : cfg_bypass_burst_i);
+
+      end
+    end
+  endgenerate
+
+  assign amo_invalidate_o = |req_is_amo;
+
   function automatic tcdm_addr_t merge_addr_key(input tcdm_addr_t addr);
     if (MergeWordOffset == 0) begin
       merge_addr_key = addr;
@@ -55,75 +118,5 @@ module mempool_group_mshr_req_decode
       merge_addr_key = {addr[$bits(tcdm_addr_t)-1:MergeWordOffset], {MergeWordOffset{1'b0}}};
     end
   endfunction
-
-  always_comb begin
-    amo_invalidate_o = 1'b0;
-    for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
-      for (int port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin
-        len_o[tile_i][port_i]               = BurstLenWidth'(1);
-        len_raw_o[tile_i][port_i]           = BurstLenWidth'(1);
-        tile_id_o[tile_i][port_i]           = '0;
-        tile_addr_o[tile_i][port_i]         = '0;
-        tile_addr_key_o[tile_i][port_i]     = '0;
-        is_load_o[tile_i][port_i]           = req_valid_i[tile_i][port_i] &&
-                                              ~req_i[tile_i][port_i].wen &&
-                                              (req_i[tile_i][port_i].wdata.amo == '0);
-        is_store_o[tile_i][port_i]          = req_valid_i[tile_i][port_i] &&
-                                              req_i[tile_i][port_i].wen &&
-                                              (req_i[tile_i][port_i].wdata.amo == '0);
-        is_single_o[tile_i][port_i]         = 1'b0;
-        is_non_full_burst_o[tile_i][port_i] = 1'b0;
-        is_full_burst_o[tile_i][port_i]     = 1'b0;
-        can_merge_o[tile_i][port_i]         = 1'b0;
-
-        if (req_valid_i[tile_i][port_i] && (req_i[tile_i][port_i].wdata.amo != '0)) begin
-          amo_invalidate_o = 1'b1;
-        end
-
-        if (req_valid_i[tile_i][port_i]) begin
-          tile_id_o[tile_i][port_i]   = req_i[tile_i][port_i].tgt_addr[TileIdBits-1:0];
-          tile_addr_o[tile_i][port_i] =
-              req_i[tile_i][port_i].tgt_addr[$bits(tcdm_addr_t)-1:TileIdBits];
-          len_raw_o[tile_i][port_i]   = (req_i[tile_i][port_i].burst_len == '0)
-                                            ? BurstLenWidth'(1)
-                                            : req_i[tile_i][port_i].burst_len;
-          // Stores and misaligned bursts are clamped to a single word.
-          if (!is_load_o[tile_i][port_i] ||
-              ((len_raw_o[tile_i][port_i] > 1) &&
-               (tile_addr_o[tile_i][port_i][BurstAlignBits-1:0] != '0))) begin
-            len_o[tile_i][port_i] = BurstLenWidth'(1);
-          end else begin
-            len_o[tile_i][port_i] = len_raw_o[tile_i][port_i];
-          end
-
-          if (len_o[tile_i][port_i] > 1) begin
-            tile_addr_key_o[tile_i][port_i] =
-                {tile_addr_o[tile_i][port_i][$bits(tcdm_addr_t)-TileIdBits-1:BurstAlignBits],
-                 {BurstAlignBits{1'b0}}};
-            addr_key_o[tile_i][port_i] =
-                {tile_addr_key_o[tile_i][port_i], tile_id_o[tile_i][port_i]};
-          end else begin
-            addr_key_o[tile_i][port_i] = merge_addr_key(req_i[tile_i][port_i].tgt_addr);
-          end
-
-          is_single_o[tile_i][port_i]     = (len_o[tile_i][port_i] == BurstLenWidth'(1));
-          is_full_burst_o[tile_i][port_i] =
-              (len_o[tile_i][port_i] == BurstLenWidth'(MshrFullBurstWords));
-          is_non_full_burst_o[tile_i][port_i] =
-              !is_single_o[tile_i][port_i] && !is_full_burst_o[tile_i][port_i];
-
-          can_merge_o[tile_i][port_i] =
-              is_load_o[tile_i][port_i] &&
-              !(is_single_o[tile_i][port_i] ? cfg_bypass_single_i : cfg_bypass_burst_i) &&
-              ((EnableMshrSingleReq       && is_single_o[tile_i][port_i] &&
-                (len_raw_o[tile_i][port_i] == BurstLenWidth'(1))) ||
-               (EnableMshrNonFullBurstReq && is_non_full_burst_o[tile_i][port_i]) ||
-               (EnableMshrFullBurstReq    && is_full_burst_o[tile_i][port_i]));
-        end else begin
-          addr_key_o[tile_i][port_i] = '0;
-        end
-      end
-    end
-  end
 
 endmodule

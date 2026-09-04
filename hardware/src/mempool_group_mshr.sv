@@ -1206,13 +1206,18 @@ module mempool_group_mshr
   // Reduce each entry to the two bits the free-way lookup needs, so the submodule takes ~200 bits
   // instead of MshrNum full entries.
   logic [MshrNum-1:0] way_reclaimable;
-  always_comb begin
-    for (int e = 0; e < MshrNum; e++) begin
-      way_reclaimable[e] = EnableRespCache && mshr_q_valid[e] &&
-                           (mshr_q[e].state == MSHR_CACHED) &&
-                           (mshr_q[e].sub_reqs_num == '0) && !mshr_hit_req[e];
+  generate
+    if (CacheReclaimable) begin : gen_way_reclaimable
+      for (genvar e = 0; e < MshrNum; e++) begin : gen_way_reclaimable_e
+        assign way_reclaimable[e] = EnableRespCache && mshr_q_valid[e] &&
+                                    (mshr_q[e].state == MSHR_CACHED) &&
+                                    (mshr_q[e].sub_reqs_num == '0) && !mshr_hit_req[e];
+      end
+    end else begin : gen_no_way_reclaimable
+      // free_way does not read reclaimable_i at CacheReclaimable = 0; do not build the producer.
+      assign way_reclaimable = '0;
     end
-  end
+  endgenerate
 
   mempool_group_mshr_free_way #(
     .MshrNum(MshrNum), .WaysPerBank(MshrWaysPerBank), .BankNum(MshrBankNum),
