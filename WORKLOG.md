@@ -16201,3 +16201,44 @@ files with a message rather than crashing (spatz has a dangling testharness.sv s
 crash mid-sweep would have read as "clean so far").
 
 **Status.** Done. Worth wiring into `make lint` or CI.
+
+## 2026-09-04 09:20 — F1: retire MSHR entries by dropping valid, not by clearing them
+
+**Purpose.** Post-placement, 80.8 % of the block's 22,776 violating endpoints sit in the group
+MSHR, on one 822-level cone. F1 is the cheapest structural cut in that cone: the dealloc paths
+CLEARED the whole entry, and that clear is a write, so every identity and resp_buf clock gate
+had to wait on the dealloc decision -- the last thing computed in the process.
+
+**Implementation.** Five retire sites (AMO invalidate, cache self-invalidate, cache age-out,
+finalize dealloc, PD2 dealloc) now drop mshr_d_valid only. mshr_wr_all is consequently raised
+by exactly ONE site -- allocation -- instead of six. And mshr_ctl_en moves off mshr_d_valid
+(which carries the dealloc decision) onto a new mshr_alloc_maybe, built only from bank_win_oh
+/ bank_free_id outside the big process: a conservative SUPERSET of the real grant, which is
+the right trade for a clock-gate enable (over-asserting costs a little power, under-asserting
+loses a write).
+
+**Why the clear was safe to remove.** Allocation blanks the entry before reuse, and every
+synthesised read of the array is valid-gated -- audited site by site (mshr_resp_seen_now,
+req_addr_hit_way, gen_req_meta_ovlp, bank_has_free, resp_is_mshr, mshr_resp_slots,
+replay_ready, drain_scan_valid, drain2_ent_ok). resp_push_ptr and resp_rd_ptr2 read ungated
+but are only consumed under a valid-gated condition. The free_outcome statistics sample
+mshr_q under mshr_q_valid && !mshr_d_valid, i.e. the pre-dealloc value, so they are unaffected.
+
+**Verification.**
+  - GEMM 256x32x256 fp16 at the TUNED CSR operating point (cfg_runtime=1, so the app programs
+    the bank shifts and merge targets; [MSHRCFG] confirms all 16 groups enabled): 3,117 cycles
+    on both arms, retval=0 on both, identical [EOC] to the nanosecond, identical [CMS FINAL].
+  - vector-burst-test + sp-mshr-burst-test at cfg_runtime=0 (MSHR live but UNTUNED -- a
+    deliberate stress point): 3,405 probe-periods compared, all IDENTICAL.
+  - check_arm_equivalence.py compares every probe line at every period, so a divergence that
+    later reconverges cannot hide behind a matching final cycle count.
+  - 0 assertion failures. Compiles clean at the sim config (MERGE_REQS=16) and at the PnR
+    config (MERGE_REQS=4, CFG_RUNTIME=0, ENABLE_STATS=0), fresh build dir both times.
+
+**Result.** Functionally equivalent, as intended. The TIMING delta is NOT yet measured --
+out-of-context synthesis of the MSHR is still in compile_fusion after ~4 h. Expected from the
+depth model: WNS roughly flat (the control group keeps its deep D pins) with ~9,055 of the
+13,071 worst-cone endpoints leaving the 11 ns path, so a large TNS drop. To be confirmed.
+
+**Status.** Committed on functional equivalence. Timing measurement pending and will be
+recorded separately rather than asserted here.

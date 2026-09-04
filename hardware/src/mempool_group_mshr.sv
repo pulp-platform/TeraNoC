@@ -2294,11 +2294,31 @@ module mempool_group_mshr
   logic [MshrNum-1:0]                   mshr_id_en;   // identity fields
   logic [MshrNum-1:0]                   mshr_ctl_en;  // control fields
   logic [MshrNum-1:0][RespBufWords-1:0] mshr_rb_en;   // one enable per response-buffer slot
+  // "Some lane may allocate entry e this cycle." A CONSERVATIVE superset of the real grant, and
+  // deliberately so: a clock-gate enable may be over-asserted (costs a little power) but must
+  // never be under-asserted, and the cheap form is far shallower than the exact one.
+  //
+  // Built only from bank_win_oh / bank_free_id, which are produced OUTSIDE the big always_comb
+  // (:2184 / :2072) -- roughly a 16-bank x 4-way decode. The exact grant would also need the
+  // winning lane's req_in_ready, which is computed inside the request door and would drag this
+  // enable back onto a ~3.8 ns path for nothing.
+  //
+  // bank_free_id[b] is by construction a way of bank b, so at most one e per bank is selected.
+  logic [MshrNum-1:0] mshr_alloc_maybe;
+  for (genvar e = 0; e < MshrNum; e++) begin : gen_alloc_maybe
+    assign mshr_alloc_maybe[e] = (|bank_win_oh[e / MshrWaysPerBank]) &&
+                                 (bank_free_id[e / MshrWaysPerBank] == mshr_id_t'(e));
+  end
   always_comb begin
     for (int e = 0; e < MshrNum; e++) begin
-      // Control changes only while the entry is live; the free cycle (valid -> !valid) is
-      // included so the clear lands.
-      mshr_ctl_en[e] = mshr_q_valid[e] | mshr_d_valid[e];
+      // Control changes only while the entry is live, or on the cycle it is allocated.
+      //
+      // This used to read `mshr_q_valid[e] | mshr_d_valid[e]`, which put every entry's control
+      // clock gate on the 822-level cone: mshr_d_valid carries the dealloc decision, the LAST
+      // thing computed in the process. The free cycle no longer needs an enable at all -- the
+      // retire path stopped clearing the entry (see the dealloc sites), so there is nothing to
+      // write -- and mshr_q_valid is an ungated `FF, so `valid` itself still updates regardless.
+      mshr_ctl_en[e] = mshr_q_valid[e] | mshr_alloc_maybe[e];
       mshr_id_en[e]  = mshr_wr_all[e]  | mshr_id_we[e];
       for (int b = 0; b < RespBufWords; b++) begin
         mshr_rb_en[e][b] = mshr_wr_all[e] | mshr_rb_we[e][b];
@@ -3559,8 +3579,12 @@ module mempool_group_mshr
       for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
         if (mshr_d_valid[mshr_i] && (mshr_d[mshr_i].state == MSHR_CACHED)) begin
           mshr_d_valid[mshr_i] = 1'b0;
-          mshr_d[mshr_i] = '0;
-          mshr_wr_all[mshr_i] = 1'b1;
+          // F1: retire by dropping valid only -- do NOT clear the entry. The clear was a WRITE, so
+          // it forced every identity and resp_buf clock gate to wait on this decision, which is the
+          // last thing computed in the process (822 logic levels, arrival 11.07 ns at 2.0 ns TCK).
+          // It is also redundant: allocation blanks the entry before reuse (:3417), and every read
+          // of the array is gated on mshr_q_valid / mshr_d_valid, so nothing can observe the stale
+          // contents of a retired entry. The mshr_gate_*_no_lost_write assertions cover the converse.
         end
       end
     end
@@ -3586,8 +3610,7 @@ module mempool_group_mshr
                 ? ServedCntW'(cfg_cache_reuse_target)
                 : ServedCntW'((mshr_d[e].burst_len == BurstLenWidth'(1)) ? cfg_hold_subs_single : cfg_hold_subs_burst)))) begin
           mshr_d_valid[e] = 1'b0;
-          mshr_d[e]       = '0;
-          mshr_wr_all[e] = 1'b1;
+          // F1: retire by dropping valid only (see the first retire site for why).
         end
       end
     end
@@ -3819,8 +3842,7 @@ module mempool_group_mshr
             mshr_cache_timeout_dbg[e] = 1'b1;
 `endif
             mshr_d_valid[e] = 1'b0;
-            mshr_d[e]       = '0;
-            mshr_wr_all[e] = 1'b1;
+            // F1: retire by dropping valid only (see the first retire site for why).
           end
         end
       end
@@ -4394,8 +4416,7 @@ module mempool_group_mshr
 `endif
             if (mshr_d[mshr_i].beats_left == BurstLenWidth'(1)) begin
               mshr_d_valid[mshr_i] = 1'b0;
-              mshr_d[mshr_i] = '0;
-              mshr_wr_all[mshr_i] = 1'b1;
+              // F1: retire by dropping valid only (see the first retire site for why).
             end else begin
               if (mshr_d[mshr_i].beats_left != '0) begin
                 mshr_d[mshr_i].beats_left = mshr_d[mshr_i].beats_left - BurstLenWidth'(1);
@@ -4431,8 +4452,7 @@ module mempool_group_mshr
 `endif
                 if (mshr_d[mshr_i].beats_left == BurstLenWidth'(1)) begin
                   mshr_d_valid[mshr_i] = 1'b0;
-                  mshr_d[mshr_i] = '0;
-                  mshr_wr_all[mshr_i] = 1'b1;
+                  // F1: retire by dropping valid only (see the first retire site for why).
                 end else begin
                   if (mshr_d[mshr_i].beats_left != '0) begin
                     mshr_d[mshr_i].beats_left = mshr_d[mshr_i].beats_left - BurstLenWidth'(1);
