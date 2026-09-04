@@ -1057,6 +1057,8 @@ module mempool_group_mshr
   // F2 (ReplayFromQ): the entry view the hold-the-fetch replay walker reads.
   mempool_group_mshr_t [MshrNum-1:0]                                           replay_scan_ent;
   logic      [MshrNum-1:0]                                                     replay_scan_valid;
+  // F3a: one bit per entry, "some store lane forced this RESP_HOLD entry to drain this cycle".
+  logic      [MshrNum-1:0]                                                     st_force_drain;
   logic      [MshrNum-1:0][RespBufPtrW-1:0]                                    drain2_rd_ptr;
   logic      [MshrNum-1:0][BurstLenWidth-1:0]                                  drain2_beat_off;
 
@@ -3805,6 +3807,22 @@ module mempool_group_mshr
     // to its already-recorded subscribers, but prohibit the entry from becoming a stale cache line.
     // This pass is after response capture so it also covers a response and invalidating operation
     // arriving in the same cycle.
+    // F3a: DECIDE for every lane, then WRITE once per entry.
+    //
+    // This pass used to be 16 tiles x 2 ports x 4 ways of sequential read-modify-write on mshr_d,
+    // so lane k+1 read the 186-bit entry lane k had just rewritten. Synthesis has to build that as
+    // a 32-deep chain of 64-entry indexed writes -- roughly 250 logic levels -- for a pass whose
+    // every written value is a CONSTANT.
+    //
+    // Equivalent by construction, not by appeal to "it probably cannot happen": the only field the
+    // hit test reads that this pass also writes is `state`, and the write moves it OUT of
+    // MSHR_RESP_HOLD. So in the sequential form a second lane hitting the same entry found the test
+    // false and wrote nothing, and the entry ended in exactly the state the first hitting lane
+    // produced -- which is the same state every hitting lane would produce, because they are all
+    // the same constants. ORing the hits and applying them once therefore gives the identical
+    // result, and the scatter below is a 1-bit OR-reduction (decode + OR tree, ~11 levels) rather
+    // than a chain of full-entry writes.
+    st_force_drain = '0;
     for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
       for (int port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin
         if (req_in_valid[tile_i][port_i] && req_in_ready[tile_i][port_i] &&
@@ -3813,26 +3831,33 @@ module mempool_group_mshr
           for (int way_i = 0; way_i < MshrWaysPerBank; way_i++) begin
             cache_hit_e =
                 int'(req_bank[tile_i][port_i]) * MshrWaysPerBank + way_i;
+            // Reads only -- every lane sees the same pre-pass entry state, which is what makes the
+            // 32 evaluations independent instead of chained.
             if (mshr_d_valid[cache_hit_e] &&
                 (mshr_d[cache_hit_e].state == MSHR_RESP_HOLD) &&
                 (mshr_d[cache_hit_e].base_addr == req_addr_key[tile_i][port_i]) &&
                 (mshr_d[cache_hit_e].tgt_group_id == req_in[tile_i][port_i].tgt_group_id)) begin
-              mshr_d[cache_hit_e].state = MSHR_DRAIN_RESP;
-              mshr_d[cache_hit_e].cacheable = 1'b0;
-              mshr_d[cache_hit_e].beats_left = BurstLenWidth'(1);
-              mshr_d[cache_hit_e].beat_pending = '0;
-              mshr_d[cache_hit_e].beat_pending2 = '0;
-              mshr_d[cache_hit_e].beat2_armed = 1'b0;
-`ifndef TARGET_SYNTHESIS
-              mshr_d[cache_hit_e].beat_seen = '0;
-              mshr_d[cache_hit_e].beat_seen[0] = 1'b1;
-`endif
-`ifndef TARGET_SYNTHESIS
-              mshr_d[cache_hit_e].beat_done = '0;
-`endif
+              st_force_drain[cache_hit_e] = 1'b1;
             end
           end
         end
+      end
+    end
+    for (int e = 0; e < MshrNum; e++) begin
+      if (st_force_drain[e]) begin
+        mshr_d[e].state = MSHR_DRAIN_RESP;
+        mshr_d[e].cacheable = 1'b0;
+        mshr_d[e].beats_left = BurstLenWidth'(1);
+        mshr_d[e].beat_pending = '0;
+        mshr_d[e].beat_pending2 = '0;
+        mshr_d[e].beat2_armed = 1'b0;
+`ifndef TARGET_SYNTHESIS
+        mshr_d[e].beat_seen = '0;
+        mshr_d[e].beat_seen[0] = 1'b1;
+`endif
+`ifndef TARGET_SYNTHESIS
+        mshr_d[e].beat_done = '0;
+`endif
       end
     end
     if (amo_invalidate) begin

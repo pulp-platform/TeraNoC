@@ -16272,3 +16272,31 @@ is never replay-ready), against a hold window of thousands of cycles.
 **Status.** Committed speculatively with the knobs OFF, where the change is bit-identical by
 construction (elaboration constants). Equivalence arm in flight; revert if it disagrees. No
 default may move without a measured throughput number.
+
+## 2026-09-04 09:40 — F3a: decide-then-write for the store-forced RESP_HOLD drain
+
+**Purpose.** First of the four 32-lane read-modify-write scatters in the main process. Each is
+a ~250-level serial chain because lane k+1 reads the 186-bit entry lane k just rewrote.
+
+**Implementation.** Compute every lane's hit against the SAME pre-pass entry state into a
+1-bit-per-entry vector, then apply the writes once per entry. The scatter becomes a decode
+plus an OR tree (~11 levels) instead of a chain of full-entry writes.
+
+**Why it is identical, by construction.** Every value this pass writes is a CONSTANT. The only
+field its hit test reads that it also writes is `state`, and the write moves it OUT of
+MSHR_RESP_HOLD -- so in the sequential form a second lane hitting the same entry found the
+test false and wrote nothing. The entry ended in exactly the state the first hitting lane
+produced, and every hitting lane produces the same constants. So OR-then-apply is the same
+result, not merely the same result in the cases we happened to test.
+
+**Scope: deliberately ONE of the four.** The other three are not equally safe and were not
+written blind:
+  - the store byte-merge writes DATA per byte, so it needs a highest-lane-wins priority
+    reduction per entry per byte (~8 k bits of mask) to stay exactly equivalent;
+  - the response capture moves a resp_buf pointer, and two beats for one entry can
+    legitimately land in one cycle at RespBufWords=2;
+  - the drain drive loops depend on the arbiters being settled first.
+Those are the shapes where a bug passes a short test and corrupts data under contention.
+
+**Status.** Committed speculatively; compiles clean at the PnR config (MERGE_REQS=4,
+CFG_RUNTIME=0), equivalence arm in flight. Revert if it disagrees.
