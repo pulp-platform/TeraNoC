@@ -123,6 +123,33 @@ def scan(path):
     return findings
 
 
+def check_pragma_case(path):
+    """Synthesis pragmas are CASE-SENSITIVE. An automated comment pass rewrote
+    `// pragma translate_off` to `// Pragma translate_off` on 2026-09-04, silently making 17 of
+    them inert -- simulation stayed clean and vopt reported nothing. Also flags an unbalanced
+    region, which is how 4 translate_off lines got eaten by a comment-compression pass the same
+    day (they sit at the end of a `//` run and look like prose)."""
+    out = []
+    try:
+        lines = Path(path).read_text(errors='replace').split('\n')
+    except OSError:
+        return out
+    off = on = 0
+    for i, ln in enumerate(lines):
+        low = ln.lower()
+        if 'pragma translate_off' in low or 'pragma translate_on' in low:
+            if 'pragma translate_off' not in ln and 'pragma translate_on' not in ln:
+                out.append((path, i + 1, 'pragma directive is not lowercase -- synthesis ignores it',
+                            0, ln.strip()[:90]))
+        if OFF_OPEN.search(ln):
+            off += 1
+        elif OFF_CLOSE.search(ln):
+            on += 1
+    if off and on and abs(off - on) > 1:
+        out.append((path, 0, 'translate_off/translate_on counts differ (%d/%d)' % (off, on), 0, ''))
+    return out
+
+
 def main(argv):
     if len(argv) < 2:
         print(__doc__)
@@ -135,7 +162,7 @@ def main(argv):
 
     total = 0
     for f in files:
-        for path, use_line, name, decl_line, text in scan(f):
+        for path, use_line, name, decl_line, text in list(scan(f)) + check_pragma_case(f):
             total += 1
             print(f'{path}:{use_line}: {name!r} is declared only in a simulation-only region '
                   f'(line {decl_line}) but used here, where synthesis can see it')

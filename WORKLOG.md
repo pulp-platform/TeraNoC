@@ -16571,3 +16571,57 @@ sets the target via CSR), `CFG_RUNTIME` sim 1 / backend 0, and the sim-only prob
 sim arm ran with `=1`; the backend define list does not carry it, so all OOC runs synthesise `=0`.
 The area deltas remain valid (all runs, baseline included, are at 0), but the synthesised
 configuration is not the one the simulations verified.
+
+## 2026-09-04 — MSHR readability: submodules, dead code, comment cut
+
+Zexin reviewed mempool_group_mshr.sv and asked for a submodule split plus far shorter comments.
+Measured first: of 6,028 lines only **1,902 were synthesised logic** -- 32% comments, 34%
+simulation-only. So the split was not where most of the pain was.
+
+### Submodules (4, one instantiated twice)
+
+| file | lines | what |
+|---|---|---|
+| `mempool_group_mshr_bank_arb.sv` | 49 | per-bank one-hot arbiter, **2 instances**: allocation (gated by bank_has_free) and merge (ungated). They were the same algorithm differing only in that gate. |
+| `mempool_group_mshr_free_way.sv` | 69 | per-bank free-way lookup: INVALID first, then rotated CACHED reclaim |
+| `mempool_group_mshr_req_decode.sv` | 127 | per-lane request classify + merge address key; stateless |
+| `mempool_group_mshr_cfg.sv` | 250 | CSR config (pre-existing) |
+
+`free_way` takes **derived vectors, not the entry array** -- the parent reduces each entry to a
+valid bit and a reclaimable bit, so the interface is ~200 bits instead of MshrNum full entries.
+
+### What is NOT extractable, and why (measured, not assumed)
+
+* **Inside the 1,400-line always_comb**: the capture arbiter and the drain2 selector. Their inputs
+  (`resp_is_mshr`, `resp_mshr_id`, `mshr_resp_slots`, `cap_want`) are driven there and nowhere else,
+  and `mshr_resp_slots` derives from the progressively-written `mshr_d`. Lifting them means
+  splitting the block and carrying ~19,000 bits of entry array through a port list -- relocating the
+  coupling, not removing it.
+* **Outside it but reading `mshr_q`**: hit lookup (76 lines), meta-overlap (32), resp-seen (43).
+  Same port-width problem.
+
+Every block extractable without pushing the entry array through a port list has been extracted.
+Going further is a restructure of the entry-array update, not a submodule split.
+
+### Deletions and comment cut
+
+* bypass-track table: 171 lines (its own comment said to delete it in the follow-up cleanup).
+* verbose debug tracer (`[E16D]`/`[T5*]`/`[GMA]`): 211 lines, silent by default, read by no script.
+* comment blocks of 4+ lines collapsed to their first sentence, max two lines; multi-line kept for
+  ~12 load-bearing blocks only. **All campaign shorthand stripped** (F1:/B0.3:/C1:/H1 fix:, audit
+  tags, dates, commit hashes) -- 0 stage labels remain.
+
+**6,028 -> ~4,470 lines; comments 1,922 -> ~660.** Verified at every step with `cmp` that every
+non-comment, non-blank line is byte-identical (3,733 lines), and vopt clean.
+
+### Two traps hit during this work
+
+* **ELFs were relocated to `hardware/elf/` at 15:21**, leaving only 52 symlinks in `hardware/`.
+  Six arms launched after that died in 22s inside `read_elf` ("Bad handle or reference",
+  mempool_tb.sv line 5). I first read the static 27 KB transcripts as "still running" and then
+  over-escalated to "733 ELFs deleted" before checking that a 35-byte .elf is a symlink. Nothing
+  was lost. Both launchers now resolve `hardware/` or `hardware/elf/` and fail loudly otherwise.
+* `hardware/include/` (6 tracked files) was missing from the working tree mid-session and was
+  restored with a path-scoped checkout. Cause never identified -- neither reaper loop touches it.
+
+**Status.** gmod3 verifying all four submodules against the 3,117-cycle reference.

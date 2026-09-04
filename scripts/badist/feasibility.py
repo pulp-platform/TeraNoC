@@ -325,7 +325,7 @@ def stalling(arm):
     if not livelocked(arm):
         return False
     u, rh, state = _observed(arm)
-    # Evidence is the RH-STUCK EPISODE COUNT, not utilisation. util < 1% missed 13 of the 22
+    # Evidence is the RH STUCK EPISODE COUNT, not utilisation. util < 1% missed 13 of the 22
     # recorded livelocks -- they sit at 1.1-4.6%, above the threshold, while carrying 10^5 RH
     # episodes. A healthy arm is in single digits (2048x128x128: 4 episodes at 41% util), so the
     # count separates cleanly where the utilisation proxy does not.

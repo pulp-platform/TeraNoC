@@ -66,7 +66,7 @@ def card(prec, shape):
     r = R.get(arm)
     if r:
         sc = r.get("spotcheck", "")
-        # RH-STUCK episode count is the livelock detector: a healthy arm is in single digits
+        # RH STUCK episode count is the livelock detector: a healthy arm is in single digits
         # (2048x128x128 -> 4 at 41% util), a livelocked one is 10^5. See
         # docs/benchmarks/8x8_scaleup/rh_livelock_root_cause.md -- those arms measure a software
         # cohort-target bug, not the architecture, so the number must not read as a result.
