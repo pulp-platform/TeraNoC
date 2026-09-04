@@ -473,22 +473,26 @@ module mempool_group_mshr
       `ifdef GROUP_MSHR_DRAIN2_BANK_PUBLISH `GROUP_MSHR_DRAIN2_BANK_PUBLISH `else 1'b1 `endif;
   // F4d: arbitrate response capture per BANK instead of per entry.
   //
-  // The capture grant runs MshrNum arbiters of NumRespLanes bits (three LSB-isolates each, 64 x 32
-  // here). Per bank that is MshrBankNum arbiters -- a 4x cut.
+  // Beats arrive on NumRespLanes lanes and several can target the SAME entry in one cycle, but an
+  // entry's resp_buf holds RespBufWords. So each cycle at most two lanes per entry are accepted and
+  // the rest are refused (resp_in_ready low) and retry. Today that is MshrNum arbiters of
+  // NumRespLanes bits; per bank it is MshrBankNum -- a 4x cut.
   //
-  // DEFAULT OFF, unlike the other F4 items, and the reason is worth stating rather than leaving to
-  // a future reader to rediscover:
-  //   * The saving is the smallest of the F4 set (~13k gates of arbiter), and it is partly given
-  //     back: selecting the winning lanes' entries needs a NumRespLanes:1 mux of mshr_id per bank
-  //     per slot, and the slot check then indexes mshr_resp_slots by that dynamic id (MshrNum:1),
-  //     where the per-entry form indexes it by a loop constant. Net is nearer ~0.5% of the module.
-  //   * The trade lands on the RESPONSE path, which is already the documented bandwidth ceiling for
-  //     burst loads. Unlike the merge case there is no multi-thousand-cycle hold window to absorb a
-  //     one-cycle deferral, so a refusal costs response throughput directly.
-  // Turn it on only if synthesis says the arbiters matter more than the muxes; [CAPARB] measures
-  // the refusals either way.
+  // Cost, recorded so it is not rediscovered as a surprise:
+  //   * Part of the arbiter saving is given back. With per-entry arbitration the free-slot lookup
+  //     indexes mshr_resp_slots by the LOOP COUNTER (a constant, free). Per bank the winner is a
+  //     LANE, so its entry must first be selected (NumRespLanes:1 on mshr_id) and the slot table
+  //     then indexed by that dynamic id (MshrNum:1). Net is nearer ~0.5% of the module.
+  //   * Throughput: four beats for four entries of one bank are all captured today; here two are,
+  //     and two retry. Unlike the merge path there is no multi-thousand-cycle hold window to hide
+  //     the deferral, and burst response bandwidth is already the measured ceiling.
+  //
+  // DEFAULT ON by Zexin's decision (2026-09-04) after the above was put to him: the area cut is
+  // wanted for backend timing (smaller block -> shorter wires, less routing pressure), and the
+  // throughput cost is to be measured rather than assumed. [CAPARB] cap_wanted / cap_fired reports
+  // the deferral in BOTH forms, so on and off are directly comparable.
   localparam bit CapPerBank =
-      `ifdef GROUP_MSHR_CAP_PER_BANK `GROUP_MSHR_CAP_PER_BANK `else 1'b0 `endif;
+      `ifdef GROUP_MSHR_CAP_PER_BANK `GROUP_MSHR_CAP_PER_BANK `else 1'b1 `endif;
   // NOT DONE: the two aging sweeps (cache self-invalidate, and the serve-timeout / cache age-out
   // countdown) are also whole-array passes on mshr_d and were the obvious third knob here. They are
   // deliberately left alone.

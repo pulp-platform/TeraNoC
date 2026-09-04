@@ -328,6 +328,18 @@ group_mshr_one_merge_per_bank ?=
 ifneq ($(strip $(group_mshr_one_merge_per_bank)),)
   vlog_defs += -DGROUP_MSHR_ONE_MERGE_PER_BANK=$(group_mshr_one_merge_per_bank)
 endif
+group_mshr_meta_ovlp_by_owner ?=
+ifneq ($(strip $(group_mshr_meta_ovlp_by_owner)),)
+  vlog_defs += -DGROUP_MSHR_META_OVLP_BY_OWNER=$(group_mshr_meta_ovlp_by_owner)
+endif
+group_mshr_drain2_bank_publish ?=
+ifneq ($(strip $(group_mshr_drain2_bank_publish)),)
+  vlog_defs += -DGROUP_MSHR_DRAIN2_BANK_PUBLISH=$(group_mshr_drain2_bank_publish)
+endif
+group_mshr_cap_per_bank ?=
+ifneq ($(strip $(group_mshr_cap_per_bank)),)
+  vlog_defs += -DGROUP_MSHR_CAP_PER_BANK=$(group_mshr_cap_per_bank)
+endif
 group_mshr_spill_req_in ?=
 ifneq ($(strip $(group_mshr_spill_req_in)),)
   vlog_defs += -DGROUP_MSHR_SPILL_REQ_IN=$(group_mshr_spill_req_in)

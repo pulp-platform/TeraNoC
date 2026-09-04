@@ -16427,17 +16427,24 @@ Same trade already accepted next door: a lane whose target sits in a bank that p
 different entry waits a cycle. Publication rotates on drain_mshr_rr_q and a drain2 candidate is
 continuous (held in DRAIN_RESP until drained), so it is reached.
 
-### F4d — per-bank capture arbitration (CapPerBank, **default OFF**)
+### F4d — per-bank capture arbitration (CapPerBank, **default ON**)
 
-Implemented and verified to elaborate, but NOT enabled, and the reason is recorded so it is not
-rediscovered: the saving is the smallest of the set (~13k gates of arbiter) and is partly given
-back -- selecting the winning lanes' entries needs a NumRespLanes:1 mux of mshr_id per bank per
-slot, and the slot check then indexes mshr_resp_slots by that dynamic id (MshrNum:1) where the
-per-entry form indexes by a loop constant. Net nearer ~0.5% of the module. And the trade lands
-on the RESPONSE path, already the documented bandwidth ceiling for burst loads, with no hold
-window to absorb a deferral. Enable only if synthesis says the arbiters beat the muxes.
+Beats arrive on 32 response lanes and several can target the SAME entry in one cycle, but an
+entry's resp_buf holds 2 words -- so at most two lanes per entry are accepted each cycle and the
+rest retry. That is 64 arbiters of 32 bits; per bank it is 16, a 4x cut.
 
-`[CAPARB] cap_wanted / cap_fired` measures the deferral in BOTH forms, so the two are comparable.
+Cost, put to Zexin before enabling and recorded here so it is not rediscovered:
+* Part of the saving is given back. Per entry, the free-slot lookup indexes mshr_resp_slots by the
+  LOOP COUNTER (constant, free). Per bank the winner is a LANE, so its entry must first be selected
+  (32:1 on mshr_id) and the slot table indexed by that dynamic id (64:1). Net nearer ~0.5%.
+* Throughput: four beats for four entries of one bank are all captured today; here two are and two
+  retry. Unlike the merge path there is no hold window to hide the deferral, and burst response
+  bandwidth is already the measured ceiling.
+
+**Decision (2026-09-04, Zexin):** enable it anyway -- the area cut is wanted for backend timing
+(smaller block -> shorter wires, less routing pressure), and the throughput cost is to be measured
+rather than assumed. `[CAPARB] cap_wanted / cap_fired` reports the deferral in BOTH forms, so on
+and off are directly comparable, and gf4 (F4d off) vs gf4d (F4d on) isolates exactly this change.
 
 **Verification.** gf4b (F4b on, F4c off -- must equal gmrg1 exactly, F4b is exact), gf4 (F4b+F4c),
 gf4d (all three). All against vg_fp16_256x32x256, cfg_runtime=1.

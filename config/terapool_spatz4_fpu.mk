@@ -327,6 +327,18 @@ group_mshr_bank_publish ?= 1
 # against the same resident entry, so coalescing is preserved; set 0 to restore the old form.
 group_mshr_one_merge_per_bank ?= 1
 
+# Meta-range overlap computed once per ENTRY rather than once per (lane, entry). Exact -- an entry
+# has exactly one owner tile, so 63 of every 64 per-lane replications were structurally dead.
+group_mshr_meta_ovlp_by_owner ?= 1
+
+# Extend the head-beat drain's bank publication to the second-slot (drain2) selector, so each lane
+# arbitrates over MshrBankNum published entries instead of MshrNum.
+group_mshr_drain2_bank_publish ?= 1
+
+# Arbitrate response capture per bank instead of per entry (4x fewer arbiters). Trades some
+# response throughput; [CAPARB] cap_wanted/cap_fired measures it. Set 0 to restore per-entry.
+group_mshr_cap_per_bank ?= 1
+
 # C2: bypass the request-input spill register. The tile already registers its request output, and
 # only wire assigns separate the two -- so this stage is a second register back-to-back with the
 # first, costing 32 x 166 = 5,312 flops/group (~85k cluster) for no data-path benefit.
