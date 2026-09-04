@@ -16527,3 +16527,47 @@ elaboration bloat and, more usefully, a trap: those 12 writes made a per-lane-ch
 "12 live writes" when every one of them was unreachable.
 
 **Status.** Both compile clean. Committed; F6 is exact by construction (same expressions, hoisted).
+
+## 2026-09-04 — cleanup: delete the bypass-track table; defaults audit
+
+**Deleted the BYPASS-TRACK (retag-on-bypass) table, 171 lines net.** `fde0369f` had gated it off
+(`EnableBypassTrack = 1'b0`) because it could not retire -- a way is freed on a matching response,
+but `bypass_match` demanded `rdata.core_id == 1` while a burst's beats return on core_id
+1..BurstLanes, so only lane-0 beats ever matched; the table filled and the depth assertion killed
+the run. **That commit's own comment said to delete it in the follow-up cleanup.** Removed: the
+typedef and declarations, the 137-line generate if/else, the PD2 depth assertion, and three
+localparams (`BypassTrackWaysDerived`, `BypassTrackWays`, `BypassTrackWayW`).
+
+Two sim-only probe consumers were tied to the deleted signals. Both were **identically zero since
+fde0369f** (the else arm assigned `'0`), so the replacements preserve behaviour exactly:
+`bp_tile_tracked` becomes `assign bp_tile_tracked = '0;` and `&& !bypass_match[t][p]` is dropped
+(it was constant 1). No area change -- a generate-if on a 0 constant never elaborated.
+
+### Defaults audit (RTL vs config vs what sim and the backend actually compiled)
+
+Verified by reading the real `vlog` command line for sim and the OOC run's `.tcl` for the backend,
+not `compile.tcl` (which does not carry `extra_vlog_defs`).
+
+The four knobs added this session default to **1 in the RTL as well as the config**, which is
+load-bearing: **the backend's define list does not carry them**, so an RTL default of 0 would have
+silently synthesised the expensive form while sim measured the cheap one.
+
+| knob | RTL default | sim | backend | agree |
+|---|---|---|---|---|
+| `OneMergePerBank` | 1 | 1 | (default) 1 | yes |
+| `MetaOvlpByOwner` | 1 | 1 | (default) 1 | yes |
+| `Drain2BankPublish` | 1 | 1 | (default) 1 | yes |
+| `CapPerBank` | 1 | 1 | (default) 1 | yes |
+| `Drain2FromQ` / `ReplayFromQ` | 0 | 0 | (default) 0 | yes |
+| `BankPublish`, `DrainFromQ` | 0 | 1 (config) | 1 (explicit) | yes, both explicit |
+| `EnableRespCache` | 1 | 1 | (default) 1 | yes |
+
+**Known and intended differences between the sim and backend images** (recorded so a reader does
+not mistake them for drift): `MERGE_REQS` sim 16 / backend 4 (the placed design used 4; software
+sets the target via CSR), `CFG_RUNTIME` sim 1 / backend 0, and the sim-only probes
+(`BYPASS_PROBE`, `RESP_HOLD_PROBE`, `ENABLE_STATS`).
+
+**One difference worth a decision, not just a note: `BankfullBackpressure`.** RTL default 0; every
+sim arm ran with `=1`; the backend define list does not carry it, so all OOC runs synthesise `=0`.
+The area deltas remain valid (all runs, baseline included, are at 0), but the synthesised
+configuration is not the one the simulations verified.

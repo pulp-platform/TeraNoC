@@ -648,14 +648,12 @@ module mempool_group_mshr
   // Left as an explicit knob rather than doubling the formula: doubling would take ROB32 from
   // 2 -> 4 ways and ROB64 from 4 -> 8, perturbing every validated baseline for a case they
   // cannot reach. Unset = bit-identical.
-  localparam int unsigned BypassTrackWaysDerived =
-    (2 > (snitch_pkg::RobDepth / MaxBurstWords)) ? 2 : (snitch_pkg::RobDepth / MaxBurstWords);
-  localparam int unsigned BypassTrackWays =
-    `ifdef GROUP_MSHR_BYPASS_WAYS `GROUP_MSHR_BYPASS_WAYS `else BypassTrackWaysDerived `endif;
-  // Way-index width for the match->retire path. MUST track BypassTrackWays: at 4 ways a 1-bit
-  // index aliases ways 2/3 onto 0/1, leaking them (allocated, never retired) until the overflow
-  // assert fires (observed on 512x256x512 fmatmul, the first geometry with >2 concurrent bypasses).
-  localparam int unsigned BypassTrackWayW = (BypassTrackWays > 1) ? $clog2(BypassTrackWays) : 1;
+  // The BYPASS-TRACK TABLE (retag-on-bypass) was declared around here and is DELETED (2026-09-04).
+  // fde0369f had gated it off because it could not retire: a way is freed on a matching response,
+  // but bypass_match demanded rdata.core_id == 1 while a burst's beats return on core_id
+  // 1..BurstLanes, so only lane-0 beats ever matched -- the table filled and the depth assertion
+  // killed the run. That commit said to delete it in the follow-up cleanup; this is it. Recover
+  // from git history (fde0369f) if the idea is ever revived.
   localparam int unsigned TileIdBits       = idx_width(NumTilesPerGroup);
   localparam int unsigned TcdmAddrNoTileW  = $bits(tcdm_addr_t) - TileIdBits;
   localparam int unsigned SpatzNumOutstandingLoads = snitch_pkg::NumIntOutstandingLoads;
@@ -1220,155 +1218,7 @@ module mempool_group_mshr
   // NOTE: this restores BANDWIDTH for bypasses, not coalescing -- a bypassed burst still has no
   // entry (no merge/multicast/cache). Everything const-folds out when PD2=0.
   // ------------------------------------------------------------------------------------------
-  typedef struct packed {
-    logic                     valid;
-    meta_id_t                 meta_base;   // first beat's meta_id (== VLSU ROB0 burst base)
-    logic [BurstLenWidth-1:0] len;         // original burst length (range check)
-    logic [BurstLenWidth-1:0] beats_left;  // outstanding beats; free the way at 0
-  } bypass_track_t;
-  bypass_track_t [NumTilesPerGroup-1:0][BypassTrackWays-1:0]                     bypass_track_q, bypass_track_d;
-  logic          [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]         bypass_match;
-  logic          [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]
-                 [BypassTrackWayW-1:0]                                         bypass_match_way;
-  logic          [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]         bypass_beat_parity;
 
-  // BYPASS-TRACK TABLE: DEAD, AND IT COULD NOT RETIRE.
-  //
-  // Its only consumer was the ParityDrain bypass retag, which the lane law replaced --
-  // tcdm_burst_expander now applies the split at the destination, so a bypassed beat reaches
-  // its requester already addressed to the right buffer and there is nothing to fix up here.
-  //
-  // Leaving it standing was not harmless, which is why this is a gate and not a comment. A way
-  // is retired on a matching response, and bypass_match demands
-  // rdata.core_id == tile_core_id_t'(1) -- the issuing port. Under the lane law a burst's beats
-  // come back on core_id 1..BurstLanes, so only the lane-0 beats ever matched: ways were
-  // allocated on every bypassed burst and never fully retired, the table filled, and the
-  // depth assertion killed the run ("bypass-track overflow at tile 6, all 16 ways
-  // outstanding", vector-burst-test cyc ~9674).
-  //
-  // Gated off rather than deleted so this change stays one idea; the else branch below ties
-  // every signal to '0, so the flops and the compare tree fold away and the overflow
-  // assertion's all_ways_valid is constant 0 (never fires). Delete the block outright in the
-  // follow-up cleanup.
-  localparam bit EnableBypassTrack = 1'b0;
-  if (EnableBypassTrack) begin : gen_bypass_retag
-    // Loop temporaries for the two always_comb blocks below, at generate scope rather than as
-    // procedural `automatic`s. Identical hardware -- each is assigned before it is read on every
-    // unrolled iteration -- but visible in a waveform and in the form the backend flow expects.
-    // bypass_retire_way keeps the table's own index width instead of widening to a 32-bit `int`
-    // only to index a BypassTrackWays-deep array.
-    meta_id_t                   bypass_off;         // meta_id - meta_base, wraps mod 2**MetaIdWidth
-    logic [BypassTrackWayW-1:0] bypass_retire_way;
-    logic                       bypass_way_found;
-
-    // B3 (F22): per-(tile,way) write enable instead of one unconditional load of the whole table.
-    // The table is NumTilesPerGroup x BypassTrackWays x bypass_track_t and changes only on a
-    // bypass-alloc or a beat retire -- a few percent of cycles -- yet every bit was clocked every
-    // cycle. bypass_track_d defaults to bypass_track_q (see the always_comb below), so gating on
-    // "d differs from q" is bit-identical by construction and gives the clock-gating pass a per-way
-    // enable to key on. Same enable style the entry register block already uses.
-    logic [NumTilesPerGroup-1:0][BypassTrackWays-1:0] bypass_track_we;
-    always_comb begin
-      for (int t = 0; t < NumTilesPerGroup; t++) begin
-        for (int w = 0; w < BypassTrackWays; w++) begin
-          bypass_track_we[t][w] = (bypass_track_d[t][w] != bypass_track_q[t][w]);
-        end
-      end
-    end
-    always_ff @(posedge clk_i or negedge rst_ni) begin
-      if (!rst_ni) begin
-        bypass_track_q <= '0;
-      end else begin
-        for (int t = 0; t < NumTilesPerGroup; t++) begin
-          for (int w = 0; w < BypassTrackWays; w++) begin
-            if (bypass_track_we[t][w]) bypass_track_q[t][w] <= bypass_track_d[t][w];
-          end
-        end
-      end
-    end
-
-    // Response-side match: a tag-0 (bypass) READ response from the burst-issuing core port whose
-    // meta_id falls in a tracked range. meta arithmetic wraps mod 2**MetaIdWidth like the VLSU's
-    // ROB0 id space, so wrapped ranges (base near the top) match correctly. The <=2 tracked
-    // ranges of a tile are disjoint by construction (distinct ROB0 allocations).
-    always_comb begin
-      for (int t = 0; t < NumTilesPerGroup; t++) begin
-        for (int p = 1; p < NumRemoteRespPortsPerTile; p++) begin
-          bypass_match[t][p]       = 1'b0;
-          bypass_match_way[t][p]   = '0;
-          bypass_beat_parity[t][p] = 1'b0;
-          if (resp_in_valid[t][p] &&
-              (resp_in[t][p].mshr_tag == '0) &&
-              (resp_in[t][p].wen == 1'b0) &&
-              (resp_in[t][p].rdata.amo == '0) &&
-              (resp_in[t][p].rdata.core_id == tile_core_id_t'(1))) begin
-            for (int w = 0; w < BypassTrackWays; w++) begin
-              bypass_off = resp_in[t][p].rdata.meta_id - bypass_track_q[t][w].meta_base;
-              if (!bypass_match[t][p] && bypass_track_q[t][w].valid &&
-                  (bypass_off < meta_id_t'(bypass_track_q[t][w].len))) begin
-                bypass_match[t][p]       = 1'b1;
-                bypass_match_way[t][p]   = BypassTrackWayW'(w);
-                bypass_beat_parity[t][p] = bypass_off[0];
-              end
-            end
-          end
-        end
-      end
-    end
-
-    // Table lifecycle: allocate on a bypass request handshake (a multi-beat load forwarded to
-    // the NoC without an entry), retire beats on forwarded-response handshakes (both ports of a
-    // tile can retire two beats of one burst in the same cycle).
-    always_comb begin
-      bypass_track_d = bypass_track_q;
-      for (int t = 0; t < NumTilesPerGroup; t++) begin
-        // Beat retirement first (a freed way can be re-allocated in the same cycle below).
-        for (int p = 1; p < NumRemoteRespPortsPerTile; p++) begin
-          bypass_retire_way = bypass_match_way[t][p];
-          if (bypass_match[t][p] && resp_from_bypass[t][p] &&
-              resp_out_valid[t][p] && resp_out_ready[t][p]) begin
-            if (bypass_track_d[t][bypass_retire_way].beats_left <= BurstLenWidth'(1)) begin
-              bypass_track_d[t][bypass_retire_way] = '0;
-            end else begin
-              bypass_track_d[t][bypass_retire_way].beats_left =
-                  bypass_track_d[t][bypass_retire_way].beats_left - 1'b1;
-            end
-          end
-        end
-        // Allocation: track every outgoing bypassed multi-beat load. The mshr_tag=='0 qualifier
-        // identifies a genuine door passthrough: entry allocations and hold-the-fetch replay
-        // injections both stamp (entry+1). Without it, a replay injection claiming a lane in the
-        // same cycle the door locally accepts a merge/held-alloc on that lane would look like a
-        // bypass handshake and leak a ghost track way (its beats return tagged, never as tag-0
-        // bypass responses, so the way would never retire).
-        for (int p = 1; p < NumRemoteReqPortsPerTile; p++) begin
-          if (req_in_valid[t][p] && req_in_ready[t][p] && req_out_valid[t][p] &&
-              (req_out[t][p].mshr_tag == '0) &&
-              req_is_load[t][p] && (req_len[t][p] > BurstLenWidth'(1)) &&
-              !req_alloc_found[t][p]) begin
-            begin : alloc_bypass_way
-              bypass_way_found = 1'b0;
-              for (int w = 0; w < BypassTrackWays; w++) begin
-                if (!bypass_way_found && !bypass_track_d[t][w].valid) begin
-                  bypass_track_d[t][w] = '{valid: 1'b1,
-                                           meta_base: req_in[t][p].wdata.meta_id,
-                                           len: req_len[t][p], beats_left: req_len[t][p]};
-                  bypass_way_found   = 1'b1;
-                end
-              end
-            end
-            // else: untracked (cannot happen -- asserted); the burst degrades to 1-wide, correct.
-          end
-        end
-      end
-    end
-  end else begin : gen_no_bypass_retag
-    assign bypass_track_d     = '0;
-    assign bypass_track_q     = '0;
-    assign bypass_match       = '0;
-    assign bypass_match_way   = '0;
-    assign bypass_beat_parity = '0;
-  end
   logic      [MshrNum-1:0][RespBufCountW-1:0]                                  mshr_resp_slots;
   logic      [MshrNum-1:0][RespBufPtrW-1:0]                                    resp_push_ptr;
   logic      [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]             resp_capture_fire;
@@ -1923,30 +1773,6 @@ module mempool_group_mshr
       end
     end
 
-    if (PD2) begin : gen_bypass_depth_assert
-      for (genvar bt = 0; bt < NumTilesPerGroup; bt++) begin : gen_bypass_depth_tile
-        // All tracking ways occupied = overflow. bypass_track_q is a PACKED ARRAY of structs,
-        // so bypass_track_q[bt].valid is NOT a legal field select across the dimension (vlog
-        // accepts it, vopt rejects it) -- reduce explicitly. all_ways_valid is sim-only (this
-        // whole block is inside pragma translate_off).
-        logic all_ways_valid;
-        always_comb begin
-          all_ways_valid = 1'b1;
-          for (int w = 0; w < BypassTrackWays; w++)
-            all_ways_valid = all_ways_valid & bypass_track_q[bt][w].valid;
-        end
-        for (genvar bp = 1; bp < NumRemoteReqPortsPerTile; bp++) begin : gen_bypass_depth_port
-          bypass_track_overflow: assert property(
-            @(posedge clk_i) disable iff (!rst_ni)
-              (req_in_valid[bt][bp] && req_in_ready[bt][bp] && req_out_valid[bt][bp] &&
-               (req_out[bt][bp].mshr_tag == '0) &&
-               req_is_load[bt][bp] && (req_len[bt][bp] > BurstLenWidth'(1)) &&
-               !req_alloc_found[bt][bp])
-              |-> !all_ways_valid)
-            else $fatal(1, "ParityDrain: bypass-track overflow at tile %0d (all %0d ways outstanding).", bt, BypassTrackWays);
-        end
-      end
-    end
 
     // ParityDrain retag-range invariant (design §6): every burst entry's subscribers must carry
     // core_id == 1 (the VLSU burst base port), so the +（b&1) retag lands on exactly {1,2}. A
@@ -3079,14 +2905,10 @@ module mempool_group_mshr
     longint bp_cyc, bp_fwd, bp_rsp, bp_orphan;
     logic [NumTilesPerGroup-1:0] bp_tile_tracked;
 
-    always_comb begin
-      bp_tile_tracked = '0;
-      for (int t = 0; t < NumTilesPerGroup; t++) begin
-        for (int w = 0; w < BypassTrackWays; w++) begin
-          if (bypass_track_q[t][w].valid) bp_tile_tracked[t] = 1'b1;
-        end
-      end
-    end
+    // Was a scan of bypass_track_q, which the deleted table's else-arm tied to '0 -- so this
+    // vector has been identically zero since fde0369f. Kept as a named constant rather than
+    // folded into its one consumer, so the probe's intent stays legible.
+    assign bp_tile_tracked = '0;
 
     always @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
@@ -3114,7 +2936,7 @@ module mempool_group_mshr
         for (int t = 0; t < NumTilesPerGroup; t++) begin
           for (int p = 1; p < NumRemoteRespPortsPerTile; p++) begin
             if (resp_out_valid[t][p] && resp_out_ready[t][p] &&
-                resp_from_bypass[t][p] && !bypass_match[t][p]) begin : bp_resp
+                resp_from_bypass[t][p]) begin : bp_resp   // was && !bypass_match: constant 1
               automatic int bc = int'(resp_out[t][p].rdata.core_id);
               automatic int bm = int'(resp_out[t][p].rdata.meta_id);
               bp_rsp = bp_rsp + 1;
