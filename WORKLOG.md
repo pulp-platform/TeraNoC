@@ -16121,3 +16121,27 @@ Review written to `docs/mshr_timing_review_500mhz.md`; companion page published 
 **Status.** Review delivered. No RTL changed. Recommended step 0 is three const-fold ablations
 (`drain_beats=1`, `hold_window_*=0`, `cache_self_inval=0`) to attribute the 822 levels per feature
 before any refactor — the netlist restructuring erased all but four RTL names in the cone.
+
+## 2026-09-04 03:19 — sp-fmatmul: fix the a_fill_cyc scope error that broke every prefill build
+
+**Purpose.** `scripts/gen_gemm_shape_app.sh` failed for every shape at HEAD:
+```
+main.c:718: error: use of undeclared identifier 'a_fill_cyc'
+```
+
+**Cause.** `a_fill_cyc` is declared inside `#if MATMUL_A_REPLICAS > 1`, but the `[AREP]`
+printf that reads it sits OUTSIDE that guard. `MATMUL_A_REPLICAS` collapses to 1 exactly
+when `A_SPAN >= NUM_GROUPS` -- which is the definition of a prefill shape. So the feature
+built only for decode shapes, and prefill was broken in BOTH apps from the moment the
+A-replication code landed.
+
+**Implementation.** One line in each app: `const uint32_t a_fill_cyc = 0;` in the `#else`
+arm. 0 is the honest value -- no replication means no fill ran -- and the [AREP] line stays
+printable for every shape, which is what makes it usable as a sweep probe.
+
+**Result.** All three build again: fp16 prefill 256x32x256 (151,408 B), fp32 prefill
+256x32x256 (183,584 B), decode 16x128x2048 (649,352 B, replicas > 1 path unchanged).
+
+**Status.** Fixed. Found while standing up a small tuned-CSR GEMM arm as the representative
+workload for the MSHR timing rework -- the burst tests run the MSHR at its untuned static
+defaults, which is a stress point, not the operating point.

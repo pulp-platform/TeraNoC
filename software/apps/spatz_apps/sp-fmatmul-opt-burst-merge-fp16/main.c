@@ -710,6 +710,10 @@ int main() {
                                            * (uint32_t)(A_REPL_STRIDE_E);
 #else
   const elem_t *const a_use = a;
+  // No replication, so no fill happened. Declared here because the [AREP] line below is OUTSIDE
+  // this guard: without it every PREFILL shape fails to compile, since MATMUL_A_REPLICAS collapses
+  // to 1 exactly when A already spans the mesh.
+  const uint32_t a_fill_cyc = 0;
 #endif
   if (cid == 0)
     printf("[AREP] replicas=%u span=%u groups_per_replica=%u a_bytes=%u fill=%s fill_cyc=%u\n",
