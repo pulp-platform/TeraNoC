@@ -16696,3 +16696,35 @@ the -34% came from F4 (-12pp) and F5 (-19.9pp).
 **Status.** Three runs healthy. Wall-clock measured: elaboration 46m13s -> 24m04s (1.92x) and
 constant propagation 1.03h -> 0.59h (1.75x) on the current RTL; technology mapping is 85% of
 `compile_fusion` and is the only phase worth optimising for turnaround.
+
+---
+
+## 2026-09-05 03:20 — pipeline stage design drafted; pre-pipeline baseline launched
+
+**Purpose.** Use the wait on the OOC runs to (a) pin the "before" throughput numbers, which become
+unrecoverable once the RTL changes, and (b) draft the stage cut.
+
+**Implementation.** `docs/mshr_pipeline_design.md`. The cut is **LOOKUP | UPDATE**, registering the
+F5 per-bank records (`agb_*`/`mgb_*`, already built) — not request|response, because 16 entry fields
+are written by both paths and straddling them costs a second write port on the 64-entry array. The
+duplicate-allocation hazard is cheap here because `mshr_bank_of()` sends a line to a fixed bank, so
+the bypass is one comparator per lane against its own bank's pending record, not a 16-way CAM.
+
+Baseline: 8 GEMM shapes on `b07ad73f` sweeping M (256 -> 2048), since the pipeline costs +1 cycle
+per allocation and nothing on a merge. Arm provenance now records all four MSHR source md5s plus the
+git SHA — the parent md5 alone is unchanged by a submodule edit, which is why `gfw3`/`gfw4` had to be
+distinguished by vlog start time.
+
+**Result.** Draft written, cut point explicitly marked provisional. Measured leaf depths:
+`free_way` 4 gates (closes at 0.2 ns — not a timing consideration), `req_decode` 7, `bank_arb` 8-9.
+Estimated S1 ~30 gates against a 31-37 gate budget at 800 MHz: at the edge. **S2 unmeasured** — it
+keeps the 400-line drain loop.
+
+**Caught:** 248 of the 785 ELFs are `s8_*` = `-DNUM_GROUPS=64 -DNUM_CORES=1024` (8x8) and fail
+silently on this 4x4 config. Every baseline ELF verified from its build log before launch.
+
+**Open:** two things could move the cut — a deep S2, or the `R2R-COST 0.00 @ 8 ns / 46.95 @ 2 ns`
+reading suggesting the 8,988-port boundary dominates rather than the reg-to-reg cone. Both are
+settled by `ooc/depth_split.tcl`, armed to fire on `fix2_head_8p0`'s logic_opto block.
+
+**Status.** No RTL written. Draft is a plan, not a decision.
