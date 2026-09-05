@@ -218,6 +218,95 @@ that, A makes the real problem worse and B is the honest answer.
 
 ---
 
+## 2A. WORK ITEM 2 — RESOLVED PLAN (2026-09-05)
+
+§2.5 listed three options and picked none. **Decision: option B, `RespBufWords = 4`**, with the whole
+response path sourced from `mshr_q` and no ready-to-ready path added.
+
+### 2A.1 Why 4, and why it gives 2 words/cycle
+
+The admission sees only registered state, so a slot's round trip is 2 cycles (capture -> register ->
+scan sees it -> drain -> register -> admission sees it free). Bandwidth x delay: 2 beats/cycle x 2
+cycles = **4 slots**. Verified in steady state:
+
+| cycle | `mshr_q.cnt` | `slots = 4 - cnt` | admits | drain sees | drains | next cnt |
+|---|---:|---:|---:|---:|---:|---:|
+| N | 0 | 4 | 2 | 0 | 0 | 2 |
+| N+1 | 2 | 2 | **2** | 2 | **2** | 2 |
+| N+2 | 2 | 2 | **2** | 2 | **2** | 2 |
+
+Settles at `cnt = 2` and holds **2 in / 2 out every cycle**, with no same-cycle coupling.
+**3 slots does NOT work**: `slots = 3-2 = 1` caps admission at 1/cycle.
+
+The rejected alternative (option A, feed the drain handshake back into admission) costs ~33 gates
+`mshr_q -> resp_in_ready` **and** creates a combinational `resp_out_ready -> resp_in_ready` path
+through the module -- an in2out ready chain that composes badly with whatever the tile side does.
+4 slots costs ~3.1% area and no depth. On a design that is timing-limited, not area-limited, that is
+the right trade.
+
+### 2A.2 The change set
+
+| # | site | now | becomes | note |
+|---|---|---|---|---|
+| 1 | `RespBufWords` `:33` | `NumRemoteRespPortsPerTile-1` = 2 | **4**, its own knob | the tie to port count is why it was 2 |
+| 2 | `mshr_resp_slot_t.beat_off` `:465` | `[BurstLenWidth-1:0]` = 5 b | **4 b** (`$clog2(MaxBurstWords)`) + assertion | provably 0..15 when written |
+| 3 | `drv_data`, `drv_burst_one` | `mshr_d` | `mshr_q` | |
+| 4 | `drv_sub_core`, `drv_sub_meta` | `mshr_d` | `mshr_q` | |
+| 5 | `mshr_resp_slots` `:2458` | `RespBufWords - mshr_d[e].resp_buf_cnt` | `mshr_q[e].resp_buf_cnt` | |
+| 6 | `beat_pending` seeding `:2795` | `mshr_d` | `mshr_q` | **needs #7** |
+| 7 | `req_merge_valid` `:1305` | `req_can_merge && req_hit_mshr_sel_valid` | `&& !req_addr_hit_drain[t][p]` | no late join once a beat is in flight |
+
+**Commit split.** #1-#5 as one commit (expected cycle-identical except for the deeper buffer);
+#6-#7 as a second (NOT cycle-identical -- it converts some merges into stall-and-retry). Splitting
+lets the cycle-identity check attribute a regression.
+
+**Not in scope:** the bypass `resp_in_ready = resp_out_ready` (`:2504`). Its ready path is 1-2 gates
+(a `resp_is_mshr` mux) and its data path is a direct `resp_out = resp_in`. Nothing to gain; buffering
+it would add latency where there is none.
+
+### 2A.3 Cost
+
+| | |
+|---|---|
+| `resp_buf` today | 2 x 64 x 37 b = 4,736 flops |
+| after (#1 + #2) | 4 x 64 x 36 b = 9,216 flops |
+| **net** | **+4,480 flops**, +32% on 13,988 registers, **~+3.1% total area** (sequential is 9.8% of 99,280 um2) |
+
+`RespBufCountW` 2->3 b, `RespBufPtrW` 1->2 b, `mshr_rb_en[64][RespBufWords]` widens. The elaboration
+guard `DrainBeatsPerEntry <= NumRemoteRespPortsPerTile-1` stays satisfied (2 <= 2).
+
+### 2A.4 Three traps, all verified
+
+1. **Do NOT narrow `burst_beat_of()`'s return type.** It is called inside `burst_beat_valid` on
+   responses not yet proven in range; the 5-bit width is what makes an out-of-range raw value (16..31)
+   fail `beat_of < len`. At 4 bits a raw 16 truncates to 0, passes the check, and a bogus response is
+   accepted as beat 0 -- silent burst corruption. **Only the stored struct field narrows**, because a
+   value is written there only after `burst_beat_valid` passed.
+2. **`beat_off` cannot be shared or dropped.** Beats arrive out of order (`:31`, `:497` --
+   multi-channel returns), so slot index != beat index. And it is not about ordering: the MSHR
+   **multicasts**, retagging each beat per subscriber under the lane law
+   (`core_id + beat%BurstLanes`, `meta_id_base + beat/BurstLanes`) -- the ROB places by tag, so a
+   wrong tag is data corruption, not a reordering hiccup. It also selects the ParityDrain port
+   (`1 + (beat & 1)`). The design already rejected the alternative (store `meta_id` + `core_id`,
+   8 b vs 4 b).
+3. **#5 reads a freshly-allocated entry's count from `mshr_q`**, i.e. the previous occupant's.
+   `no_alloc_while_resp_landing` should make that unreachable -- **confirm the assertion actually
+   covers it** before relying on it.
+
+### 2A.5 Verification
+
+1. Elaborate at both `MshrMergeReqs` (sim 16, PnR 4) -- `RespBufWords` interacts with neither, but
+   the widened pointers touch the drain arithmetic.
+2. Assertions live under Questa/VCS: `resp_src_exclusive`, `head_beat_must_match_subreq`,
+   `beat_done_subset_seen`, `cached_entry_holds_data`, plus the new `beat_off < MaxBurstWords`.
+3. **Cycle-identity for #1-#5** against the 8 baseline arms. A deeper buffer can only remove stalls,
+   so cycles should be identical or better; a *slower* result means the disjointness argument behind
+   #3/#4 is wrong somewhere.
+4. **#6-#7 measured, not asserted** -- record the delta per shape.
+5. Directed test: a burst sustaining 2 beats/cycle into one entry, to prove 2A.1 holds in RTL and not
+   just on paper. Nothing existing covers it.
+6. Re-run the segmented depth report on the changed RTL.
+
 ## 3. How the two items interact
 
 They are independent and can land in either order.

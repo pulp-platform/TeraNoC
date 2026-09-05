@@ -16765,3 +16765,37 @@ reduce bandwidth (a buffer sized for the old latency does).
 
 **Status.** No RTL written. Gate is `ooc/depth_split.tcl` (armed) plus the three OOC runs. Baseline:
 8 arms running, all compiled clean.
+
+---
+
+## 2026-09-05 16:00 — response-path change set resolved (planned, not implemented)
+
+**Purpose.** Close out §2.5's three open options with a decision, and write the change set in
+enough detail to implement.
+
+**Decision: `RespBufWords = 4`**, whole response path sourced from `mshr_q`, no ready-to-ready added.
+Bandwidth x delay: the admission only ever sees registered state, so a slot's round trip is 2 cycles;
+2 beats/cycle x 2 cycles = 4 slots. Verified in steady state (settles at cnt=2, holds 2 in / 2 out
+indefinitely). **3 slots does not work** -- slots = 3-2 = 1 caps admission at 1/cycle.
+
+Rejected option A (feed the drain handshake into admission): ~33 gates `mshr_q -> resp_in_ready`
+AND a combinational `resp_out_ready -> resp_in_ready` in2out ready chain. 4 slots costs ~3.1% area
+(+4,480 flops) and no depth -- the right trade on a timing-limited design.
+
+**Three traps found while checking, all recorded in the doc:**
+1. Narrowing `burst_beat_of()`'s RETURN type is unsafe -- it is called inside `burst_beat_valid` on
+   unvalidated responses, and the 5-bit width is what makes an out-of-range raw value fail
+   `beat_of < len`. Only the STORED struct field may narrow (5 -> 4 b, provably 0..15 once validated).
+2. `beat_off` cannot be shared or removed. Beats arrive out of order (multi-channel returns), and it
+   is not an ordering field: the MSHR MULTICASTS and retags per subscriber under the lane law, and
+   the ROB places by tag -- a wrong tag is data corruption. It also picks the ParityDrain port.
+3. Sourcing `mshr_resp_slots` from `mshr_q` reads a freshly-allocated entry's count from the previous
+   occupant; `no_alloc_while_resp_landing` should make that unreachable -- confirm before relying.
+
+**Not in scope:** the bypass `resp_in_ready = resp_out_ready` -- 1-2 gates of `resp_is_mshr` mux and
+a direct `resp_out = resp_in`. Nothing to gain.
+
+**Status.** Plan only, no RTL. Commit split defined (#1-#5 expected cycle-identical, #6-#7 measured).
+Backend: `fix2_head_8p0` closed at 8 ns (WNS +0.003, 0 violations, 1,104,205 cells) and is in
+final_opto; `fix2_head_2p0` moved to fenga1 after a PLACE-006 over-utilization failure, and a
+resized copy (`2p0fp`, core_utilization 0.30) runs beside it; `base2_8p0` still in tech mapping.
