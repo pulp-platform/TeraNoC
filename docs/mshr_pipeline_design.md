@@ -185,25 +185,23 @@ cap_g1[e] = slots >= 1;   cap_g2[e] = slots >= 2;                    // :2550
 resp_in_ready[t][p] = cap_first&&cap_g1 || cap_second&&cap_g2;       // :2590  -> MODULE OUTPUT
 ```
 
-Today the slot turns over **inside one cycle** (capture at `:2630`, drain at `:2833`, both on
-`mshr_d`), so 2 slots carry 2 beats/cycle:
+**CORRECTED 2026-09-05.** An earlier version of this section claimed the slot turns over inside one
+cycle today "because the drain sees them in `mshr_d`". That is wrong: the drain's *scan* is
+`mshr_q`-sourced (`DrainFromQ = 1` in sim and backend), so a beat captured in cycle N has
+`mshr_q.resp_buf_cnt == 0` and **cannot be selected until N+1**. The turnover is ALREADY 2 cycles:
 
-| | cnt |
-|---|---|
-| start of N (`mshr_q`) | 0 |
-| capture grants 2 | 2 |
-| drain (sees them in `mshr_d`) drains 2 | 0 |
-
-With the drain fully on `mshr_q` the turnover becomes **2 cycles**:
-
-| cycle | capture | drain (`mshr_q`) | cnt |
+| cycle | admission sees | drain scan sees | cnt |
 |---|---|---|---|
-| N | slots = 2 -> admits 2 | cnt = 0 -> drains nothing | -> 2 |
-| N+1 | slots = 0 -> **admits nothing** | cnt = 2 -> drains 2 | -> 0 |
+| N | 0 -> admits 2 | 0 -> drains nothing | -> 2 |
+| N+1 | 2 -> **admits nothing** | 2 -> drains 2 | -> 0 |
 
-**Admit 2 / admit 0 / admit 2 — 1 beat per cycle, half the design rate**, surfacing as
-`resp_in_ready` deasserting to the NoC. `RespBufWords = NumRemoteRespPortsPerTile - 1 = 2` is sized
-exactly for a one-cycle turnover; there is no slack to absorb a second cycle.
+So the design already sustains **1 beat/cycle per entry**, not 2, and `RespBufWords = 2` is sized for
+that. Two consequences:
+
+* Moving `drv_*` to `mshr_q` (§2.2) does **not** change turnover or bandwidth -- the scan already
+  gates it. This objection was filed under the wrong item.
+* Turnover only degrades further when a **pipeline register** pushes the scan another cycle back.
+  That is where §2.5 applies, and only there.
 
 ### 2.5 Three ways to keep 2 beats/cycle — undecided
 
@@ -322,6 +320,13 @@ Recorded because each was wrong in a way that would have led to a wrong design.
    (or the turnover) and full bandwidth returns.
 6. **"Forward capture into drain."** Wrong direction once §2.2 lands: the drain no longer depends on
    capture, so it is the **admission** that must see the drain (§2.5 A).
+7. **"Today the slot turns over inside one cycle."** No -- the drain scan is already `mshr_q`-sourced,
+   so turnover is already 2 cycles and the per-entry rate is already 1 beat/cycle. See the correction
+   in §2.4. The bandwidth objection belongs to the pipeline register, not to the `mshr_q` conversion.
+8. **"The `mshr_q` conversion buys ~52 -> ~29 gates."** That figure is for the FULL decoupling
+   (including the `beat_pending` seeding and the merge gate). The conversion alone leaves the
+   scan->select cone shared between the drive and the `resp_buf` update, so the realistic gain is
+   ~26 -> ~20 gates on that path. Modest and bounded, not the headline number.
 
 ---
 
