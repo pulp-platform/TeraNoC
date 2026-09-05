@@ -16675,3 +16675,24 @@ are contaminated and are kept only as a reference point.
 **Status.** `base2_8p0` / `fix2_head_8p0` / `fix2_head_2p0` all in technology mapping, 0 errors.
 At const-prop, under the corrected SDC: baseline 1,269,127 vs HEAD 843,935 = **-33.5%**, and the
 baseline reproduces its historical figure exactly.
+
+---
+
+## 2026-09-05 02:25 — removed 16 stale OOC runs after harvesting them
+
+**Purpose.** Reclaim fenga3 and stop confusing dead SDC-contaminated runs with the live three.
+
+**Implementation.** Killed `rt_base_head_8p0` (16h14m, 63.7 GB, a duplicate of `base2_8p0` under the
+broken SDC) after verifying each PID against `/proc/<pid>/cmdline`. Harvested INSTCNT traces and
+source md5s for all 16 remaining stale tags into `docs/ooc_stale_runs_harvest.md`, then removed their
+`save/`, `reports/` and logs behind two guards: a name check for the live runs and the 500 MHz
+reference block, and a per-tag `pgrep` for a still-running process.
+
+**Result.** 510 GB RAM free (was 411), 907 GB disk (was 901 -- the win was memory, not disk). Only
+`base2_8p0`, `fix2_head_8p0`, `fix2_head_2p0`, the leaf depth runs and the interactive lib remain.
+The harvest completed the F-series record: **F1 and F2 bought no area** (F2 is +0.19% vs baseline);
+the -34% came from F4 (-12pp) and F5 (-19.9pp).
+
+**Status.** Three runs healthy. Wall-clock measured: elaboration 46m13s -> 24m04s (1.92x) and
+constant propagation 1.03h -> 0.59h (1.75x) on the current RTL; technology mapping is 85% of
+`compile_fusion` and is the only phase worth optimising for turnaround.
