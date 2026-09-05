@@ -16728,3 +16728,40 @@ reading suggesting the 8,988-port boundary dominates rather than the reg-to-reg 
 settled by `ooc/depth_split.tcl`, armed to fire on `fix2_head_8p0`'s logic_opto block.
 
 **Status.** No RTL written. Draft is a plan, not a decision.
+
+---
+
+## 2026-09-05 05:20 — two planned changes written up; decisions deferred to the backend results
+
+**Purpose.** Record both candidate changes in enough detail to implement, and name the measurement
+that decides between them, before any RTL is touched.
+
+**Item 1 — request path cut (LOOKUP | UPDATE).** Registers the F5 per-bank records (`agb_*`/`mgb_*`,
+already built). Chosen over request|response because 16 entry fields are written by both paths;
+the same objection kills capture|drain on the response side (15 fields). Any workable cut here is
+decide|apply, not phaseA|phaseB. The duplicate-alloc hazard is one comparator per lane, not a 16-way
+CAM, because `mshr_bank_of()` sends a line to a fixed bank and there is at most one pending alloc per
+bank. S1 ~30 gates against a 31-37 budget; ~944 flops (+7.3%); +1 cycle allocation latency, no
+throughput loss.
+
+**Item 2 — derive the whole response side from `mshr_q`.** Today the drain SELECTS from `mshr_q` but
+FETCHES data from `mshr_d` (F6 hoist), which makes capture and drain serial: ~52 gates. Moving
+`drv_*` and the `beat_pending` seeding to `mshr_q` makes them parallel cones: ~29 gates, no pipeline
+stage, no latency. Prerequisite is a one-line change -- `req_addr_hit_drain` gates only the allocate
+path, so a merge can currently land in the very cycle a beat arrives; AND it into `req_merge_valid`
+and `mshr_d.sub_reqs == mshr_q.sub_reqs` holds by construction.
+
+**The catch, and the open decision.** Admission (`mshr_resp_slots = RespBufWords - mshr_d.cnt`, line
+2458) runs BEFORE the drain, so today the slot turns over inside one cycle and 2 slots carry 2
+beats/cycle. Fully `mshr_q`-sourcing the drain makes the turnover 2 cycles -> admit 2 / admit 0 ->
+**half rate**. Three fixes costed in the doc: forward the freeing into admission (puts drain-select on
+the `resp_in_ready` boundary path, ~39 gates -- and `R2R-COST=0.00` hints the boundary is already the
+binding constraint), `RespBufWords=4` (+4,096 flops, +32% sequential), or credit-based ready.
+
+**Result.** `docs/mshr_pipeline_design.md`, 345 lines, with a §6 recording six of my own wrong
+conclusions that the user's questions corrected -- notably that `resp_buf` is fan-out storage not a
+pipeline stage, that one-core-per-tile makes the multicast single-cycle, and that a pipeline does not
+reduce bandwidth (a buffer sized for the old latency does).
+
+**Status.** No RTL written. Gate is `ooc/depth_split.tcl` (armed) plus the three OOC runs. Baseline:
+8 arms running, all compiled clean.
