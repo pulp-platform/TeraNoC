@@ -876,6 +876,26 @@ module mempool_tile
     );
   end: gen_tcdm_registers_req_slv
 
+  // Remote response input buffer. REQUIRED -- this is not an optional optimisation.
+  //
+  // i_remote_resp_interco is a stream_xbar, whose handshake contract is that data_i/sel_i stay
+  // stable while valid_i is high and ready_o is low. Port 0 does NOT honour that: mempool_group
+  // merges the barrier release into the local response with a combinational 2:1 mux,
+  //   valid[0] = bar_rel_vec | master_local_resp_valid
+  //   rdata[0] = bar_rel_vec ? bar_rel_rdata : master_local_resp_rdata
+  // so when a LIC response is waiting on a stalled crossbar and bar_rel_vec then rises, valid
+  // stays high through the OR while the payload switches underneath it.
+  //
+  // This register absorbs that: fall_through_register is always ready when empty, so valid && !ready
+  // is rare at this input. MEASURED 2026-09-06 on vg_fp16_256x32x256 -- removing it fires
+  // stream_xbar's input_data_unstable / input_sel_unstable (20 hits; 0 with it present, across five
+  // arms). The throughput effect is separately small and shape-dependent (fp16 256x32x256 +4.4%,
+  // fp32 -0.6%, 1024x256x256 -2.1%, 2048x256x256 +1.0%), so it was never the reason to keep it.
+  //
+  // NOTE: this only makes the violation RARE, not impossible -- the buffer is DEPTH 1, so under
+  // sustained backpressure ready_o still drops with a beat pending. The real fix is to hold the
+  // port-0 mux select stable until the beat is accepted, in mempool_group.sv. Until that lands,
+  // this register must stay.
   for (genvar h = 0; unsigned'(h) < NumRemoteRespPortsPerTile; h++) begin: gen_tcdm_registers_resp
     fall_through_register #(
       .T(tcdm_master_resp_t)
