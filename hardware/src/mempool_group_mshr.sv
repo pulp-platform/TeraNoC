@@ -595,7 +595,12 @@ module mempool_group_mshr
   // Entries contending for the same outbound lane). Tied off when the feature is compiled out.
   mshr_id_t                                                                    hold_replay_rr_q;
   logic                [MshrNum-1:0]                                           mshr_resp_inflight; // Block same-cycle merge.
-  logic                [MshrNum-1:0]                                           mshr_resp_seen_now; // Any in-flight input beat matching this MSHR.
+  // R1: per-response-lane validation, kept as (valid, target entry id) instead of scattered into a
+  // MshrNum-wide vector. Both consumers index that vector by e_abs -- a DIFFERENT dynamic index --
+  // so the scatter was immediately undone by a 64:1 re-mux. Comparing ids removes scatter and mux.
+  logic     [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]                   rsn_v;
+  mshr_id_t [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]                   rsn_id;
+  logic     [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrWaysPerBank-1:0] req_resp_seen;
   logic                                                                        csr_trace_any_i;
 
   // Response classification and debug (per response port).
@@ -759,6 +764,14 @@ module mempool_group_mshr
              [BurstLenWidth-1:0]                                               resp_capture_beat_offset;
   logic      [MshrNum-1:0]                                                     resp_head_beat_pending;
   logic      [MshrNum-1:0][RespBufCountW-1:0]                                  resp_cnt_after_pop;
+  // Finalize pop-count terms (see the finalize pass). Per entry, evaluated from the values
+  // entering that pass so the head and second beat do not chain.
+  logic                                                                        fin_cache;
+  logic                                                                        fin_head;
+  logic                                                                        fin_second_en;
+  logic                                                                        fin_second;
+  logic                                                                        fin_retire;
+  logic      [1:0]                                                             fin_pop;
   // Response drain scheduling (single-response per MSHR).
 
   // Round-robin fairness bases.
@@ -1018,50 +1031,66 @@ module mempool_group_mshr
 
 
   // Detect whether any response beat on input already targets each MSHR entry.
-  localparam bit RespSeenByTag = `ifdef GROUP_MSHR_RESP_SEEN_BY_TAG `GROUP_MSHR_RESP_SEEN_BY_TAG `else 1'b1 `endif;
+  //
+  // O(1) by tag: the response carries the entry id, so index it and re-validate. The legacy form
+  // scanned all MshrNum entries per lane; it sat behind a localparam that nothing could set, so it
+  // was const-folded away and is deleted rather than left as a 64-way scan a reader has to discount.
   always_comb begin
-    mshr_resp_seen_now = '0;
+    rsn_v  = '0;
+    rsn_id = '0;
     for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
       for (int port_i = 1; port_i < NumRemoteRespPortsPerTile; port_i++) begin
+        // Unconditional: the id must be valid for the consumer's compare even when rsn_v is 0.
+        rsn_tag_cand = mshr_id_t'(resp_in[tile_i][port_i].mshr_tag - MshrTagWidth'(1));
+        rsn_id[tile_i][port_i] = rsn_tag_cand;
         if (resp_in_valid[tile_i][port_i] &&
             (resp_in[tile_i][port_i].wen == 1'b0) &&
             (resp_in[tile_i][port_i].rdata.amo == '0)) begin
-          if (RespSeenByTag) begin
-            // O(1): index the tagged entry, then run the identical re-validation.
-            if (resp_in[tile_i][port_i].mshr_tag != '0) begin : rsn_tag
-              rsn_tag_cand =
-                  mshr_id_t'(resp_in[tile_i][port_i].mshr_tag - MshrTagWidth'(1));
-              if (mshr_q_valid[rsn_tag_cand] &&
-                  ((mshr_q[rsn_tag_cand].state == MSHR_WAIT_RESP) ||
-                   (mshr_q[rsn_tag_cand].state == MSHR_DRAIN_RESP)) &&
-                  (mshr_q[rsn_tag_cand].sub_reqs[0].tile_id == tile_group_id_t'(tile_i)) &&
-                  burst_beat_valid(resp_in[tile_i][port_i].rdata.core_id,
-                                   resp_in[tile_i][port_i].rdata.meta_id,
-                                   mshr_q[rsn_tag_cand].sub_reqs[0].core_id,
-                                   mshr_q[rsn_tag_cand].sub_reqs[0].meta_id_base,
-                                   mshr_q[rsn_tag_cand].burst_len)) begin
-                mshr_resp_seen_now[rsn_tag_cand] = 1'b1;
-              end
-            end
-          end else begin
-            for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
-              if (mshr_q_valid[mshr_i] &&
-                  ((mshr_q[mshr_i].state == MSHR_WAIT_RESP) ||
-                   (mshr_q[mshr_i].state == MSHR_DRAIN_RESP)) &&
-                  (mshr_q[mshr_i].sub_reqs[0].tile_id == tile_group_id_t'(tile_i)) &&
-                  burst_beat_valid(resp_in[tile_i][port_i].rdata.core_id,
-                                   resp_in[tile_i][port_i].rdata.meta_id,
-                                   mshr_q[mshr_i].sub_reqs[0].core_id,
-                                   mshr_q[mshr_i].sub_reqs[0].meta_id_base,
-                                   mshr_q[mshr_i].burst_len)) begin
-                mshr_resp_seen_now[mshr_i] = 1'b1;
-              end
+          if (resp_in[tile_i][port_i].mshr_tag != '0) begin : rsn_tag
+            if (mshr_q_valid[rsn_tag_cand] &&
+                ((mshr_q[rsn_tag_cand].state == MSHR_WAIT_RESP) ||
+                 (mshr_q[rsn_tag_cand].state == MSHR_DRAIN_RESP)) &&
+                (mshr_q[rsn_tag_cand].sub_reqs[0].tile_id == tile_group_id_t'(tile_i)) &&
+                burst_beat_valid(resp_in[tile_i][port_i].rdata.core_id,
+                                 resp_in[tile_i][port_i].rdata.meta_id,
+                                 mshr_q[rsn_tag_cand].sub_reqs[0].core_id,
+                                 mshr_q[rsn_tag_cand].sub_reqs[0].meta_id_base,
+                                 mshr_q[rsn_tag_cand].burst_len)) begin
+              rsn_v[tile_i][port_i] = 1'b1;
             end
           end
         end
       end
     end
   end
+
+`ifndef TARGET_SYNTHESIS
+  // Sim-only per-entry view of the above, for the statistics include, which scans all entries.
+  // Reconstructed from the lane form; excluded from synthesis, so it costs no hardware.
+  logic [MshrNum-1:0] mshr_resp_seen_now;
+  always_comb begin
+    mshr_resp_seen_now = '0;
+    for (int t = 0; t < NumTilesPerGroup; t++) begin
+      for (int pp = 1; pp < NumRemoteRespPortsPerTile; pp++) begin
+        if (rsn_v[t][pp]) mshr_resp_seen_now[rsn_id[t][pp]] = 1'b1;
+      end
+    end
+  end
+`endif
+
+  // Is any validated response beat targeting entry e this cycle? Arguments, not module reads: a
+  // function called from a continuous assign does not sample signals it reads but does not take.
+  function automatic logic resp_seen_at(
+      input logic     [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1] v,
+      input mshr_id_t [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1] id,
+      input mshr_id_t e);
+    resp_seen_at = 1'b0;
+    for (int t = 0; t < NumTilesPerGroup; t++) begin
+      for (int pp = 1; pp < NumRemoteRespPortsPerTile; pp++) begin
+        if (v[t][pp] && (id[t][pp] == e)) resp_seen_at = 1'b1;
+      end
+    end
+  endfunction
 
   // Increment 3: address-banking replaces the O(ports^2) same-cycle leader/follower coalescing.
   generate
@@ -1097,10 +1126,13 @@ module mempool_group_mshr
           // rather than allocate a second entry for the same line. Two valid entries CAN still
           // share an address (a request refused by no_late_join_burst allocates its own), so a
           // same-address pair is not by itself a duplicate-allocation bug.
+          assign req_resp_seen[tile_i][port_i][way_i] = resp_seen_at(rsn_v, rsn_id, e_abs);
+
           assign req_addr_hit_drain_way[tile_i][port_i][way_i] =
               req_addr_hit_way[tile_i][port_i][way_i] &&
               ((mshr_q[e_abs].state == MSHR_DRAIN_RESP) ||
-               (StallOnResp && (mshr_resp_seen_now[e_abs] || mshr_resp_inflight[e_abs])));
+               (StallOnResp && (req_resp_seen[tile_i][port_i][way_i] ||
+                                mshr_resp_inflight[e_abs])));
 
           assign req_hit_way[tile_i][port_i][way_i] =
               req_can_merge[tile_i][port_i] &&
@@ -1116,7 +1148,7 @@ module mempool_group_mshr
                 (mshr_q[e_abs].state == MSHR_CACHED) &&
                 (mshr_q[e_abs].resp_buf_cnt != '0) &&
                 (req_len[tile_i][port_i] == BurstLenWidth'(1)))) &&
-              !mshr_resp_seen_now[e_abs] &&
+              !req_resp_seen[tile_i][port_i][way_i] &&
               !mshr_resp_inflight[e_abs] &&
               ((mshr_q[e_abs].sub_reqs_num + SubReqCountW'(1)) <= MshrMergeReqs);
         end
@@ -3383,102 +3415,104 @@ module mempool_group_mshr
     end
 
     // Finalize response draining per beat.
+    //
+    // Pop-count form. The head beat and the ParityDrain second beat used to be applied as two
+    // CHAINED read-modify-writes: resp_buf_rd_ptr, resp_buf_cnt and beats_left were each updated
+    // twice in sequence and state was written up to three times, so the second beat's arithmetic
+    // waited on the first. Every chained CONDITION has an equivalent on the values entering this
+    // pass, which is what lets both pops be decided together and applied once:
+    //     "resp_buf_cnt after the head pop != 0"     ==  resp_buf_cnt >= 2
+    //     "beats_left after the head decrement == 1" ==  beats_left == 2
+    // NOT a bandwidth change: pop == 2 is the same two beats, decided in parallel not in series.
     for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
       resp_head_beat_pending[mshr_i] = 1'b0;
-      resp_cnt_after_pop[mshr_i] = mshr_d[mshr_i].resp_buf_cnt;
+      resp_cnt_after_pop[mshr_i]     = mshr_d[mshr_i].resp_buf_cnt;
+      fin_cache     = 1'b0;
+      fin_head      = 1'b0;
+      fin_second_en = 1'b0;
+      fin_second    = 1'b0;
+      fin_retire    = 1'b0;
+      fin_pop       = 2'd0;
+
       if (mshr_d_valid[mshr_i] && (mshr_d[mshr_i].resp_buf_cnt != '0) &&
           (mshr_d[mshr_i].state == MSHR_DRAIN_RESP)) begin
         resp_head_beat_pending[mshr_i] = |mshr_d[mshr_i].beat_pending;
         if (!resp_head_beat_pending[mshr_i]) begin
-          if ((mshr_d[mshr_i].beats_left == BurstLenWidth'(1)) &&
-              EnableRespCache && !amo_invalidate &&
-              mshr_d[mshr_i].cacheable &&
-              (mshr_d[mshr_i].burst_len == BurstLenWidth'(1))) begin
-            // Keep final drained head response as cache data (do not pop).
-            for (int s = 0; s < MshrMergeReqs; s++) begin
-              mshr_d[mshr_i].sub_reqs[s].valid = 1'b0;
-            end
-            mshr_d[mshr_i].sub_reqs_num = '0;
-            mshr_d[mshr_i].beat_pending = '0;
+          fin_cache = (mshr_d[mshr_i].beats_left == BurstLenWidth'(1)) &&
+                      EnableRespCache && !amo_invalidate &&
+                      mshr_d[mshr_i].cacheable &&
+                      (mshr_d[mshr_i].burst_len == BurstLenWidth'(1));
+          fin_head  = !fin_cache;
+        end
+      end
+
+      if (fin_cache) begin
+        // Keep final drained head response as cache data (do not pop).
+        for (int s = 0; s < MshrMergeReqs; s++) begin
+          mshr_d[mshr_i].sub_reqs[s].valid = 1'b0;
+        end
+        mshr_d[mshr_i].sub_reqs_num = '0;
+        mshr_d[mshr_i].beat_pending = '0;
 `ifndef TARGET_SYNTHESIS
-            mshr_d[mshr_i].beat_done[resp_beat_offset[mshr_i]] = 1'b1;
+        mshr_d[mshr_i].beat_done[resp_beat_offset[mshr_i]] = 1'b1;
 `endif
-            mshr_d[mshr_i].beats_left = '0;
-            mshr_d[mshr_i].state = MSHR_CACHED;
-            // Re-arm the serve-target timeout for the cache-resident phase: a line whose target is
-            // Never reached would otherwise never self-invalidate, and with CacheReclaimable=0 it
-            mshr_d[mshr_i].hold_cnt = hold_ticks(cfg_cache_hold_ticks_src);
+        mshr_d[mshr_i].beats_left = '0;
+        mshr_d[mshr_i].state = MSHR_CACHED;
+        // Re-arm the serve-target timeout for the cache-resident phase: a line whose target is
+        // Never reached would otherwise never self-invalidate, and with CacheReclaimable=0 it
+        mshr_d[mshr_i].hold_cnt = hold_ticks(cfg_cache_hold_ticks_src);
+      end else if (fin_head) begin
+        // beats_left != 1 is exactly "the head pop does not retire the entry", which is what
+        // gated the whole PD2 block on mshr_d_valid after the head write.
+        fin_second_en = PD2 && (mshr_d[mshr_i].burst_len != BurstLenWidth'(1)) &&
+                        mshr_d[mshr_i].beat2_armed &&
+                        (mshr_d[mshr_i].beats_left != BurstLenWidth'(1));
+        fin_second    = fin_second_en && (mshr_d[mshr_i].beat_pending2 == '0) &&
+                        (mshr_d[mshr_i].resp_buf_cnt >= RespBufCountW'(2));
+        fin_pop       = fin_second ? 2'd2 : 2'd1;
+        fin_retire    = (mshr_d[mshr_i].beats_left == BurstLenWidth'(1)) ||
+                        (fin_second && (mshr_d[mshr_i].beats_left == BurstLenWidth'(2)));
+
+        // rd_ptr advances by the pop count. pop <= 2 and rd_ptr <= RespBufWords-1, so a single
+        // conditional subtraction covers the wrap (RespBufWords >= 2 is asserted above).
+        if (RespBufWords > 1) begin
+          if ((int'(mshr_d[mshr_i].resp_buf_rd_ptr) + int'(fin_pop)) >= int'(RespBufWords)) begin
+            mshr_d[mshr_i].resp_buf_rd_ptr = RespBufPtrW'(
+                int'(mshr_d[mshr_i].resp_buf_rd_ptr) + int'(fin_pop) - int'(RespBufWords));
           end else begin
-            // Pop the drained head beat.
-            if (mshr_d[mshr_i].resp_buf_cnt != '0) begin
-              if (RespBufWords > 1) begin
-                if (mshr_d[mshr_i].resp_buf_rd_ptr == RespBufPtrW'(RespBufWords - 1)) begin
-                  mshr_d[mshr_i].resp_buf_rd_ptr = '0;
-                end else begin
-                  mshr_d[mshr_i].resp_buf_rd_ptr = mshr_d[mshr_i].resp_buf_rd_ptr + 1'b1;
-                end
-              end
-              resp_cnt_after_pop[mshr_i] = mshr_d[mshr_i].resp_buf_cnt - 1'b1;
-              mshr_d[mshr_i].resp_buf_cnt = resp_cnt_after_pop[mshr_i];
-            end
-
-            mshr_d[mshr_i].beat_pending = '0;
+            mshr_d[mshr_i].resp_buf_rd_ptr = RespBufPtrW'(
+                int'(mshr_d[mshr_i].resp_buf_rd_ptr) + int'(fin_pop));
+          end
+        end
+        resp_cnt_after_pop[mshr_i]  = mshr_d[mshr_i].resp_buf_cnt - RespBufCountW'(fin_pop);
+        mshr_d[mshr_i].resp_buf_cnt = resp_cnt_after_pop[mshr_i];
 `ifndef TARGET_SYNTHESIS
-            mshr_d[mshr_i].beat_done[resp_beat_offset[mshr_i]] = 1'b1;
+        mshr_d[mshr_i].beat_done[resp_beat_offset[mshr_i]] = 1'b1;
+        if (fin_second) begin
+          mshr_d[mshr_i].beat_done[resp_beat_offset2[mshr_i]] = 1'b1;
+        end
 `endif
-            if (mshr_d[mshr_i].beats_left == BurstLenWidth'(1)) begin
-              mshr_d_valid[mshr_i] = 1'b0;
-              // Retire by dropping valid only (see the first retire site for why).
-            end else begin
-              if (mshr_d[mshr_i].beats_left != '0) begin
-                mshr_d[mshr_i].beats_left = mshr_d[mshr_i].beats_left - BurstLenWidth'(1);
-              end
-              if (resp_cnt_after_pop[mshr_i] != '0) begin
-                mshr_d[mshr_i].state = MSHR_DRAIN_RESP;
-              end else begin
-                mshr_d[mshr_i].state = MSHR_WAIT_RESP;
-              end
-            end
+        // An armed second beat that could not pop is promoted into the head slot.
+        mshr_d[mshr_i].beat_pending =
+            (fin_second_en && !fin_second) ? mshr_d[mshr_i].beat_pending2 : '0;
 
-            // ParityDrain: resolve the second slot after the head pop.
-            if (PD2 && mshr_d_valid[mshr_i] &&
-                (mshr_d[mshr_i].burst_len != BurstLenWidth'(1)) &&
-                mshr_d[mshr_i].beat2_armed) begin
-              if ((mshr_d[mshr_i].beat_pending2 == '0) &&
-                  (mshr_d[mshr_i].resp_buf_cnt != '0)) begin
-                // Pop the (already fully served) promoted beat as well.
-                if (RespBufWords > 1) begin
-                  if (mshr_d[mshr_i].resp_buf_rd_ptr == RespBufPtrW'(RespBufWords - 1)) begin
-                    mshr_d[mshr_i].resp_buf_rd_ptr = '0;
-                  end else begin
-                    mshr_d[mshr_i].resp_buf_rd_ptr = mshr_d[mshr_i].resp_buf_rd_ptr + 1'b1;
-                  end
-                end
-                mshr_d[mshr_i].resp_buf_cnt = mshr_d[mshr_i].resp_buf_cnt - 1'b1;
-`ifndef TARGET_SYNTHESIS
-                mshr_d[mshr_i].beat_done[resp_beat_offset2[mshr_i]] = 1'b1;
-`endif
-                if (mshr_d[mshr_i].beats_left == BurstLenWidth'(1)) begin
-                  mshr_d_valid[mshr_i] = 1'b0;
-                  // Retire by dropping valid only (see the first retire site for why).
-                end else begin
-                  if (mshr_d[mshr_i].beats_left != '0) begin
-                    mshr_d[mshr_i].beats_left = mshr_d[mshr_i].beats_left - BurstLenWidth'(1);
-                  end
-                  if (mshr_d[mshr_i].resp_buf_cnt != '0) begin
-                    mshr_d[mshr_i].state = MSHR_DRAIN_RESP;
-                  end else begin
-                    mshr_d[mshr_i].state = MSHR_WAIT_RESP;
-                  end
-                end
-              end else begin
-                mshr_d[mshr_i].beat_pending = mshr_d[mshr_i].beat_pending2;
-              end
-              if (mshr_d_valid[mshr_i]) begin
-                mshr_d[mshr_i].beat_pending2 = '0;
-                mshr_d[mshr_i].beat2_armed   = 1'b0;
-              end
-            end
+        if (fin_retire) begin
+          mshr_d_valid[mshr_i] = 1'b0;
+          // Retire by dropping valid only (see the first retire site for why). beat_pending2 and
+          // beat2_armed are deliberately NOT cleared here -- the original cleared them under
+          // `if (mshr_d_valid)`, i.e. never on the retiring path.
+        end else begin
+          if (mshr_d[mshr_i].beats_left != '0) begin
+            mshr_d[mshr_i].beats_left = mshr_d[mshr_i].beats_left - BurstLenWidth'(fin_pop);
+          end
+          if (resp_cnt_after_pop[mshr_i] != '0) begin
+            mshr_d[mshr_i].state = MSHR_DRAIN_RESP;
+          end else begin
+            mshr_d[mshr_i].state = MSHR_WAIT_RESP;
+          end
+          if (fin_second_en) begin
+            mshr_d[mshr_i].beat_pending2 = '0;
+            mshr_d[mshr_i].beat2_armed   = 1'b0;
           end
         end
       end
