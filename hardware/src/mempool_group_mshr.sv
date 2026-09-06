@@ -29,9 +29,15 @@ module mempool_group_mshr
   parameter bit EnableMshrNonFullBurstReq   = `ifdef GROUP_MSHR_ENABLE_NON_FULL `GROUP_MSHR_ENABLE_NON_FULL `else 1'b1 `endif,
   parameter bit EnableMshrFullBurstReq      = `ifdef GROUP_MSHR_ENABLE_FULL `GROUP_MSHR_ENABLE_FULL `else 1'b1 `endif,
   // Per-entry buffered response beats (for out-of-order/multi-channel returns).
-  // Default tracks remote response bandwidth per tile.
-  parameter int RespBufWords   = ((NumRemoteRespPortsPerTile > 1) ?
-                                  (NumRemoteRespPortsPerTile - 1) : 1),
+  // Sized by BANDWIDTH x DELAY, not by port count. The admission (mshr_resp_slots) only ever sees
+  // REGISTERED state, so a slot's round trip is 2 cycles: captured -> registered -> the drain scan
+  // sees it -> drained -> registered -> the admission sees it free. To sustain the 2 beats/cycle the
+  // capture (cap_first/cap_second) and drain (ParityDrain) datapaths are built for:
+  //     2 beats/cycle x 2 cycles = 4 slots.
+  // It settles at cnt=2 and holds 2 in / 2 out indefinitely. THREE DOES NOT WORK: slots = 3-2 = 1
+  // caps admission at 1/cycle. The old value was NumRemoteRespPortsPerTile-1 = 2, which tied the
+  // depth to the port count and gave exactly half the achievable rate.
+  parameter int RespBufWords   = 4,
   // 0: drain one sub-request per MSHR per cycle (original behavior)
   // 1: drain as many sub-requests as ports allow per cycle
   parameter bit DrainMultiPort = 1'b1,
@@ -100,6 +106,9 @@ module mempool_group_mshr
 
   // BURST LANE LAW: beat b belongs to VLSU lane b % NrMemPorts and is entry b / NrMemPorts of
   // That reorder buffer, so a burst's beats are distributed by the ordinary word->port rule.
+  // Width of a beat OFFSET (0..MaxBurstWords-1). Distinct from BurstLenWidth, which sizes a LENGTH
+  // (1..MaxBurstWords) and therefore needs one more bit.
+  localparam int unsigned BeatOffW   = $clog2(mempool_pkg::MaxBurstWords);
   localparam int unsigned BurstLanes = NumMemPortsPerSpatz;
   localparam int unsigned BurstLaneW = idx_width(BurstLanes);
   if (BurstLanes & (BurstLanes - 1))
@@ -135,6 +144,17 @@ module mempool_group_mshr
   // ------------------------------------------------------------------------------------
   // Misconfig guards: the parity datapath is hardwired for 2 beats/cycle and needs both usable
   // Resp ports [2:1]; an illegal knob must fail elaboration, not wedge silently at runtime.
+  // Two distinct conditions, deliberately at different severities. An $error must mean BROKEN;
+  // running at half the achievable response rate is suboptimal, not broken -- and the design shipped
+  // that way until 2026-09-05, so making it fatal would refuse a legitimate A/B build.
+  if (RespBufWords < DrainBeatsPerEntry)
+    $error({"[mempool_group_mshr] RespBufWords (%0d) < DrainBeatsPerEntry (%0d): the buffer cannot ",
+            "even hold one cycle's drain width."}, RespBufWords, DrainBeatsPerEntry);
+  else if (RespBufWords < 2 * DrainBeatsPerEntry)
+    $warning({"[mempool_group_mshr] RespBufWords (%0d) < 2 x DrainBeatsPerEntry (%0d): the admission ",
+              "sees only REGISTERED state, so a slot's round trip is 2 cycles. Below bandwidth x ",
+              "delay the per-entry response rate is halved (admit N / admit 0 / admit N)."},
+             RespBufWords, DrainBeatsPerEntry);
   if ((DrainBeatsPerEntry != 1) && (DrainBeatsPerEntry != 2))
     $error("[mempool_group_mshr] group_mshr_drain_beats must be 1 (off) or 2, got %0d.",
            DrainBeatsPerEntry);
@@ -461,9 +481,16 @@ module mempool_group_mshr
 
   // Response-buffer slot -- NOT a full tcdm_master_resp_t: the drain path builds its reply from
   // Sub_reqs, so only the fields below are ever read back.
+  // BeatOffW, not BurstLenWidth: this field holds an OFFSET (0..MaxBurstWords-1), not a length
+  // (1..MaxBurstWords). A value is written only after burst_beat_valid() passed, which requires
+  // beat < burst_len <= MaxBurstWords, so 0..15 is provable -- see the assertion at the capture.
+  // NOTE burst_beat_of()'s RETURN type must stay BurstLenWidth: it is called inside
+  // burst_beat_valid() on responses not yet proven in range, and the extra bit is what makes an
+  // out-of-range raw value (16..31) fail `beat_of < len`. At 4 bits a raw 16 truncates to 0, passes
+  // the check, and a bogus response is accepted as beat 0 -- silent burst corruption.
   typedef struct packed {
-    logic [BurstLenWidth-1:0] beat_off;
-    data_t                    data;
+    logic [BeatOffW-1:0] beat_off;
+    data_t               data;
   } mshr_resp_slot_t;
 
   typedef struct packed {
@@ -659,6 +686,23 @@ module mempool_group_mshr
   logic      [MshrNum-1:0]                                                     replay_scan_valid;
   // One bit per entry, "some store lane forced this RESP_HOLD entry to drain this cycle".
   logic      [MshrNum-1:0]                                                     st_force_drain;
+  // Break the serial read-modify-write chain on mshr_d[e].state.
+  //
+  // The store force-drain tested `mshr_d[e].state == MSHR_RESP_HOLD`, i.e. the value the RESPONSE
+  // CAPTURE may have written earlier in this same always_comb. That serialised capture -> force-
+  // drain, and measurement on fix2_head_2p0fp puts 129 of the path's 165 cell levels downstream of
+  // the arbiter, in exactly this chain.
+  //
+  // The dependency is real -- "a buffered response predates any store/AMO observed after it
+  // returned" -- but it is only on WHETHER THE CAPTURE FIRED, not on the fully merged state. So the
+  // same value is computable in parallel from mshr_q plus the capture's own fire terms, which is
+  // what st_post_cap does. Sites that need the pre-capture value keep reading mshr_d.
+  logic      [MshrNum-1:0]                                                     st_alloc_fire;
+  logic      [MshrNum-1:0]                                                     st_merge_drain;
+  logic      [MshrNum-1:0]                                                     st_cap_fire;
+  logic      [MshrNum-1:0]                                                     st_cap_hold;
+  mshr_state_t [MshrNum-1:0]                                                   st_post_cap;
+  mshr_id_t                                                                    st_pe;
   // Response capture is decided per ENTRY instead of chained across lanes.
   localparam int unsigned NumRespPortsActive = (NumRemoteRespPortsPerTile > 1) ?
                                                (NumRemoteRespPortsPerTile - 1) : 1;
@@ -695,11 +739,14 @@ module mempool_group_mshr
   mshr_resp_slot_t [MshrNum-1:0]                                               cap_d0, cap_d1;
   logic [RespBufPtrW-1:0]                                                      cap_s0, cap_s1, cap_n0, cap_n1;
   logic [RespLaneW-1:0]                                                        cap_lane;
-  // The grant takes at most TWO lanes per entry, exact only while an entry cannot have more than
-  // Two free slots. RespBufWords is NumRemoteRespPortsPerTile-1 and the resp channel count is
-  // Already restricted to 1 or 2, so this holds -- but fail loudly rather than drop a third beat.
-  if (RespBufWords > 2)
-    $error("[mempool_group_mshr] F3c grants at most 2 response lanes per entry per cycle; RespBufWords=%0d needs it generalised.", RespBufWords);
+  // The grant takes at most TWO lanes per entry per cycle (cap_first/cap_second are one-hot). With
+  // RespBufWords > 2 that is no longer "one grant per free slot", and that is INTENTIONAL: the
+  // capture datapath is built for 2 beats/cycle and the extra depth exists to cover the admission's
+  // 2-cycle view of the buffer, not to capture more per cycle. A third lane targeting the same entry
+  // is NOT dropped -- it gets neither cap_first nor cap_second, so resp_in_ready stays low and it
+  // retries next cycle. The pointer arithmetic below is generic in RespBufWords (modulo wraparound
+  // via cap_n0/cap_n1, count saturating at RespBufWords), so no generalisation is required.
+  // The real sizing constraint is asserted above: RespBufWords >= 2 x DrainBeatsPerEntry.
   logic      [MshrNum-1:0][RespBufPtrW-1:0]                                    drain2_rd_ptr;
   logic      [MshrNum-1:0][BurstLenWidth-1:0]                                  drain2_beat_off;
 
@@ -1302,8 +1349,16 @@ module mempool_group_mshr
   always_comb begin
     for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
       for (int port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin
+        // No late join once a beat is in flight. req_addr_hit_drain means "this address's entry is
+        // draining, OR has a response arriving this cycle / in flight" (StallOnResp). It already
+        // gates the ALLOCATE path (:1194) and the non-merge branch, but not the merge -- so a
+        // subscriber could join in the very cycle a beat lands and the entry flipped to
+        // MSHR_DRAIN_RESP. Blocking it makes mshr_d.sub_reqs == mshr_q.sub_reqs for any entry with a
+        // beat in flight, BY CONSTRUCTION, which is what lets the drain read sub_reqs from mshr_q.
+        // Cost: such a merge becomes stall-and-retry, one cycle later.
         req_merge_valid[tile_i][port_i] =
-            req_can_merge[tile_i][port_i] && req_hit_mshr_sel_valid[tile_i][port_i];
+            req_can_merge[tile_i][port_i] && req_hit_mshr_sel_valid[tile_i][port_i] &&
+            !req_addr_hit_drain[tile_i][port_i];
         req_merge_mshr_id[tile_i][port_i] = req_hit_mshr_sel_id[tile_i][port_i];
       end
     end
@@ -2454,8 +2509,16 @@ module mempool_group_mshr
     // Response path: capture MSHR responses or bypass to group
     // ------------------------------------------------------------
     for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
-      if (mshr_d_valid[mshr_i] && (mshr_d[mshr_i].resp_buf_cnt < RespBufWords)) begin
-        mshr_resp_slots[mshr_i] = RespBufCountW'(RespBufWords) - mshr_d[mshr_i].resp_buf_cnt;
+      // mshr_q, so the admission is a pure register-to-output cone with no dependence on this
+      // cycle's request pass. Two writes to resp_buf_cnt happen earlier in mshr_d and are NOT seen
+      // here; neither can matter:
+      //  - allocation: resp_is_mshr requires mshr_q_valid, which a freshly allocated entry does not
+      //    have until the next edge, so no response can be captured into it this cycle;
+      //  - the store byte-merge (:2360) fires only on MSHR_CACHED entries, while capture requires
+      //    WAIT_RESP/DRAIN_RESP -- disjoint -- and only when cnt == 0, so the worst divergence is
+      //    0 vs 1 and 4 slots still leaves >= 3 free against the 2 needed.
+      if (mshr_q_valid[mshr_i] && (mshr_q[mshr_i].resp_buf_cnt < RespBufWords)) begin
+        mshr_resp_slots[mshr_i] = RespBufCountW'(RespBufWords) - mshr_q[mshr_i].resp_buf_cnt;
       end else begin
         mshr_resp_slots[mshr_i] = '0;
       end
@@ -2614,11 +2677,11 @@ module mempool_group_mshr
 `endif
           if (cap_first[resp_mshr_id[tile_i][port_i]][cap_lane]) begin
             cap_d0[resp_mshr_id[tile_i][port_i]] =
-                '{beat_off: resp_capture_beat_offset[tile_i][port_i],
+                '{beat_off: BeatOffW'(resp_capture_beat_offset[tile_i][port_i]),
                   data:     resp_in[tile_i][port_i].rdata.data};
           end else begin
             cap_d1[resp_mshr_id[tile_i][port_i]] =
-                '{beat_off: resp_capture_beat_offset[tile_i][port_i],
+                '{beat_off: BeatOffW'(resp_capture_beat_offset[tile_i][port_i]),
                   data:     resp_in[tile_i][port_i].rdata.data};
           end
         end
@@ -2663,9 +2726,49 @@ module mempool_group_mshr
       end
     end
 
-    // The per-lane capture form that this replaced was kept compiled-out here under
-    // `if (1'b0)` while its equivalence arm ran; it is deleted now that the arm passed.
-    // Recover it from git history (F3c, git history) if the rewrite ever needs diffing.
+    // The per-lane capture form this replaced lives in git history (F3c) if it ever needs diffing.
+
+    // ---- The MSHR_RESP_HOLD predicate, without reading mshr_d ------------------------------
+    // Only the CAPTURE can create MSHR_RESP_HOLD (alloc writes WAIT_RESP, merge writes DRAIN_RESP),
+    // and only a MERGE can clear a pre-existing one. Both are expressible from mshr_q plus their own
+    // fire terms, so this reproduces the value the store force-drain below would have read out of
+    // mshr_d -- without serialising behind the capture's write, which is 129 of the 165 cell levels
+    // on the critical path measured on fix2_head_2p0fp.
+    //
+    // burst_len / sub_reqs_num come from mshr_q: legal because the no-late-join gate on
+    // req_merge_valid (req_addr_hit_drain covers "a response is arriving this cycle") means no merge
+    // can touch an entry the capture is writing. That also makes capture and merge mutually
+    // exclusive on one entry, so the priority below cannot mask a real update.
+    // mgb_slot needs no recording -- it is already defined as MergeRankW'(mshr_q[e].sub_reqs_num).
+    st_alloc_fire  = '0;
+    st_merge_drain = '0;
+    st_cap_fire    = '0;
+    st_cap_hold    = '0;
+    st_post_cap    = '{default: MSHR_IDLE};
+    for (int b = 0; b < MshrBankNum; b++) begin
+      st_pe = b * MshrWaysPerBank + int'(agb_way[b]);
+      if (agb_v[b]) st_alloc_fire[st_pe] = 1'b1;
+      st_pe = b * MshrWaysPerBank + int'(mgb_way[b]);
+      if (mgb_v[b]) begin
+        if (EnableRespCache && (mshr_q[st_pe].state == MSHR_CACHED)) begin
+          st_merge_drain[st_pe] = 1'b1;
+        end else if (RespWaitSubsSingle && (mshr_q[st_pe].state == MSHR_RESP_HOLD) &&
+                     ((MergeRankW'(mshr_q[st_pe].sub_reqs_num) + MergeRankW'(1)) >=
+                      SubReqCountW'(cfg_hold_subs_single))) begin
+          st_merge_drain[st_pe] = 1'b1;
+        end
+      end
+    end
+    for (int e = 0; e < MshrNum; e++) begin
+      st_cap_fire[e] = cap_g1[e] | cap_g2[e];
+      st_cap_hold[e] = st_cap_fire[e] && RespWaitSubsSingle && !amo_invalidate &&
+                       (mshr_q[e].burst_len == BurstLenWidth'(1)) &&
+                       (mshr_q[e].sub_reqs_num < SubReqCountW'(cfg_hold_subs_single));
+      st_post_cap[e] = st_cap_fire[e]
+                     ? (st_cap_hold[e]    ? MSHR_RESP_HOLD : MSHR_DRAIN_RESP)
+                     : (st_alloc_fire[e]  ? MSHR_WAIT_RESP
+                     : (st_merge_drain[e] ? MSHR_DRAIN_RESP : mshr_q[e].state));
+    end
 
     // A buffered response predates any store/AMO observed after it returned.
     st_force_drain = '0;
@@ -2679,8 +2782,12 @@ module mempool_group_mshr
                 int'(req_bank[tile_i][port_i]) * MshrWaysPerBank + way_i;
             // Reads only -- every lane sees the same pre-pass entry state, which is what makes the
             // 32 evaluations independent instead of chained.
+            // st_post_cap holds the same value mshr_d would here, computed from mshr_q plus the
+            // capture/merge fire terms instead of from the capture's write.
+            // base_addr / tgt_group_id are not written before this point for a held entry, so they
+            // stay on mshr_d either way.
             if (mshr_d_valid[cache_hit_e] &&
-                (mshr_d[cache_hit_e].state == MSHR_RESP_HOLD) &&
+                (st_post_cap[cache_hit_e] == MSHR_RESP_HOLD) &&
                 (mshr_d[cache_hit_e].base_addr == req_addr_key[tile_i][port_i]) &&
                 (mshr_d[cache_hit_e].tgt_group_id == req_in[tile_i][port_i].tgt_group_id)) begin
               st_force_drain[cache_hit_e] = 1'b1;
@@ -2792,14 +2899,27 @@ module mempool_group_mshr
     end
 
     // Initialize pending-requester bitmap for a new head beat.
+    //
+    // SPLIT SOURCING, deliberately. The TRIGGER stays on mshr_d -- state and resp_buf_cnt are
+    // written by this cycle's capture, and seeding in the same cycle is what lets the drain fire at
+    // N+1 instead of N+2. Sourcing the trigger from mshr_q would add a cycle to EVERY head beat and
+    // undo the RespBufWords=4 widening.
+    //
+    // The DATA comes from mshr_q, which is where the depth was: sub_reqs / sub_reqs_num are written
+    // by the merge in the request path (~35 gates to here), while state / resp_buf_cnt come from the
+    // capture (~16). Reading them from the register removes the request path from this cone.
+    //
+    // Legal only because of the no-late-join gate on req_merge_valid: req_addr_hit_drain covers
+    // "draining OR a response arriving this cycle / in flight", so no merge can touch an entry the
+    // trigger fires on, and mshr_d.sub_reqs == mshr_q.sub_reqs there by construction.
     for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
       if (mshr_d_valid[mshr_i] &&
           (mshr_d[mshr_i].state == MSHR_DRAIN_RESP) &&
           (mshr_d[mshr_i].resp_buf_cnt != '0) &&
           (mshr_d[mshr_i].beat_pending == '0) &&
-          (mshr_d[mshr_i].sub_reqs_num != '0)) begin
+          (mshr_q[mshr_i].sub_reqs_num != '0)) begin
         for (int s = 0; s < MshrMergeReqs; s++) begin
-          mshr_d[mshr_i].beat_pending[s] = mshr_d[mshr_i].sub_reqs[s].valid;
+          mshr_d[mshr_i].beat_pending[s] = mshr_q[mshr_i].sub_reqs[s].valid;
         end
       end
     end
@@ -2817,11 +2937,17 @@ module mempool_group_mshr
           (mshr_d[mshr_i].burst_len != BurstLenWidth'(1)) &&
           (mshr_d[mshr_i].resp_buf_cnt >= RespBufCountW'(2))) begin
         resp_beat_offset2[mshr_i] = mshr_d[mshr_i].resp_buf[resp_rd_ptr2[mshr_i]].beat_off;
+        // Same split as the head-beat seed above: the TRIGGER stays on mshr_d (sourcing it from
+        // mshr_q would add a cycle to every second beat), the DATA comes from mshr_q. sub_reqs /
+        // sub_reqs_num are written by the merge in the request path, so reading them from the
+        // register takes that path out of this cone. Legal by the same construction: the trigger
+        // requires MSHR_DRAIN_RESP, and req_addr_hit_drain blocks any merge into such an entry, so
+        // mshr_d.sub_reqs == mshr_q.sub_reqs here.
         if ((mshr_d[mshr_i].state == MSHR_DRAIN_RESP) &&
             !mshr_d[mshr_i].beat2_armed &&
-            (mshr_d[mshr_i].sub_reqs_num != '0)) begin
+            (mshr_q[mshr_i].sub_reqs_num != '0)) begin
           for (int s = 0; s < MshrMergeReqs; s++) begin
-            mshr_d[mshr_i].beat_pending2[s] = mshr_d[mshr_i].sub_reqs[s].valid;
+            mshr_d[mshr_i].beat_pending2[s] = mshr_q[mshr_i].sub_reqs[s].valid;
           end
           mshr_d[mshr_i].beat2_armed = 1'b1;
         end
@@ -2859,8 +2985,13 @@ module mempool_group_mshr
         drain_scan_valid[e] = DrainFromQ ? mshr_q_valid[e] : mshr_d_valid[e];
         drain_scan_ent[e]   = DrainFromQ ? mshr_q[e]       : mshr_d[e];
         // Drive operands, always from mshr_d (see the declaration for why).
-        drv_data[e]      = mshr_d[e].resp_buf[mshr_d[e].resp_buf_rd_ptr].data;
-        drv_burst_one[e] = (mshr_d[e].burst_len == BurstLenWidth'(1));
+        // From mshr_q, not mshr_d: the drain SCAN is already mshr_q-sourced (DrainFromQ), so the
+        // drive can only ever touch an entry the registered state selected -- and for such an entry
+        // the two are equal (capture writes at wr_ptr, the drive reads rd_ptr, and the scan requires
+        // resp_buf_cnt != 0, so they are different slots). Reading mshr_d made the drive serially
+        // dependent on the capture pass for no benefit.
+        drv_data[e]      = mshr_q[e].resp_buf[mshr_q[e].resp_buf_rd_ptr].data;
+        drv_burst_one[e] = (mshr_q[e].burst_len == BurstLenWidth'(1));
         drain_ent_ok[e] = drain_scan_valid[e] && (drain_scan_ent[e].resp_buf_cnt != '0) &&
                           (drain_scan_ent[e].state == MSHR_DRAIN_RESP);
         // BOTH entry-level terms must be assigned BEFORE the sub-request loop that reads them --
@@ -2870,8 +3001,11 @@ module mempool_group_mshr
           drain_sub_ready[e][s] = drain_ent_ok[e] && drain_scan_ent[e].sub_reqs[s].valid &&
                                   drain_scan_ent[e].beat_pending[s];
           drain_sub_tile[e][s]  = drain_scan_ent[e].sub_reqs[s].tile_id;
-          drv_sub_core[e][s]    = mshr_d[e].sub_reqs[s].core_id;
-          drv_sub_meta[e][s]    = mshr_d[e].sub_reqs[s].meta_id_base;
+          // mshr_q for the same reason: a merge cannot land in an entry the mshr_q-based scan
+          // selected, because req_hit_way requires mshr_q.state == MSHR_WAIT_RESP while the scan
+          // requires MSHR_DRAIN_RESP. Disjoint, so mshr_d.sub_reqs == mshr_q.sub_reqs here.
+          drv_sub_core[e][s]    = mshr_q[e].sub_reqs[s].core_id;
+          drv_sub_meta[e][s]    = mshr_q[e].sub_reqs[s].meta_id_base;
           // Effective destination port: the ParityDrain pin for multi-beat entries, otherwise the
           // Requester's own mapped port. Independent of s in the PD2 arm, but kept per-s so the
           // Consumer is a single uniform compare.
@@ -3360,6 +3494,21 @@ module mempool_group_mshr
 
 
 `ifndef TARGET_SYNTHESIS
+  // beat_off is stored in BeatOffW bits (0..MaxBurstWords-1), one bit narrower than the
+  // BurstLenWidth value it is cast from. That is only sound because burst_beat_valid() has already
+  // required beat < burst_len <= MaxBurstWords. If MaxBurstWords, the lane law or the tag scheme
+  // ever change, this fires instead of silently aliasing an out-of-range beat onto a valid one.
+  for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_beat_off_fits_tile
+    for (genvar pp = 1; pp < NumRemoteRespPortsPerTile; pp++) begin : gen_beat_off_fits_port
+      beat_off_fits: assert property(
+        @(posedge clk_i) disable iff (!rst_ni)
+          (resp_in_valid[t][pp] && resp_is_mshr[t][pp]) |->
+            (resp_capture_beat_offset[t][pp] < BurstLenWidth'(mempool_pkg::MaxBurstWords)))
+        else $fatal(1, "MSHR beat_off %0d does not fit BeatOffW (tile %0d port %0d)",
+                    resp_capture_beat_offset[t][pp], t, pp);
+    end
+  end
+
   // Report a duplicate beat once per cycle, on settled values. See the note at the
   // Declaration for why this cannot live inside the always_comb that detects it.
   always_ff @(posedge clk_i) begin

@@ -16799,3 +16799,55 @@ a direct `resp_out = resp_in`. Nothing to gain.
 Backend: `fix2_head_8p0` closed at 8 ns (WNS +0.003, 0 violations, 1,104,205 cells) and is in
 final_opto; `fix2_head_2p0` moved to fenga1 after a PLACE-006 over-utilization failure, and a
 resized copy (`2p0fp`, core_utilization 0.30) runs beside it; `base2_8p0` still in tech mapping.
+
+---
+
+## 2026-09-06 18:20 — response-path set implemented and verified; fall-through proved load-bearing
+
+**Purpose.** Implement the §2A change set, remove the knobs it was developed behind, and check the
+placed 2 ns result to see which of its violating paths the new RTL actually addresses.
+
+**Implemented (all cycle-identical at 2942 on `vg_fp16_256x32x256`, retval 0, 0 assertions):**
+* #1-#5 response path sourced from `mshr_q`; `RespBufWords` 2 -> 4; `beat_off` 5 -> 4 b (`BeatOffW`).
+* #6, #7 merge gate; #7 is the no-late-join gate the `mshr_q` sourcing depends on.
+* `StateParallel`: the store force-drain no longer reads the capture's `mshr_d.state` write. Made
+  unconditional after the equivalence arm passed; the knob and the `mshr_d` branch are deleted.
+* ParityDrain second-beat seed now reads `mshr_q.sub_reqs` / `sub_reqs_num`, matching the head-beat
+  seed twenty lines above. The trigger deliberately stays on `mshr_d` -- sourcing it from `mshr_q`
+  would add a cycle to every second beat. Legal by the same construction the head-beat seed uses.
+* Knobs 47 -> 45 (`GROUP_MSHR_STATE_PARALLEL`, `GROUP_MSHR_RESP_BUF_WORDS` removed); `st_pe` is
+  `mshr_id_t`, not `int`.
+
+**The fall-through register is REQUIRED and has been restored.** Removing it (measured, 4 shapes)
+fires `stream_xbar`'s `input_data_unstable` / `input_sel_unstable` -- 20 hits, against 0 across five
+arms that keep it. Root cause is NOT the MSHR: all 20 are on `gen_inp_assertions[0]`, the LOCAL port,
+where `mempool_group.sv:323` merges the barrier release into the LIC response with a combinational
+2:1 mux -- `valid` stays high through the OR while the payload and `sel_i` switch underneath it. The
+register hid this by being always-ready when empty. It only makes the violation RARE: at DEPTH 1,
+sustained backpressure still drops `ready_o` with a beat pending. **Real fix is to hold the port-0
+mux select stable until the beat is accepted, in `mempool_group.sv`** -- filed, not done.
+The throughput case for the register is separately weak and shape-dependent (fp16 256x32x256 +4.4%,
+fp32 -0.6%, 1024x256x256 -2.1%, 2048x256x256 +1.0%), so protocol safety is the reason it stays.
+
+**Placed 2 ns diagnosis (`fix2_head_2p0fp`, 3,635 violating endpoints).** Worst path is
+`i_spill_resp_in/b_full_q` -> ~163 gates -> `i_alloc_arb` (12 cells) -> `clock_gate_mshr_q_valid_reg`,
+2.63 ns. **The depth is UPSTREAM of the arbiter** -- an earlier note in this log had the direction
+backwards. Families: drain counters 714, `resp_buf` pointers 378, `(hold_cnt,issued,state)` 193,
+clock-gate enables 33, `resp_buf` data 62. So the work above addresses ~250 of 3,635; the drain
+counters (~1,100 with the pointers) are untouched.
+
+**Disabling the inferred clock gate is worth ~0.02 ns, not a fix.** A gating check is 0.175 ns
+tighter than a D-pin check, but the same cone still lands on `mshr_q_valid`'s D pin and the worst
+D-pin endpoint is already -0.640 against the gate's -0.660. Removing an endpoint is not removing a
+path. Demoted to housekeeping.
+
+**Result.** Backend: `full67_1p0` / `full67_2p0` (#1-#7) finished logic_opto on fenga3 and are
+placing on fenga1; `respq_2p0` (#1-#5) finished logic_opto, not moved; `base2_8p0` still in
+logic_opto. The 1 ns logic_opto probe reads WNS -12.67 / 25,185 endpoints, which is NOT
+interpretable -- the same stage read -14.08 for a design that closed at +0.003 after placement.
+
+**Status.** `mempool_group_mshr.sv` + `mempool_tile.sv` committed. NOT yet verified: `merge_reqs=4`
+(the value synthesis elaborates; every sim so far used 16), `vector-burst-test`, multi-shape sweep.
+Open: Fix 1 (resp -> alloc coupling) can only be done as the request-path pipeline cut, because
+`req_hit_way` carries a second response dependency and a same-address request must block, not
+allocate. Fix 3 next step is the pop-count restructure of the promote/finalize block.
