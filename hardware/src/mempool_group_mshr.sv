@@ -232,31 +232,8 @@ module mempool_group_mshr
   // REGISTERED entry array instead of the combinational next state.
   localparam bit BankPublish = `ifdef GROUP_MSHR_BANK_PUBLISH `GROUP_MSHR_BANK_PUBLISH `else 1'b0 `endif;
 
-  // Always 1. The drive operands (drv_data / drv_burst_one / drv_sub_core / drv_sub_meta) are
-  // unconditionally mshr_q-sourced, so a DrainFromQ=0 scan would select entries on mshr_d and drive
-  // them from mshr_q: for an entry whose FIRST beat is captured this cycle the mshr_d scan passes
-  // (resp_buf_cnt != 0 after the capture) while mshr_q still holds the previous occupant of slot
-  // rd_ptr. Only terapool_spatz4_fpu.mk set the knob to 1, so the RTL default was the incoherent
-  // one. Removed the choice rather than the mux.
-  localparam bit DrainFromQ = 1'b1;
-  // Source the ParityDrain SECOND-SLOT scan from the registered array instead of the in-cycle
-  // Next state -- the same discipline DrainFromQ already applies to the head-beat scan, extended.
-  localparam bit Drain2FromQ = `ifdef GROUP_MSHR_DRAIN2_FROM_Q `GROUP_MSHR_DRAIN2_FROM_Q `else PD2 `endif;
   // Source the hold-the-fetch REPLAY walker from the registered array.
   localparam bit ReplayFromQ = `ifdef GROUP_MSHR_REPLAY_FROM_Q `GROUP_MSHR_REPLAY_FROM_Q `else 1'b1 `endif;
-  // Accept at most ONE merge per bank per cycle, mirroring the per-bank single ALLOCATION the
-  // Arbiter has always enforced. A loser gets req_merge_ready = 0, stalls a cycle, and retries
-  // Against the same still-resident entry -- coalescing is preserved, just spread out. Not a new
-  // Stall path: the capacity check below deasserts the same signal today.
-
-  // One merge per bank => at most one per ENTRY (an entry is in exactly one bank), so merge_rank
-  // Is identically zero and its NumAllocSlots^2 comparator network folds away. It is also what
-  // Makes the per-bank merge APPLY legal (mgb_*).
-
-  // NOT equivalent: peak merge acceptance falls from NumAllocSlots to MshrBankNum per cycle;
-  // [MRGARB] counts the retries. DEFAULT ON in the RTL as well as the config -- the backend
-  // Define list does not carry this knob, so 0 here would silently synthesise the costly form.
-  // Compute the meta-range overlap ONCE PER ENTRY instead of once per (lane, entry).
 
   // Req_meta_ovlp_map is the last [lane][MshrNum] structure in the module: 32 lanes x 64 entries =
   // 2048 replications of a tile compare, a core compare and a two-sided modular range test. But the
@@ -276,8 +253,6 @@ module mempool_group_mshr
   localparam bit CapPerBank = `ifdef GROUP_MSHR_CAP_PER_BANK `GROUP_MSHR_CAP_PER_BANK `else 1'b1 `endif;
   // NOT DONE: the two aging sweeps (cache self-invalidate, and the serve-timeout / cache age-out
   // Countdown) are also whole-array passes on mshr_d and were the obvious third knob here.
-  if (Drain2FromQ && !PD2)
-    $error("[mempool_group_mshr] group_mshr_drain2_from_q needs group_mshr_drain_beats=2; the second-slot scan does not exist otherwise.");
   localparam int unsigned HoldCntTicks =
       (HoldPrescaleW == 0) ? HoldCntMax : (HoldCntMax >> HoldPrescaleW);
   localparam int unsigned HoldCntW = (HoldCntTicks > 1) ? $clog2(HoldCntTicks + 1) : 1;
@@ -685,8 +660,6 @@ module mempool_group_mshr
   mshr_id_t  [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]             resp_sel2_mshr_id;
   logic      [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]
              [idx_width(MshrMergeReqs)-1:0]                                    resp_sel2_subreq_idx;
-  logic      [MshrNum-1:0][BurstLenWidth-1:0]                                  resp_beat_offset2;
-  logic      [MshrNum-1:0][RespBufPtrW-1:0]                                    resp_rd_ptr2;
   // The entry view the second-slot scan reads, and the second-slot read pointer
   // And beat offset derived from THAT view. Const-folds away entirely at Drain2FromQ = 0.
   mempool_group_mshr_t [MshrNum-1:0]                                           drain2_scan_ent;
@@ -1899,6 +1872,7 @@ module mempool_group_mshr
   logic [47:0]      bfb_free_banks_sum;
   logic [31:0]      bfb_alias_events;
   logic [31:0]      bfb_full_events;
+
   always_comb begin
     bfb_free_banks_now = '0;
     for (int b = 0; b < MshrBankNum; b++) begin
@@ -2003,6 +1977,63 @@ module mempool_group_mshr
   // Beat offset for the head and second slots, register-sourced like the operands beside them.
   logic [MshrNum-1:0][BurstLenWidth-1:0]                      drv_beat_off;
   data_t [MshrNum-1:0]                                        drv2_data;
+
+  // ------------------------------------------------------------------------------------
+  // Drain scan and drive operands -- a pure function of mshr_q, so it lives OUTSIDE the
+  // entry-update always_comb.
+  //
+  // Every signal written here has exactly one driver and none of them is read back by the
+  // update block before this settles, so splitting it out is behaviour-preserving. It is
+  // worth splitting because the depth is now visible: this block reads REGISTERS only, which
+  // is what the DrainFromQ work established -- previously the `DrainFromQ ? mshr_q : mshr_d`
+  // ternaries hid that, and a reader could not tell whether the drive waited on the capture.
+  // ------------------------------------------------------------------------------------
+  always_comb begin
+    // ---- hoist the (tile,port)-INDEPENDENT half of the drain eligibility test ---- The
+    // Scan below runs inside `for (tile) for (port)` -- 16 x 2 = 32 instances at the 8x8 backend
+    for (int e = 0; e < MshrNum; e++) begin
+      // NOT an `automatic ... = ...` local: an initialiser at declaration inside a procedural
+      // Block is ignored by synthesis (Spyglass SYNTH_89), which this module was cleaned of
+      // Earlier. drain_ent_ok is a module-scope packed vector instead.
+      drain_scan_valid[e] = mshr_q_valid[e];
+      drain_scan_ent[e]   = mshr_q[e];
+      // From mshr_q, not mshr_d: the drain SCAN is already mshr_q-sourced (DrainFromQ), so the
+      // drive can only ever touch an entry the registered state selected -- and for such an entry
+      // the two are equal (capture writes at wr_ptr, the drive reads rd_ptr, and the scan requires
+      // resp_buf_cnt != 0, so they are different slots). Reading mshr_d made the drive serially
+      // dependent on the capture pass for no benefit.
+      drv_data[e]      = mshr_q[e].resp_buf[mshr_q[e].resp_buf_rd_ptr].data;
+      // Same q-sourcing as drv_data, and the same burst_len==1 special case resp_beat_offset
+      // makes (a single-word entry's only legal beat is 0, so replayed cached data does not
+      // depend on a stale meta_id inside resp_buf). The drain scan already requires
+      // resp_buf_cnt != 0, so the outer guard resp_beat_offset carries is redundant here.
+      drv_beat_off[e]  = (mshr_q[e].burst_len == BurstLenWidth'(1))
+                       ? '0 : mshr_q[e].resp_buf[mshr_q[e].resp_buf_rd_ptr].beat_off;
+      drv_burst_one[e] = (mshr_q[e].burst_len == BurstLenWidth'(1));
+      drain_ent_ok[e] = drain_scan_valid[e] && (drain_scan_ent[e].resp_buf_cnt != '0) &&
+                        (drain_scan_ent[e].state == MSHR_DRAIN_RESP);
+      // BOTH entry-level terms must be assigned BEFORE the sub-request loop that reads them --
+      // These are blocking assignments, so an assignment placed after the loop would feed it the
+      // Previous evaluation's value.
+      for (int s = 0; s < MshrMergeReqs; s++) begin
+        drain_sub_ready[e][s] = drain_ent_ok[e] && drain_scan_ent[e].sub_reqs[s].valid &&
+                                drain_scan_ent[e].beat_pending[s];
+        drain_sub_tile[e][s]  = drain_scan_ent[e].sub_reqs[s].tile_id;
+        // mshr_q for the same reason: a merge cannot land in an entry the mshr_q-based scan
+        // selected, because req_hit_way requires mshr_q.state == MSHR_WAIT_RESP while the scan
+        // requires MSHR_DRAIN_RESP. Disjoint, so mshr_d.sub_reqs == mshr_q.sub_reqs here.
+        drv_sub_core[e][s]    = mshr_q[e].sub_reqs[s].core_id;
+        drv_sub_meta[e][s]    = mshr_q[e].sub_reqs[s].meta_id_base;
+        // Effective destination port: the ParityDrain pin for multi-beat entries, otherwise the
+        // Requester's own mapped port. Independent of s in the PD2 arm, but kept per-s so the
+        // Consumer is a single uniform compare.
+        drain_sub_port[e][s]  = (PD2 && (drain_scan_ent[e].burst_len != BurstLenWidth'(1)))
+                              ? (RespPortIdW'(1) + RespPortIdW'(drv_beat_off[e][0]))
+                              : map_resp_port_id(drain_scan_ent[e].sub_reqs[s].port_id);
+        // Second-slot (ParityDrain) eligibility, hoisted for the drain2 scan further down.
+      end
+    end
+  end
   // ParityDrain second-slot equivalents. drain2_sub_port is indexed by ENTRY only: both beats of an
   // Entry share one parity port, so it does not vary per sub-request.
   logic [MshrNum-1:0]                                         drain2_ent_ok;
@@ -2057,9 +2088,7 @@ module mempool_group_mshr
   logic [SubIdxW-1:0]       drain2_sub_base, drain2_s;             // B
 
   always_comb begin
-    int unsigned merge_new_idx;
     // Defaults
-    // F5a per-bank merge record (see the apply after the request loop).
     mgb_v    = '0;
     mgb_way  = '0;
     mgb_tile = '0;
@@ -2956,16 +2985,9 @@ module mempool_group_mshr
     // ParityDrain: second-slot beat offset (resp_buf slot rd_ptr+1, burst entries with two
     // Buffered beats) and its ONE-SHOT pending arm.
     for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
-      resp_rd_ptr2[mshr_i] =
-          (RespBufWords > 1) ?
-          ((mshr_d[mshr_i].resp_buf_rd_ptr == RespBufPtrW'(RespBufWords - 1))
-               ? '0 : RespBufPtrW'(mshr_d[mshr_i].resp_buf_rd_ptr + 1'b1))
-          : '0;
-      resp_beat_offset2[mshr_i] = '0;
       if (PD2 && mshr_d_valid[mshr_i] &&
           (mshr_d[mshr_i].burst_len != BurstLenWidth'(1)) &&
           (mshr_d[mshr_i].resp_buf_cnt >= RespBufCountW'(2))) begin
-        resp_beat_offset2[mshr_i] = mshr_d[mshr_i].resp_buf[resp_rd_ptr2[mshr_i]].beat_off;
         // Same split as the head-beat seed above: the TRIGGER stays on mshr_d (sourcing it from
         // mshr_q would add a cycle to every second beat), the DATA comes from mshr_q. sub_reqs /
         // sub_reqs_num are written by the merge in the request path, so reading them from the
@@ -3005,51 +3027,6 @@ module mempool_group_mshr
         end
       end
 
-      // ---- hoist the (tile,port)-INDEPENDENT half of the drain eligibility test ---- The
-      // Scan below runs inside `for (tile) for (port)` -- 16 x 2 = 32 instances at the 8x8 backend
-      for (int e = 0; e < MshrNum; e++) begin
-        // NOT an `automatic ... = ...` local: an initialiser at declaration inside a procedural
-        // Block is ignored by synthesis (Spyglass SYNTH_89), which this module was cleaned of
-        // Earlier. drain_ent_ok is a module-scope packed vector instead.
-        drain_scan_valid[e] = DrainFromQ ? mshr_q_valid[e] : mshr_d_valid[e];
-        drain_scan_ent[e]   = DrainFromQ ? mshr_q[e]       : mshr_d[e];
-        // Drive operands, always from mshr_d (see the declaration for why).
-        // From mshr_q, not mshr_d: the drain SCAN is already mshr_q-sourced (DrainFromQ), so the
-        // drive can only ever touch an entry the registered state selected -- and for such an entry
-        // the two are equal (capture writes at wr_ptr, the drive reads rd_ptr, and the scan requires
-        // resp_buf_cnt != 0, so they are different slots). Reading mshr_d made the drive serially
-        // dependent on the capture pass for no benefit.
-        drv_data[e]      = mshr_q[e].resp_buf[mshr_q[e].resp_buf_rd_ptr].data;
-        // Same q-sourcing as drv_data, and the same burst_len==1 special case resp_beat_offset
-        // makes (a single-word entry's only legal beat is 0, so replayed cached data does not
-        // depend on a stale meta_id inside resp_buf). The drain scan already requires
-        // resp_buf_cnt != 0, so the outer guard resp_beat_offset carries is redundant here.
-        drv_beat_off[e]  = (mshr_q[e].burst_len == BurstLenWidth'(1))
-                         ? '0 : mshr_q[e].resp_buf[mshr_q[e].resp_buf_rd_ptr].beat_off;
-        drv_burst_one[e] = (mshr_q[e].burst_len == BurstLenWidth'(1));
-        drain_ent_ok[e] = drain_scan_valid[e] && (drain_scan_ent[e].resp_buf_cnt != '0) &&
-                          (drain_scan_ent[e].state == MSHR_DRAIN_RESP);
-        // BOTH entry-level terms must be assigned BEFORE the sub-request loop that reads them --
-        // These are blocking assignments, so an assignment placed after the loop would feed it the
-        // Previous evaluation's value.
-        for (int s = 0; s < MshrMergeReqs; s++) begin
-          drain_sub_ready[e][s] = drain_ent_ok[e] && drain_scan_ent[e].sub_reqs[s].valid &&
-                                  drain_scan_ent[e].beat_pending[s];
-          drain_sub_tile[e][s]  = drain_scan_ent[e].sub_reqs[s].tile_id;
-          // mshr_q for the same reason: a merge cannot land in an entry the mshr_q-based scan
-          // selected, because req_hit_way requires mshr_q.state == MSHR_WAIT_RESP while the scan
-          // requires MSHR_DRAIN_RESP. Disjoint, so mshr_d.sub_reqs == mshr_q.sub_reqs here.
-          drv_sub_core[e][s]    = mshr_q[e].sub_reqs[s].core_id;
-          drv_sub_meta[e][s]    = mshr_q[e].sub_reqs[s].meta_id_base;
-          // Effective destination port: the ParityDrain pin for multi-beat entries, otherwise the
-          // Requester's own mapped port. Independent of s in the PD2 arm, but kept per-s so the
-          // Consumer is a single uniform compare.
-          drain_sub_port[e][s]  = (PD2 && (drain_scan_ent[e].burst_len != BurstLenWidth'(1)))
-                                ? (RespPortIdW'(1) + RespPortIdW'(drv_beat_off[e][0]))
-                                : map_resp_port_id(drain_scan_ent[e].sub_reqs[s].port_id);
-          // Second-slot (ParityDrain) eligibility, hoisted for the drain2 scan further down.
-        end
-      end
 
       // ---- opt3 stage 1: one entry published per bank, round-robin, PORT-INDEPENDENT ----
       // Computed once here, shared by every (tile,port) instance below.
@@ -3230,8 +3207,8 @@ module mempool_group_mshr
         for (int e = 0; e < MshrNum; e++) begin
           // Drain2FromQ is an elaboration constant, so exactly one arm is built and there is no
           // Runtime mux -- and at 0 every term below is literally the mshr_d expression it replaced.
-          drain2_scan_valid[e] = Drain2FromQ ? mshr_q_valid[e] : mshr_d_valid[e];
-          drain2_scan_ent[e]   = Drain2FromQ ? mshr_q[e]       : mshr_d[e];
+          drain2_scan_valid[e] = mshr_q_valid[e];
+          drain2_scan_ent[e]   = mshr_q[e];
           drain2_ent_ok[e]   = drain2_scan_valid[e] &&
                                (drain2_scan_ent[e].state == MSHR_DRAIN_RESP) &&
                                (drain2_scan_ent[e].burst_len != BurstLenWidth'(1)) &&
@@ -3251,7 +3228,7 @@ module mempool_group_mshr
           drv2_data[e]       = drain2_scan_ent[e].resp_buf[drain2_rd_ptr[e]].data;
           // Entry-level, not per-sub-request: both beats of an entry share one parity port.
           drain2_sub_port[e] = RespPortIdW'(1) +
-              RespPortIdW'(Drain2FromQ ? drain2_beat_off[e][0] : resp_beat_offset2[e][0]);
+              RespPortIdW'(drain2_beat_off[e][0]);
           for (int s = 0; s < MshrMergeReqs; s++) begin
             drain2_sub_ready[e][s] = drain2_ent_ok[e] && drain2_scan_ent[e].sub_reqs[s].valid &&
                                      drain2_scan_ent[e].beat_pending2[s];
@@ -3494,7 +3471,7 @@ module mempool_group_mshr
 `ifndef TARGET_SYNTHESIS
         mshr_d[mshr_i].beat_done[resp_beat_offset[mshr_i]] = 1'b1;
         if (fin_second) begin
-          mshr_d[mshr_i].beat_done[resp_beat_offset2[mshr_i]] = 1'b1;
+          mshr_d[mshr_i].beat_done[drain2_beat_off[mshr_i]] = 1'b1;
         end
 `endif
         // An armed second beat that could not pop is promoted into the head slot.
