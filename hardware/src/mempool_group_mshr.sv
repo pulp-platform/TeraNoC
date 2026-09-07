@@ -695,10 +695,11 @@ module mempool_group_mshr
   // what st_post_cap does. Sites that need the pre-capture value keep reading mshr_d.
   logic      [MshrNum-1:0]                                                     st_alloc_fire;
   logic      [MshrNum-1:0]                                                     st_merge_drain;
+
+
   logic      [MshrNum-1:0]                                                     st_cap_fire;
   logic      [MshrNum-1:0]                                                     st_cap_hold;
   mshr_state_t [MshrNum-1:0]                                                   st_post_cap;
-  mshr_id_t                                                                    st_pe;
   // Response capture is decided per ENTRY instead of chained across lanes.
   localparam int unsigned NumRespPortsActive = (NumRemoteRespPortsPerTile > 1) ?
                                                (NumRemoteRespPortsPerTile - 1) : 1;
@@ -2040,6 +2041,40 @@ module mempool_group_mshr
   logic [MshrNum-1:0][MshrMergeReqs-1:0]                      drain2_sub_ready;
   tile_group_id_t [MshrNum-1:0][MshrMergeReqs-1:0]            drain2_sub_tile;
   logic [MshrNum-1:0][RespPortIdW-1:0]                        drain2_sub_port;
+
+  /// Second-slot (ParityDrain) drain scan: the head-beat test one buffer slot further on.
+  /// Register-sourced, so the second drive never waits on this cycle's capture. PD2 folds into
+  /// drain2_scan_valid, so at PD2 = 0 every term below is constant zero and needs no default.
+  generate
+    for (genvar e = 0; e < MshrNum; e++) begin : gen_drain2_scan
+      assign drain2_scan_valid[e] = PD2 && mshr_q_valid[e];
+      assign drain2_scan_ent[e]   = mshr_q[e];
+      assign drain2_ent_ok[e]     = drain2_scan_valid[e]                                     &&
+                                    (drain2_scan_ent[e].state        == MSHR_DRAIN_RESP)     &&
+                                    (drain2_scan_ent[e].burst_len    != BurstLenWidth'(1))   &&
+                                    (drain2_scan_ent[e].resp_buf_cnt >= RespBufCountW'(2))   &&
+                                    drain2_scan_ent[e].beat2_armed;
+      // Slot rd_ptr+1, wrapping; the head slot is rd_ptr.
+      assign drain2_rd_ptr[e]     = (RespBufWords > 1)
+                                  ? ((drain2_scan_ent[e].resp_buf_rd_ptr ==
+                                      RespBufPtrW'(RespBufWords - 1))
+                                       ? '0
+                                       : RespBufPtrW'(drain2_scan_ent[e].resp_buf_rd_ptr + 1'b1))
+                                  : '0;
+      assign drain2_beat_off[e]   = drain2_scan_ent[e].resp_buf[drain2_rd_ptr[e]].beat_off;
+      assign drv2_data[e]         = drain2_scan_ent[e].resp_buf[drain2_rd_ptr[e]].data;
+      // Both beats of an entry share one parity port, so this is per-entry, not per-sub-request.
+      assign drain2_sub_port[e]   = RespPortIdW'(1) + RespPortIdW'(drain2_beat_off[e][0]);
+
+      for (genvar s = 0; s < MshrMergeReqs; s++) begin : gen_drain2_sub
+        assign drain2_sub_ready[e][s] = drain2_ent_ok[e]                     &&
+                                        drain2_scan_ent[e].sub_reqs[s].valid &&
+                                        drain2_scan_ent[e].beat_pending2[s];
+        assign drain2_sub_tile[e][s]  = drain2_scan_ent[e].sub_reqs[s].tile_id;
+      end
+    end
+  endgenerate
+
   logic [MshrIdxW-1:0]      drain_win_e;
   logic [SubIdxW-1:0]       drain_win_s;
   logic                     drain_have_e,    drain_have_s;
@@ -2067,6 +2102,27 @@ module mempool_group_mshr
   // Per-bank write never conflicts" -- so this needs no knob: it is unconditionally true.
   logic [MshrBankNum-1:0]                    agb_v;
   logic [MshrBankNum-1:0][VictimPtrW-1:0]    agb_way;
+
+  /// Allocation and merge FIRE terms, from the per-bank grant records and mshr_q only.
+  ///
+  /// An entry's bank and way are compile-time constants here, so the arbiter's scatter becomes a
+  /// per-entry compare and needs no variable index. The two merge cases set the same value and are
+  /// mutually exclusive on state, so the original if / else-if is an OR.
+  generate
+    for (genvar e = 0; e < MshrNum; e++) begin : gen_st_fire
+      localparam int unsigned StBank = e / MshrWaysPerBank;
+      localparam int unsigned StWay  = e % MshrWaysPerBank;
+
+      assign st_alloc_fire[e]  = agb_v[StBank] && (agb_way[StBank] == VictimPtrW'(StWay));
+      assign st_merge_drain[e] = mgb_v[StBank] && (mgb_way[StBank] == VictimPtrW'(StWay)) &&
+                                 ((EnableRespCache &&
+                                   (mshr_q[e].state == MSHR_CACHED)) ||
+                                  (RespWaitSubsSingle &&
+                                   (mshr_q[e].state == MSHR_RESP_HOLD) &&
+                                   ((MergeRankW'(mshr_q[e].sub_reqs_num) + MergeRankW'(1)) >=
+                                    SubReqCountW'(cfg_hold_subs_single))));
+    end
+  endgenerate
   tcdm_addr_t [MshrBankNum-1:0]              agb_addr;
   group_id_t [MshrBankNum-1:0]               agb_grp;
   logic [MshrBankNum-1:0][BurstLenWidth-1:0] agb_len;
@@ -2484,27 +2540,6 @@ module mempool_group_mshr
       end
     end
 
-    // AMO invalidates all cached entries (cache is best-effort only).
-    // Allocation and merge FIRE terms, hoisted here so the two cache retires below can be
-    // computed from mshr_q instead of chaining behind the merge apply. Depends only on the
-    // per-bank records (agb_*/mgb_*) and mshr_q, so nothing between here and its old
-    // position matters; the capture-dependent half (st_cap_*/st_post_cap) stays below.
-    st_alloc_fire  = '0;
-    st_merge_drain = '0;
-    for (int b = 0; b < MshrBankNum; b++) begin
-      st_pe = b * MshrWaysPerBank + int'(agb_way[b]);
-      if (agb_v[b]) st_alloc_fire[st_pe] = 1'b1;
-      st_pe = b * MshrWaysPerBank + int'(mgb_way[b]);
-      if (mgb_v[b]) begin
-        if (EnableRespCache && (mshr_q[st_pe].state == MSHR_CACHED)) begin
-          st_merge_drain[st_pe] = 1'b1;
-        end else if (RespWaitSubsSingle && (mshr_q[st_pe].state == MSHR_RESP_HOLD) &&
-                     ((MergeRankW'(mshr_q[st_pe].sub_reqs_num) + MergeRankW'(1)) >=
-                      SubReqCountW'(cfg_hold_subs_single))) begin
-          st_merge_drain[st_pe] = 1'b1;
-        end
-      end
-    end
 
     if (EnableRespCache && amo_invalidate) begin
       for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
@@ -3202,39 +3237,6 @@ module mempool_group_mshr
       // ParityDrain second-slot service: the beat at rd_ptr+1 drains CONCURRENTLY with the head on
       // Its own parity port (consecutive beats have opposite parity, so head and slot2 of one
       if (PD2) begin
-        // ---- Hoist the port-independent half of the second-slot test (mirror of the head-beat
-        // Hoist above).
-        for (int e = 0; e < MshrNum; e++) begin
-          // Drain2FromQ is an elaboration constant, so exactly one arm is built and there is no
-          // Runtime mux -- and at 0 every term below is literally the mshr_d expression it replaced.
-          drain2_scan_valid[e] = mshr_q_valid[e];
-          drain2_scan_ent[e]   = mshr_q[e];
-          drain2_ent_ok[e]   = drain2_scan_valid[e] &&
-                               (drain2_scan_ent[e].state == MSHR_DRAIN_RESP) &&
-                               (drain2_scan_ent[e].burst_len != BurstLenWidth'(1)) &&
-                               (drain2_scan_ent[e].resp_buf_cnt >= RespBufCountW'(2)) &&
-                               drain2_scan_ent[e].beat2_armed;
-          // The parity port comes from the second slot's beat offset, which must be derived from
-          // The SAME view as the eligibility test above -- resp_beat_offset2 is mshr_d-based and
-          // Would drag the whole d-side cone back in through the port select alone.
-          drain2_rd_ptr[e]   = (RespBufWords > 1) ?
-              ((drain2_scan_ent[e].resp_buf_rd_ptr == RespBufPtrW'(RespBufWords - 1))
-                   ? '0 : RespBufPtrW'(drain2_scan_ent[e].resp_buf_rd_ptr + 1'b1))
-              : '0;
-          drain2_beat_off[e] = drain2_scan_ent[e].resp_buf[drain2_rd_ptr[e]].beat_off;
-          // Second-slot payload, from the SAME view as the eligibility test. The head slot was
-          // converted to drv_data and this one was missed, which left the capture pass on the
-          // resp_out cone through the only remaining mshr_d read there.
-          drv2_data[e]       = drain2_scan_ent[e].resp_buf[drain2_rd_ptr[e]].data;
-          // Entry-level, not per-sub-request: both beats of an entry share one parity port.
-          drain2_sub_port[e] = RespPortIdW'(1) +
-              RespPortIdW'(drain2_beat_off[e][0]);
-          for (int s = 0; s < MshrMergeReqs; s++) begin
-            drain2_sub_ready[e][s] = drain2_ent_ok[e] && drain2_scan_ent[e].sub_reqs[s].valid &&
-                                     drain2_scan_ent[e].beat_pending2[s];
-            drain2_sub_tile[e][s]  = drain2_scan_ent[e].sub_reqs[s].tile_id;
-          end
-        end
         // Publish at most one second-slot entry per bank. Lane-independent, so it is built
         // Once here rather than 32 times inside the (tile, resp port) loops below. The way scan is
         // Rotated by the shared drain RR pointer, so publication reaches every way over time.
