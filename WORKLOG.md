@@ -16961,3 +16961,66 @@ combinational logic was being built for synthesis with nothing to consume it. -1
 **Status.** vopt clean (0 errors). Cycle-identity check against cutR7 (4241 cycles on
 fp16_256x64x256) in flight -- pure dead-code removal must not change behaviour, so a different
 number would mean one of the five claims above is wrong.
+
+## 2026-09-09 01:30 — group MSHR: forward instead of stalling; standalone feature bench
+
+**Purpose.** The pipeline cut committed in `70a3f8b5` was functionally correct but cost up to
+**+14.1%** cycles. Both causes were the same mistake -- a stall where a pipeline should forward.
+
+**Root cause, measured not inferred.** A new standalone bench (`tb_group_mshr_unit.sv`) drives
+16 lanes at one line simultaneously -- the real coalescing pattern -- and times assembly:
+
+| RTL | cohort assembly |
+|---|---|
+| reference, no cut | **16 cycles** (1 merge/cycle, the OneMergePerBank limit) |
+| cut as committed | 35 |
+| + allocation forwarding | 35 |
+| **+ back-to-back merges** | **16** |
+
+**Two fixes.**
+1. `req_fwd_hit` / `req_fwd_id`: a follower arriving the cycle after its leader allocates merges
+   into the IN-FLIGHT record (entry id = b*WaysPerBank + agb_q_way[b]) instead of waiting for it
+   to reach mshr_q. Forwarding lanes are excluded from `req_alloc_cand` -- `req_hit_mshr` only
+   sees RESIDENT ways, so without that a forwarding lane stayed an allocation candidate and could
+   allocate a duplicate (caught by `mshr_entry_in_its_bank`).
+2. `merge_inflight` no longer blocks every back-to-back merge into one entry -- which IS a cohort,
+   since one line maps to one bank and one entry. It now blocks only the state-changing cases
+   (CACHED / RESP_HOLD, where a merge flips state and a second decision would read the pre-merge
+   value). For a WAIT_RESP entry only the subscriber count moves, so the stale count is COUNTED
+   (`merge_slot += merge_inflight[target]`) rather than refused.
+
+`no_late_join_burst` excludes forwarded merges: it samples mshr_q at the DECISION cycle, where a
+forwarded target still holds the previous occupant. `cut_merge_apply_no_late_join` re-proves the
+property at the apply cycle.
+
+**Result, 8-shape sweep (5 of 8 complete, zero fatals):**
+
+| shape | ref | cut | fwd4 |
+|---|---|---|---|
+| f32 | 3981 | -0.1% | +0.5% |
+| n64 | 4163 | +1.8% | +2.0% |
+| 128 | 7870 | +9.2% | **+3.4%** |
+| 512 | 6804 | +12.7% | **+4.8%** |
+| 256 | 13299 | +14.1% | **+6.6%** |
+
+Worst case +14.1% -> +6.6%. The cost stays BIMODAL -- four shapes ~free, three at 3-7% -- and the
+reason is still unknown. Sharing depth does NOT explain it: p512 has the largest N and is nearly
+free. Five mechanisms were tested against the reference and are all at parity (staggered cohorts,
+miss latency, burst cohorts, response delivery, simultaneous cohorts).
+
+**Bench.** `make mshr_unit config=... buildpath=...` runs against an already-compiled build in
+~1 minute, versus 40+ for one cluster shape. T1 measures sustained throughput (32.00 accepts/cycle
+= exactly NumLanes, i.e. full bandwidth), T2/T6 cohort assembly simultaneous and staggered, T3 miss
+latency, T4 capacity, T5 a bank-hash sweep over GEMM strides, T7 response delivery, T8 burst
+cohorts. Its own first run exposed three stimulus bugs that each produced plausible numbers:
+sequential lane driving (measured serial acceptance, not a cohort), `hold_subs_single=1` (which
+means "singles bypass" and disabled the merging the test measures), and sampling the bank decode
+with valid=0.
+
+**Backend, settled.** `fixF_2p0` closes 2 ns at WNS -0.000011 / 119,064 um^2 (vs chain_2p0's
+-0.000086 / 117,622), and `fixF_1p0` lands at -0.648 against chain_1p0's -0.652 -- so the
+`137366b8` drain-seed fix is timing-neutral at both clocks. 1.0 and 1.2 ns do not close on pre-cut
+RTL.
+
+**Status.** No OOC has yet been run on CUT RTL, so the cut's cost is measured and its benefit is
+not. That is the next thing to close.

@@ -759,6 +759,29 @@ $(buildpath)/.vopt-$(questa_opt_top): $(buildpath)/compile.tcl
 vopt: compile $(buildpath)/.vopt-$(questa_opt_top)
 
 .PHONY: simc-lean
+# Standalone feature bench for the group MSHR: throughput, cohort assembly, miss latency,
+# capacity and the bank hash, without a 40-minute cluster run. Reuses the compiled work library
+# and adds only the unit TB, so it tracks whatever RTL the build directory holds.
+# Runs against an ALREADY COMPILED build directory (it does not re-run floogen or bender).
+#   make -o update-floogen vopt config=terapool_spatz4_fpu buildpath=build_X   # once
+#   make mshr_unit config=terapool_spatz4_fpu buildpath=build_X
+#   make mshr_unit ... MSHR_UNIT_TEST=cohort
+MSHR_UNIT_TEST ?= all
+.PHONY: mshr_unit
+mshr_unit:
+	@test -d $(buildpath)/$(library) || { \
+	  echo "mshr_unit: $(buildpath)/$(library) not found -- build the RTL first, e.g."; \
+	  echo "  make -o update-floogen vopt config=$(config) buildpath=$(buildpath)"; exit 1; }
+	cd $(buildpath) && \
+	  $(questa_cmd) vlog -sv -work $(library) $(addprefix +incdir+,$(sim_incdirs)) \
+	    $(patsubst -D%,+define+%,$(vlog_defs)) ../tb/tb_group_mshr_unit.sv && \
+	  $(questa_cmd) vopt $(questa_voptargs) +acc -work $(library) tb_group_mshr_unit \
+	    -o tb_group_mshr_unit_opt && \
+	  $(questa_cmd) vsim -c -work $(library) $(library).tb_group_mshr_unit_opt \
+	    +MSHR_UNIT_TEST=$(MSHR_UNIT_TEST) -do "run -a; quit -f" | tee mshr_unit.log
+	@grep -q 'MSHR-UNIT. done: 0 failure' $(buildpath)/mshr_unit.log \
+	  || { echo "mshr_unit: FAILURES -- see $(buildpath)/mshr_unit.log"; exit 1; }
+
 simc-lean: clean-dasm vopt
 	cd $(buildpath) && \
 	ulimit -n $(sim_ulimit_n) 2>/dev/null || true; \

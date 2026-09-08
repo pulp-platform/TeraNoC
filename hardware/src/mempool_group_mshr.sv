@@ -629,10 +629,13 @@ module mempool_group_mshr
   /// req_meta_ovlp_map cannot see its meta range. Conservative: same owner, any bank.
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_owner_inflight;
   logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrBankNum-1:0]  req_owner_inflight_bank;
-  /// This request's own line has an allocation recorded but not yet in mshr_q, so req_addr_hit_way
-  /// still reads the way's OLD key and the request would allocate a second entry for it. One cycle
-  /// of wait, for the colliding request only -- the bank keeps accepting.
-  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_alloc_addr_inflight;
+  /// This request's line is being allocated right now -- recorded in agb_q_*, not yet in mshr_q.
+  /// req_addr_hit_way reads the way's OLD key and would miss, so without forwarding the request
+  /// allocates a duplicate (wrong) or waits a cycle (correct but slow: one lost cycle per cohort,
+  /// which measured 870 of the 512 shape's cycles). Forward instead: the target entry id is
+  /// b*WaysPerBank + agb_q_way[b], so the follower merges into the leader's entry immediately.
+  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_fwd_hit;
+  mshr_id_t  [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_fwd_id;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_hit_mshr_sel_valid;
   mshr_id_t  [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_hit_mshr_sel_id;
   logic      [MshrNum-1:0]                                                     mshr_hit_req;
@@ -1166,7 +1169,8 @@ module mempool_group_mshr
           assign req_addr_hit_drain_way[tile_i][port_i][way_i] =
               req_addr_hit_way[tile_i][port_i][way_i] &&
               ((mshr_q[e_abs].state == MSHR_DRAIN_RESP) ||
-               merge_inflight[e_abs] || alloc_inflight[e_abs] ||
+               (merge_inflight[e_abs] && (mshr_q[e_abs].state != MSHR_WAIT_RESP)) ||
+               alloc_inflight[e_abs] ||
                (StallOnResp && (req_resp_seen[tile_i][port_i][way_i] ||
                                 mshr_resp_inflight[e_abs])));
 
@@ -1241,11 +1245,14 @@ module mempool_group_mshr
         // Exactly the req_addr_hit_way key, compared against the in-flight allocation record.
         // agb_q_len keeps a different-length request free to allocate its own entry, as req_hit_way
         // would have let it.
-        assign req_alloc_addr_inflight[tile_i][port_i] =
+        assign req_fwd_hit[tile_i][port_i] =
             req_can_merge[tile_i][port_i] && agb_q_v[req_bank[tile_i][port_i]] &&
             (agb_q_addr[req_bank[tile_i][port_i]] == req_addr_key[tile_i][port_i]) &&
             (agb_q_grp [req_bank[tile_i][port_i]] == req_in[tile_i][port_i].tgt_group_id) &&
             (agb_q_len [req_bank[tile_i][port_i]] == req_len[tile_i][port_i]);
+        assign req_fwd_id[tile_i][port_i] =
+            mshr_id_t'(int'(req_bank[tile_i][port_i]) * MshrWaysPerBank +
+                       int'(agb_q_way[req_bank[tile_i][port_i]]));
       end
     end
   endgenerate
@@ -1307,8 +1314,11 @@ module mempool_group_mshr
   always_comb begin
     for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
       for (int port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin
-        req_hit_mshr_sel_valid[tile_i][port_i] = 1'b0;
-        req_hit_mshr_sel_id[tile_i][port_i] = '0;
+        // Forwarded in-flight allocation first: no resident way can hold this line, or the
+        // allocation would not have fired for it.
+        req_hit_mshr_sel_valid[tile_i][port_i] = req_fwd_hit[tile_i][port_i];
+        req_hit_mshr_sel_id[tile_i][port_i]    = req_fwd_hit[tile_i][port_i]
+                                               ? req_fwd_id[tile_i][port_i] : '0;
         for (int way_i = 0; way_i < MshrWaysPerBank; way_i++) begin
           if (!req_hit_mshr_sel_valid[tile_i][port_i] &&
               req_hit_way[tile_i][port_i][way_i]) begin
@@ -1328,6 +1338,10 @@ module mempool_group_mshr
       assign req_alloc_cand[tile_i][port_i] =
           req_can_merge[tile_i][port_i]      &&
           !req_hit_mshr[tile_i][port_i]      &&
+          // A forwarding lane merges into the in-flight allocation; req_hit_mshr only sees
+          // RESIDENT ways, so without this it would also stay an allocation candidate and could
+          // win the arbiter -- allocating a second entry for a line it is already merging into.
+          !req_fwd_hit[tile_i][port_i]       &&
           !req_addr_hit_drain[tile_i][port_i] &&
           !req_meta_conflict[tile_i][port_i];
     end
@@ -2204,6 +2218,74 @@ module mempool_group_mshr
   mshr_id_t                                  agb_e;
   logic [MergeRankW-1:0]                     mgb_slot;   // recomputed from mshr_q
 
+  /// PER-BANK RECORD SCATTER, one-hot.
+  ///
+  /// Both arbiters emit an LSB-isolated win_oh per bank and their candidate already carries the
+  /// bank match, so exactly one lane can ever write a bank's record: the 32-deep mux the
+  /// procedural `agb_x[req_bank[t][p]] = ...` form inferred came from the VARIABLE INDEX, not from
+  /// contention. Selecting with the arbiter's own one-hot and OR-ing the masked lanes turns 32
+  /// levels into 5, and takes the whole record off the always_comb.
+  ///
+  /// win_oh implies req_alloc_cand (which carries req_can_merge) for allocation and
+  /// req_merge_valid for merge, so accept = valid && ready reproduces each guard exactly.
+  logic [NumAllocSlots-1:0]                     arb_accept;
+  tcdm_addr_t [NumAllocSlots-1:0]               arb_addr;
+  group_id_t [NumAllocSlots-1:0]                arb_grp;
+  logic [NumAllocSlots-1:0][BurstLenWidth-1:0]  arb_len;
+  tile_group_id_t [NumAllocSlots-1:0]           arb_tile;
+  logic [NumAllocSlots-1:0][RespPortIdW-1:0]    arb_port;
+  tile_core_id_t [NumAllocSlots-1:0]            arb_core;
+  meta_id_t [NumAllocSlots-1:0]                 arb_meta;
+  logic [NumAllocSlots-1:0][VictimPtrW-1:0]     arb_awy, arb_mwy;
+  logic [MshrBankNum-1:0][NumAllocSlots-1:0]    agb_sel, mgb_sel;
+
+  generate
+    for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_arb_lane_t
+      for (genvar p = 1; p < NumRemoteReqPortsPerTile; p++) begin : gen_arb_lane_p
+        localparam int unsigned Sl = t * NumReqPortsActive + (p - 1);
+        assign arb_accept[Sl] = req_in_valid[t][p] && req_in_ready[t][p];
+        assign arb_addr  [Sl] = req_addr_key[t][p];
+        assign arb_grp   [Sl] = req_in[t][p].tgt_group_id;
+        assign arb_len   [Sl] = req_len[t][p];
+        assign arb_tile  [Sl] = tile_group_id_t'(t);
+        assign arb_port  [Sl] = RespPortIdW'(p);
+        assign arb_core  [Sl] = req_in[t][p].wdata.core_id;
+        assign arb_meta  [Sl] = req_in[t][p].wdata.meta_id;
+        assign arb_awy   [Sl] = req_alloc_found_mshr_id[t][p][VictimPtrW-1:0];
+        assign arb_mwy   [Sl] = req_merge_mshr_id[t][p][VictimPtrW-1:0];
+      end
+    end
+
+    for (genvar b = 0; b < MshrBankNum; b++) begin : gen_arb_record
+      assign agb_sel[b] = bank_win_oh[b]       & arb_accept;
+      assign mgb_sel[b] = bank_merge_win_oh[b] & arb_accept;
+      assign agb_v[b]   = |agb_sel[b];
+      assign mgb_v[b]   = |mgb_sel[b];
+
+      always_comb begin
+        agb_way [b] = '0; agb_addr[b] = '0; agb_grp [b] = '0; agb_len [b] = '0;
+        agb_tile[b] = '0; agb_port[b] = '0; agb_core[b] = '0; agb_meta[b] = '0;
+        mgb_way [b] = '0; mgb_tile[b] = '0; mgb_port[b] = '0;
+        mgb_core[b] = '0; mgb_meta[b] = '0;
+        for (int s = 0; s < NumAllocSlots; s++) begin
+          agb_way [b] |= {VictimPtrW      {agb_sel[b][s]}} & arb_awy [s];
+          agb_addr[b] |= {$bits(tcdm_addr_t){agb_sel[b][s]}} & arb_addr[s];
+          agb_grp [b] |= {$bits(group_id_t) {agb_sel[b][s]}} & arb_grp [s];
+          agb_len [b] |= {BurstLenWidth   {agb_sel[b][s]}} & arb_len [s];
+          agb_tile[b] |= {$bits(tile_group_id_t){agb_sel[b][s]}} & arb_tile[s];
+          agb_port[b] |= {RespPortIdW     {agb_sel[b][s]}} & arb_port[s];
+          agb_core[b] |= {$bits(tile_core_id_t){agb_sel[b][s]}} & arb_core[s];
+          agb_meta[b] |= {$bits(meta_id_t) {agb_sel[b][s]}} & arb_meta[s];
+          mgb_way [b] |= {VictimPtrW      {mgb_sel[b][s]}} & arb_mwy [s];
+          mgb_tile[b] |= {$bits(tile_group_id_t){mgb_sel[b][s]}} & arb_tile[s];
+          mgb_port[b] |= {RespPortIdW     {mgb_sel[b][s]}} & arb_port[s];
+          mgb_core[b] |= {$bits(tile_core_id_t){mgb_sel[b][s]}} & arb_core[s];
+          mgb_meta[b] |= {$bits(meta_id_t) {mgb_sel[b][s]}} & arb_meta[s];
+        end
+      end
+    end
+  endgenerate
+
   /// Stage register. The valid bits are unconditional; each bank's payload is enabled by its own
   /// valid, so an idle bank's flops do not toggle.
   `FF(agb_q_v, agb_v, '0)
@@ -2239,23 +2321,8 @@ module mempool_group_mshr
 
   always_comb begin
     // Defaults
-    mgb_v    = '0;
-    mgb_way  = '0;
-    mgb_tile = '0;
-    mgb_port = '0;
-    mgb_core = '0;
-    mgb_meta = '0;
     mgb_e    = '0;
     mgb_slot = '0;
-    agb_v    = '0;
-    agb_way  = '0;
-    agb_addr = '0;
-    agb_grp  = '0;
-    agb_len  = '0;
-    agb_tile = '0;
-    agb_port = '0;
-    agb_core = '0;
-    agb_meta = '0;
     agb_e    = '0;
     mshr_d      = mshr_q;
     // Clock-gate write flags. Set on the same line as the write they describe (see the entry
@@ -2328,7 +2395,10 @@ module mempool_group_mshr
             // Merge hit: accept without touching NoC.
             // Slot and capacity come from the REGISTERED count plus this port's rank, not from
             // The value earlier ports left in mshr_d.
-            merge_slot = MergeRankW'(mshr_q[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num);
+            merge_slot = req_fwd_hit[tile_i][port_i]
+                       ? MergeRankW'(1)   // forwarded: the leader will be sub_reqs[0]
+                       : MergeRankW'(mshr_q[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num +
+                                     SubReqCountW'(merge_inflight[req_merge_mshr_id[tile_i][port_i]]));
             req_in_ready[tile_i][port_i] =
                 req_merge_ready[tile_i][port_i] &&
                 ((merge_slot + MergeRankW'(1)) <= MergeRankW'(MshrMergeReqs));
@@ -2336,13 +2406,6 @@ module mempool_group_mshr
               if ((merge_slot + MergeRankW'(1)) <= MergeRankW'(MshrMergeReqs)) begin
                 // RECORD only. The apply runs once per bank after this loop closes, so no
                 // Lane reads what an earlier lane wrote and the 32-deep chain disappears.
-                mgb_v   [req_bank[tile_i][port_i]] = 1'b1;
-                mgb_way [req_bank[tile_i][port_i]] =
-                    req_merge_mshr_id[tile_i][port_i][VictimPtrW-1:0];
-                mgb_tile[req_bank[tile_i][port_i]] = tile_group_id_t'(tile_i);
-                mgb_port[req_bank[tile_i][port_i]] = RespPortIdW'(port_i);
-                mgb_core[req_bank[tile_i][port_i]] = req_in[tile_i][port_i].wdata.core_id;
-                mgb_meta[req_bank[tile_i][port_i]] = req_in[tile_i][port_i].wdata.meta_id;
               end
             end
           end else begin
@@ -2352,16 +2415,11 @@ module mempool_group_mshr
               // A same-address entry is draining, or a meta-id range conflict exists: wait for it.
               req_in_ready[tile_i][port_i]  = 1'b0;
               req_out_valid[tile_i][port_i] = 1'b0;
-            end else if (req_alloc_addr_inflight[tile_i][port_i] ||
-                         req_owner_inflight[tile_i][port_i]) begin
-              // Two TRUE conflicts with an allocation that has not reached mshr_q yet, each
-              // stalling only the colliding request:
-              //   same line  -- req_addr_hit_way still reads the way's old key, so this request
-              //                 would allocate a second entry for a line already being allocated;
-              //   same owner -- req_meta_ovlp_map scans mshr_q, so it cannot see an in-flight
-              //                 allocation whose meta range overlaps this one.
-              // Neither gates the bank: it keeps accepting one request per cycle, and a merging
-              // cohort pays one cycle for its leader, not one per follower.
+            end else if (req_owner_inflight[tile_i][port_i]) begin
+              // The one conflict with an in-flight allocation that cannot be forwarded:
+              // req_meta_ovlp_map scans mshr_q, so it cannot see an in-flight allocation whose meta
+              // range overlaps this request's. Same-line requests do not come here -- they forward
+              // into the in-flight entry (req_fwd_hit) and merge in the same cycle.
               req_in_ready[tile_i][port_i]  = 1'b0;
               req_out_valid[tile_i][port_i] = 1'b0;
             end else if (req_can_merge[tile_i][port_i] && !req_alloc_found[tile_i][port_i] &&
@@ -2407,16 +2465,6 @@ module mempool_group_mshr
                   end
                 end
                 // RECORD the allocation; the entry write happens once per bank after the loop.
-                agb_v   [req_bank[tile_i][port_i]] = 1'b1;
-                agb_way [req_bank[tile_i][port_i]] =
-                    req_alloc_found_mshr_id[tile_i][port_i][VictimPtrW-1:0];
-                agb_addr[req_bank[tile_i][port_i]] = req_addr_key[tile_i][port_i];
-                agb_grp [req_bank[tile_i][port_i]] = req_in[tile_i][port_i].tgt_group_id;
-                agb_len [req_bank[tile_i][port_i]] = req_len[tile_i][port_i];
-                agb_tile[req_bank[tile_i][port_i]] = tile_group_id_t'(tile_i);
-                agb_port[req_bank[tile_i][port_i]] = RespPortIdW'(port_i);
-                agb_core[req_bank[tile_i][port_i]] = req_in[tile_i][port_i].wdata.core_id;
-                agb_meta[req_bank[tile_i][port_i]] = req_in[tile_i][port_i].wdata.meta_id;
                 end
               end
             end
@@ -3697,6 +3745,25 @@ module mempool_group_mshr
   // Bank. Allocation enforces this (bank_free_id[req_bank] only returns ways of that bank), so if this
   // Ever fails a request could miss a real hit and allocate a duplicate. Catch any violation early.
   generate
+    // Interlock firing counters. Distinguishes "the interlocks over-block" from "the extra cycle
+    // of entry-visibility latency costs throughput" -- the two have the same symptom in cycles.
+    logic [31:0] cut_addr_stall_dbg, cut_owner_stall_dbg, cut_alloc_dbg, cut_bench_cyc_dbg;
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        cut_addr_stall_dbg  <= '0;
+        cut_owner_stall_dbg <= '0;
+        cut_alloc_dbg       <= '0;
+        cut_bench_cyc_dbg   <= '0;
+      end else begin
+        cut_addr_stall_dbg  <= cut_addr_stall_dbg  + 32'($countones(req_fwd_hit));
+        cut_owner_stall_dbg <= cut_owner_stall_dbg + 32'($countones(req_owner_inflight));
+        cut_alloc_dbg       <= cut_alloc_dbg       + 32'($countones(agb_v));
+        cut_bench_cyc_dbg   <= cut_bench_cyc_dbg   + 32'd1;
+      end
+    end
+    final $display("[CUTSTALL] fwd_hits=%0d owner_stalls=%0d allocations=%0d cycles=%0d",
+                   cut_addr_stall_dbg, cut_owner_stall_dbg, cut_alloc_dbg, cut_bench_cyc_dbg);
+
     // ------------------------------------------------------------
     // Pipeline-cut invariants.
     //
@@ -3946,10 +4013,15 @@ module mempool_group_mshr
       for (genvar port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin : gen_late_join_guard_port
         no_late_join_burst: assert property(
           @(posedge clk_i) disable iff (!rst_ni)
+            // A FORWARDED merge targets an entry being allocated this cycle, so mshr_q still holds
+            // the previous occupant and this decision-cycle test compares against the wrong entry.
+            // req_fwd_hit already requires agb_q_len == req_len, and cut_merge_apply_no_late_join
+            // re-proves the property at the apply cycle, where mshr_q is the right entry.
             !(req_in_valid[tile_i][port_i] &&
               req_in_ready[tile_i][port_i] &&
               req_merge_valid[tile_i][port_i] &&
               req_hit_mshr_sel_valid[tile_i][port_i] &&
+              !req_fwd_hit[tile_i][port_i] &&
               (req_len[tile_i][port_i] > BurstLenWidth'(1))) ||
             ((mshr_q[req_hit_mshr_sel_id[tile_i][port_i]].state == MSHR_WAIT_RESP) &&
              (mshr_q[req_hit_mshr_sel_id[tile_i][port_i]].beats_left ==
