@@ -641,7 +641,6 @@ module mempool_group_mshr
   mshr_id_t  [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                                 req_merge_mshr_id;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                                 req_merge_ready;
   // Prefix rank of same-target merging ports.
-  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MergeRankW-1:0]                  merge_rank;
   logic                                                                                           amo_invalidate;
 
   // Request allocation (banked allocator bookkeeping).
@@ -661,7 +660,9 @@ module mempool_group_mshr
   mshr_id_t  [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]             resp_sel_mshr_id;
   logic      [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]
              [idx_width(MshrMergeReqs)-1:0]                                    resp_sel_subreq_idx;
+`ifndef TARGET_SYNTHESIS
   logic      [MshrNum-1:0][BurstLenWidth-1:0]                                  resp_beat_offset;
+`endif
   // ParityDrain second-slot scheduling ('0/unused when DrainBeatsPerEntry == 1).
   logic      [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]             resp_sel2_valid;
   mshr_id_t  [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]             resp_sel2_mshr_id;
@@ -819,7 +820,6 @@ module mempool_group_mshr
   // Is ~200 lines earlier) put them ahead of their own width parameter.
   logic [NumAllocSlots-1:0] merge_same_mask;   // earlier ports targeting the SAME entry
   logic [MergeRankW-1:0]    merge_slot;        // q.sub_reqs_num + this port's rank (cannot wrap)
-  logic [MergeCountW-1:0]   merge_rank_raw;    // untruncated population count, before saturation
   logic [AllocRrW-1:0]      alloc_rr_q, alloc_rr_d;
   // (B) M3 drain: rotate the MSHR-entry scan axis (MshrNum entries).
   localparam int unsigned DrainMshrRrW = idx_width(MshrNum);
@@ -943,13 +943,6 @@ module mempool_group_mshr
   `endif
   `endif
 
-  function automatic tcdm_addr_t merge_addr_key(input tcdm_addr_t addr);
-    if (MergeWordOffset == 0) begin
-      merge_addr_key = addr;
-    end else begin
-      merge_addr_key = {addr[$bits(tcdm_addr_t)-1:MergeWordOffset], {MergeWordOffset{1'b0}}};
-    end
-  endfunction
 
   // Map a recorded request port ID to a legal response port ID [1..NumRemoteRespPortsPerTile-1].
   // When req/resp port counts differ, this keeps routing deterministic.
@@ -1853,12 +1846,10 @@ module mempool_group_mshr
     localparam int unsigned BpMetaN = 2**$bits(meta_id_t);
     integer bp_out_cnt [NumTilesPerGroup][BpCoreN][BpMetaN];
     longint bp_cyc, bp_fwd, bp_rsp, bp_orphan;
-    logic [NumTilesPerGroup-1:0] bp_tile_tracked;
 
     // Was a scan of bypass_track_q, which the deleted table's else-arm tied to '0 -- so this
     // Vector has been identically zero since fde0369f. Kept as a named constant rather than
     // Folded into its one consumer, so the probe's intent stays legible.
-    assign bp_tile_tracked = '0;
 
     always @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
@@ -1892,7 +1883,7 @@ module mempool_group_mshr
               bp_rsp = bp_rsp + 1;
               if (bp_out_cnt[t][bc][bm] > 0) begin
                 bp_out_cnt[t][bc][bm] -= 1;
-              end else if (!bp_tile_tracked[t]) begin
+              end else begin
                 bp_orphan = bp_orphan + 1;
                 $display("[BYP ORPHAN] cyc=%0d g=%0d t=%0d p=%0d core=%0d meta=%0d wen=%0b : bypass response with no outstanding forward for this key",
                          bp_cyc, group_id_i, t, p, bc, bm, resp_out[t][p].wen);
@@ -2313,8 +2304,6 @@ module mempool_group_mshr
 
     // Rank each merging port against the earlier ports targeting the same entry.
     merge_same_mask = '0;
-    merge_rank_raw  = '0;
-    merge_rank      = '0;
 
     stb_hit = '0;
     for (int t = 0; t < NumTilesPerGroup; t++) begin
@@ -2339,8 +2328,7 @@ module mempool_group_mshr
             // Merge hit: accept without touching NoC.
             // Slot and capacity come from the REGISTERED count plus this port's rank, not from
             // The value earlier ports left in mshr_d.
-            merge_slot = mshr_q[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num +
-                         merge_rank[tile_i][port_i];
+            merge_slot = MergeRankW'(mshr_q[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num);
             req_in_ready[tile_i][port_i] =
                 req_merge_ready[tile_i][port_i] &&
                 ((merge_slot + MergeRankW'(1)) <= MergeRankW'(MshrMergeReqs));
@@ -3098,7 +3086,9 @@ module mempool_group_mshr
       end
     end
 
-    // Precompute beat offset for the currently buffered head response (per MSHR).
+`ifndef TARGET_SYNTHESIS
+    // Head-beat offset per entry. Its only readers are beat_done and one assertion, both
+    // simulation-only, so it is not built for synthesis.
     for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
       if (mshr_d_valid[mshr_i] && (mshr_d[mshr_i].resp_buf_cnt != '0)) begin
         // For single-word entries (including cached replay), the only legal beat
@@ -3116,6 +3106,7 @@ module mempool_group_mshr
         resp_beat_offset[mshr_i] = '0;
       end
     end
+`endif
 
     // Initialize pending-requester bitmap for a new head beat.
     //
@@ -3841,12 +3832,6 @@ module mempool_group_mshr
         else $fatal(1, "MSHR resp_buf_cnt out of range: mshr=%0d cnt=%0d depth=%0d",
                     mshr_i, mshr_q[mshr_i].resp_buf_cnt, RespBufWords);
 
-      resp_valid_coherent: assert property(
-        @(posedge clk_i) disable iff (!rst_ni)
-          !mshr_q_valid[mshr_i] ||
-          ((mshr_q[mshr_i].resp_buf_cnt != '0) == (mshr_q[mshr_i].resp_buf_cnt != '0)))
-        else $fatal(1, "MSHR resp_valid mismatch with resp_buf_cnt: mshr=%0d valid=%0d cnt=%0d",
-                    mshr_i, (mshr_q[mshr_i].resp_buf_cnt != '0), mshr_q[mshr_i].resp_buf_cnt);
 
       // Load-bearing invariant for EnableMshrSingleReq + EnableRespCache: a live
       // CACHED entry must always hold its buffered response (resp_buf_cnt > 0, so

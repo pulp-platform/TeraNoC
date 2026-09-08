@@ -16941,3 +16941,23 @@ discriminates, still prints per event.
 **Status.** Single-shape verified. 8-shape sweep in flight. No OOC run yet -- `merge_decided` put
 the merge arbiter back into two retire passes, so the cut's timing gain must be re-measured before
 it can be claimed.
+
+## 2026-09-08 19:15 — group MSHR: remove verified dead code
+
+**Purpose.** Clear dead logic before the timing restructurings, so the harder work happens in a
+smaller file. Every item verified against the source first, not taken on the reviewer's word.
+
+| removed | evidence |
+|---|---|
+| `resp_valid_coherent` assertion | asserts `(cnt != 0) == (cnt != 0)` -- a tautology; it has never checked anything |
+| `merge_rank`, `merge_rank_raw` | only ever assigned `'0`; `merge_slot` was adding a constant zero |
+| `merge_addr_key()` | defined, never called -- the decode submodule owns the key |
+| `bp_tile_tracked` | tied `'0`, so its guard `!bp_tile_tracked[t]` is always true |
+| `resp_beat_offset` -> sim-only | **no synthesis reader**: both consumers are `beat_done` writes inside `ifndef TARGET_SYNTHESIS`, the third is an assertion |
+
+**Result.** The last is the only one with hardware value, and it is real: MshrNum x BurstLenWidth of
+combinational logic was being built for synthesis with nothing to consume it. -11 lines net.
+
+**Status.** vopt clean (0 errors). Cycle-identity check against cutR7 (4241 cycles on
+fp16_256x64x256) in flight -- pure dead-code removal must not change behaviour, so a different
+number would mean one of the five claims above is wrong.
