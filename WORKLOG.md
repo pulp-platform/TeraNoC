@@ -16851,3 +16851,32 @@ interpretable -- the same stage read -14.08 for a design that closed at +0.003 a
 Open: Fix 1 (resp -> alloc coupling) can only be done as the request-path pipeline cut, because
 `req_hit_way` carries a second response dependency and a same-address request must block, not
 allocate. Fix 3 next step is the pop-count restructure of the promote/finalize block.
+
+## 2026-09-08 05:00 — group MSHR: fix the drain-seed deadlock introduced by `0c7b0ef7`
+
+**Purpose.** `0c7b0ef7` ("source the response path from mshr_q") deadlocked 5 of 8 GEMM shapes.
+Found by bisect against a surviving pre-bug snapshot; it had gone unnoticed for two days because the
+guarding assertion `no_late_join_burst` is gated on `req_len > 1` and every stuck request is a
+single (`bl=1`), so 22 h of hung simulation raised zero assertions.
+
+**Root cause.** The head-beat drain seed triggered on `mshr_d` but read `sub_reqs` / `sub_reqs_num`
+from `mshr_q`. A request hitting a CACHED entry merges in and flips it to `MSHR_DRAIN_RESP` in the
+same cycle, while `mshr_q` still holds the cache-resident state whose `sub_reqs_num` the `fin_cache`
+path had zeroed. The guard blocked the seed, `beat_pending` was never set, and every merged
+subscriber waited forever.
+
+**Implementation.** Two words at `mempool_group_mshr.sv:3013` and `:3015` — guard and data both back
+on `mshr_d`. Nothing else changed; all of `7436c1ed`'s allocation-arbiter work is intact. The stale
+"legal by construction" comment above the seed is replaced with the measured explanation.
+
+**Result.** Bisect matrix (`fp16_256x64x256`, ref 4163 cycles / 89% FPU util / STUCK_REQ 0):
+guard-only, data-only and guard-deleted each still deadlocked at ~0.1% util; both together fix it.
+Validation sweep, 7 of 8 shapes finished, **all bit-exact** against the pre-bug reference — n64 4163,
+128 7870, 512 6804, 256 13299, f32 3981, p512 34867, m1k 47965, every STUCK_REQ count matching too;
+m2k still running. `p512`/`m1k` landing exactly also shows the burst-only second seed (`:3034`) does
+not need the same change.
+
+**Status.** Fixed and validated functionally. Timing cost unmeasured — `fixF_2p0` / `fixF_1p0` OOC
+runs in flight against `chain_2p0` (same RTL unfixed, which closed 2 ns at WNS -0.000086,
+117,622 um^2). Post-placement data also shows 1.2 ns (WNS -0.396) and 1.0 ns (WNS -0.652) do not
+close, with 20 of 20 top paths running `group_mshr_req_i` -> `clock_gate_mshr_q_valid_reg_*`.

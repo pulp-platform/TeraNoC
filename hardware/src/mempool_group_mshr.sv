@@ -2993,26 +2993,31 @@ module mempool_group_mshr
 
     // Initialize pending-requester bitmap for a new head beat.
     //
-    // SPLIT SOURCING, deliberately. The TRIGGER stays on mshr_d -- state and resp_buf_cnt are
-    // written by this cycle's capture, and seeding in the same cycle is what lets the drain fire at
-    // N+1 instead of N+2. Sourcing the trigger from mshr_q would add a cycle to EVERY head beat and
-    // undo the RespBufWords=4 widening.
+    // TRIGGER AND DATA BOTH ON mshr_d, and they must stay that way. Sourcing sub_reqs / sub_reqs_num
+    // from mshr_q was shallower but WRONG: a request hitting a CACHED entry merges in and flips the
+    // entry to MSHR_DRAIN_RESP in the same cycle, so the trigger fires while mshr_q still holds the
+    // cache-resident state -- where the fin_cache path below has zeroed sub_reqs and sub_reqs_num.
+    // The guard then blocked the seed outright and the hit never delivered: every merged subscriber
+    // waited forever, 5 of 8 GEMM shapes deadlocked at ~0.1% FPU utilisation, and the reference
+    // 4163-cycle fp16_256x64x256 arm never terminated.
     //
-    // The DATA comes from mshr_q, which is where the depth was: sub_reqs / sub_reqs_num are written
-    // by the merge in the request path (~35 gates to here), while state / resp_buf_cnt come from the
-    // capture (~16). Reading them from the register removes the request path from this cone.
+    // Both halves are load-bearing -- guard alone, data alone, and dropping the guard were each
+    // measured and each still deadlocked. Seeding an all-zero beat_pending is not a benign no-op:
+    // beat_pending == 0 with state == MSHR_DRAIN_RESP is what the fin logic below reads as "drain
+    // complete", so the buffered beat retires before any subscriber is served.
     //
-    // Legal only because of the no-late-join gate on req_merge_valid: req_addr_hit_drain covers
-    // "draining OR a response arriving this cycle / in flight", so no merge can touch an entry the
-    // trigger fires on, and mshr_d.sub_reqs == mshr_q.sub_reqs there by construction.
+    // no_late_join_burst does NOT cover this: it is gated on req_len > 1, and every stuck request
+    // was a single (bl=1). The cost of reading mshr_d here is the merge in the request path, but
+    // that path is already in this cone -- the trigger reads mshr_d.state, which the same merge
+    // block writes.
     for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
       if (mshr_d_valid[mshr_i] &&
           (mshr_d[mshr_i].state == MSHR_DRAIN_RESP) &&
           (mshr_d[mshr_i].resp_buf_cnt != '0) &&
           (mshr_d[mshr_i].beat_pending == '0) &&
-          (mshr_q[mshr_i].sub_reqs_num != '0)) begin
+          (mshr_d[mshr_i].sub_reqs_num != '0)) begin
         for (int s = 0; s < MshrMergeReqs; s++) begin
-          mshr_d[mshr_i].beat_pending[s] = mshr_q[mshr_i].sub_reqs[s].valid;
+          mshr_d[mshr_i].beat_pending[s] = mshr_d[mshr_i].sub_reqs[s].valid;
         end
       end
     end
