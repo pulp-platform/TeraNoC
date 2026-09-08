@@ -21,7 +21,13 @@
 //   (matching the surrounding RTL idiom) and for the signed inflight delta.
 //
 //   Output line tags:
-//     [CMS WARN]   - stuck request / orphan response / dup-id allocation
+//     [CMS WARN]   - stuck request (per event); orphan / dup-id are COUNTED only.
+//
+//     ORPHAN_RESP and DUP_ALLOC fire on every healthy run -- the scoreboard does not model MSHR
+//     coalescing, so a merged response reads as an orphan and a reused meta id as a duplicate.
+//     They were 89% of a 49 MB transcript (425,831 of 463,459 lines) and identical between a
+//     passing and a hung arm, so they discriminate nothing. The per-entry counters and the
+//     cms_period_summary totals are unchanged; +define+CMS_WARN_EVERY_EVENT restores the prints.
 //     [CMS]        - periodic summary
 //     [CMS FINAL]  - end-of-simulation dump
 //
@@ -238,8 +244,10 @@ module tb_core_mem_scoreboard (
                       // is consumed by that port's own monitor -- not an orphan here.
                       !(CmsPd2 && (P > 0) && cms_tbl[G][T][C][P-1][p_id].valid)) begin
                     cms_n_orphan[G][T][C][P] <= cms_n_orphan[G][T][C][P] + 1'b1;
+`ifdef CMS_WARN_EVERY_EVENT
                     $display("[CMS WARN] cyc=%0d g=%0d t=%0d c=%0d p=%0d hart=0x%0h ORPHAN_RESP id=%0d",
                              cms_cycle, G, T, C, P, cms_hart_id(G,T,C), p_id);
+`endif
                   end else if (cms_tbl[G][T][C][P][p_id].valid) begin
                     automatic logic [BurstLenWidth:0] beats_after = cms_tbl[G][T][C][P][p_id].beats_recv + 1'b1;
                     automatic logic [CmsCycW-1:0]     lat         = cms_cycle - cms_tbl[G][T][C][P][p_id].cycle_issued;
@@ -294,12 +302,14 @@ module tb_core_mem_scoreboard (
                           && !(p_hs && p_id == beat_id && resp_full)
                           && !(resp2_full && beat_id == p2_id)) begin
                         cms_n_dup_alloc[G][T][C][P] <= cms_n_dup_alloc[G][T][C][P] + 1'b1;
+`ifdef CMS_WARN_EVERY_EVENT
                         $display("[CMS WARN] cyc=%0d g=%0d t=%0d c=%0d p=%0d hart=0x%0h DUP_ALLOC id=%0d (burst_base=%0d beat=%0d) prev_cyc=%0d prev_addr=0x%08x new_addr=0x%08x",
                                  cms_cycle, G, T, C, P, cms_hart_id(G,T,C),
                                  beat_id, q_id, b,
                                  cms_tbl[G][T][C][P][beat_id].cycle_issued,
                                  cms_tbl[G][T][C][P][beat_id].addr,
                                  q_addr);
+`endif
                       end
                       cms_tbl[G][T][C][P][beat_id].valid        <= 1'b1;
                       cms_tbl[G][T][C][P][beat_id].cycle_issued <= cms_cycle;

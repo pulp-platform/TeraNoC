@@ -16880,3 +16880,64 @@ not need the same change.
 runs in flight against `chain_2p0` (same RTL unfixed, which closed 2 ns at WNS -0.000086,
 117,622 um^2). Post-placement data also shows 1.2 ns (WNS -0.396) and 1.0 ns (WNS -0.652) do not
 close, with 20 of 20 top paths running `group_mshr_req_i` -> `clock_gate_mshr_q_valid_reg_*`.
+
+## 2026-09-08 19:05 — group MSHR: request-path pipeline cut at the arbiter output
+
+**Purpose.** Split the request cone. Measured at 1.2 ns the worst path is 100 cells / 1.233 ns of
+logic from `group_mshr_req_i` to the `mshr_q_valid` clock gate, and 98.3% of violating paths start
+at that port. Cutting at the allocation/merge arbiter output splits it 0.647 / 0.586 ns.
+
+**Implementation.** `agb_*` / `mgb_*` registered into `agb_q_*` / `mgb_q_*` (13 fields x 16 banks,
+payload enabled by its own valid); the two apply loops read the registered records, so the entry
+write lands one cycle after the decision. Per-entry `alloc_inflight` / `merge_inflight` are plain
+compares against those registers -- bank and way are compile-time constants per entry.
+
+**Eight defects the deferral exposed, all silent, all fixed.** The module is built on invariants of
+the form "X and Y cannot touch one entry in one cycle", true only because decision and write shared
+a cycle:
+1. `mshr_ctl_en` keyed on the combinational arbiter grant -- the allocation's control fields were
+   dropped by a closed clock gate. `mshr_gate_ctl_no_lost_write` passed vacuously through it.
+2. a CACHED way being re-keyed still read valid for a cycle -- a request for the OLD address could
+   hit it and merge into the new line.
+3. the AMO cache flush had no merge veto.
+4. the capture wrote RESP_HOLD from a pre-merge `sub_reqs_num`.
+5. the PD2 second-slot seed had the same skew; `beat2_armed` is one-shot, so the slot was never
+   re-seeded.
+6. both CACHED retires vetoed the merge being APPLIED, not the one being DECIDED (`merge_decided`).
+7. a merge applied onto an entry that turned DRAIN_RESP in between never entered `beat_pending`.
+8. a way with a merge in flight could be picked as an allocation victim and blanked.
+
+**Interlocks are precise, not coarse.** An intermediate version held the whole bank for a cycle
+after any grant. That halved per-bank acceptance, and since `req_bank` is address-hashed a
+coalescing cohort all maps to ONE bank -- it doubled cohort assembly, which is the MSHR's purpose.
+Measured cost: +6.4% on n64 and **+14.8% on 256**, the deepest-sharing shape. Replaced by three
+precise terms: `req_alloc_addr_inflight` (same line only), `way_reclaimable &= !merge_inflight`,
+and a real two-sided meta-range test in `req_owner_inflight`. A bank accepts one request per cycle
+again; a cohort pays one cycle for its leader, not one per follower.
+
+**Result (fp16_256x64x256, reference 4163 cycles):**
+
+| version | cycles | merge_grants | merge_arb_stalls |
+|---|---|---|---|
+| reference (no cut) | 4163 | 122880 | 49447 |
+| bank hold | 4431 (+6.4%) | 122880 | 55242 (+11.7%) |
+| **precise interlocks** | **4241 (+1.9%)** | **122880** | **44495 (-10.0%)** |
+
+`merge_grants` identical throughout -- no work is lost. Stalls now BELOW the reference: the stage
+register decouples the decision from the entry write, so the arbiter retries less than the original
+combinational form. The residual +1.9% is latency, not throughput.
+
+**Also added.** Six sim-only `gen_mshr_cut_invariant` assertions. Every pre-existing per-entry
+assertion checks one entry against ITSELF, so a dropped write leaves the previous occupant's
+self-consistent snapshot and all of them pass -- which is why seven of the eight defects were
+silent. These check the cut: that a decision in flight lands, lands once, and is not overtaken.
+
+**TB.** `[CMS WARN] ORPHAN_RESP` / `DUP_ALLOC` per-event prints gated behind `CMS_WARN_EVERY_EVENT`
+(default off). They were 89.3% of a 49 MB transcript (425,831 of 463,459 lines) and fire identically
+on passing and hung arms -- the scoreboard does not model coalescing, so a merged response reads as
+an orphan. Counters and `cms_period_summary` totals unchanged; `STUCK_REQ`, the one that
+discriminates, still prints per event.
+
+**Status.** Single-shape verified. 8-shape sweep in flight. No OOC run yet -- `merge_decided` put
+the merge arbiter back into two retire passes, so the cut's timing gain must be re-measured before
+it can be claimed.

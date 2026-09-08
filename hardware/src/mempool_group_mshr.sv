@@ -570,7 +570,6 @@ module mempool_group_mshr
   logic                [MshrNum-1:0]                                           mshr_d_valid;
   logic                [MshrNum-1:0]                                           mshr_q_valid;
   // Occupancy, exported so the CSR file can refuse a bank-hash change while entries are resident.
-  assign mshr_busy_o = |mshr_q_valid;
   // Hold-the-fetch replay walk start pointer (rotates every cycle for fairness among held
   // Entries contending for the same outbound lane). Tied off when the feature is compiled out.
   mshr_id_t                                                                    hold_replay_rr_q;
@@ -626,6 +625,14 @@ module mempool_group_mshr
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_hit_mshr;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_addr_hit_drain;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_meta_conflict;
+  /// An allocation from this lane's own (tile, core) is recorded but not yet in mshr_q, so
+  /// req_meta_ovlp_map cannot see its meta range. Conservative: same owner, any bank.
+  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_owner_inflight;
+  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrBankNum-1:0]  req_owner_inflight_bank;
+  /// This request's own line has an allocation recorded but not yet in mshr_q, so req_addr_hit_way
+  /// still reads the way's OLD key and the request would allocate a second entry for it. One cycle
+  /// of wait, for the colliding request only -- the bank keeps accepting.
+  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_alloc_addr_inflight;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_hit_mshr_sel_valid;
   mshr_id_t  [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_hit_mshr_sel_id;
   logic      [MshrNum-1:0]                                                     mshr_hit_req;
@@ -695,6 +702,43 @@ module mempool_group_mshr
   // what st_post_cap does. Sites that need the pre-capture value keep reading mshr_d.
   logic      [MshrNum-1:0]                                                     st_alloc_fire;
   logic      [MshrNum-1:0]                                                     st_merge_drain;
+
+  /// REQUEST PIPELINE CUT (stage boundary).
+  ///
+  /// The arbiter decision is registered here and the entry write happens next cycle, which splits
+  /// the request cone -- measured 1.233 ns / 100 cells at the clock gate, 1.381 ns / 90 cells at
+  /// resp_buf.data -- into 0.65 ns before the cut and 0.72 ns after it.
+  ///
+  /// Everything downstream reads these records, never the combinational agb_* / mgb_*, so the
+  /// arbiter output is out of the entry-write cone entirely.
+  logic [MshrBankNum-1:0]                    agb_q_v;
+  logic [MshrBankNum-1:0][VictimPtrW-1:0]    agb_q_way;
+  tcdm_addr_t [MshrBankNum-1:0]              agb_q_addr;
+  group_id_t [MshrBankNum-1:0]               agb_q_grp;
+  logic [MshrBankNum-1:0][BurstLenWidth-1:0] agb_q_len;
+  tile_group_id_t [MshrBankNum-1:0]          agb_q_tile;
+  logic [MshrBankNum-1:0][RespPortIdW-1:0]   agb_q_port;
+  tile_core_id_t [MshrBankNum-1:0]           agb_q_core;
+  meta_id_t [MshrBankNum-1:0]                agb_q_meta;
+  logic [MshrBankNum-1:0]                    mgb_q_v;
+  logic [MshrBankNum-1:0][VictimPtrW-1:0]    mgb_q_way;
+  tile_group_id_t [MshrBankNum-1:0]          mgb_q_tile;
+  logic [MshrBankNum-1:0][RespPortIdW-1:0]   mgb_q_port;
+  tile_core_id_t [MshrBankNum-1:0]           mgb_q_core;
+  meta_id_t [MshrBankNum-1:0]                mgb_q_meta;
+
+  /// Per-entry views of the two in-flight records: "a write for this entry is registered but has
+  /// not reached mshr_q yet". Bank and way are compile-time constants per entry, so each is one
+  /// compare against a register -- no variable index, nothing from the request path.
+  logic [MshrNum-1:0] alloc_inflight;
+  logic [MshrNum-1:0] merge_inflight;
+  logic [MshrNum-1:0] merge_decided;
+  /// mshr_q_valid as the free-way lookup must see it: an in-flight allocation already owns its way.
+  logic [MshrNum-1:0] free_way_valid;
+
+  // Busy must also cover a decision that is recorded but not yet in mshr_q, or the bank-hash CSR
+  // could be rewritten in that window.
+  assign mshr_busy_o = (|mshr_q_valid) | (|agb_q_v) | (|mgb_q_v);
 
 
   logic      [MshrNum-1:0]                                                     st_cap_fire;
@@ -1120,9 +1164,16 @@ module mempool_group_mshr
           // same-address pair is not by itself a duplicate-allocation bug.
           assign req_resp_seen[tile_i][port_i][way_i] = resp_seen_at(rsn_v, rsn_id, e_abs);
 
+          // Both in-flight terms make the request WAIT rather than act on a stale entry:
+          //  merge_inflight -- sub_reqs_num and state are one cycle behind, so req_hit_way's
+          //    capacity test and its CACHED / RESP_HOLD disjuncts would read pre-merge values;
+          //  alloc_inflight -- this way is being re-keyed to another line, and mshr_q still shows
+          //    the old address, so a hit here would merge into an entry about to become someone
+          //    else's.
           assign req_addr_hit_drain_way[tile_i][port_i][way_i] =
               req_addr_hit_way[tile_i][port_i][way_i] &&
               ((mshr_q[e_abs].state == MSHR_DRAIN_RESP) ||
+               merge_inflight[e_abs] || alloc_inflight[e_abs] ||
                (StallOnResp && (req_resp_seen[tile_i][port_i][way_i] ||
                                 mshr_resp_inflight[e_abs])));
 
@@ -1180,6 +1231,28 @@ module mempool_group_mshr
         assign req_hit_mshr[tile_i][port_i] = |req_hit_way[tile_i][port_i];
         assign req_addr_hit_drain[tile_i][port_i] = |req_addr_hit_drain_way[tile_i][port_i];
         assign req_meta_conflict[tile_i][port_i] = |req_meta_ovlp_map[tile_i][port_i];
+
+        // req_meta_ovlp_map scans mshr_q across ALL banks, so the per-bank hold below cannot
+        // cover it: an in-flight allocation in another bank is invisible to the overlap check.
+        // Same (tile, core) is the conservative stand-in -- one registered compare per bank.
+        for (genvar b = 0; b < MshrBankNum; b++) begin : gen_owner_inflight_bank
+          assign req_owner_inflight_bank[tile_i][port_i][b] =
+              agb_q_v[b] && (agb_q_tile[b] == tile_group_id_t'(tile_i)) &&
+              (agb_q_core[b] == req_in[tile_i][port_i].wdata.core_id) &&
+              ((meta_id_t'(agb_q_meta[b] - req_in[tile_i][port_i].wdata.meta_id) <
+                req_len[tile_i][port_i]) ||
+               (meta_id_t'(req_in[tile_i][port_i].wdata.meta_id - agb_q_meta[b]) <
+                agb_q_len[b]));
+        end
+        assign req_owner_inflight[tile_i][port_i] = |req_owner_inflight_bank[tile_i][port_i];
+        // Exactly the req_addr_hit_way key, compared against the in-flight allocation record.
+        // agb_q_len keeps a different-length request free to allocate its own entry, as req_hit_way
+        // would have let it.
+        assign req_alloc_addr_inflight[tile_i][port_i] =
+            req_can_merge[tile_i][port_i] && agb_q_v[req_bank[tile_i][port_i]] &&
+            (agb_q_addr[req_bank[tile_i][port_i]] == req_addr_key[tile_i][port_i]) &&
+            (agb_q_grp [req_bank[tile_i][port_i]] == req_in[tile_i][port_i].tgt_group_id) &&
+            (agb_q_len [req_bank[tile_i][port_i]] == req_len[tile_i][port_i]);
       end
     end
   endgenerate
@@ -1275,7 +1348,10 @@ module mempool_group_mshr
   generate
     if (CacheReclaimable) begin : gen_way_reclaimable
       for (genvar e = 0; e < MshrNum; e++) begin : gen_way_reclaimable_e
+        // Neither in-flight record may be reclaimed: mshr_q still shows the pre-write entry, so a
+        // merge landing this cycle would be blanked by the allocation that picked it as victim.
         assign way_reclaimable[e] = EnableRespCache && mshr_q_valid[e] &&
+                                    !alloc_inflight[e] && !merge_inflight[e] &&
                                     (mshr_q[e].state == MSHR_CACHED) &&
                                     (mshr_q[e].sub_reqs_num == '0) && !mshr_hit_req[e];
       end
@@ -1290,7 +1366,7 @@ module mempool_group_mshr
     .IdW($bits(mshr_id_t)), .VictimPtrW(VictimPtrW),
     .CacheReclaimable(CacheReclaimable), .CacheVictimRR(CacheVictimRR)
   ) i_free_way (
-    .valid_i       (mshr_q_valid),
+    .valid_i       (free_way_valid),
     .reclaimable_i (way_reclaimable),
     .victim_rr_i   (victim_rr_q),
     .has_free_o    (bank_has_free),
@@ -1484,15 +1560,11 @@ module mempool_group_mshr
   logic [MshrNum-1:0][RespBufWords-1:0] mshr_rb_en;   // one enable per response-buffer slot
   // "Some lane may allocate entry e this cycle." A CONSERVATIVE superset of the real grant, and
   // Deliberately so: a clock-gate enable may be over-asserted (costs a little power) but must.
-  logic [MshrNum-1:0] mshr_alloc_maybe;
-  for (genvar e = 0; e < MshrNum; e++) begin : gen_alloc_maybe
-    assign mshr_alloc_maybe[e] = (|bank_win_oh[e / MshrWaysPerBank]) &&
-                                 (bank_free_id[e / MshrWaysPerBank] == mshr_id_t'(e));
-  end
   always_comb begin
     for (int e = 0; e < MshrNum; e++) begin
-      // Control changes only while the entry is live, or on the cycle it is allocated.
-      mshr_ctl_en[e] = mshr_q_valid[e] | mshr_alloc_maybe[e];
+      // Control changes only while the entry is live, or on the cycle it is allocated --
+      // alloc_inflight, not the arbiter grant, because the cut moved the write a cycle later.
+      mshr_ctl_en[e] = mshr_q_valid[e] | alloc_inflight[e];
       mshr_id_en[e]  = mshr_wr_all[e]  | mshr_id_we[e];
       for (int b = 0; b < RespBufWords; b++) begin
         mshr_rb_en[e][b] = mshr_wr_all[e] | mshr_rb_we[e][b];
@@ -2103,6 +2175,7 @@ module mempool_group_mshr
   logic [MshrBankNum-1:0]                    agb_v;
   logic [MshrBankNum-1:0][VictimPtrW-1:0]    agb_way;
 
+
   /// Allocation and merge FIRE terms, from the per-bank grant records and mshr_q only.
   ///
   /// An entry's bank and way are compile-time constants here, so the arbiter's scatter becomes a
@@ -2113,8 +2186,15 @@ module mempool_group_mshr
       localparam int unsigned StBank = e / MshrWaysPerBank;
       localparam int unsigned StWay  = e % MshrWaysPerBank;
 
-      assign st_alloc_fire[e]  = agb_v[StBank] && (agb_way[StBank] == VictimPtrW'(StWay));
-      assign st_merge_drain[e] = mgb_v[StBank] && (mgb_way[StBank] == VictimPtrW'(StWay)) &&
+      assign alloc_inflight[e] = agb_q_v[StBank] && (agb_q_way[StBank] == VictimPtrW'(StWay));
+      assign merge_inflight[e] = mgb_q_v[StBank] && (mgb_q_way[StBank] == VictimPtrW'(StWay));
+      // Combinational twin: a retire in THIS cycle must also stand off a merge that is only being
+      // decided now, or the merge applies next cycle into an entry that has already been dropped.
+      assign merge_decided[e]  = mgb_v  [StBank] && (mgb_way  [StBank] == VictimPtrW'(StWay));
+      assign free_way_valid[e] = mshr_q_valid[e] | alloc_inflight[e];
+
+      assign st_alloc_fire[e]  = alloc_inflight[e];
+      assign st_merge_drain[e] = merge_inflight[e] &&
                                  ((EnableRespCache &&
                                    (mshr_q[e].state == MSHR_CACHED)) ||
                                   (RespWaitSubsSingle &&
@@ -2132,6 +2212,29 @@ module mempool_group_mshr
   meta_id_t [MshrBankNum-1:0]                agb_meta;
   mshr_id_t                                  agb_e;
   logic [MergeRankW-1:0]                     mgb_slot;   // recomputed from mshr_q
+
+  /// Stage register. The valid bits are unconditional; each bank's payload is enabled by its own
+  /// valid, so an idle bank's flops do not toggle.
+  `FF(agb_q_v, agb_v, '0)
+  `FF(mgb_q_v, mgb_v, '0)
+  generate
+    for (genvar b = 0; b < MshrBankNum; b++) begin : gen_arb_stage_reg
+      `FFL(agb_q_way [b], agb_way [b], agb_v[b], '0)
+      `FFL(agb_q_addr[b], agb_addr[b], agb_v[b], '0)
+      `FFL(agb_q_grp [b], agb_grp [b], agb_v[b], '0)
+      `FFL(agb_q_len [b], agb_len [b], agb_v[b], '0)
+      `FFL(agb_q_tile[b], agb_tile[b], agb_v[b], '0)
+      `FFL(agb_q_port[b], agb_port[b], agb_v[b], '0)
+      `FFL(agb_q_core[b], agb_core[b], agb_v[b], '0)
+      `FFL(agb_q_meta[b], agb_meta[b], agb_v[b], '0)
+      `FFL(mgb_q_way [b], mgb_way [b], mgb_v[b], '0)
+      `FFL(mgb_q_tile[b], mgb_tile[b], mgb_v[b], '0)
+      `FFL(mgb_q_port[b], mgb_port[b], mgb_v[b], '0)
+      `FFL(mgb_q_core[b], mgb_core[b], mgb_v[b], '0)
+      `FFL(mgb_q_meta[b], mgb_meta[b], mgb_v[b], '0)
+    end
+  endgenerate
+
   logic [MshrBankNum-1:0]   drain2_bank_cand;                      // per-lane bank candidates
   logic [MshrBankNum-1:0]   drain2_bank_rr_mask;
   logic [MshrBankNum-1:0]   drain2_bhi, drain2_blo, drain2_bfirst;
@@ -2261,6 +2364,18 @@ module mempool_group_mshr
               // A same-address entry is draining, or a meta-id range conflict exists: wait for it.
               req_in_ready[tile_i][port_i]  = 1'b0;
               req_out_valid[tile_i][port_i] = 1'b0;
+            end else if (req_alloc_addr_inflight[tile_i][port_i] ||
+                         req_owner_inflight[tile_i][port_i]) begin
+              // Two TRUE conflicts with an allocation that has not reached mshr_q yet, each
+              // stalling only the colliding request:
+              //   same line  -- req_addr_hit_way still reads the way's old key, so this request
+              //                 would allocate a second entry for a line already being allocated;
+              //   same owner -- req_meta_ovlp_map scans mshr_q, so it cannot see an in-flight
+              //                 allocation whose meta range overlaps this one.
+              // Neither gates the bank: it keeps accepting one request per cycle, and a merging
+              // cohort pays one cycle for its leader, not one per follower.
+              req_in_ready[tile_i][port_i]  = 1'b0;
+              req_out_valid[tile_i][port_i] = 1'b0;
             end else if (req_can_merge[tile_i][port_i] && !req_alloc_found[tile_i][port_i] &&
                          (bank_has_free[req_bank[tile_i][port_i]] || cfg_bankfull_bp)) begin
               // Mergeable miss that lost this bank's single allocation slot this cycle, but a free
@@ -2330,7 +2445,7 @@ module mempool_group_mshr
                     int'(req_bank[tile_i][port_i]) * MshrWaysPerBank + way_i;
                 // Reads only. None of state / resp_buf_cnt / resp_buf_rd_ptr is written by this
                 // Pass any more, so all 32 lanes evaluate against the same entry state.
-                if (mshr_d_valid[cache_hit_e] &&
+                if (mshr_d_valid[cache_hit_e] && !alloc_inflight[cache_hit_e] &&
                     (mshr_d[cache_hit_e].state == MSHR_CACHED) &&
                     req_addr_hit_way[tile_i][port_i][way_i]) begin
                   stb_lane = RespLaneW'(tile_i * NumReqPortsActive + (port_i - 1));
@@ -2350,8 +2465,8 @@ module mempool_group_mshr
     // Cycle, and bank_free_id[b] is by construction a way of bank b. So these MshrBankNum writes
     // Target distinct entries and need no ordering between them -- exactly the property the old
     for (int b = 0; b < MshrBankNum; b++) begin
-      if (agb_v[b]) begin
-        agb_e = mshr_id_t'(b * MshrWaysPerBank + int'(agb_way[b]));
+      if (agb_q_v[b]) begin
+        agb_e = mshr_id_t'(b * MshrWaysPerBank + int'(agb_q_way[b]));
         // Recorded, not applied -- see the mshr_alloc_set declaration. No pass below needs to see
         // this entry as valid: a response cannot arrive for an entry allocated this cycle
         // (no_alloc_while_resp_landing asserts exactly that), and every clear guard excludes
@@ -2359,12 +2474,12 @@ module mempool_group_mshr
         mshr_alloc_set[agb_e] = 1'b1;
         mshr_d[agb_e]       = '0;
         mshr_wr_all[agb_e]  = 1'b1;
-        mshr_d[agb_e].base_addr    = agb_addr[b];
-        mshr_d[agb_e].tgt_group_id = agb_grp[b];
-        mshr_d[agb_e].burst_len    = agb_len[b];
+        mshr_d[agb_e].base_addr    = agb_q_addr[b];
+        mshr_d[agb_e].tgt_group_id = agb_q_grp[b];
+        mshr_d[agb_e].burst_len    = agb_q_len[b];
         mshr_d[agb_e].state        = MSHR_WAIT_RESP;
         mshr_d[agb_e].cacheable    = 1'b1;
-        mshr_d[agb_e].beats_left   = agb_len[b];
+        mshr_d[agb_e].beats_left   = agb_q_len[b];
         mshr_d[agb_e].beat_pending  = '0;
         mshr_d[agb_e].beat_pending2 = '0;
         mshr_d[agb_e].beat2_armed   = 1'b0;
@@ -2374,10 +2489,10 @@ module mempool_group_mshr
 `endif
         // Owner request is always stored in sub_reqs[0].
         mshr_d[agb_e].sub_reqs[0].valid        = 1'b1;
-        mshr_d[agb_e].sub_reqs[0].tile_id      = agb_tile[b];
-        mshr_d[agb_e].sub_reqs[0].port_id      = agb_port[b];
-        mshr_d[agb_e].sub_reqs[0].core_id      = agb_core[b];
-        mshr_d[agb_e].sub_reqs[0].meta_id_base = agb_meta[b];
+        mshr_d[agb_e].sub_reqs[0].tile_id      = agb_q_tile[b];
+        mshr_d[agb_e].sub_reqs[0].port_id      = agb_q_port[b];
+        mshr_d[agb_e].sub_reqs[0].core_id      = agb_q_core[b];
+        mshr_d[agb_e].sub_reqs[0].meta_id_base = agb_q_meta[b];
 `ifndef TARGET_SYNTHESIS
         mshr_d[agb_e].cache_hit_cnt = '0;
 `endif
@@ -2385,10 +2500,10 @@ module mempool_group_mshr
         // Feature off) means the fetch went out this same cycle on the passthrough, so mark it
         // Issued immediately.
         mshr_d[agb_e].hold_cnt =
-            hold_ticks((agb_len[b] == BurstLenWidth'(1)) ?
+            hold_ticks((agb_q_len[b] == BurstLenWidth'(1)) ?
                        cfg_hold_window_single : cfg_hold_window_burst);
         mshr_d[agb_e].issued =
-            (((agb_len[b] == BurstLenWidth'(1)) ?
+            (((agb_q_len[b] == BurstLenWidth'(1)) ?
               cfg_hold_window_single : cfg_hold_window_burst) == 0);
         mshr_d[agb_e].sub_reqs_num = SubReqCountW'(1);
         // Cache self-invalidate: the owner is the first served sub-request.
@@ -2402,18 +2517,25 @@ module mempool_group_mshr
     // B is a loop constant here, so b*MshrWaysPerBank + way is a MshrWaysPerBank:1 select and the
     // Write is bank-local as well as parallel (the per-lane form was MshrNum:1).
     for (int b = 0; b < MshrBankNum; b++) begin
-      if (mgb_v[b]) begin
-        mgb_e = mshr_id_t'(b * MshrWaysPerBank + int'(mgb_way[b]));
+      if (mgb_q_v[b]) begin
+        mgb_e = mshr_id_t'(b * MshrWaysPerBank + int'(mgb_q_way[b]));
         // Merge_rank is identically zero under this knob, so the slot is just the registered
         // Count -- no need to have carried it out of the lane loop.
         mgb_slot = MergeRankW'(mshr_q[mgb_e].sub_reqs_num);
         mshr_id_we[mgb_e] = 1'b1;
         mshr_d[mgb_e].sub_reqs[mgb_slot].valid        = 1'b1;
-        mshr_d[mgb_e].sub_reqs[mgb_slot].tile_id      = mgb_tile[b];
-        mshr_d[mgb_e].sub_reqs[mgb_slot].port_id      = mgb_port[b];
-        mshr_d[mgb_e].sub_reqs[mgb_slot].core_id      = mgb_core[b];
-        mshr_d[mgb_e].sub_reqs[mgb_slot].meta_id_base = mgb_meta[b];
+        mshr_d[mgb_e].sub_reqs[mgb_slot].tile_id      = mgb_q_tile[b];
+        mshr_d[mgb_e].sub_reqs[mgb_slot].port_id      = mgb_q_port[b];
+        mshr_d[mgb_e].sub_reqs[mgb_slot].core_id      = mgb_q_core[b];
+        mshr_d[mgb_e].sub_reqs[mgb_slot].meta_id_base = mgb_q_meta[b];
         mshr_d[mgb_e].sub_reqs_num = SubReqCountW'(mgb_slot + MergeRankW'(1));
+        // The entry may have turned DRAIN_RESP between the decision and now (serve timeout, store
+        // force-drain, AMO). Neither state branch below fires then, and the head seed is skipped
+        // because beat_pending is already non-zero, so this subscriber would never be drained.
+        if (mshr_q[mgb_e].state == MSHR_DRAIN_RESP) begin
+          mshr_d[mgb_e].beat_pending[mgb_slot] = 1'b1;
+          if (PD2 && mshr_q[mgb_e].beat2_armed) mshr_d[mgb_e].beat_pending2[mgb_slot] = 1'b1;
+        end
         mshr_d[mgb_e].served_cnt   = mshr_q[mgb_e].served_cnt + ServedCntW'(1);
 `ifndef TARGET_SYNTHESIS
         if (EnableRespCache && (mshr_q[mgb_e].state == MSHR_CACHED)) begin
@@ -2543,10 +2665,11 @@ module mempool_group_mshr
 
     if (EnableRespCache && amo_invalidate) begin
       for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
-        // From mshr_q: allocation writes MSHR_WAIT_RESP so it can never present CACHED here, and
-        // while amo_invalidate is high no merge target is CACHED either -- every req_hit_way
-        // disjunct that can reach a CACHED entry carries !amo_invalidate.
-        if (mshr_q_valid[mshr_i] && (mshr_q[mshr_i].state == MSHR_CACHED)) begin
+        // From mshr_q: allocation writes MSHR_WAIT_RESP so it can never present CACHED here.
+        // !merge_inflight is required: a merge decided before amo_invalidate rose is applied
+        // under it, and retiring the entry would drop the subscriber that merge just attached.
+        if (mshr_q_valid[mshr_i] && (mshr_q[mshr_i].state == MSHR_CACHED) &&
+            !merge_inflight[mshr_i]) begin
           mshr_d_valid[mshr_i] = 1'b0;
           // Retire by dropping valid only -- do NOT clear the entry.
         end
@@ -2564,7 +2687,8 @@ module mempool_group_mshr
         // sub_reqs_num/served_cnt, which the mshr_d form observed and the mshr_q form cannot.
         // !st_merge_drain[e] restores exactly that veto; without it the entry would be retired and
         // the merging subscriber's response lost.
-        if (mshr_q_valid[e] && (mshr_q[e].state == MSHR_CACHED) && !st_merge_drain[e] &&
+        if (mshr_q_valid[e] && (mshr_q[e].state == MSHR_CACHED) &&
+            !st_merge_drain[e] && !merge_decided[e] &&
             (mshr_q[e].sub_reqs_num == '0) &&
             (mshr_q[e].served_cnt >=
              ((cfg_cache_reuse_target != '0)
@@ -2795,12 +2919,12 @@ module mempool_group_mshr
         mshr_d[e].resp_buf_wr_ptr = cap_g2[e] ? cap_n1 : cap_n0;
         // From mshr_q, which makes this literally st_cap_hold[e]'s expression (st_cap_fire is 1
         // inside this guard). burst_len is written only by the allocation, which cannot reach an
-        // entry the capture writes; sub_reqs_num is written only by the merge, which the no-late-join
-        // gate excludes for an entry with a beat arriving -- the same invariant st_cap_hold already
-        // depends on. If mshr_q were wrong here, st_post_cap would already be wrong.
+        // sub_reqs_num comes from mshr_d: the no-late-join gate only kept a merge and a capture
+        // apart in the SAME cycle, and the pipeline cut applies a merge one cycle after it is
+        // decided, so a beat can land on top of it.
         if (RespWaitSubsSingle && !amo_invalidate &&
             (mshr_q[e].burst_len == BurstLenWidth'(1)) &&
-            (mshr_q[e].sub_reqs_num < SubReqCountW'(cfg_hold_subs_single))) begin
+            (mshr_d[e].sub_reqs_num < SubReqCountW'(cfg_hold_subs_single))) begin
           mshr_d[e].state    = MSHR_RESP_HOLD;
           mshr_d[e].hold_cnt = hold_ticks(cfg_serve_timeout);
         end else begin
@@ -2828,9 +2952,11 @@ module mempool_group_mshr
     st_post_cap    = '{default: MSHR_IDLE};
     for (int e = 0; e < MshrNum; e++) begin
       st_cap_fire[e] = cap_g1[e] | cap_g2[e];
+      // mshr_d: the merge apply above may have raised sub_reqs_num this cycle (see the capture
+      // pass). Register-fed, so no request-path depth is added.
       st_cap_hold[e] = st_cap_fire[e] && RespWaitSubsSingle && !amo_invalidate &&
                        (mshr_q[e].burst_len == BurstLenWidth'(1)) &&
-                       (mshr_q[e].sub_reqs_num < SubReqCountW'(cfg_hold_subs_single));
+                       (mshr_d[e].sub_reqs_num < SubReqCountW'(cfg_hold_subs_single));
       st_post_cap[e] = st_cap_fire[e]
                      ? (st_cap_hold[e]    ? MSHR_RESP_HOLD : MSHR_DRAIN_RESP)
                      : (st_alloc_fire[e]  ? MSHR_WAIT_RESP
@@ -2952,7 +3078,7 @@ module mempool_group_mshr
         // entry (a merge into a CACHED entry sets st_merge_drain), so sub_reqs_num and hold_cnt are
         // still their registered values.
         end else if (CacheSelfInval && EnableRespCache && mshr_d_valid[e] &&
-                     (st_post_cap[e] == MSHR_CACHED) &&
+                     (st_post_cap[e] == MSHR_CACHED) && !merge_decided[e] &&
                      (mshr_q[e].sub_reqs_num == '0)) begin
           // A cache line that never reaches its sharing target ages out instead of pinning its way
           // Forever. Entries that DO reach the target are freed earlier by the self-invalidate pass.
@@ -3028,17 +3154,15 @@ module mempool_group_mshr
       if (PD2 && mshr_d_valid[mshr_i] &&
           (mshr_d[mshr_i].burst_len != BurstLenWidth'(1)) &&
           (mshr_d[mshr_i].resp_buf_cnt >= RespBufCountW'(2))) begin
-        // Same split as the head-beat seed above: the TRIGGER stays on mshr_d (sourcing it from
-        // mshr_q would add a cycle to every second beat), the DATA comes from mshr_q. sub_reqs /
-        // sub_reqs_num are written by the merge in the request path, so reading them from the
-        // register takes that path out of this cone. Legal by the same construction: the trigger
-        // requires MSHR_DRAIN_RESP, and req_addr_hit_drain blocks any merge into such an entry, so
-        // mshr_d.sub_reqs == mshr_q.sub_reqs here.
+        // Same sourcing as the head-beat seed: both trigger and data on mshr_d. req_addr_hit_drain
+        // blocks a merge DECISION into a draining entry, but the cut applies a merge one cycle
+        // later, so mshr_d.sub_reqs can carry a subscriber mshr_q does not. beat2_armed is
+        // one-shot, so a slot missed here is never re-seeded and that subscriber is never served.
         if ((mshr_d[mshr_i].state == MSHR_DRAIN_RESP) &&
             !mshr_d[mshr_i].beat2_armed &&
             (mshr_q[mshr_i].sub_reqs_num != '0)) begin
           for (int s = 0; s < MshrMergeReqs; s++) begin
-            mshr_d[mshr_i].beat_pending2[s] = mshr_q[mshr_i].sub_reqs[s].valid;
+            mshr_d[mshr_i].beat_pending2[s] = mshr_d[mshr_i].sub_reqs[s].valid;
           end
           mshr_d[mshr_i].beat2_armed = 1'b1;
         end
@@ -3582,6 +3706,62 @@ module mempool_group_mshr
   // Bank. Allocation enforces this (bank_free_id[req_bank] only returns ways of that bank), so if this
   // Ever fails a request could miss a real hit and allocate a duplicate. Catch any violation early.
   generate
+    // ------------------------------------------------------------
+    // Pipeline-cut invariants.
+    //
+    // Every other per-entry assertion here checks ONE entry against ITSELF, so a write dropped by
+    // a closed clock gate leaves the previous occupant's self-consistent snapshot and all of them
+    // pass. These check the cut itself: that a decision in flight lands, lands once, and is not
+    // overtaken. Simulation only.
+    // ------------------------------------------------------------
+    for (genvar e = 0; e < MshrNum; e++) begin : gen_mshr_cut_invariant
+      cut_alloc_ctl_gated: assert property(
+        @(posedge clk_i) disable iff (!rst_ni)
+          !alloc_inflight[e] || mshr_ctl_en[e])
+        else $fatal(1, "MSHR entry %0d: allocation applied with the control clock gate off", e);
+
+      cut_alloc_target_free: assert property(
+        @(posedge clk_i) disable iff (!rst_ni)
+          !alloc_inflight[e] || !mshr_q_valid[e] || (mshr_q[e].state == MSHR_CACHED))
+        else $fatal(1, "MSHR entry %0d: allocated over a live non-CACHED entry (state=%0d)",
+                    e, mshr_q[e].state);
+
+      cut_merge_not_retired: assert property(
+        @(posedge clk_i) disable iff (!rst_ni)
+          !merge_inflight[e] || mshr_d_valid[e])
+        else $fatal(1, "MSHR entry %0d: retired with a merge in flight -- subscriber lost", e);
+
+      // The capture must see the merge that is being applied this cycle, not the pre-merge count.
+      cut_cap_sees_merge: assert property(
+        @(posedge clk_i) disable iff (!rst_ni)
+          !(st_cap_fire[e] && merge_inflight[e]) ||
+          (mshr_d[e].sub_reqs_num == SubReqCountW'(mshr_q[e].sub_reqs_num + 1)))
+        else $fatal(1, "MSHR entry %0d: capture read a pre-merge sub_reqs_num (d=%0d q=%0d)",
+                    e, mshr_d[e].sub_reqs_num, mshr_q[e].sub_reqs_num);
+
+      // no_late_join_burst samples the DECISION cycle; the merge lands one cycle later, so the
+      // property has to be restated where the write actually happens.
+      cut_merge_apply_no_late_join: assert property(
+        @(posedge clk_i) disable iff (!rst_ni)
+          !(merge_inflight[e] && (mshr_q[e].burst_len > BurstLenWidth'(1))) ||
+          ((mshr_q[e].state == MSHR_WAIT_RESP) &&
+           (mshr_q[e].beats_left == mshr_q[e].burst_len)))
+        else $fatal(1, "MSHR late join at apply: entry=%0d state=%0d left=%0d",
+                    e, mshr_q[e].state, mshr_q[e].beats_left);
+    end
+
+    for (genvar b = 0; b < MshrBankNum; b++) begin : gen_mshr_cut_bank_invariant
+      cut_no_double_grant: assert property(
+        @(posedge clk_i) disable iff (!rst_ni)
+          !(agb_v[b] && agb_q_v[b] && (agb_way[b] == agb_q_way[b])))
+        else $fatal(1, "MSHR bank %0d: re-granted way %0d across the cut", b, agb_way[b]);
+    end
+
+    cut_busy_covers_inflight: assert property(
+      @(posedge clk_i) disable iff (!rst_ni)
+        !((|agb_q_v) || (|mgb_q_v)) || mshr_busy_o)
+      else $fatal(1, "MSHR busy_o low with a decision in flight -- bank-hash CSR could change");
+
     for (genvar mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin : gen_mshr_bank_invariant
       mshr_entry_in_its_bank: assert property(
         @(posedge clk_i) disable iff (!rst_ni)
