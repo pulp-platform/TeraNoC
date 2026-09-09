@@ -2358,6 +2358,10 @@ module mempool_group_mshr
   endgenerate
 
   logic [MshrBankNum-1:0]   drain2_bank_cand;                      // per-lane bank candidates
+  // Candidates with the sub-request axis kept, and the winning BANK. Under Drain2BankPublish
+  // the winner never has to be widened to MshrNum and encoded back.
+  logic [MshrBankNum-1:0][MshrMergeReqs-1:0] drain2_bank_sub_cand;
+  logic [BankIdW-1:0]       drain2_bank_idx;
   logic [MshrBankNum-1:0]   drain2_bank_rr_mask;
   logic [MshrBankNum-1:0]   drain2_bhi, drain2_blo, drain2_bfirst;
   logic [BankIdW-1:0]       drain2_bank_base;
@@ -3430,6 +3434,7 @@ module mempool_group_mshr
               // for THIS port?
               drain2_cand = '0;
               drain2_bank_cand = '0;
+              drain2_bank_sub_cand = '0;
               drain2_any = 1'b0;
               if (Drain2BankPublish) begin
                 // Only the published entry of each bank is selectable. b is a loop constant, so
@@ -3442,7 +3447,8 @@ module mempool_group_mshr
                          tile_group_id_t'(tile_i)) &&
                         (drain2_sub_port[b * MshrWaysPerBank + int'(drain2_pub_w[b])] ==
                          port_i[RespPortIdW-1:0])) begin
-                      drain2_bank_cand[b] = 1'b1;
+                      drain2_bank_sub_cand[b][s] = 1'b1;
+                      drain2_bank_cand[b]        = 1'b1;
                     end
                   end
                 end
@@ -3471,13 +3477,6 @@ module mempool_group_mshr
                 drain2_bfirst = (drain2_bhi != '0)
                                     ? (drain2_bhi & (~drain2_bhi + MshrBankNum'(1)))
                                     : (drain2_blo & (~drain2_blo + MshrBankNum'(1)));
-                // Re-expand the winning bank to the absolute entry one-hot so everything
-                // downstream (drain2_idx, drain2_mshr_i, the sub-request scan) is unchanged.
-                for (int b = 0; b < MshrBankNum; b++) begin
-                  if (drain2_bfirst[b]) begin
-                    drain2_first[b * MshrWaysPerBank + int'(drain2_pub_w[b])] = 1'b1;
-                  end
-                end
               end else begin
                 for (int e = 0; e < MshrNum; e++) begin
                   drain2_rr_mask[e] = EnableRrFairness ? (MshrIdxW'(e) >= drain2_base) : 1'b1;
@@ -3487,22 +3486,40 @@ module mempool_group_mshr
                 drain2_first = (drain2_hi != '0) ? (drain2_hi & (~drain2_hi + MshrNum'(1)))
                                                  : (drain2_lo & (~drain2_lo + MshrNum'(1)));
               end
-              drain2_idx   = '0;
-              for (int b = 0; b < MshrNum; b++) begin
-                if (drain2_first[b]) drain2_idx |= MshrIdxW'(b);
+              // Encode the winner on the axis it was decided on: MshrBankNum wide under
+              // Drain2BankPublish, MshrNum wide otherwise.
+              drain2_bank_idx = '0;
+              drain2_idx      = '0;
+              if (Drain2BankPublish) begin
+                for (int b = 0; b < MshrBankNum; b++) begin
+                  if (drain2_bfirst[b]) drain2_bank_idx |= BankIdW'(b);
+                end
+              end else begin
+                for (int b = 0; b < MshrNum; b++) begin
+                  if (drain2_first[b]) drain2_idx |= MshrIdxW'(b);
+                end
               end
               if (drain2_any) begin
-                drain2_mshr_i = drain2_idx;   // already absolute -- no base add
+                // The absolute id is still needed to address the entry, but it is now built from
+                // the winning bank and that bank's published way, not recovered from a MshrNum-wide
+                // scatter.
+                drain2_mshr_i = Drain2BankPublish
+                    ? MshrIdxW'(int'(drain2_bank_idx) * MshrWaysPerBank +
+                                int'(drain2_pub_w[drain2_bank_idx]))
+                    : drain2_idx;
                 // First eligible sub-request inside the winning entry, same rotated order.
                 for (int ks = 0; ks < MshrMergeReqs; ks++) begin
                   drain2_s = SubIdxW'(drain2_sub_base + SubIdxW'(ks));
-                  // Reuse the hoisted vectors instead of re-reading mshr_d[drain2_mshr_i] -- a
-                  // 4-bit
-                  // select in place of a full-entry MshrNum:1 struct mux.
+                  // Under Drain2BankPublish this row was already evaluated above: a
+                  // MshrBankNum:1 select instead of re-reading the ready/tile/port vectors at the
+                  // winning entry id.
                   if (!resp_sel2_valid[tile_i][port_i] &&
-                      drain2_sub_ready[drain2_mshr_i][drain2_s] &&
-                      (drain2_sub_tile[drain2_mshr_i][drain2_s] == tile_group_id_t'(tile_i)) &&
-                      (drain2_sub_port[drain2_mshr_i] == port_i[RespPortIdW-1:0])) begin
+                      (Drain2BankPublish
+                         ? drain2_bank_sub_cand[drain2_bank_idx][drain2_s]
+                         : (drain2_sub_ready[drain2_mshr_i][drain2_s] &&
+                            (drain2_sub_tile[drain2_mshr_i][drain2_s] ==
+                             tile_group_id_t'(tile_i)) &&
+                            (drain2_sub_port[drain2_mshr_i] == port_i[RespPortIdW-1:0])))) begin
                     resp_sel2_valid[tile_i][port_i]      = 1'b1;
                     resp_sel2_mshr_id[tile_i][port_i]    = mshr_id_t'(drain2_mshr_i);
                     resp_sel2_subreq_idx[tile_i][port_i] = drain2_s;   // already SubIdxW wide
