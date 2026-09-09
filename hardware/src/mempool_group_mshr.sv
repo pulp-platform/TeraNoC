@@ -742,6 +742,9 @@ module mempool_group_mshr
   logic      [MshrNum-1:0]                                                     st_cap_fire;
   logic      [MshrNum-1:0]                                                     st_cap_hold;
   mshr_state_t [MshrNum-1:0]                                                   st_post_cap;
+  // st_post_cap == MSHR_RESP_HOLD, reduced per entry so a lane selects one bit instead of
+  // muxing the state and comparing afterwards.
+  logic        [MshrNum-1:0]                                                   st_hold_post_cap;
   // Response capture is decided per ENTRY instead of chained across lanes.
   localparam int unsigned NumRespPortsActive = (NumRemoteRespPortsPerTile > 1) ?
                                                (NumRemoteRespPortsPerTile - 1) : 1;
@@ -2970,6 +2973,7 @@ module mempool_group_mshr
     st_cap_fire    = '0;
     st_cap_hold    = '0;
     st_post_cap    = '{default: MSHR_IDLE};
+    st_hold_post_cap = '0;
     for (int e = 0; e < MshrNum; e++) begin
       st_cap_fire[e] = cap_g1[e] | cap_g2[e];
       // mshr_d: the merge apply above may have raised sub_reqs_num this cycle (see the capture
@@ -2981,6 +2985,7 @@ module mempool_group_mshr
                      ? (st_cap_hold[e]    ? MSHR_RESP_HOLD : MSHR_DRAIN_RESP)
                      : (st_alloc_fire[e]  ? MSHR_WAIT_RESP
                      : (st_merge_drain[e] ? MSHR_DRAIN_RESP : mshr_q[e].state));
+      st_hold_post_cap[e] = (st_post_cap[e] == MSHR_RESP_HOLD);
     end
 
     // A buffered response predates any store/AMO observed after it returned.
@@ -2994,15 +2999,15 @@ module mempool_group_mshr
             cache_hit_e =
                 int'(req_bank[tile_i][port_i]) * MshrWaysPerBank + way_i;
             // Reads only, so the 32 lane evaluations are independent instead of chained.
+            // The address test is req_addr_hit_way, not a second copy of it: same e_abs, same
+            // mshr_q vintage, same two compares, and its extra req_in_valid term is implied by
+            // this block's own guard.
             // st_post_cap holds the value mshr_d would, computed from mshr_q plus the capture/merge
-            // fire terms. The sibling st_post_cap == MSHR_RESP_HOLD restricts this to an entry held
-            // in mshr_q or put there by the capture -- never CACHED, never freshly allocated
-            // (st_alloc_fire takes priority and yields MSHR_WAIT_RESP) -- and for such an entry
+            // fire terms. The sibling MSHR_RESP_HOLD test restricts this to an entry held in mshr_q
+            // or put there by the capture -- never CACHED, never freshly allocated (st_alloc_fire
+            // takes priority and yields MSHR_WAIT_RESP) -- and for such an entry
             // mshr_d_valid == mshr_q_valid with neither address field written.
-            if (mshr_q_valid[cache_hit_e] &&
-                (st_post_cap[cache_hit_e] == MSHR_RESP_HOLD) &&
-                (mshr_q[cache_hit_e].base_addr == req_addr_key[tile_i][port_i]) &&
-                (mshr_q[cache_hit_e].tgt_group_id == req_in[tile_i][port_i].tgt_group_id)) begin
+            if (req_addr_hit_way[tile_i][port_i][way_i] && st_hold_post_cap[cache_hit_e]) begin
               st_force_drain[cache_hit_e] = 1'b1;
             end
           end
