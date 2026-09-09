@@ -17257,3 +17257,41 @@ the author's established layout. The 1320-line `always_comb` split was already r
 `fwd_hits=1370 owner_stalls=1317 allocations=1248`).
 
 **Status.** Comment pass complete; RTL work for this round is wrapped up.
+
+## 2026-09-09 20:05 — group MSHR: eight variable-index removals (COMMITTED SPECULATIVELY)
+
+**Purpose.** A subagent audit of the current RTL for one class only -- a dynamic array index, which
+synthesis must build as an N-deep priority mux (read) or an N-wide scatter (write) because it cannot
+know which slot is touched. Five earlier passes had worked this class; it was not exhausted.
+
+**Implementation.** One commit per finding, cumulative, base `3b551e8f`:
+
+| commit | change | cone |
+|---|---|---|
+| `91cc496c` | OR the per-bank grant instead of `win_oh[req_bank][slot]` | request |
+| `d5de36f1` | force-drain reuses `req_addr_hit_way`; RESP_HOLD reduced per entry | request |
+| `b0077c8d` | merge capacity per way, killing a MshrNum:1 mux + adder + comparator | request |
+| `2f615d3a` | drain sub-request row selected, not recomputed at the winning id | drain |
+| `9384c0b0` | per-bank capture winner as a way one-hot (32-deep chain + 64x32 scatter gone) | response |
+| `baa04155` | drain2 winner encoded as a bank, not a MshrNum one-hot round trip | drain |
+| `468d2808` | drain drive operands published per bank instead of 32 lanes x MshrNum:1 | drain |
+| `97557d05` | store byte-merge entry predicate hoisted to a constant index | request |
+
+The three request-cone ones were verified against the source before implementing: `merge_slot` has
+exactly one functional reader and the `if` below it has an empty body; the arbiter's
+`req_per_bank[b][s] = cand_i[s] && (bank_i[s] == b)` is what makes the OR identical to the indexed
+read; and the force-drain terms are term-for-term `req_addr_hit_way`.
+
+**Result.** `vlog` clean on all eight. The split was replayed from `3b551e8f` and gated
+**byte-identical** to the file that was built and syntax-checked, so no commit contains untested
+text. The step-4 file hashes `c0e79c1c`, which is what the running `build_s4` arm reported -- that
+gate tests `2f615d3a` exactly.
+
+**Status: SPECULATIVE.** Committed at the user's request before the cluster gates returned. Arms in
+flight: `cm3` (comment pass), `s1`, `s3`, `s4`; `s8` (all eight) is queued. Every arm must return
+`[UART] The execution took 7133 cycles` with `fwd_hits=1370 owner_stalls=1317 allocations=1248`.
+
+**Note.** `hardware/generated/` was switched to 8x8 mid-session by another session building a VCS
+image; the `mempool_system` mesh assertion caught it and refused to elaborate rather than producing
+a wrong-mesh build. The arm runner now waits for 4x4 in both files (one is untracked, so they can
+disagree) instead of racing it.
