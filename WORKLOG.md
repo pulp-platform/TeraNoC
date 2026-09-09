@@ -17047,3 +17047,29 @@ predicate, same candidate id), so the `mshr_resp_inflight[e_abs]` term in `req_a
 is redundant. Deleting it removes a response->request combinational edge that runs THROUGH the big
 always_comb, which is the remaining item with real timing value -- but it touches the riskiest
 boundary in the module and gets its own build and sweep rather than being bundled here.
+
+## 2026-09-09 02:50 — group MSHR: drop the redundant response-inflight term; fix a byte-merge index
+
+**1. `mshr_resp_inflight` removed from both request-path consumers.** Verified term-for-term
+identical to `req_resp_seen`: same `resp_in_valid` / `wen==0` / `amo=='0` / `mshr_tag!='0` /
+`mshr_q_valid[cand]` / `(WAIT_RESP||DRAIN_RESP)` / owner-tile / `burst_beat_valid` predicate on the
+same candidate id (`mshr_tag - 1`). Both consumers already carried `req_resp_seen` directly beside
+it, so this is a pure deletion.
+
+The value is structural: `mshr_resp_inflight` is SCATTERED inside the main `always_comb`, so every
+consumer carried a response->request combinational edge THROUGH the block, while `req_resp_seen` is
+produced outside it. Its last reader is an assertion inside `ifndef TARGET_SYNTHESIS`, so synthesis
+now drops the signal entirely.
+
+**2. Byte-merge data index made to match its enable index -- a latent bug.** The store byte-merge
+wrote `mshr_d[e].resp_buf[mshr_d[e].resp_buf_rd_ptr]` while raising
+`mshr_rb_we[e][mshr_q[e].resp_buf_rd_ptr]`. At `CacheReclaimable=1` -- **the RTL default**, though
+the shipping build overrides it to 0 -- an allocation blanking `resp_buf_rd_ptr` in the same cycle
+steers the data write to one slot and the clock gate to another. Now both read `mshr_q`, which is
+what the enable's own justification comment already argued for, and it takes the allocation decode
+off the data index as well.
+
+**Status.** vopt clean; unit bench cohort 16 cycles / 1 NoC request on both. The
+vg_fp16_512x64x256 cluster runs (which must return exactly 7133, the number before these changes)
+were still in flight at commit time -- recorded here so the next session checks them rather than
+assuming.

@@ -573,7 +573,11 @@ module mempool_group_mshr
   // Hold-the-fetch replay walk start pointer (rotates every cycle for fairness among held
   // Entries contending for the same outbound lane). Tied off when the feature is compiled out.
   mshr_id_t                                                                    hold_replay_rr_q;
-  logic                [MshrNum-1:0]                                           mshr_resp_inflight; // Block same-cycle merge.
+  // Only an assertion reads this now. It is term-for-term identical to req_resp_seen (same valid /
+  // wen / amo / tag / mshr_q_valid / state / owner-tile / burst_beat_valid on the same candidate),
+  // but it is SCATTERED inside the main always_comb, so every consumer carried a response->request
+  // edge through the block. Synthesis drops it with its last reader.
+  logic                [MshrNum-1:0]                                           mshr_resp_inflight;
   // R1: per-response-lane validation, kept as (valid, target entry id) instead of scattered into a
   // MshrNum-wide vector. Both consumers index that vector by e_abs -- a DIFFERENT dynamic index --
   // so the scatter was immediately undone by a 64:1 re-mux. Comparing ids removes scatter and mux.
@@ -1184,8 +1188,7 @@ module mempool_group_mshr
               ((mshr_q[e_abs].state == MSHR_DRAIN_RESP) ||
                (merge_inflight[e_abs] && (mshr_q[e_abs].state != MSHR_WAIT_RESP)) ||
                alloc_inflight[e_abs] ||
-               (StallOnResp && (req_resp_seen[tile_i][port_i][way_i] ||
-                                mshr_resp_inflight[e_abs])));
+               (StallOnResp && req_resp_seen[tile_i][port_i][way_i]));
 
           assign req_hit_way[tile_i][port_i][way_i] =
               req_can_merge[tile_i][port_i] &&
@@ -1202,7 +1205,6 @@ module mempool_group_mshr
                 (mshr_q[e_abs].resp_buf_cnt != '0) &&
                 (req_len[tile_i][port_i] == BurstLenWidth'(1)))) &&
               !req_resp_seen[tile_i][port_i][way_i] &&
-              !mshr_resp_inflight[e_abs] &&
               ((mshr_q[e_abs].sub_reqs_num + SubReqCountW'(1)) <= MshrMergeReqs);
         end
         // Full-table meta-overlap (cross-bank): same tile+core, overlapping meta_id, different
@@ -2631,7 +2633,11 @@ module mempool_group_mshr
           stb_bytes[e]          = stb_bytes[e] | stb_be[l];
           for (int b = 0; b < StrbW; b++) begin
             if (stb_be[l][b]) begin
-              mshr_d[e].resp_buf[mshr_d[e].resp_buf_rd_ptr].data[b*8 +: 8] =
+              // mshr_q, matching the ENABLE index below. They disagreed: the data was written at
+              // the in-cycle pointer while mshr_rb_we raised the registered one, so at
+              // CacheReclaimable=1 (the RTL default) an allocation blanking resp_buf_rd_ptr in the
+              // same cycle could steer the write to one slot and the clock gate to another.
+              mshr_d[e].resp_buf[mshr_q[e].resp_buf_rd_ptr].data[b*8 +: 8] =
                   stb_wd[l][b*8 +: 8];
             end
           end
