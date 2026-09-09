@@ -17163,3 +17163,29 @@ flight at commit time.
 track to close 2 ns, at 130,913 um^2 against pre-cut `fixF_2p0`'s 119,064 (about +10% area).
 `cut_1p0` is at Ph24 with SETUP 13,178, which is not yet a verdict: `chain_1p2` held 13,729 flat for
 30 iterations before dropping 85%.
+
+## 2026-09-09 17:20 — group MSHR: store byte-merge becomes a one-hot select
+
+**Purpose.** The last of the three timing items. The byte-merge walked 32 lanes per byte, each
+overwriting the last, so synthesis built a 32-deep chain into `resp_buf.data` -- 8192 registers, and
+the worst request-fed endpoint family in the placed report.
+
+**Implementation.** Per (entry, byte): build the mask of lanes wanting that byte, isolate the
+HIGHEST set bit (which is the old loop's last-writer-wins), and OR the masked lanes. 32 levels -> 5.
+The MSB-isolate is reverse / LSB-isolate (`x & (~x+1)`, the arbiter's own idiom) / reverse, and every
+operand is a function argument, so nothing is sampled implicitly.
+
+**Three things checked before committing to the approach**, rather than assumed:
+* equivalence -- "last writer" is the highest lane index, so the selector is an MSB-isolate;
+* area -- the sequential form already implies a 32-input priority mux per (entry, byte), so this is
+  the same gate count restructured from a chain into a tree, not an expansion;
+* `stb_ovl` -- its only consumer is a debug counter, so the overlap detection moved inside
+  `ifndef TARGET_SYNTHESIS` and costs no hardware. `stb_seen`, which existed only to drive it, is
+  deleted.
+
+**Verified.** vopt clean, full 8-test unit suite passes with 0 failures. The vg_fp16_512x64x256
+cluster runs for this and for the preceding apply-loop change were both still in flight at commit
+time; both must return 7133.
+
+**All three timing optimisations are now implemented on the post-cut RTL:** mshr_hit_req per-entry
+compare, per-entry apply loops, and this. The `_precut` comparison variant was dropped as not needed.

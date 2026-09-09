@@ -786,7 +786,11 @@ module mempool_group_mshr
   logic [RespLaneW-1:0]                                                        stb_lane;
   logic [MshrNum-1:0][StrbW-1:0]                                               stb_bytes;
   logic [MshrNum-1:0]                                                          stb_ovl;
-  logic [StrbW-1:0]                                                            stb_seen;
+  /// Per (entry, byte): which lanes want to write that byte, which one wins, and its data.
+  /// The winner is the HIGHEST lane index, reproducing the old loop's last-writer-wins.
+  logic [MshrNum-1:0][StrbW-1:0][NumReqLanes-1:0]                              stb_byte_req;
+  logic [MshrNum-1:0][StrbW-1:0][NumReqLanes-1:0]                              stb_byte_win;
+  logic [MshrNum-1:0][StrbW-1:0][7:0]                                          stb_byte_data;
   mshr_resp_slot_t [MshrNum-1:0]                                               cap_d0, cap_d1;
   logic [RespBufPtrW-1:0]                                                      cap_s0, cap_s1, cap_n0, cap_n1;
   logic      [RespBufCountW-1:0]                                               cap_cnt_sum;
@@ -1306,6 +1310,40 @@ module mempool_group_mshr
       end
     end
   endgenerate
+
+  /// Highest set bit of a lane vector -- the last writer in the old sequential loop.
+  function automatic logic [NumReqLanes-1:0] stb_hi_isolate(input logic [NumReqLanes-1:0] v);
+    logic [NumReqLanes-1:0] rev, iso;
+    for (int i = 0; i < NumReqLanes; i++) rev[i] = v[NumReqLanes-1-i];
+    iso = rev & (~rev + 1'b1);
+    for (int i = 0; i < NumReqLanes; i++) stb_hi_isolate[i] = iso[NumReqLanes-1-i];
+  endfunction
+
+  /// Store byte-merge select, one-hot per (entry, byte).
+  ///
+  /// The sequential form walked 32 lanes per byte, each overwriting the last, so synthesis built a
+  /// 32-deep chain into resp_buf.data -- 8192 registers, and the worst request-fed endpoint family
+  /// in the placed report. Selecting with a one-hot and OR-ing the masked lanes is the same result
+  /// in log depth: 32 levels -> 5. Every operand is an argument, so the function samples nothing
+  /// implicitly.
+  generate
+    for (genvar e = 0; e < MshrNum; e++) begin : gen_stb_e
+      for (genvar b = 0; b < StrbW; b++) begin : gen_stb_b
+        for (genvar l = 0; l < NumReqLanes; l++) begin : gen_stb_l
+          assign stb_byte_req[e][b][l] = stb_hit[e][l] && stb_be[l][b];
+        end
+        assign stb_byte_win[e][b] = stb_hi_isolate(stb_byte_req[e][b]);
+      end
+    end
+  endgenerate
+
+  always_comb begin
+    stb_byte_data = '0;
+    for (int e = 0; e < MshrNum; e++)
+      for (int b = 0; b < StrbW; b++)
+        for (int l = 0; l < NumReqLanes; l++)
+          stb_byte_data[e][b] |= {8{stb_byte_win[e][b][l]}} & stb_wd[l][b*8 +: 8];
+  end
 
   // Mshr_hit_req[e]: is entry e address-hit by some request this cycle?
   if (CacheReclaimable) begin : gen_mshr_hit_req
@@ -2613,25 +2651,19 @@ module mempool_group_mshr
       end
     end
 
-    // One byte-merge per entry.
+    // One byte-merge per entry. The lane walk lives in gen_stb_e above; this only applies the
+    // per-byte winner. resp_buf_rd_ptr is read from mshr_q, matching the ENABLE index below.
     stb_bytes = '0; stb_ovl = '0;
     for (int e = 0; e < MshrNum; e++) begin
-      stb_seen = '0;
-      for (int l = 0; l < NumReqLanes; l++) begin
-        if (stb_hit[e][l]) begin
-          if (|(stb_seen & stb_be[l])) stb_ovl[e] = 1'b1;   // two lanes, same byte, same cycle
-          stb_seen              = stb_seen | stb_be[l];
-          stb_bytes[e]          = stb_bytes[e] | stb_be[l];
-          for (int b = 0; b < StrbW; b++) begin
-            if (stb_be[l][b]) begin
-              // mshr_q, matching the ENABLE index below. They disagreed: the data was written at
-              // the in-cycle pointer while mshr_rb_we raised the registered one, so at
-              // CacheReclaimable=1 (the RTL default) an allocation blanking resp_buf_rd_ptr in the
-              // same cycle could steer the write to one slot and the clock gate to another.
-              mshr_d[e].resp_buf[mshr_q[e].resp_buf_rd_ptr].data[b*8 +: 8] =
-                  stb_wd[l][b*8 +: 8];
-            end
-          end
+      for (int b = 0; b < StrbW; b++) begin
+        stb_bytes[e][b] = |stb_byte_req[e][b];
+`ifndef TARGET_SYNTHESIS
+        // Two lanes writing one byte in one cycle -- a statistic, not a hazard: the winner is
+        // defined (highest lane), exactly as the sequential form defined it.
+        if ($countones(stb_byte_req[e][b]) > 1) stb_ovl[e] = 1'b1;
+`endif
+        if (stb_bytes[e][b]) begin
+          mshr_d[e].resp_buf[mshr_q[e].resp_buf_rd_ptr].data[b*8 +: 8] = stb_byte_data[e][b];
         end
       end
       if (|stb_bytes[e]) begin
