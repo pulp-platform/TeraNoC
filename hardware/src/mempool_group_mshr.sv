@@ -1436,8 +1436,9 @@ module mempool_group_mshr
   // Loop temporaries for the allocation arbiter, declared at module scope rather than as
   // procedural `automatic`s inside the always_comb below.
   logic [AllocRrW-1:0]                       alloc_slot_idx;      // flatten block
-  logic [AllocRrW-1:0]                       alloc_scatter_slot;  // scatter block
-  logic [BankIdW-1:0]                        alloc_scatter_bank;
+  // Per-bank grant, before the OR that returns it to its requester.
+  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrBankNum-1:0] alloc_grant_bank;
+  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrBankNum-1:0] merge_grant_bank;
 
   // Per-bank merge arbiter (OneMergePerBank). Same shape as the allocation arbiter above and
   // sharing its rotation base, so a high-index tile is not perpetually beaten to a contended bank.
@@ -1447,7 +1448,6 @@ module mempool_group_mshr
   logic [NumAllocSlots-1:0][BankIdW-1:0]     merge_arb_bank_flat;
   logic [MshrBankNum-1:0][NumAllocSlots-1:0] bank_merge_win_oh;   // one-hot merge winner per bank
   logic [AllocRrW-1:0]                       merge_arb_slot_idx;      // flatten block
-  logic [AllocRrW-1:0]                       merge_arb_scatter_slot;  // scatter block
 `ifndef TARGET_SYNTHESIS
   logic [NumAllocSlots-1:0]                  merge_arb_grant_flat_dbg; // granted lanes, for coverage
 `endif
@@ -1483,21 +1483,27 @@ module mempool_group_mshr
     .win_oh_o    (bank_win_oh)
   );
 
-  // Scatter the per-bank one-hot grant back to the (tile,port) requesters. Slot s only ever appears
-  // in its own bank's vector, so indexing by req_bank here selects that same bank.
-  always_comb begin
-    for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
-      for (int port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin
-        alloc_scatter_slot = AllocRrW'(tile_i * NumReqPortsActive + (port_i - 1));
-        alloc_scatter_bank = req_bank[tile_i][port_i];
-        req_alloc_found[tile_i][port_i]         =
-            bank_win_oh[alloc_scatter_bank][alloc_scatter_slot];
-        req_alloc_found_mshr_id[tile_i][port_i] =
-            bank_win_oh[alloc_scatter_bank][alloc_scatter_slot] ? bank_free_id[alloc_scatter_bank]
-                                                                : '0;
+  // Return the per-bank one-hot grant to its (tile,port) requester. The arbiter builds its request
+  // vector as `cand && (bank == b)` (mempool_group_mshr_bank_arb), so a slot can only ever win in
+  // its OWN bank -- the OR below is identical to indexing by req_bank, and keeps req_bank (the
+  // latest signal in this cone) off the grant path. bank_free_id reads registers only, so the one
+  // remaining bank select has early data and an early index.
+  generate
+    for (genvar tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin : gen_grant_tile
+      for (genvar port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin : gen_grant_port
+        for (genvar bank_i = 0; bank_i < MshrBankNum; bank_i++) begin : gen_grant_bank
+          assign alloc_grant_bank[tile_i][port_i][bank_i] =
+              bank_win_oh[bank_i][tile_i * NumReqPortsActive + (port_i - 1)];
+          assign merge_grant_bank[tile_i][port_i][bank_i] =
+              bank_merge_win_oh[bank_i][tile_i * NumReqPortsActive + (port_i - 1)];
+        end
+        assign req_alloc_found[tile_i][port_i] = |alloc_grant_bank[tile_i][port_i];
+        assign req_merge_ready[tile_i][port_i] = |merge_grant_bank[tile_i][port_i];
+        assign req_alloc_found_mshr_id[tile_i][port_i] =
+            req_alloc_found[tile_i][port_i] ? bank_free_id[req_bank[tile_i][port_i]] : '0;
       end
     end
-  end
+  endgenerate
 
   // Select the merge target per request.
   always_comb begin
@@ -1552,16 +1558,6 @@ module mempool_group_mshr
     end
   end
 `endif
-
-  always_comb begin
-    for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
-      for (int port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin
-        merge_arb_scatter_slot = AllocRrW'(tile_i * NumReqPortsActive + (port_i - 1));
-        req_merge_ready[tile_i][port_i] =
-            bank_merge_win_oh[req_bank[tile_i][port_i]][merge_arb_scatter_slot];
-      end
-    end
-  end
 
   // Sequential state update
   // shared hold prescaler: one free-running counter per MSHR instance. Entry e takes its tick
