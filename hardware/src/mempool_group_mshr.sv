@@ -761,10 +761,13 @@ module mempool_group_mshr
   logic [MshrBankNum-1:0][NumRespLanes-1:0]                                    capb_want;
   logic [MshrBankNum-1:0][NumRespLanes-1:0]                                    capb_l1, capb_l2;
   logic [NumRespLanes-1:0]                                                     capb_rest;
-  mshr_id_t [MshrBankNum-1:0]                                                  capb_e1, capb_e2;
+  // Which WAY of the bank each grant landed on, and that way's slot headroom. Keeping the winner
+  // as a one-hot over MshrWaysPerBank instead of an entry id removes the 32-deep last-writer chain
+  // that encoded it, the MshrNum:1 reads of mshr_resp_slots, and the MshrNum-wide scatter back.
+  logic [MshrBankNum-1:0][MshrWaysPerBank-1:0]                                 capb_l1_way, capb_l2_way;
+  logic [MshrBankNum-1:0][MshrWaysPerBank-1:0]                                 capb_slot_ge1, capb_slot_ge2;
   logic [MshrBankNum-1:0]                                                      capb_g1, capb_g2;
   logic [MshrBankNum-1:0]                                                      capb_same;
-  logic [RespLaneW-1:0]                                                        capb_lane;
   // Per-entry masks of what the two drain DRIVE loops want cleared. Both loops only ever
   // clear BITS, and bit clears commute -- so ORing the requests and applying one AND-NOT per entry
   // is identical to letting 32 lanes each read-modify-write the entry in turn.
@@ -2832,21 +2835,24 @@ module mempool_group_mshr
         capb_l1[b] = capb_want[b] & (~capb_want[b] + NumRespLanes'(1));
         capb_rest  = capb_want[b] & ~capb_l1[b];
         capb_l2[b] = capb_rest    & (~capb_rest    + NumRespLanes'(1));
-        capb_e1[b] = '0;
-        capb_e2[b] = '0;
-        for (int t = 0; t < NumTilesPerGroup; t++) begin
-          for (int pp = 1; pp < NumRemoteRespPortsPerTile; pp++) begin
-            capb_lane = RespLaneW'(t * NumRespPortsActive + (pp - 1));
-            if (capb_l1[b][capb_lane]) capb_e1[b] = resp_mshr_id[t][pp];
-            if (capb_l2[b][capb_lane]) capb_e2[b] = resp_mshr_id[t][pp];
-          end
+        // cap_want[e] is the set of lanes targeting entry e, so intersecting it with the granted
+        // lane names the way directly -- one-hot, because a lane targets exactly one entry.
+        for (int w = 0; w < MshrWaysPerBank; w++) begin
+          capb_l1_way  [b][w] = |(capb_l1[b] & cap_want[b * MshrWaysPerBank + w]);
+          capb_l2_way  [b][w] = |(capb_l2[b] & cap_want[b * MshrWaysPerBank + w]);
+          capb_slot_ge1[b][w] =
+              (mshr_resp_slots[b * MshrWaysPerBank + w] >= RespBufCountW'(1));
+          capb_slot_ge2[b][w] =
+              (mshr_resp_slots[b * MshrWaysPerBank + w] >= RespBufCountW'(2));
         end
-        capb_same[b] = (capb_e1[b] == capb_e2[b]);
-        capb_g1[b] = (capb_l1[b] != '0) &&
-                     (mshr_resp_slots[capb_e1[b]] >= RespBufCountW'(1));
+        // Both grants on the same way is the same entry. Only read under capb_l2 != 0, where both
+        // one-hots are populated -- the old id compare needed the same guard, since the ids
+        // defaulted to 0.
+        capb_same[b] = |(capb_l1_way[b] & capb_l2_way[b]);
+        capb_g1[b] = (capb_l1[b] != '0) && |(capb_l1_way[b] & capb_slot_ge1[b]);
         capb_g2[b] = (capb_l2[b] != '0) &&
-                     (capb_same[b] ? (mshr_resp_slots[capb_e1[b]] >= RespBufCountW'(2))
-                                   : (mshr_resp_slots[capb_e2[b]] >= RespBufCountW'(1)));
+                     (capb_same[b] ? |(capb_l1_way[b] & capb_slot_ge2[b])
+                                   : |(capb_l2_way[b] & capb_slot_ge1[b]));
       end
       // Map back onto the per-entry vectors the rest of the pass reads, so nothing downstream
       // changes. The guards matter: a bank with no wanter must not write entry 0 and clobber
@@ -2856,17 +2862,19 @@ module mempool_group_mshr
       cap_g1     = '0;
       cap_g2     = '0;
       for (int b = 0; b < MshrBankNum; b++) begin
-        if (capb_l1[b] != '0) begin
-          cap_first[capb_e1[b]] = capb_l1[b];
-          cap_g1[capb_e1[b]]    = capb_g1[b];
-        end
-        if (capb_l2[b] != '0) begin
-          if (capb_same[b]) begin
-            cap_second[capb_e1[b]] = capb_l2[b];
-            cap_g2[capb_e1[b]]     = capb_g2[b];
-          end else begin
-            cap_first[capb_e2[b]] = capb_l2[b];
-            cap_g1[capb_e2[b]]    = capb_g2[b];
+        for (int w = 0; w < MshrWaysPerBank; w++) begin
+          if ((capb_l1[b] != '0) && capb_l1_way[b][w]) begin
+            cap_first[b * MshrWaysPerBank + w] = capb_l1[b];
+            cap_g1   [b * MshrWaysPerBank + w] = capb_g1[b];
+          end
+          if ((capb_l2[b] != '0) && capb_l2_way[b][w]) begin
+            if (capb_same[b]) begin
+              cap_second[b * MshrWaysPerBank + w] = capb_l2[b];
+              cap_g2    [b * MshrWaysPerBank + w] = capb_g2[b];
+            end else begin
+              cap_first[b * MshrWaysPerBank + w] = capb_l2[b];
+              cap_g1   [b * MshrWaysPerBank + w] = capb_g2[b];
+            end
           end
         end
       end
