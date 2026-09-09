@@ -17073,3 +17073,32 @@ off the data index as well.
 vg_fp16_512x64x256 cluster runs (which must return exactly 7133, the number before these changes)
 were still in flight at commit time -- recorded here so the next session checks them rather than
 assuming.
+
+## 2026-09-09 12:40 — group MSHR: remove aliases and duplicate localparams
+
+Each item verified against the source before removal, not taken on the reviewer's word.
+
+| removed | evidence |
+|---|---|
+| `drain_scan_ent` | `drain_scan_ent[e] = mshr_q[e]` -- a full-entry STRUCT COPY per entry, read six times. It became a pure alias when the DrainFromQ ternary was removed; the readers now use `mshr_q` directly. |
+| `DrainMshrRrW` | `= idx_width(MshrNum)`, identical to `MshrIdxW` three lines below; the two were used interchangeably. |
+| `SubReqRrW` | `= idx_width(MshrMergeReqs)`, identical to `SubIdxW`. |
+| `[MSHRLIFE]` block | a header over an EMPTY `ifndef VERILATOR` / `ifndef TARGET_SYNTHESIS` pair. |
+
+The `drain_scan_ent` removal is the only one with hardware value, and it is real: a MshrNum-deep
+array of full-entry struct copies existed purely as an alias.
+
+**Deliberately not removed.** `DrainMultiPort` -- nothing overrides it and the elaboration check
+forces it to 1 whenever PD2 is on, but removing a module PARAMETER changes the interface and its
+`if` has no `else`, so a reachability mistake leaves `resp_sel_*` unassigned. Zero hardware gain,
+non-zero risk. `stb_bytes` -> 1 bit is valid (only `|stb_bytes[e]` is read) but sits inside the
+store byte-merge, which is the next rewrite of those same lines.
+
+**Verified.** vopt clean, unit bench cohort 16 cycles / 1 NoC request, and the vg_fp16_512x64x256
+cluster shape at **7133 cycles** -- exactly the number before the change, as a pure removal must be.
+
+**Process note.** Earlier in this session the working tree was clobbered TWICE by exit traps in
+sweep scripts restoring their stale backups, the second time landing comment edits on a base two
+commits old. All eleven backup files are now re-pointed at the worktree as a step in every edit
+cycle, and a comment-only change is checked with
+`git diff | grep -v '^[+-]\s*//'` -- which is what caught it.
