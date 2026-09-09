@@ -2088,6 +2088,9 @@ module mempool_group_mshr
   // so the arbitration runs over MshrBankNum candidates instead of MshrNum.
   logic [MshrBankNum-1:0][MshrIdxW-1:0] bank_pub_e;    // published entry id per bank (port-indep.)
   logic [MshrBankNum-1:0]   bank_cand, bank_cand_rot, bank_cand_eff, bank_pfx, bank_first;
+  // Per-bank candidates with the sub-request axis KEPT, so the winner's sub-request set is
+  // selected rather than re-derived at the winning entry id.
+  logic [MshrBankNum-1:0][MshrMergeReqs-1:0] bank_sub_cand;
   logic [BankIdW-1:0]       bank_base, bank_idx, bank_win_d, bank_win;
   logic [VictimPtrW-1:0]    base_way;
   logic                     bank_demote;
@@ -3242,6 +3245,7 @@ module mempool_group_mshr
             // Per-entry: does this entry offer any sub-request eligible for THIS port?
             drain_ent_cand = '0;
             bank_cand      = '0;
+            bank_sub_cand  = '0;
             if (BankPublish) begin
               // Evaluate only the MshrBankNum published entries, not all MshrNum -- the
               // per-(tile,port) predicate work drops by MshrWaysPerBank.
@@ -3251,7 +3255,8 @@ module mempool_group_mshr
                       drain_sub_ready[bank_pub_e[b]][s] &&
                       (drain_sub_tile[bank_pub_e[b]][s] == tile_group_id_t'(tile_i)) &&
                       (drain_sub_port[bank_pub_e[b]][s] == port_i[RespPortIdW-1:0])) begin
-                    bank_cand[b] = 1'b1;
+                    bank_sub_cand[b][s] = 1'b1;
+                    bank_cand[b]        = 1'b1;
                   end
                 end
               end
@@ -3304,13 +3309,21 @@ module mempool_group_mshr
               drain_win_e  = drain_have_e ? MshrIdxW'(drain_sel_base + drain_idx) : '0;
             end
             if (drain_have_e) begin
-              // First eligible sub-request inside the winning entry, same rotated order.
+              // Eligible sub-requests inside the winning entry. Under BankPublish this is the row
+              // already evaluated above -- a MshrBankNum:1 select of MshrMergeReqs bits, not a
+              // MshrNum:1 re-read of drain_sub_ready/_tile/_port at the winning entry id. The
+              // winning bank always has bank_pub_v set: bank_cand[b] requires it, and the demoted
+              // fallback picks bank_base, which is in bank_cand whenever bank_cand_eff is empty.
               drain_sub_cand = '0;
-              for (int s = 0; s < MshrMergeReqs; s++) begin
-                if (drain_sub_ready[drain_win_e][s] &&
-                    (drain_sub_tile[drain_win_e][s] == tile_group_id_t'(tile_i)) &&
-                    (drain_sub_port[drain_win_e][s] == port_i[RespPortIdW-1:0])) begin
-                  drain_sub_cand[s] = 1'b1;
+              if (BankPublish) begin
+                drain_sub_cand = bank_sub_cand[bank_win];
+              end else begin
+                for (int s = 0; s < MshrMergeReqs; s++) begin
+                  if (drain_sub_ready[drain_win_e][s] &&
+                      (drain_sub_tile[drain_win_e][s] == tile_group_id_t'(tile_i)) &&
+                      (drain_sub_port[drain_win_e][s] == port_i[RespPortIdW-1:0])) begin
+                    drain_sub_cand[s] = 1'b1;
+                  end
                 end
               end
               drain_have_s = 1'b0; drain_win_s = '0;
