@@ -17189,3 +17189,27 @@ time; both must return 7133.
 
 **All three timing optimisations are now implemented on the post-cut RTL:** mshr_hit_req per-entry
 compare, per-entry apply loops, and this. The `_precut` comparison variant was dropped as not needed.
+
+## 2026-09-09 17:55 — group MSHR: two safe disaggregation steps, and the dead port_taken write
+
+**1. `stb_be` / `stb_wd` lane pack lifted into a generate.** Reads `req_in` only, nothing else
+drives them, no order dependence on the main pass.
+
+**2. Removed the dead `port_taken = 1'b1` write** in the ParityDrain drive. Verified rather than
+assumed: both readers (:3296, :3465) PRECEDE it and nothing reads it afterwards. This also removes a
+second driver of a signal the select pass owns, which is the prerequisite for ever splitting the
+drain select from the drain drive.
+
+**Ruled out, with reasons.** `st_post_cap` was ranked a safe extraction by the review, but is no
+longer: `st_cap_hold` now reads `mshr_d[e].sub_reqs_num` (my own fix for defect #4), and the later
+`fin_cache` pass writes `sub_reqs_num = '0'`, so a separate always_comb would see the POST-RETIRE
+value. `st_force_drain` writes `mshr_d` directly and cannot be lifted either.
+
+**Assessment.** The main always_comb is 1328 lines in three sections -- request ~350, response ~455,
+drain ~465 -- and all three write `mshr_d`, so none extracts wholesale. What remains (`cap_arb`,
+needing block-local temps; `drain_select`, ~250 lines) is READABILITY ONLY with no PPA gain, against
+a module that produced eight silent defects today and four failed split attempts, three of which
+compiled cleanly first. Stopping the disaggregation here is the better trade.
+
+**Status.** vopt clean and the full unit suite passes on both steps; the two vg_fp16_512x64x256
+cluster runs (which must return 7133) were still in flight at commit time.

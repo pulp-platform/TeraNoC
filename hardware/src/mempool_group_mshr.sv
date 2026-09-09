@@ -1311,6 +1311,18 @@ module mempool_group_mshr
     end
   endgenerate
 
+  /// Store byte-merge lane pack: a flat view of req_in for the merge below. Reads req_in only and
+  /// nothing else drives these, so it carries no order dependence on the main pass.
+  generate
+    for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_stb_pack_t
+      for (genvar pp = 1; pp < NumRemoteReqPortsPerTile; pp++) begin : gen_stb_pack_p
+        localparam int unsigned StbL = t * NumReqPortsActiveF3 + (pp - 1);
+        assign stb_be[StbL] = req_in[t][pp].be;
+        assign stb_wd[StbL] = req_in[t][pp].wdata.data;
+      end
+    end
+  endgenerate
+
   /// Highest set bit of a lane vector -- the last writer in the old sequential loop.
   function automatic logic [NumReqLanes-1:0] stb_hi_isolate(input logic [NumReqLanes-1:0] v);
     logic [NumReqLanes-1:0] rev, iso;
@@ -2419,12 +2431,6 @@ module mempool_group_mshr
     merge_same_mask = '0;
 
     stb_hit = '0;
-    for (int t = 0; t < NumTilesPerGroup; t++) begin
-      for (int pp = 1; pp < NumRemoteReqPortsPerTile; pp++) begin
-        stb_be[t * NumReqPortsActiveF3 + (pp - 1)] = req_in[t][pp].be;
-        stb_wd[t * NumReqPortsActiveF3 + (pp - 1)] = req_in[t][pp].wdata.data;
-      end
-    end
 
     // ------------------------------------------------------------
     // Request path: merge loads, allocate MSHR, or bypass to NoC
@@ -3566,7 +3572,9 @@ module mempool_group_mshr
 `ifndef TARGET_SYNTHESIS
               resp_mshr_id_dbg[tile_i][port_i] = drain2_sel_e2;
 `endif
-              port_taken[tile_i][port_i] = 1'b1;
+              // port_taken is NOT set here: both of its readers (:3296, :3465) precede this point,
+              // so the write was dead. It also made the drain drive a second driver of a signal the
+              // select pass owns, which blocked splitting the two apart.
               if (resp_out_ready[tile_i][port_i]) begin
                 bp2_clr[drain2_sel_e2][resp_sel2_subreq_idx[tile_i][port_i]] = 1'b1;
               end
