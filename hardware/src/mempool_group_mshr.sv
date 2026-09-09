@@ -614,6 +614,8 @@ module mempool_group_mshr
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrWaysPerBank-1:0] req_addr_hit_way;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrWaysPerBank-1:0] req_addr_hit_drain_way;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrWaysPerBank-1:0] req_hit_way;
+  // Merge capacity for this way, evaluated where the entry index is still the EARLY req_bank.
+  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrWaysPerBank-1:0] req_hit_cap_way;
   // Meta-overlap is a CROSS-address check (same tile+core, different address, overlapping meta_id
   // range) that protects core-side (core,meta_id) response uniqueness.
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrNum-1:0]         req_meta_ovlp_map;
@@ -637,6 +639,7 @@ module mempool_group_mshr
   mshr_id_t  [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_fwd_id;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_hit_mshr_sel_valid;
   mshr_id_t  [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_hit_mshr_sel_id;
+  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_hit_cap_sel;
   logic      [MshrNum-1:0]                                                     mshr_hit_req;
   /// Per-entry, per-lane hit terms feeding mshr_hit_req. Only generated at CacheReclaimable=1.
   logic [MshrNum-1:0][NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]      mshr_hit_req_lane;
@@ -833,7 +836,6 @@ module mempool_group_mshr
   localparam int unsigned AllocRrW          = idx_width(NumAllocSlots);
   // Sized by NumAllocSlots, so these must follow it rather than sit beside req_merge_*.
   logic [NumAllocSlots-1:0] merge_same_mask;   // earlier ports targeting the SAME entry
-  logic [MergeRankW-1:0]    merge_slot;        // q.sub_reqs_num + this port's rank (cannot wrap)
   logic [AllocRrW-1:0]      alloc_rr_q, alloc_rr_d;
   // (B) drain: rotate the MSHR-entry scan axis (MshrNum entries) -- width is MshrIdxW below.
   // Natural widths for the rotated scan indices. Power-of-two MshrNum/MshrMergeReqs is
@@ -1195,6 +1197,14 @@ module mempool_group_mshr
                 (req_len[tile_i][port_i] == BurstLenWidth'(1)))) &&
               !req_resp_seen[tile_i][port_i][way_i] &&
               ((mshr_q[e_abs].sub_reqs_num + SubReqCountW'(1)) <= MshrMergeReqs);
+
+          // Same capacity test the merge accept applies, plus the in-flight merge this entry has
+          // not yet absorbed. Evaluated here because e_abs indexes on req_bank, which is ready
+          // early; at the accept the only available index is the selected way, the latest signal
+          // in this cone. Data is register-fed (mshr_q, and merge_inflight from mgb_q_*).
+          assign req_hit_cap_way[tile_i][port_i][way_i] =
+              ((MergeRankW'(mshr_q[e_abs].sub_reqs_num + SubReqCountW'(merge_inflight[e_abs])) +
+                MergeRankW'(1)) <= MergeRankW'(MshrMergeReqs));
         end
         // Full-table meta-overlap (cross-bank): same tile+core, overlapping meta_id, different
         // address.
@@ -1368,12 +1378,16 @@ module mempool_group_mshr
         req_hit_mshr_sel_valid[tile_i][port_i] = req_fwd_hit[tile_i][port_i];
         req_hit_mshr_sel_id[tile_i][port_i]    = req_fwd_hit[tile_i][port_i]
                                                ? req_fwd_id[tile_i][port_i] : '0;
+        // A forwarded merge is the leader's sub_reqs[1], so its capacity term const-folds.
+        req_hit_cap_sel[tile_i][port_i]        =
+            (MergeRankW'(1) + MergeRankW'(1)) <= MergeRankW'(MshrMergeReqs);
         for (int way_i = 0; way_i < MshrWaysPerBank; way_i++) begin
           if (!req_hit_mshr_sel_valid[tile_i][port_i] &&
               req_hit_way[tile_i][port_i][way_i]) begin
             req_hit_mshr_sel_valid[tile_i][port_i] = 1'b1;
             req_hit_mshr_sel_id[tile_i][port_i] =
                 mshr_id_t'(int'(req_bank[tile_i][port_i]) * MshrWaysPerBank + way_i);
+            req_hit_cap_sel[tile_i][port_i] = req_hit_cap_way[tile_i][port_i][way_i];
           end
         end
       end
@@ -2413,22 +2427,12 @@ module mempool_group_mshr
             req_out[tile_i][port_i].burst_len = BurstLenWidth'(1);
           end
           if (req_merge_valid[tile_i][port_i]) begin
-            // Merge hit: accept without touching NoC.
-            // Slot and capacity come from the REGISTERED count plus this port's rank, not from
-            // the value earlier ports left in mshr_d.
-            merge_slot = req_fwd_hit[tile_i][port_i]
-                       ? MergeRankW'(1)   // forwarded: the leader will be sub_reqs[0]
-                       : MergeRankW'(mshr_q[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num +
-                                     SubReqCountW'(merge_inflight[req_merge_mshr_id[tile_i][port_i]]));
+            // Merge hit: accept without touching NoC. Capacity was decided per way alongside
+            // req_hit_way and selected with it, so no entry array is read at the selected id here.
+            // The merge itself is RECORDED by the arbiter; the apply runs once per bank after this
+            // loop closes, so no lane reads what an earlier lane wrote.
             req_in_ready[tile_i][port_i] =
-                req_merge_ready[tile_i][port_i] &&
-                ((merge_slot + MergeRankW'(1)) <= MergeRankW'(MshrMergeReqs));
-            if (req_in_ready[tile_i][port_i]) begin
-              if ((merge_slot + MergeRankW'(1)) <= MergeRankW'(MshrMergeReqs)) begin
-                // RECORD only. The apply runs once per bank after this loop closes, so no
-                // lane reads what an earlier lane wrote and the 32-deep chain disappears.
-              end
-            end
+                req_merge_ready[tile_i][port_i] && req_hit_cap_sel[tile_i][port_i];
           end else begin
             // Not a merge into a resident entry: decide STALL / ALLOCATE / BYPASS.
             if (req_can_merge[tile_i][port_i] &&
