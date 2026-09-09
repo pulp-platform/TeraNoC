@@ -2090,10 +2090,24 @@ module mempool_group_mshr
   // Bank-narrowed selector. With BankPublish on, at most one entry per bank is selectable,
   // so the arbitration runs over MshrBankNum candidates instead of MshrNum.
   logic [MshrBankNum-1:0][MshrIdxW-1:0] bank_pub_e;    // published entry id per bank (port-indep.)
+  // The published entry's drive operands, per bank. The publication is port-independent, so
+  // these are built MshrWaysPerBank:1 once instead of MshrNum:1 in each of the 32 lanes.
+  data_t         [MshrBankNum-1:0]                     pub_drv_data;
+  logic          [MshrBankNum-1:0][BurstLenWidth-1:0]  pub_drv_beat_off;
+  logic          [MshrBankNum-1:0]                     pub_drv_burst_one;
+  tile_core_id_t [MshrBankNum-1:0][MshrMergeReqs-1:0]  pub_drv_sub_core;
+  meta_id_t      [MshrBankNum-1:0][MshrMergeReqs-1:0]  pub_drv_sub_meta;
+  // This lane's operands after the bank select.
+  data_t                                               drv_sel_data;
+  logic          [BurstLenWidth-1:0]                   drv_sel_beat_off;
+  logic                                                drv_sel_burst_one;
+  tile_core_id_t [MshrMergeReqs-1:0]                   drv_sel_sub_core;
+  meta_id_t      [MshrMergeReqs-1:0]                   drv_sel_sub_meta;
   logic [MshrBankNum-1:0]   bank_cand, bank_cand_rot, bank_cand_eff, bank_pfx, bank_first;
   // Per-bank candidates with the sub-request axis KEPT, so the winner's sub-request set is
   // selected rather than re-derived at the winning entry id.
   logic [MshrBankNum-1:0][MshrMergeReqs-1:0] bank_sub_cand;
+  logic [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1][BankIdW-1:0] resp_sel_bank;
   logic [BankIdW-1:0]       bank_base, bank_idx, bank_win_d, bank_win;
   logic [VictimPtrW-1:0]    base_way;
   logic                     bank_demote;
@@ -3212,13 +3226,9 @@ module mempool_group_mshr
           resp_sel_valid[tile_i][port_i] = 1'b0;
           resp_sel_mshr_id[tile_i][port_i] = '0;
           resp_sel_subreq_idx[tile_i][port_i] = '0;
+          resp_sel_bank[tile_i][port_i] = '0;
         end
       end
-      for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
-        for (int s = 0; s < MshrMergeReqs; s++) begin
-        end
-      end
-
       // One entry published per bank, round-robin and port-independent: computed once here,
       // shared by every (tile,port) instance below.
       for (int e = 0; e < MshrNum; e++) begin
@@ -3244,6 +3254,17 @@ module mempool_group_mshr
           bank_pub_e[b] = MshrIdxW'(b * MshrWaysPerBank + int'(bank_pub_w[b]));
           bank_rr_d[b] = VictimPtrW'(bank_pub_w[b] + VictimPtrW'(1));
         end
+      end
+
+      // Publish the winning entry's drive operands per bank, once. b is a loop constant, so each of
+      // these is a MshrWaysPerBank:1 select; the drive loop below then selects MshrBankNum:1
+      // instead of reading the MshrNum-wide arrays at the winning entry id, in all 32 lanes.
+      for (int b = 0; b < MshrBankNum; b++) begin
+        pub_drv_data     [b] = drv_data     [b * MshrWaysPerBank + int'(bank_pub_w[b])];
+        pub_drv_beat_off [b] = drv_beat_off [b * MshrWaysPerBank + int'(bank_pub_w[b])];
+        pub_drv_burst_one[b] = drv_burst_one[b * MshrWaysPerBank + int'(bank_pub_w[b])];
+        pub_drv_sub_core [b] = drv_sub_core [b * MshrWaysPerBank + int'(bank_pub_w[b])];
+        pub_drv_sub_meta [b] = drv_sub_meta [b * MshrWaysPerBank + int'(bank_pub_w[b])];
       end
 
       // Select one sub-request per response port.
@@ -3349,6 +3370,7 @@ module mempool_group_mshr
                 resp_sel_valid[tile_i][port_i]      = 1'b1;
                 resp_sel_mshr_id[tile_i][port_i]    = mshr_id_t'(drain_win_e);
                 resp_sel_subreq_idx[tile_i][port_i] = drain_win_s;   // already SubIdxW wide
+                resp_sel_bank[tile_i][port_i]       = bank_win;
               end
             end
           end
@@ -3364,17 +3386,31 @@ module mempool_group_mshr
             // responses with wen == 0 (resp_is_mshr stays 0 otherwise and the beat takes the
             // bypass path), so the stored bit could never be anything but 0.
             resp_out[tile_i][port_i].wen = 1'b0;
-            resp_out[tile_i][port_i].rdata.data = drv_data[resp_sel_mshr_id[tile_i][port_i]];
+            // One select per lane, on the bank the winner came from. Under BankPublish the winning
+            // entry IS its bank's published entry, so these are the same values the MshrNum-wide
+            // reads returned.
+            if (BankPublish) begin
+              drv_sel_data      = pub_drv_data     [resp_sel_bank[tile_i][port_i]];
+              drv_sel_beat_off  = pub_drv_beat_off [resp_sel_bank[tile_i][port_i]];
+              drv_sel_burst_one = pub_drv_burst_one[resp_sel_bank[tile_i][port_i]];
+              drv_sel_sub_core  = pub_drv_sub_core [resp_sel_bank[tile_i][port_i]];
+              drv_sel_sub_meta  = pub_drv_sub_meta [resp_sel_bank[tile_i][port_i]];
+            end else begin
+              drv_sel_data      = drv_data     [resp_sel_mshr_id[tile_i][port_i]];
+              drv_sel_beat_off  = drv_beat_off [resp_sel_mshr_id[tile_i][port_i]];
+              drv_sel_burst_one = drv_burst_one[resp_sel_mshr_id[tile_i][port_i]];
+              drv_sel_sub_core  = drv_sub_core [resp_sel_mshr_id[tile_i][port_i]];
+              drv_sel_sub_meta  = drv_sub_meta [resp_sel_mshr_id[tile_i][port_i]];
+            end
+            resp_out[tile_i][port_i].rdata.data = drv_sel_data;
             // Re-emit beat b for THIS requester under the lane law: lane from the low BurstLaneW
             // bits, row from the rest.
             resp_out[tile_i][port_i].rdata.core_id =
-                drv_sub_core[resp_sel_mshr_id[tile_i][port_i]]
-                            [resp_sel_subreq_idx[tile_i][port_i]] +
-                tile_core_id_t'(drv_beat_off[resp_sel_mshr_id[tile_i][port_i]][BurstLaneW-1:0]);
+                drv_sel_sub_core[resp_sel_subreq_idx[tile_i][port_i]] +
+                tile_core_id_t'(drv_sel_beat_off[BurstLaneW-1:0]);
             resp_out[tile_i][port_i].rdata.meta_id =
-                drv_sub_meta[resp_sel_mshr_id[tile_i][port_i]]
-                            [resp_sel_subreq_idx[tile_i][port_i]] +
-                meta_id_t'(drv_beat_off[resp_sel_mshr_id[tile_i][port_i]] >> BurstLaneW);
+                drv_sel_sub_meta[resp_sel_subreq_idx[tile_i][port_i]] +
+                meta_id_t'(drv_sel_beat_off >> BurstLaneW);
             resp_out[tile_i][port_i].rdata.amo = '0;  // sub-requests are loads by construction (req_is_load)
             resp_from_mshr[tile_i][port_i] = 1'b1;
 `ifndef TARGET_SYNTHESIS
@@ -3388,7 +3424,7 @@ module mempool_group_mshr
                   resp_sel_subreq_idx[tile_i][port_i]] = 1'b1;
               // Clear sub_req.valid on the drain handshake so the next cycle's beat_pending
               // seed cannot re-include it and re-deliver the same response.
-              if (drv_burst_one[resp_sel_mshr_id[tile_i][port_i]]) begin
+              if (drv_sel_burst_one) begin
                 sv_clr[resp_sel_mshr_id[tile_i][port_i]][
                     resp_sel_subreq_idx[tile_i][port_i]] = 1'b1;
               end
