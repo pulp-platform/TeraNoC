@@ -17213,3 +17213,47 @@ compiled cleanly first. Stopping the disaggregation here is the better trade.
 
 **Status.** vopt clean and the full unit suite passes on both steps; the two vg_fp16_512x64x256
 cluster runs (which must return 7133) were still in flight at commit time.
+
+## 2026-09-09 18:40 — group MSHR: comment clean pass (no code change)
+
+**Purpose.** User review of the previous consolidation: comments were still too long, carried
+internal progress abbreviations nobody outside the session can read, and narrated how the code was
+arrived at rather than what it does. Two subagents audited comments and coding style; this applies
+the findings.
+
+**Implementation.** Comment and whitespace only -- `git diff` filtered to non-comment lines is
+**empty** (the only other change is collapsing runs of blank lines).
+
+- **Internal tags removed** (`C1`, `C3`, `B0.3`, `M3`/`L3`, `F4d`, `opt3`, `3b`, probe tags) and the
+  three `// ---- FOO ----` banner markers turned into ordinary sentences.
+- **History and measurement narration dropped** where it described a superseded version rather than
+  the code: the deleted bypass-track table, "the original cleared them under...", the
+  `1.233 ns / 100 cells` and `129 of the path's 165 cell levels` figures, `214 lines of noise`,
+  `870 of the 512 shape's cycles`, the "unreachable re-arm" story, the commented-out `MshrNum`
+  alternatives. The rule they justify is stated once in SOURCING DISCIPLINE; the sites now state
+  the invariant, not the experiment.
+- **Sourcing-rationale blocks condensed**: twelve 4-5 line "why `mshr_q` and not `mshr_d` here"
+  blocks reduced to the correctness argument alone (2-4 lines each).
+- **Damaged comments repaired.** An earlier reflow had truncated nine sentences mid-clause and left
+  them committed -- `req_len is.`, `HoldSubsBurst for.`, `and by.`, `cycles,.`, `hazard);.`,
+  `but must.`, `the gap field is.`, `(, docs/...)`, plus one continuation line at the wrong indent
+  (the NO RETAG note). The module-header admission policy had been joined into a single unreadable
+  line; it is a three-item list again. All rewritten from the code they describe.
+- **Formatting.** 191 wrapped-line de-capitalisations (`// Hold_cnt` reads as a different symbol
+  than `hold_cnt`), 11 doubled `// //` markers, 2 non-ASCII characters (`3-5×`, a full-width paren),
+  space-before-punctuation artifacts, and every comment line wrapped to <=100 columns.
+
+**Result.** 911 -> 840 comment lines; 4110 -> 4033 file lines; 354 insertions / 425 deletions, all
+comments. Zero comment lines over 100 columns (the 193 long lines that remain are declarations,
+`ifdef` localparams and message strings -- pre-existing house style, deliberately untouched).
+
+**Not done, with reasons.** The `_q` infix rename (`mshr_q_valid` -> `mshr_valid_q`, 113 sites) and
+hoisting three generate-scope declarations both change hierarchical names that wave scripts and
+assertions reference, for no PPA gain. Re-aligning the declaration column would touch 200+ lines of
+the author's established layout. The 1320-line `always_comb` split was already ruled out.
+
+**Verification.** `vopt` clean at the PnR-matching define set; `vg_fp16_512x64x256` must return
+`[UART] The execution took 7133 cycles` (the reference `d1`/`d2` runs both do, with
+`fwd_hits=1370 owner_stalls=1317 allocations=1248`).
+
+**Status.** Comment pass complete; RTL work for this round is wrapped up.

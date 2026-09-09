@@ -14,16 +14,16 @@ module mempool_group_mshr
   parameter int NumRemoteRespPortsPerTile = 2,
 
   // Parameter int MshrNum        = NumTilesPerGroup * 32,
-  // Parameter int MshrNum        = NumTilesPerGroup * 2,
-  // Can be overridden from build defines with GROUP_MSHR_NUM.
   parameter int MshrNum        = `ifdef GROUP_MSHR_NUM `GROUP_MSHR_NUM `else NumTilesPerGroup `endif,
   parameter int MshrMergeWords = 1,
   parameter int MshrMergeReqs  = `ifdef GROUP_MSHR_MERGE_REQS `GROUP_MSHR_MERGE_REQS `else 8 `endif,
-  // Address-banking (Increment 3): the MSHR table is partitioned into MshrNum/MshrWaysPerBank banks,
-  // Each request maps to bank_of({tgt_group,addr}); allocation and the hit search are confined to that
+  // Address-banking: the MSHR table is partitioned into MshrNum/MshrWaysPerBank banks, a request
+  // maps to bank_of({tgt_group,addr}), and allocation and the hit search stay inside that bank.
   parameter int MshrWaysPerBank = `ifdef GROUP_MSHR_WAYS_PER_BANK `GROUP_MSHR_WAYS_PER_BANK `else 4 `endif,
-  // MSHR admission policy by effective load length: - single      : req_len == 1 - non-full    : 1
-  // < req_len < MshrFullBurstWords - full-burst  : req_len == MshrFullBurstWords req_len is.
+  // MSHR admission policy by effective load length:
+  //   single     : req_len == 1
+  //   non-full   : 1 < req_len < MshrFullBurstWords
+  //   full-burst : req_len == MshrFullBurstWords
   parameter int unsigned MshrFullBurstWords = MaxBurstWords,
   parameter bit EnableMshrSingleReq         = `ifdef GROUP_MSHR_ENABLE_SINGLE `GROUP_MSHR_ENABLE_SINGLE `else 1'b0 `endif,
   parameter bit EnableMshrNonFullBurstReq   = `ifdef GROUP_MSHR_ENABLE_NON_FULL `GROUP_MSHR_ENABLE_NON_FULL `else 1'b1 `endif,
@@ -31,9 +31,9 @@ module mempool_group_mshr
   // Per-entry buffered response beats (for out-of-order/multi-channel returns).
   // Sized by BANDWIDTH x DELAY, not by port count. The admission (mshr_resp_slots) only ever sees
   // REGISTERED state, so a slot's round trip is 2 cycles: captured -> registered -> the drain scan
-  // sees it -> drained -> registered -> the admission sees it free. To sustain the 2 beats/cycle the
+  // sees it -> drained -> registered -> the admission sees it free. To sustain 2 beats/cycle the
   // capture (cap_first/cap_second) and drain (ParityDrain) datapaths are built for:
-  //     2 beats/cycle x 2 cycles = 4 slots.
+  // 2 beats/cycle x 2 cycles = 4 slots.
   // It settles at cnt=2 and holds 2 in / 2 out indefinitely. THREE DOES NOT WORK: slots = 3-2 = 1
   // caps admission at 1/cycle. The old value was NumRemoteRespPortsPerTile-1 = 2, which tied the
   // depth to the port count and gave exactly half the achievable rate.
@@ -42,7 +42,7 @@ module mempool_group_mshr
   // 1: drain as many sub-requests as ports allow per cycle
   parameter bit DrainMultiPort = 1'b1,
   // Round-robin fairness on the contended arbitration scans: the per-bank
-  // Allocation admit, the drain entry scan, and the drain sub_req scan all rotate their priority
+  // allocation admit, the drain entry scan, and the drain sub_req scan all rotate their priority
   parameter bit EnableRrFairness = `ifdef GROUP_MSHR_ENABLE_RR `GROUP_MSHR_ENABLE_RR `else 1'b1 `endif,
   // Keep responded entries as a small read-response cache.
   parameter bit EnableRespCache = `ifdef GROUP_MSHR_RESP_CACHE `GROUP_MSHR_RESP_CACHE `else 1'b1 `endif,
@@ -87,12 +87,12 @@ module mempool_group_mshr
   output logic                            [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]  group_mshr_resp_valid_o,
   input  logic                            [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]  group_mshr_resp_ready_i,
   // Runtime configuration (docs/mshr_runtime_csr_design.md). At MshrCfgRuntime=0 every field is a
-  // Constant driven by mempool_group_mshr_cfg, so the reads below const-fold exactly as the
-  // Localparams they replace and the netlist is unchanged.
+  // constant driven by mempool_group_mshr_cfg, so the reads below const-fold exactly as the
+  // localparams they replace and the netlist is unchanged.
   input  mempool_pkg::mshr_cfg_t                                                          cfg_i,
   // Any entry valid. The CSR file uses it to REFUSE a bank-hash change while entries are resident:
   // The bank index both places an entry and looks it up, so re-hashing mid-flight makes a lookup
-  // Probe the wrong bank and a second entry is allocated for a line that already has one.
+  // probe the wrong bank and a second entry is allocated for a line that already has one.
   output logic                                                                            mshr_busy_o
 );
 
@@ -105,7 +105,7 @@ module mempool_group_mshr
   localparam bit PD2 = (DrainBeatsPerEntry > 1);
 
   // BURST LANE LAW: beat b belongs to VLSU lane b % NrMemPorts and is entry b / NrMemPorts of
-  // That reorder buffer, so a burst's beats are distributed by the ordinary word->port rule.
+  // that reorder buffer, so a burst's beats are distributed by the ordinary word->port rule.
   // Width of a beat OFFSET (0..MaxBurstWords-1). Distinct from BurstLenWidth, which sizes a LENGTH
   // (1..MaxBurstWords) and therefore needs one more bit.
   localparam int unsigned BeatOffW   = $clog2(mempool_pkg::MaxBurstWords);
@@ -142,11 +142,10 @@ module mempool_group_mshr
                        (burst_beat_of(resp_core, resp_meta, base_core, base_meta) < len);
   endfunction
   // ------------------------------------------------------------------------------------
-  // Misconfig guards: the parity datapath is hardwired for 2 beats/cycle and needs both usable
-  // Resp ports [2:1]; an illegal knob must fail elaboration, not wedge silently at runtime.
-  // Two distinct conditions, deliberately at different severities. An $error must mean BROKEN;
-  // running at half the achievable response rate is suboptimal, not broken -- and the design shipped
-  // that way until 2026-09-05, so making it fatal would refuse a legitimate A/B build.
+  // misconfig guards: the parity datapath is hardwired for 2 beats/cycle and needs both usable
+  // resp ports [2:1]; an illegal knob must fail elaboration, not wedge silently at runtime.
+  // Two distinct conditions, deliberately at different severities: an $error must mean BROKEN,
+  // and running at half the achievable response rate is suboptimal, not broken.
   if (RespBufWords < DrainBeatsPerEntry)
     $error({"[mempool_group_mshr] RespBufWords (%0d) < DrainBeatsPerEntry (%0d): the buffer cannot ",
             "even hold one cycle's drain width."}, RespBufWords, DrainBeatsPerEntry);
@@ -164,7 +163,7 @@ module mempool_group_mshr
   if (PD2 && !DrainMultiPort)
     $error("[mempool_group_mshr] ParityDrain (group_mshr_drain_beats=2) requires DrainMultiPort=1.");
   // The rotated scan indices wrap by TRUNCATION to idx_width() bits rather than by `%`. Since
-  // Idx_width() is $clog2(), truncation equals mod-N only when N is a power of two -- for any other
+  // idx_width() is $clog2(), truncation equals mod-N only when N is a power of two -- for any other
   // N it silently wraps at the next power of two instead, corrupting the scan order. Fail loudly.
   if (MshrNum & (MshrNum - 1))
     $error("[mempool_group_mshr] group_mshr_num (%0d) must be a power of two.", MshrNum);
@@ -174,13 +173,14 @@ module mempool_group_mshr
     $error("[mempool_group_mshr] group_mshr_ways_per_bank (%0d) must be a power of two.",
            MshrWaysPerBank);
   // Hold-the-fetch (request-hold merge window, docs/mshr_request_hold_design.md): a mergeable
-  // Allocation is consumed locally and its NoC fetch is withheld for up to HoldWindow cycles,.
+  // allocation is consumed locally and its NoC fetch is withheld for up to HoldWindow cycles, so
+  // later requests to the same line can still merge into it. 0 releases the fetch immediately.
   localparam int unsigned HoldWindow = `ifdef GROUP_MSHR_HOLD_WINDOW `GROUP_MSHR_HOLD_WINDOW `else 0 `endif;
   // Per-request-type hold windows (default: the uniform HoldWindow).
   localparam int unsigned HoldWindowSingle = `ifdef GROUP_MSHR_HOLD_WINDOW_SINGLE `GROUP_MSHR_HOLD_WINDOW_SINGLE `else HoldWindow `endif;
   localparam int unsigned HoldWindowBurst = `ifdef GROUP_MSHR_HOLD_WINDOW_BURST `GROUP_MSHR_HOLD_WINDOW_BURST `else HoldWindow `endif;
   // The hold feature is active (and its logic generated) iff EITHER class holds; the counter is
-  // Sized from the larger of the two windows.
+  // sized from the larger of the two windows.
   localparam int unsigned HoldWindowMax =
     (HoldWindowSingle > HoldWindowBurst) ? HoldWindowSingle : HoldWindowBurst;
   localparam int unsigned HoldSubs = `ifdef GROUP_MSHR_HOLD_SUBS `GROUP_MSHR_HOLD_SUBS `else 2 `endif;
@@ -189,8 +189,9 @@ module mempool_group_mshr
   localparam int unsigned HoldSubsBurst = `ifdef GROUP_MSHR_HOLD_SUBS_BURST `GROUP_MSHR_HOLD_SUBS_BURST `else HoldSubs `endif;
   // Scalar response-release policy.
   localparam bit RespWaitSubsSingle = `ifdef GROUP_MSHR_RESP_WAIT_SUBS_SINGLE `GROUP_MSHR_RESP_WAIT_SUBS_SINGLE `else 1'b0 `endif;
-  // Cache self-invalidate (idea 1, docs/mshr_bank_hash_design.md): a CACHED entry that has served
-  // Its per-type sharing target (HoldSubsSingle for scalar/single entries, HoldSubsBurst for.
+  // Cache self-invalidate (docs/mshr_bank_hash_design.md): a CACHED entry that has served its
+  // per-type sharing target -- HoldSubsSingle for a scalar/single entry, HoldSubsBurst for a burst
+  // -- retires itself instead of waiting for the cache timeout.
   localparam bit CacheSelfInval = `ifdef GROUP_MSHR_CACHE_SELF_INVAL `GROUP_MSHR_CACHE_SELF_INVAL `else 1'b0 `endif;
   // Cache reuse target / cache-phase timeout (group_mshr_cache_reuse_target, _cache_timeout).
   localparam int unsigned CacheReuseTarget = `ifdef GROUP_MSHR_CACHE_REUSE_TARGET `GROUP_MSHR_CACHE_REUSE_TARGET `else 0 `endif;
@@ -199,23 +200,22 @@ module mempool_group_mshr
   // MshrCfgRuntime=1; software owns it thereafter.
   localparam int unsigned BankfullBackpressure = `ifdef GROUP_MSHR_BANKFULL_BACKPRESSURE `GROUP_MSHR_BANKFULL_BACKPRESSURE `else 1 `endif;
   // RR cache-victim selection (group_mshr_cache_victim_rr): per-bank round-robin start pointer for
-  // The pass-2 CACHED-reclaim scan, instead of always taking the lowest-index reclaimable.
+  // the pass-2 CACHED-reclaim scan, instead of always taking the lowest-index reclaimable.
   localparam bit CacheVictimRR = `ifdef GROUP_MSHR_CACHE_VICTIM_RR `GROUP_MSHR_CACHE_VICTIM_RR `else 1'b0 `endif;
   // CACHED replacement policy. 1 preserves the original pass-2 allocator behavior, where a bank
-  // With no INVALID way may reclaim an idle CACHED way. 0 protects CACHED ways from allocation;
+  // with no INVALID way may reclaim an idle CACHED way. 0 protects CACHED ways from allocation;
   // They remain resident until self-invalidation or the existing AMO invalidation.
   localparam bit CacheReclaimable = `ifdef GROUP_MSHR_CACHE_RECLAIMABLE `GROUP_MSHR_CACHE_RECLAIMABLE `else 1'b1 `endif;
   // Bypass-path delivery probe (simulation-only; see the gen_bypass_probe block). 0 = off.
   localparam bit BypassProbe = `ifdef GROUP_MSHR_BYPASS_PROBE `GROUP_MSHR_BYPASS_PROBE `else 1'b0 `endif;
   // RESP_HOLD stall probe (simulation-only; see gen_resp_hold_probe). Age in cycles after which a
-  // Still-held entry is reported; 0 = off.
+  // still-held entry is reported; 0 = off.
   localparam int unsigned RespHoldProbe = `ifdef GROUP_MSHR_RESP_HOLD_PROBE `GROUP_MSHR_RESP_HOLD_PROBE `else 0 `endif;
   // Stall (instead of allocating a duplicate entry) when a same-address entry is receiving its
-  // Response this very cycle -- see req_addr_hit_drain_way.
+  // response this very cycle -- see req_addr_hit_drain_way.
   localparam bit StallOnResp = `ifdef GROUP_MSHR_STALL_ON_RESP `GROUP_MSHR_STALL_ON_RESP `else 1'b1 `endif;
   localparam int unsigned VictimPtrW = (MshrWaysPerBank > 1) ? $clog2(MshrWaysPerBank) : 1;
-  // Hold_cnt is sized from the window itself, so ANY window value is supported -- there is no
-  // Width-imposed ceiling (an earlier > 31 guard wrongly claimed one).
+  // hold_cnt is sized from the window itself, so ANY window value is supported -- there is no
   localparam int unsigned ServeTimeout = `ifdef GROUP_MSHR_SERVE_TIMEOUT `GROUP_MSHR_SERVE_TIMEOUT `else 0 `endif;
   // The counter must be sized for the LARGEST value that can ever be loaded, and at
   // MshrCfgRuntime=1 that is the hardware bound, NOT the elaborated default -- software can write
@@ -224,7 +224,7 @@ module mempool_group_mshr
   localparam int unsigned HoldCntMax =
     mempool_pkg::MshrCfgRuntime ? mempool_pkg::MshrCfgHoldCntMax : HoldCntElabMax;
   // HOLD PRESCALER: hold_cnt ticks every 2**HoldPrescaleW cycles, not every cycle, so the counter
-  // Is narrower and MshrNum counters no longer toggle every cycle.
+  // is narrower and MshrNum counters no longer toggle every cycle.
   localparam int unsigned HoldPrescaleW = `ifdef GROUP_MSHR_HOLD_PRESCALE_W `GROUP_MSHR_HOLD_PRESCALE_W `else 4 `endif;
   localparam int unsigned HoldPrescaleWSafe = (HoldPrescaleW > 0) ? HoldPrescaleW : 1;
 
@@ -235,29 +235,29 @@ module mempool_group_mshr
   // Source the hold-the-fetch REPLAY walker from the registered array.
   localparam bit ReplayFromQ = `ifdef GROUP_MSHR_REPLAY_FROM_Q `GROUP_MSHR_REPLAY_FROM_Q `else 1'b1 `endif;
 
-  // Req_meta_ovlp_map is the last [lane][MshrNum] structure in the module: 32 lanes x 64 entries =
+  // req_meta_ovlp_map is the last [lane][MshrNum] structure in the module: 32 lanes x 64 entries =
   // 2048 replications of a tile compare, a core compare and a two-sided modular range test. But the
-  // Relation is SPARSE -- the test is gated on sub_reqs[0].tile_id == tile_i, and an entry has
+  // relation is SPARSE -- the test is gated on sub_reqs[0].tile_id == tile_i, and an entry has
   localparam bit MetaOvlpByOwner = `ifdef GROUP_MSHR_META_OVLP_BY_OWNER `GROUP_MSHR_META_OVLP_BY_OWNER `else 1'b1 `endif;
   // Extend the head-beat drain's BankPublish narrowing to the second-slot (drain2) selector,
-  // Which is otherwise ungated and runs MshrNum-wide in every config x 32 (tile, resp port)
-  // Instances. Published entries are addressed as b*MshrWaysPerBank + pub_w[b] with b a loop
-  // Constant, so the sub-request lookup stays MshrWaysPerBank:1, never MshrNum:1.
+  // which is otherwise ungated and runs MshrNum-wide in every config x 32 (tile, resp port)
+  // instances. Published entries are addressed as b*MshrWaysPerBank + pub_w[b] with b a loop
+  // constant, so the sub-request lookup stays MshrWaysPerBank:1, never MshrNum:1.
   // Same trade as next door: a lane whose target sits in a bank that published a different
-  // Entry waits a cycle. Publication rotates, and a drain2 candidate is continuous.
+  // entry waits a cycle. Publication rotates, and a drain2 candidate is continuous.
   localparam bit Drain2BankPublish = `ifdef GROUP_MSHR_DRAIN2_BANK_PUBLISH `GROUP_MSHR_DRAIN2_BANK_PUBLISH `else 1'b1 `endif;
   // Arbitrate response capture per BANK instead of per entry: MshrBankNum arbiters instead of
   // MshrNum, paid for with a NumRespLanes:1 entry select and a dynamic index into
-  // Mshr_resp_slots. Measured on vg_fp16_256x32x256: no cost -- cycles and [CAPARB] identical
-  // On and off, so the 31.6% deferral there is the resp-buf-full case, not bank contention.
+  // mshr_resp_slots. Measured on the reference shape: no cost -- cycles and [CAPARB] identical
+  // on and off, so the 31.6% deferral there is the resp-buf-full case, not bank contention.
   localparam bit CapPerBank = `ifdef GROUP_MSHR_CAP_PER_BANK `GROUP_MSHR_CAP_PER_BANK `else 1'b1 `endif;
   // NOT DONE: the two aging sweeps (cache self-invalidate, and the serve-timeout / cache age-out
-  // Countdown) are also whole-array passes on mshr_d and were the obvious third knob here.
+  // countdown) are also whole-array passes on mshr_d and were the obvious third knob here.
   localparam int unsigned HoldCntTicks =
       (HoldPrescaleW == 0) ? HoldCntMax : (HoldCntMax >> HoldPrescaleW);
   localparam int unsigned HoldCntW = (HoldCntTicks > 1) ? $clog2(HoldCntTicks + 1) : 1;
   // Convert a cycle count from the config into ticks. Never rounds a non-zero window down to
-  // Zero, which would silently turn "hold briefly" into "do not hold at all".
+  // zero, which would silently turn "hold briefly" into "do not hold at all".
   function automatic logic [HoldCntW-1:0] hold_ticks(input int unsigned cycles);
     if (HoldPrescaleW == 0) hold_ticks = HoldCntW'(cycles);
     else if (cycles == 0)   hold_ticks = '0;
@@ -267,7 +267,7 @@ module mempool_group_mshr
     end
   endfunction
   // Lower bound is 1, not 2: 1 is the defined "bypass this class" encoding, matched by the runtime
-  // Range check (mempool_group_mshr_cfg.sv: subs_ok = [1, MergeReqs]) and by.
+  // range check (mempool_group_mshr_cfg.sv: subs_ok = [1, MergeReqs]).
   if ((HoldSubs < 1) || (HoldSubs > MshrMergeReqs))
     $error("[mempool_group_mshr] group_mshr_hold_subs (%0d) must be in [1, MshrMergeReqs].",
            HoldSubs);
@@ -278,13 +278,13 @@ module mempool_group_mshr
   if (RespWaitSubsSingle && !EnableMshrSingleReq)
     $error("[mempool_group_mshr] group_mshr_resp_wait_subs_single requires scalar MSHRs.");
   // Both of these remove a release path that previously bounded how long an entry can hold data:
-  // Resp_wait_subs_single makes delivery wait for a subscriber target, and cache_reclaimable=0.
+  // resp_wait_subs_single makes delivery wait for a subscriber target, and cache_reclaimable=0.
   if ((RespWaitSubsSingle || !CacheReclaimable) && (ServeTimeout == 0))
     $error("[mempool_group_mshr] group_mshr_resp_wait_subs_single=1 or group_mshr_cache_reclaimable=0 requires group_mshr_serve_timeout > 0 (no release path otherwise).");
   localparam int unsigned SubReqCountW     = idx_width(MshrMergeReqs + 1);
 
   // RUNTIME CONFIG SELECT: each cfg_* is the localparam at MshrCfgRuntime=0 (folds to a constant)
-  // And the CSR field at 1. READ THESE at the use sites, never the localparams.
+  // and the CSR field at 1. READ THESE at the use sites, never the localparams.
   logic [mempool_pkg::MshrCfgSubsW-1:0]    cfg_hold_subs_single, cfg_hold_subs_burst;
   logic [mempool_pkg::MshrCfgHoldCntW-1:0] cfg_hold_window_single, cfg_hold_window_burst;
   logic [mempool_pkg::MshrCfgHoldCntW-1:0] cfg_serve_timeout;
@@ -295,15 +295,15 @@ module mempool_group_mshr
   logic [mempool_pkg::MshrCfgHoldCntW-1:0] cfg_cache_hold_ticks_src;
   logic [mempool_pkg::MshrCfgShiftW-1:0]   cfg_bank_shift_single, cfg_bank_shift_burst;
   logic                                    cfg_bank_burst_bits, cfg_mshr_enable;
-  // R3: hold_subs == 1 means "this class does not merge -- bypass it".
+  // hold_subs == 1 means "this class does not merge -- bypass it".
   logic                                    cfg_bypass_single, cfg_bypass_burst;
 
-  // C1 FIX the merge rank and slot need their OWN width, not SubReqCountW.
+  // The merge rank and slot need their OWN width, not SubReqCountW.
   localparam int unsigned MergeRankW      = idx_width(2 * MshrMergeReqs + 1);
   localparam int unsigned MergeCountW     = idx_width(NumTilesPerGroup *
                                               ((NumRemoteReqPortsPerTile > 1) ?
                                                (NumRemoteReqPortsPerTile - 1) : 1) + 1);
-  // Served_cnt only has to reach the larger sharing target, where it saturates.
+  // served_cnt only has to reach the larger sharing target, where it saturates.
   localparam int unsigned ServedCntElabMax = (HoldSubsSingle > HoldSubsBurst)
                                              ? HoldSubsSingle : HoldSubsBurst;
   // 2*MshrMergeReqs, not MshrMergeReqs.
@@ -314,13 +314,10 @@ module mempool_group_mshr
   localparam int unsigned RespBufPtrW      = idx_width(RespBufWords);
   localparam int unsigned MergeWordOffset  = (MshrMergeWords <= 1) ? 0 : $clog2(MshrMergeWords);
   localparam int unsigned BurstAlignBits  = (MaxBurstWords > 1) ? $clog2(MaxBurstWords) : 1;
-  // ParityDrain bypass-retag tracking depth (FF-1). Depth 2 encodes "one instruction in flight x
-  // <=2 bursts/insn" -- but the VLSU burst admission scales with the ROB depth, so at ROB64 one
-  // e32,m4 load alone is 4 bursts and a full MSHR bank would overflow the 2 ways -> the depth
   localparam int unsigned TileIdBits       = idx_width(NumTilesPerGroup);
   localparam int unsigned TcdmAddrNoTileW  = $bits(tcdm_addr_t) - TileIdBits;
   localparam int unsigned SpatzNumOutstandingLoads = snitch_pkg::NumIntOutstandingLoads;
-  // Address-banking geometry (Increment 3): MshrBankNum banks of MshrWaysPerBank entries each.
+  // Address-banking geometry: MshrBankNum banks of MshrWaysPerBank entries each.
   localparam int unsigned MshrBankNum = (MshrWaysPerBank > 0) ? (MshrNum / MshrWaysPerBank) : 1;
   localparam int unsigned BankIdW     = idx_width(MshrBankNum);
   // Current coalescer merges only exact 32-bit words (MshrMergeWords should be 1).
@@ -328,7 +325,7 @@ module mempool_group_mshr
   // Bank-select hash choice (docs/mshr_bank_hash_design.md).
   localparam int unsigned BankHash = `ifdef GROUP_MSHR_BANK_HASH `GROUP_MSHR_BANK_HASH `else 0 `endif;
   // Bank-select field shift for BankHash==3 (field-select on the reconstructed LINEAR word
-  // Address).
+  // address).
   localparam int unsigned BankSelShift = `ifdef GROUP_MSHR_BANK_SHIFT `GROUP_MSHR_BANK_SHIFT `else 5 `endif;
   // Per-request-type field-select shifts (default: the uniform BankSelShift).
   localparam int unsigned BankSelShiftSingle = `ifdef GROUP_MSHR_BANK_SHIFT_SINGLE `GROUP_MSHR_BANK_SHIFT_SINGLE `else BankSelShift `endif;
@@ -336,8 +333,8 @@ module mempool_group_mshr
   // Burst-branch hash structure (BankHash==3, bursts only).
   localparam int unsigned BankBurstBits = `ifdef GROUP_MSHR_BANK_BURST_BITS `GROUP_MSHR_BANK_BURST_BITS `else 1 `endif;
   // Drive the runtime-config selects. MshrCfgRuntime is a compile-time constant, so each ternary
-  // Collapses at elaboration: at 0 these ARE the localparams and every downstream expression is
-  // Structurally what it was before the CSRs existed.
+  // collapses at elaboration: at 0 these ARE the localparams and every downstream expression is
+  // structurally what it was before the CSRs existed.
   assign cfg_mshr_enable        = mempool_pkg::MshrCfgRuntime ? cfg_i.enable : 1'b1;
   assign cfg_hold_subs_single   = mempool_pkg::MshrCfgRuntime ? cfg_i.hold_subs_single
                                                               : mempool_pkg::MshrCfgSubsW'(HoldSubsSingle);
@@ -377,12 +374,12 @@ module mempool_group_mshr
     $error("[mempool_group_mshr] group_mshr_bank_shift_burst (%0d) + gap field (%0d) exceeds word-addr width (%0d).",
            BankSelShiftBurst, BankIdW - BankBurstBits, WordAddrW);
   // The two burst-hash fields must not overlap: the gap field starts at BankSelShiftBurst, the
-  // Intra-load burst bits end at BurstAlignBits+BankBurstBits-1.
+  // intra-load burst bits end at BurstAlignBits+BankBurstBits-1.
   if ((BankHash == 3) && (BankSelShiftBurst < BurstAlignBits + BankBurstBits))
     $error("[mempool_group_mshr] group_mshr_bank_shift_burst (%0d) overlaps the intra-load burst bits [%0d +: %0d]. Set it to clog2(p_start gap in words), e.g. 5 (M=P=256) / 7 (M=P=512).",
            BankSelShiftBurst, BurstAlignBits, BankBurstBits);
     // Bb == BankIdW is LEGAL: every bank bit then comes from the intra-load burst index, which is
-    // Exactly what a shape with ONE p-slice per group (KS=1) needs -- there the gap field is.
+    // exactly what a shape with ONE p-slice per group (KS=1) needs.
     if ((BankHash == 3) && (BankBurstBits > BankIdW))
       $error("[mempool_group_mshr] group_mshr_bank_burst_bits (%0d) exceeds BankIdW (%0d).",
            BankBurstBits, BankIdW);
@@ -399,7 +396,7 @@ module mempool_group_mshr
     b = BankIdW'(grp);
     if (BankHash == 3) begin
       // Field-select on the reconstructed LINEAR word address (pure re-wiring: put the group field
-      // Back above the tile field).
+      // back above the tile field).
       word_addr = { addr_key[$bits(tcdm_addr_t)-1 : TileIdBits + BankInTileW], // bank_row (high)
                     grp[GroupBits-1:0],                                        // group
                     addr_key[TileIdBits-1:0],                                  // tile
@@ -410,7 +407,7 @@ module mempool_group_mshr
         b = word_addr[sh_burst +: BankIdW];
       end else begin
         // ONE intra-load bit: the high BankIdW-1 bits from the p-slice gap at sh_burst, plus the
-        // Bit just above the burst boundary.
+        // bit just above the burst boundary.
         b = { word_addr[sh_burst +: BankIdW - 1],
               word_addr[BurstAlignBits +: 1] };
       end
@@ -420,7 +417,6 @@ module mempool_group_mshr
         b[(i - BurstAlignBits) % BankIdW] = b[(i - BurstAlignBits) % BankIdW] ^ addr_key[i];
       end
     end else if (BankHash == 1) begin
-      // (Superseded by 2; kept for the record.) xorshift-mix the line index then fold.
       mix = addr_key >> BurstAlignBits;
       mix = mix ^ (mix >> 7);
       mix = mix ^ (mix >> 13);
@@ -430,7 +426,7 @@ module mempool_group_mshr
       end
     end else begin
       // Include the low BurstAlignBits (the tile field of tgt_addr) in the bank index, on top of
-      // The legacy fold of the higher bits.
+      // the legacy fold of the higher bits.
       b = b ^ BankIdW'(addr_key[BurstAlignBits-1:0]);
       for (int i = BurstAlignBits; i < $bits(tcdm_addr_t); i++) begin
         b[(i - BurstAlignBits) % BankIdW] = b[(i - BurstAlignBits) % BankIdW] ^ addr_key[i];
@@ -439,7 +435,7 @@ module mempool_group_mshr
     return b;
   endfunction
 
-  // Per-entry MSHR lifecycle: - IDLE       : entry is free/unused (typically valid=0).
+  // Per-entry MSHR lifecycle: - IDLE: entry is free/unused (typically valid=0).
   typedef enum logic [2:0] {
     MSHR_IDLE       = 3'b000,
     MSHR_WAIT_RESP  = 3'b001,
@@ -460,7 +456,7 @@ module mempool_group_mshr
   } mempool_group_mshr_sub_req_t;
 
   // Response-buffer slot -- NOT a full tcdm_master_resp_t: the drain path builds its reply from
-  // Sub_reqs, so only the fields below are ever read back.
+  // sub_reqs, so only the fields below are ever read back.
   // BeatOffW, not BurstLenWidth: this field holds an OFFSET (0..MaxBurstWords-1), not a length
   // (1..MaxBurstWords). A value is written only after burst_beat_valid() passed, which requires
   // beat < burst_len <= MaxBurstWords, so 0..15 is provable -- see the assertion at the capture.
@@ -477,21 +473,21 @@ module mempool_group_mshr
     // Canonical merged address key (tile bits included) used for hit lookup.
     tcdm_addr_t base_addr;
     // Target group used to route requests in NoC and to disambiguate same address
-    // Targeting different groups.
+    // targeting different groups.
     group_id_t tgt_group_id;
     // Burst length for this merged entry (1..MaxBurstWords). All merged requesters
-    // In this entry share the same burst_len.
+    // in this entry share the same burst_len.
     logic [BurstLenWidth-1:0] burst_len;
     // Requester records merged in this entry (one record per requester, not per beat).
-    // Sub_reqs[0] is reserved for the owner request used as match anchor.
+    // sub_reqs[0] is reserved for the owner request used as match anchor.
     mempool_group_mshr_sub_req_t [MshrMergeReqs-1:0] sub_reqs;
     // Number of valid requester records currently stored in sub_reqs.
     logic [SubReqCountW-1:0] sub_reqs_num;
     // Cache self-invalidate (group_mshr_cache_self_inval): cumulative count of sub-requests this
-    // Entry has admitted/served over its whole life (owner + every merge, in WAIT_RESP and
+    // entry has admitted/served over its whole life (owner + every merge, in WAIT_RESP and
     logic [ServedCntW-1:0] served_cnt;
     // Per-head-beat pending mask: bit s=1 means requester s still needs the current
-    // Buffered response beat; cleared as each requester is serviced.
+    // buffered response beat; cleared as each requester is serviced.
     logic [MshrMergeReqs-1:0] beat_pending;
     // ParityDrain second-slot service state (the beat at resp_buf_rd_ptr+1, burst entries only):
     // Pending mask + one-shot arm flag.
@@ -501,19 +497,19 @@ module mempool_group_mshr
     // Decremented once per fully drained beat.
     logic [BurstLenWidth-1:0] beats_left;
     // Per-beat bookkeeping (no per-beat payload stored here):
-    // - beat_seen[b]   : beat b has been captured from NoC (possibly out-of-order)
-    // - beat_done[b]   : beat b has been fully drained to all merged requesters
+    // - beat_seen[b]: beat b has been captured from NoC (possibly out-of-order)
+    // - beat_done[b]: beat b has been fully drained to all merged requesters
 `ifndef TARGET_SYNTHESIS
     // VERIFICATION ONLY: every read of beat_seen is an assertion, so it is excluded from synthesis.
     logic [MaxBurstWords-1:0] beat_seen;
 `endif
 `ifndef TARGET_SYNTHESIS
     // VERIFICATION ONLY, for the same reason as beat_seen above: its only reader is the
-    // Beat_done_subset_seen assertion.
+    // beat_done_subset_seen assertion.
     logic [MaxBurstWords-1:0] beat_done;
 `endif
     // Small per-entry response FIFO to absorb returning beats while outputs are
-    // Temporarily blocked or responses arrive from multiple channels.
+    // temporarily blocked or responses arrive from multiple channels.
     mshr_resp_slot_t [RespBufWords-1:0] resp_buf;
     // Valid bit per response-buffer slot.
     // Number of valid beats currently stored in resp_buf.
@@ -555,7 +551,7 @@ module mempool_group_mshr
   // MSHR state (registered and next-state).
   mempool_group_mshr_t [MshrNum-1:0]                                           mshr_d;
   // Block-local scratch values, hoisted out of the always blocks: packed signals at module scope
-  // Instead of procedural automatics, so they are visible in a waveform.
+  // instead of procedural automatics, so they are visible in a waveform.
   mshr_id_t                cache_hit_e;
   mshr_id_t                evict_vid;
   logic [VictimPtrW-1:0]   evict_vw;
@@ -571,14 +567,12 @@ module mempool_group_mshr
   logic                [MshrNum-1:0]                                           mshr_q_valid;
   // Occupancy, exported so the CSR file can refuse a bank-hash change while entries are resident.
   // Hold-the-fetch replay walk start pointer (rotates every cycle for fairness among held
-  // Entries contending for the same outbound lane). Tied off when the feature is compiled out.
+  // entries contending for the same outbound lane). Tied off when the feature is compiled out.
   mshr_id_t                                                                    hold_replay_rr_q;
-  // Only an assertion reads this now. It is term-for-term identical to req_resp_seen (same valid /
-  // wen / amo / tag / mshr_q_valid / state / owner-tile / burst_beat_valid on the same candidate),
-  // but it is SCATTERED inside the main always_comb, so every consumer carried a response->request
-  // edge through the block. Synthesis drops it with its last reader.
+  // Only an assertion reads this now: term-for-term identical to req_resp_seen on the same
+  // candidate. Synthesis drops it with its last reader.
   logic                [MshrNum-1:0]                                           mshr_resp_inflight;
-  // R1: per-response-lane validation, kept as (valid, target entry id) instead of scattered into a
+  // per-response-lane validation, kept as (valid, target entry id) instead of scattered into a
   // MshrNum-wide vector. Both consumers index that vector by e_abs -- a DIFFERENT dynamic index --
   // so the scatter was immediately undone by a 64:1 re-mux. Comparing ids removes scatter and mux.
   logic     [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]                   rsn_v;
@@ -615,15 +609,16 @@ module mempool_group_mshr
              [TcdmAddrNoTileW-1:0]                                            req_tile_addr;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]
              [TcdmAddrNoTileW-1:0]                                            req_tile_addr_key;
-  // Bank-scoped hit detection (Increment 3b): each request compares its address against only the
+  // Bank-scoped hit detection: each request compares its address against only the
   // MshrWaysPerBank entries of its own bank (req_bank), not all MshrNum.
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrWaysPerBank-1:0] req_addr_hit_way;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrWaysPerBank-1:0] req_addr_hit_drain_way;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrWaysPerBank-1:0] req_hit_way;
   // Meta-overlap is a CROSS-address check (same tile+core, different address, overlapping meta_id
-  // Range) that protects core-side (core,meta_id) response uniqueness.
+  // range) that protects core-side (core,meta_id) response uniqueness.
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrNum-1:0]         req_meta_ovlp_map;
-  // F4b owner-indexed meta overlap: one result per (entry, req port), plus the owner one-hot.
+  // Meta-range overlap: one result per (entry, req port), scattered by an owner one-hot. An entry
+  // has exactly one owner tile, so the per-lane form was 63/64 dead.
   logic      [MshrNum-1:0][NumRemoteReqPortsPerTile-1:1]                             mo_ovlp;
   logic      [MshrNum-1:0][NumTilesPerGroup-1:0]                                     mo_owner_oh;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_hit_mshr;
@@ -635,8 +630,8 @@ module mempool_group_mshr
   logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrBankNum-1:0]  req_owner_inflight_bank;
   /// This request's line is being allocated right now -- recorded in agb_q_*, not yet in mshr_q.
   /// req_addr_hit_way reads the way's OLD key and would miss, so without forwarding the request
-  /// allocates a duplicate (wrong) or waits a cycle (correct but slow: one lost cycle per cohort,
-  /// which measured 870 of the 512 shape's cycles). Forward instead: the target entry id is
+  /// either allocates a duplicate (wrong) or waits a cycle. Forward instead: the target entry id
+  /// is b*MshrWaysPerBank + agb_q_way[b], so the follower merges into the leader's entry at once.
   /// b*WaysPerBank + agb_q_way[b], so the follower merges into the leader's entry immediately.
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_fwd_hit;
   mshr_id_t  [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_fwd_id;
@@ -655,13 +650,13 @@ module mempool_group_mshr
   // Request allocation (banked allocator bookkeeping).
   logic    [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                req_alloc_found;
   mshr_id_t[NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                req_alloc_found_mshr_id;
-  // Per-bank single-allocation-per-cycle scheme (Increment 3): req_alloc_cand marks a request that
-  // Wants a new entry (mergeable load that missed, no drain/meta hazard);.
+  // Per-bank single-allocation-per-cycle scheme: req_alloc_cand marks a request that
+  // wants a new entry: a mergeable load that missed, with no drain or meta hazard.
   logic    [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                req_alloc_cand;
   logic    [MshrBankNum-1:0]                                                   bank_has_free;
   mshr_id_t[MshrBankNum-1:0]                                                   bank_free_id;
   // RR victim start pointer per bank (CacheVictimRR); consumed by the pass-2 reclaim scan,
-  // Advanced only on a reclaim fire. Tied 0 / unread when CacheVictimRR=0 (const-folds out).
+  // advanced only on a reclaim fire. Tied 0 / unread when CacheVictimRR=0 (const-folds out).
   logic    [MshrBankNum-1:0][VictimPtrW-1:0]                                   victim_rr_q, victim_rr_d;
 
   // Response drain scheduling (per response port).
@@ -678,7 +673,7 @@ module mempool_group_mshr
   logic      [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]
              [idx_width(MshrMergeReqs)-1:0]                                    resp_sel2_subreq_idx;
   // The entry view the second-slot scan reads, and the second-slot read pointer
-  // And beat offset derived from THAT view. Const-folds away entirely at Drain2FromQ = 0.
+  // and beat offset derived from THAT view. Const-folds away entirely at Drain2FromQ = 0.
   mempool_group_mshr_t [MshrNum-1:0]                                           drain2_scan_ent;
   logic      [MshrNum-1:0]                                                     drain2_scan_valid;
   // The entry view the hold-the-fetch replay walker reads.
@@ -689,36 +684,30 @@ module mempool_group_mshr
   // Serve-timeout predicate and window value, both from registered state plus fire terms.
   logic                                                                        st_hold_live;
   logic      [HoldCntW-1:0]                                                    st_hold_src;
-  // Allocation's valid-SET, held back until the end of the pass.
-  //
-  // Applying it in place put the allocation arbiter's output into every later clear guard, and the
-  // clear guards feed mshr_d_valid, which is what the inferred clock gate on mshr_q_valid keys on.
-  // Measured on the placed 2 ns block that chain is 130 of the critical path's 174 cells -- 1.72 ns
-  // of 2.69. The dependency is spurious: allocation blanks the entry and writes MSHR_WAIT_RESP,
-  // while every clear requires MSHR_CACHED, MSHR_RESP_HOLD, or MSHR_DRAIN_RESP with
-  // resp_buf_cnt != 0, so no clear can fire on an entry allocated this cycle. Deferring the set
-  // changes nothing and takes win_oh_o off the clear chain.
+  // Allocation's valid-set, applied as one OR at the end of the pass so the arbiter stays out of
+  // every clear guard. Safe: allocation writes MSHR_WAIT_RESP, and every clear requires CACHED,
+  // RESP_HOLD or DRAIN_RESP with resp_buf_cnt != 0, so no clear can fire on a just-allocated entry.
   logic      [MshrNum-1:0]                                                     mshr_alloc_set;
-  // Break the serial read-modify-write chain on mshr_d[e].state.
-  //
-  // The store force-drain tested `mshr_d[e].state == MSHR_RESP_HOLD`, i.e. the value the RESPONSE
-  // CAPTURE may have written earlier in this same always_comb. That serialised capture -> force-
-  // drain, and measurement on fix2_head_2p0fp puts 129 of the path's 165 cell levels downstream of
-  // the arbiter, in exactly this chain.
-  //
-  // The dependency is real -- "a buffered response predates any store/AMO observed after it
-  // returned" -- but it is only on WHETHER THE CAPTURE FIRED, not on the fully merged state. So the
-  // same value is computable in parallel from mshr_q plus the capture's own fire terms, which is
-  // what st_post_cap does. Sites that need the pre-capture value keep reading mshr_d.
+  /// SOURCING DISCIPLINE -- read this once; the sites below refer back to it.
+  /// The entry array has two vintages: `mshr_q` is the register, `mshr_d` is what this cycle's
+  /// passes have written so far. A pass reading `mshr_d` inherits the depth of every earlier pass
+  /// that wrote it.
+  /// The rule: if a later pass depends only on WHETHER an earlier one fired -- not on the value it
+  /// wrote -- compute it from `mshr_q` plus a narrow fire term, so the two evaluate in PARALLEL.
+  /// `alloc_inflight` / `merge_inflight` / `st_post_cap` exist for exactly that.
+  /// HARD LIMIT: a pass whose TRIGGER and DATA come from different vintages is wrong whenever the
+  /// two can disagree. Both must be mshr_q, or both mshr_d. Sites that depart say why in one line.
+  /// Break the serial read-modify-write chain on mshr_d[e].state. The store force-drain needs
+  /// "a buffered response predates any store/AMO observed after it returned", which depends only on
+  /// WHETHER THE CAPTURE FIRED, not on the state it wrote -- so st_post_cap computes it in parallel
+  /// from mshr_q plus the capture's own fire terms. Sites that need the pre-capture value keep
+  /// reading mshr_d.
   logic      [MshrNum-1:0]                                                     st_alloc_fire;
   logic      [MshrNum-1:0]                                                     st_merge_drain;
 
   /// REQUEST PIPELINE CUT (stage boundary).
-  ///
-  /// The arbiter decision is registered here and the entry write happens next cycle, which splits
-  /// the request cone -- measured 1.233 ns / 100 cells at the clock gate, 1.381 ns / 90 cells at
-  /// resp_buf.data -- into 0.65 ns before the cut and 0.72 ns after it.
-  ///
+  /// The arbiter decision is registered here and the entry write happens next cycle, splitting the
+  /// request cone into two roughly equal halves.
   /// Everything downstream reads these records, never the combinational agb_* / mgb_*, so the
   /// arbiter output is out of the entry-write cone entirely.
   logic [MshrBankNum-1:0]                    agb_q_v;
@@ -750,7 +739,6 @@ module mempool_group_mshr
   // could be rewritten in that window.
   assign mshr_busy_o = (|mshr_q_valid) | (|agb_q_v) | (|mgb_q_v);
 
-
   logic      [MshrNum-1:0]                                                     st_cap_fire;
   logic      [MshrNum-1:0]                                                     st_cap_hold;
   mshr_state_t [MshrNum-1:0]                                                   st_post_cap;
@@ -772,8 +760,8 @@ module mempool_group_mshr
   logic [MshrBankNum-1:0]                                                      capb_same;
   logic [RespLaneW-1:0]                                                        capb_lane;
   // Per-entry masks of what the two drain DRIVE loops want cleared. Both loops only ever
-  // Clear BITS, and bit clears commute -- so ORing the requests and applying one AND-NOT per entry
-  // Is identical to letting 32 lanes each read-modify-write the entry in turn.
+  // clear BITS, and bit clears commute -- so ORing the requests and applying one AND-NOT per entry
+  // is identical to letting 32 lanes each read-modify-write the entry in turn.
   logic [MshrNum-1:0][MshrMergeReqs-1:0]                                       bp_clr, bp2_clr, sv_clr;
   // Store byte-merge into CACHED lines, decided per entry instead of chained across lanes.
   localparam int unsigned NumReqPortsActiveF3 = (NumRemoteReqPortsPerTile > 1) ?
@@ -798,15 +786,13 @@ module mempool_group_mshr
   // The grant takes at most TWO lanes per entry per cycle (cap_first/cap_second are one-hot). With
   // RespBufWords > 2 that is no longer "one grant per free slot", and that is INTENTIONAL: the
   // capture datapath is built for 2 beats/cycle and the extra depth exists to cover the admission's
-  // 2-cycle view of the buffer, not to capture more per cycle. A third lane targeting the same entry
-  // is NOT dropped -- it gets neither cap_first nor cap_second, so resp_in_ready stays low and it
-  // retries next cycle. The pointer arithmetic below is generic in RespBufWords (modulo wraparound
-  // via cap_n0/cap_n1, count saturating at RespBufWords), so no generalisation is required.
-  // The real sizing constraint is asserted above: RespBufWords >= 2 x DrainBeatsPerEntry.
+  // 2-cycle view of the buffer, not to capture more per cycle. A third lane targeting the same
+  // entry is NOT dropped -- it gets neither cap_first nor cap_second, so resp_in_ready stays low
+  // and it retries next cycle. The pointer arithmetic below is generic in RespBufWords (modulo
+  // wraparound via cap_n0/cap_n1, count saturating at RespBufWords), so no generalisation is
+  // required. The real sizing constraint is asserted above: RespBufWords >= 2 x DrainBeatsPerEntry.
   logic      [MshrNum-1:0][RespBufPtrW-1:0]                                    drain2_rd_ptr;
   logic      [MshrNum-1:0][BurstLenWidth-1:0]                                  drain2_beat_off;
-
-  // ParityDrain bypass-retag table (design doc §4.6).
 
   logic      [MshrNum-1:0][RespBufCountW-1:0]                                  mshr_resp_slots;
 
@@ -842,14 +828,13 @@ module mempool_group_mshr
                                               (NumRemoteReqPortsPerTile - 1) : 1;
   localparam int unsigned NumAllocSlots     = NumTilesPerGroup * NumReqPortsActive;
   localparam int unsigned AllocRrW          = idx_width(NumAllocSlots);
-  // Sized by NumAllocSlots, so these must follow it -- declaring them beside req_merge_* (which
-  // Is ~200 lines earlier) put them ahead of their own width parameter.
+  // Sized by NumAllocSlots, so these must follow it rather than sit beside req_merge_*.
   logic [NumAllocSlots-1:0] merge_same_mask;   // earlier ports targeting the SAME entry
   logic [MergeRankW-1:0]    merge_slot;        // q.sub_reqs_num + this port's rank (cannot wrap)
   logic [AllocRrW-1:0]      alloc_rr_q, alloc_rr_d;
-  // (B) M3 drain: rotate the MSHR-entry scan axis (MshrNum entries) -- width is MshrIdxW below.
+  // (B) drain: rotate the MSHR-entry scan axis (MshrNum entries) -- width is MshrIdxW below.
   // Natural widths for the rotated scan indices. Power-of-two MshrNum/MshrMergeReqs is
-  // Asserted at elaboration, so truncation to these widths is exactly mod-N.
+  // asserted at elaboration, so truncation to these widths is exactly mod-N.
   localparam int unsigned MshrIdxW = idx_width(MshrNum);
   localparam int unsigned SubIdxW  = idx_width(MshrMergeReqs);
 
@@ -860,9 +845,9 @@ module mempool_group_mshr
   logic [MshrNum-1:0]                                        replay_rr_mask;
   logic [MshrNum-1:0]                                        replay_cand, replay_hi, replay_lo, replay_win_oh;
   logic [MshrIdxW-1:0]                                       replay_win_e;
-  // B0.3 splits the entry-space rotation base into {bank, way} by bit position. idx_width() floors
-  // At 1 for a single-element axis, so with MshrBankNum==1 or MshrWaysPerBank==1 the two halves no
-  // Longer tile the entry index and the split would silently select the wrong bank.
+  // BankPublish splits the entry-space rotation base into {bank, way} by bit position. idx_width()
+  // floors at 1 for a single-element axis, so with MshrBankNum==1 or MshrWaysPerBank==1 the two
+  // halves no longer tile the entry index and the split would silently select the wrong bank.
   if (BankPublish && (MshrIdxW != (BankIdW + VictimPtrW)))
     $error("[mempool_group_mshr] group_mshr_bank_publish needs idx_width(MshrNum)=%0d to equal BankIdW(%0d)+VictimPtrW(%0d).",
            MshrIdxW, BankIdW, VictimPtrW);
@@ -871,7 +856,7 @@ module mempool_group_mshr
   logic [MshrBankNum-1:0]                                     bank_pub_v;
   logic [VictimPtrW-1:0]                                      bank_scan_w;
   logic [MshrIdxW-1:0]  drain_mshr_rr_q, drain_mshr_rr_d;
-  // (C) L3 drain: rotate the sub_req scan axis (MshrMergeReqs sub-requests), a separate base from
+  // (C) drain: rotate the sub_req scan axis (MshrMergeReqs sub-requests), a separate base from
   // (B) so the two axes do not rotate in lockstep. Width is SubIdxW above.
   logic [SubIdxW-1:0]     subreq_rr_q, subreq_rr_d;
 
@@ -967,7 +952,6 @@ module mempool_group_mshr
   `endif
   `endif
 
-
   // Map a recorded request port ID to a legal response port ID [1..NumRemoteRespPortsPerTile-1].
   // When req/resp port counts differ, this keeps routing deterministic.
   function automatic logic [RespPortIdW-1:0] map_resp_port_id(input logic [RespPortIdW-1:0] req_port_id);
@@ -1035,8 +1019,6 @@ module mempool_group_mshr
           .ready_i (resp_in_ready[tile_i][port_i]       ),
           .data_o  (resp_in[tile_i][port_i]             )
         );
-
-        // NOTE: the depth-1 output spill is the ORIGINAL, pre-deadlock-fix staging element.
         spill_register #(
           .T(tcdm_master_resp_t),
           .Bypass(!SpillRespOut)
@@ -1082,12 +1064,11 @@ module mempool_group_mshr
     .amo_invalidate_o    (amo_invalidate)
   );
 
-
   // Detect whether any response beat on input already targets each MSHR entry.
-  //
   // O(1) by tag: the response carries the entry id, so index it and re-validate. The legacy form
   // scanned all MshrNum entries per lane; it sat behind a localparam that nothing could set, so it
-  // was const-folded away and is deleted rather than left as a 64-way scan a reader has to discount.
+  // was const-folded away and is deleted rather than left as a 64-way scan a reader has to
+  // discount.
   always_comb begin
     rsn_v  = '0;
     rsn_id = '0;
@@ -1145,12 +1126,12 @@ module mempool_group_mshr
     end
   endfunction
 
-  // Increment 3: address-banking replaces the O(ports^2) same-cycle leader/follower coalescing.
+  // address-banking replaces the O(ports^2) same-cycle leader/follower coalescing.
   generate
     for (genvar tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin : gen_req_bank_tile
       for (genvar port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin : gen_req_bank_port
-        // Type comes from the CLAMPED req_is_single (:878), not req_len_raw: a store or a
-        // Misaligned burst is forced to req_len=1 and must bank like a single (see BankSelShift*).
+        // Type comes from the CLAMPED req_is_single, not req_len_raw: a store or a
+        // misaligned burst is forced to req_len=1 and must bank like a single (see BankSelShift*).
         assign req_bank[tile_i][port_i] =
             mshr_bank_of(req_addr_key[tile_i][port_i], req_in[tile_i][port_i].tgt_group_id,
                          req_is_single[tile_i][port_i],
@@ -1159,9 +1140,10 @@ module mempool_group_mshr
     end
   endgenerate
 
-  // MSHR hit lookup (parallel compare), bank-scoped to this request's MshrWaysPerBank ways. For a fixed
-  // Way_i, the absolute entry id e_abs = req_bank*MshrWaysPerBank + way_i selects one entry per bank, so
-  // Mshr_q[e_abs] is a MshrBankNum:1 mux feeding a single comparator (vs one comparator per MshrNum entry).
+  // MSHR hit lookup (parallel compare), bank-scoped to this request's MshrWaysPerBank ways. For a
+  // fixed way_i, the absolute entry id e_abs = req_bank*MshrWaysPerBank + way_i selects one entry
+  // per bank, so mshr_q[e_abs] is a MshrBankNum:1 mux feeding a single comparator (vs one
+  // comparator per MshrNum entry).
   generate
     for (genvar tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin : gen_req_mshr_lookup_tile
       for (genvar port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin : gen_req_mshr_lookup_port
@@ -1182,11 +1164,11 @@ module mempool_group_mshr
           assign req_resp_seen[tile_i][port_i][way_i] = resp_seen_at(rsn_v, rsn_id, e_abs);
 
           // Both in-flight terms make the request WAIT rather than act on a stale entry:
-          //  merge_inflight -- sub_reqs_num and state are one cycle behind, so req_hit_way's
-          //    capacity test and its CACHED / RESP_HOLD disjuncts would read pre-merge values;
-          //  alloc_inflight -- this way is being re-keyed to another line, and mshr_q still shows
-          //    the old address, so a hit here would merge into an entry about to become someone
-          //    else's.
+          // merge_inflight -- sub_reqs_num and state are one cycle behind, so req_hit_way's
+          // capacity test and its CACHED / RESP_HOLD disjuncts would read pre-merge values;
+          // alloc_inflight -- this way is being re-keyed to another line, and mshr_q still shows
+          // the old address, so a hit here would merge into an entry about to become someone
+          // else's.
           assign req_addr_hit_drain_way[tile_i][port_i][way_i] =
               req_addr_hit_way[tile_i][port_i][way_i] &&
               ((mshr_q[e_abs].state == MSHR_DRAIN_RESP) ||
@@ -1212,7 +1194,7 @@ module mempool_group_mshr
               ((mshr_q[e_abs].sub_reqs_num + SubReqCountW'(1)) <= MshrMergeReqs);
         end
         // Full-table meta-overlap (cross-bank): same tile+core, overlapping meta_id, different
-        // Address.
+        // address.
         if (MetaOvlpByOwner) begin : gen_req_meta_ovlp_owner
           for (genvar mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin : gen_map
             assign req_meta_ovlp_map[tile_i][port_i][mshr_i] =
@@ -1296,8 +1278,8 @@ module mempool_group_mshr
              (mshr_q[e].state == MSHR_RESP_HOLD)) &&
             (mshr_q[e].sub_reqs[0].core_id == req_in[mo_ot][p].wdata.core_id) &&
             // Same-address exclusion, bank-local exactly as in the per-lane form: a same-address
-            // Entry must lie in the request's own bank, so req_addr_hit_way (already bank-scoped)
-            // Carries it and no extra address comparator appears here.
+            // entry must lie in the request's own bank, so req_addr_hit_way (already bank-scoped)
+            // carries it and no extra address comparator appears here.
             !((req_bank[mo_ot][p] == BankIdW'(e / MshrWaysPerBank)) &&
               req_addr_hit_way[mo_ot][p][e % MshrWaysPerBank]) &&
             // Length guards are load-bearing -- see the per-lane form for why.
@@ -1332,7 +1314,6 @@ module mempool_group_mshr
   endfunction
 
   /// Store byte-merge select, one-hot per (entry, byte).
-  ///
   /// The sequential form walked 32 lanes per byte, each overwriting the last, so synthesis built a
   /// 32-deep chain into resp_buf.data -- 8192 registers, and the worst request-fed endpoint family
   /// in the placed report. Selecting with a one-hot and OR-ing the masked lanes is the same result
@@ -1357,7 +1338,7 @@ module mempool_group_mshr
           stb_byte_data[e][b] |= {8{stb_byte_win[e][b][l]}} & stb_wd[l][b*8 +: 8];
   end
 
-  // Mshr_hit_req[e]: is entry e address-hit by some request this cycle?
+  // mshr_hit_req[e]: is entry e address-hit by some request this cycle?
   if (CacheReclaimable) begin : gen_mshr_hit_req
     for (genvar e = 0; e < MshrNum; e++) begin : gen_hit_req_e
       localparam int unsigned HrBank = e / MshrWaysPerBank;
@@ -1374,7 +1355,8 @@ module mempool_group_mshr
     assign mshr_hit_req = '0;
   end
 
-  // Select the first matching way per request to avoid multi-merge; absolute id = req_bank*ways + way.
+  // Select the first matching way per request to avoid multi-merge; absolute id = req_bank*ways +
+  // way.
   always_comb begin
     for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
       for (int port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin
@@ -1396,7 +1378,7 @@ module mempool_group_mshr
   end
 
   // Allocation candidacy: a mergeable load that missed every resident entry and has no drain/meta
-  // Hazard wants a new entry.
+  // hazard wants a new entry.
   for (genvar tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin : gen_req_alloc_cand_tile
     for (genvar port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin : gen_req_alloc_cand_port
       assign req_alloc_cand[tile_i][port_i] =
@@ -1411,8 +1393,8 @@ module mempool_group_mshr
     end
   end
 
-  // Per-bank free-way lookup with INVALID-FIRST priority (idea 2): prefer a truly free (invalid)
-  // Way, and reclaim a CACHED way only when the bank has no invalid way.
+  // Per-bank free-way lookup with INVALID-FIRST priority: prefer a truly free (invalid)
+  // way, and reclaim a CACHED way only when the bank has no invalid way.
   // Reduce each entry to the two bits the free-way lookup needs, so the submodule takes ~200 bits
   // instead of MshrNum full entries.
   logic [MshrNum-1:0] way_reclaimable;
@@ -1452,14 +1434,15 @@ module mempool_group_mshr
   logic [MshrBankNum-1:0][NumAllocSlots-1:0] bank_win_oh;     // one-hot winner per bank
 
   // Loop temporaries for the allocation arbiter, declared at module scope rather than as
-  // Procedural `automatic`s inside the always_comb below.
+  // procedural `automatic`s inside the always_comb below.
   logic [AllocRrW-1:0]                       alloc_slot_idx;      // flatten block
   logic [AllocRrW-1:0]                       alloc_scatter_slot;  // scatter block
   logic [BankIdW-1:0]                        alloc_scatter_bank;
 
-  // Per-bank merge arbiter (OneMergePerBank). Same shape as the allocation arbiter above and sharing
-  // Its rotation base, so a high-index tile is not perpetually beaten to a contended bank. Separate
-  // Signals rather than reuse: a module-scope variable may have only one combinational driver.
+  // Per-bank merge arbiter (OneMergePerBank). Same shape as the allocation arbiter above and
+  // sharing its rotation base, so a high-index tile is not perpetually beaten to a contended bank.
+  // Separate signals rather than reuse: a module-scope variable may have only one combinational
+  // driver.
   logic [NumAllocSlots-1:0]                  merge_arb_cand_flat;
   logic [NumAllocSlots-1:0][BankIdW-1:0]     merge_arb_bank_flat;
   logic [MshrBankNum-1:0][NumAllocSlots-1:0] bank_merge_win_oh;   // one-hot merge winner per bank
@@ -1483,7 +1466,7 @@ module mempool_group_mshr
     end
     // Thermometer mask from the rotation base, computed once and shared by every bank.
     // EnableRrFairness = 0 collapses it to all-ones, i.e. plain ascending priority from slot 0 --
-    // Exactly the old alloc_base = 0 behaviour.
+    // exactly the old alloc_base = 0 behaviour.
     for (int s = 0; s < NumAllocSlots; s++) begin
       alloc_rr_mask[s] = EnableRrFairness ? (s >= int'(alloc_rr_q)) : 1'b1;
     end
@@ -1501,7 +1484,7 @@ module mempool_group_mshr
   );
 
   // Scatter the per-bank one-hot grant back to the (tile,port) requesters. Slot s only ever appears
-  // In its own bank's vector, so indexing by req_bank here selects that same bank.
+  // in its own bank's vector, so indexing by req_bank here selects that same bank.
   always_comb begin
     for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
       for (int port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin
@@ -1522,11 +1505,11 @@ module mempool_group_mshr
       for (int port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin
         // No late join once a beat is in flight. req_addr_hit_drain means "this address's entry is
         // draining, OR has a response arriving this cycle / in flight" (StallOnResp). It already
-        // gates the ALLOCATE path (:1194) and the non-merge branch, but not the merge -- so a
-        // subscriber could join in the very cycle a beat lands and the entry flipped to
-        // MSHR_DRAIN_RESP. Blocking it makes mshr_d.sub_reqs == mshr_q.sub_reqs for any entry with a
-        // beat in flight, BY CONSTRUCTION, which is what lets the drain read sub_reqs from mshr_q.
-        // Cost: such a merge becomes stall-and-retry, one cycle later.
+        // gates the ALLOCATE path and the non-merge branch, but not the merge -- so a subscriber
+        // could join in the very cycle a beat lands and the entry flipped to MSHR_DRAIN_RESP.
+        // Blocking it makes mshr_d.sub_reqs == mshr_q.sub_reqs for any entry with a beat in flight,
+        // BY CONSTRUCTION, which is what lets the drain read sub_reqs from mshr_q. Cost: such a
+        // merge becomes stall-and-retry, one cycle later.
         req_merge_valid[tile_i][port_i] =
             req_can_merge[tile_i][port_i] && req_hit_mshr_sel_valid[tile_i][port_i] &&
             !req_addr_hit_drain[tile_i][port_i];
@@ -1536,7 +1519,7 @@ module mempool_group_mshr
   end
 
   // Per-bank merge arbiter (OneMergePerBank): same shape as the allocation arbiter and sharing its
-  // Rotation base, so a high-index tile is not perpetually beaten to a contended bank.
+  // rotation base, so a high-index tile is not perpetually beaten to a contended bank.
   always_comb begin
     merge_arb_cand_flat = '0;
     merge_arb_bank_flat = '0;
@@ -1550,7 +1533,7 @@ module mempool_group_mshr
   end
 
   // Ungated: an entry that is already resident is always a legal merge target. Shares the
-  // Allocation rotation base, so a high-index tile is not perpetually beaten to a contended bank.
+  // allocation rotation base, so a high-index tile is not perpetually beaten to a contended bank.
   mempool_group_mshr_bank_arb #(
     .NumSlots(NumAllocSlots), .NumBanks(MshrBankNum), .BankIdW(BankIdW)
   ) i_merge_arb (
@@ -1581,8 +1564,8 @@ module mempool_group_mshr
   end
 
   // Sequential state update
-  // Shared hold prescaler: one free-running counter per MSHR instance. Entry e takes its tick
-  // When hold_prescale_q == e[HoldPrescaleWSafe-1:0].
+  // shared hold prescaler: one free-running counter per MSHR instance. Entry e takes its tick
+  // when hold_prescale_q == e[HoldPrescaleWSafe-1:0].
   logic [HoldPrescaleWSafe-1:0]      hold_prescale_q;
   logic [2**HoldPrescaleWSafe-1:0]   hold_tick_phase;  // one-hot decode of the shared prescaler
   logic [MshrNum-1:0]                hold_tick;        // per-entry tick enable
@@ -1594,7 +1577,7 @@ module mempool_group_mshr
     hold_tick_phase                  = '0;
     hold_tick_phase[hold_prescale_q] = 1'b1;
     // `int` is SIGNED: HoldPrescaleWSafe'(e) on a signed operand turns e = 8..15 into the 4-bit
-    // Patterns 1000..1111, read back as -8..-1, so the bit-select went out of range and returned
+    // patterns 1000..1111, read back as -8..-1, so the bit-select went out of range and returned
     for (int unsigned e = 0; e < MshrNum; e++) begin
       hold_tick[e] = (HoldPrescaleW == 0) ? 1'b1 : hold_tick_phase[HoldPrescaleWSafe'(e)];
     end
@@ -1630,7 +1613,8 @@ module mempool_group_mshr
   logic [MshrNum-1:0]                   mshr_ctl_en;  // control fields
   logic [MshrNum-1:0][RespBufWords-1:0] mshr_rb_en;   // one enable per response-buffer slot
   // "Some lane may allocate entry e this cycle." A CONSERVATIVE superset of the real grant, and
-  // Deliberately so: a clock-gate enable may be over-asserted (costs a little power) but must.
+  // deliberately so: a clock-gate enable may be over-asserted (it costs a little power) but never
+  // under-asserted (it would lose a write).
   always_comb begin
     for (int e = 0; e < MshrNum; e++) begin
       // Control changes only while the entry is live, or on the cycle it is allocated --
@@ -1707,7 +1691,7 @@ module mempool_group_mshr
   end
 
   // Entry-occupancy view for utilization analysis (simulation-only, zero hardware, always
-  // Available -- no debug define needed).
+  // available -- no debug define needed).
   `ifndef TARGET_SYNTHESIS
   localparam int unsigned MshrCntW = idx_width(MshrNum + 1);
   logic [MshrNum-1:0]  mshr_inuse_dbg;
@@ -1756,7 +1740,7 @@ module mempool_group_mshr
     if (HoldWindowMax != 0) begin
       for (int e = 0; e < MshrNum; e++) begin
         // Genuine held->released edge: the entry was VALID and NOT issued last cycle and is issued
-        // Now.
+        // now.
         if (mshr_d_valid[e] && mshr_d[e].issued &&
             mshr_q_valid[e] && !mshr_q[e].issued &&
             (((mshr_d[e].burst_len == BurstLenWidth'(1)) ?
@@ -1786,18 +1770,18 @@ module mempool_group_mshr
     end
   end
 
-  // F3c COVERAGE: counts the case the per-entry capture exists to handle -- TWO response lanes
-  // Capturing into the SAME entry in one cycle. Zero here would make the equivalence arm vacuous.
+  // Coverage counter for the case the per-entry capture exists to handle: TWO response lanes
+  // capturing into the SAME entry in one cycle. Zero here would make the equivalence arm vacuous.
   logic [31:0] stb_ovl_cnt_dbg;
   logic [31:0] cap_two_grant_cnt_dbg;   // cycles-with-entries where a second lane was granted
   logic [31:0] cap_one_grant_cnt_dbg;   // ... where only the first was, for a ratio
   // OneMergePerBank cost, measured rather than argued: merges the per-bank arbiter refused this
-  // Cycle (the lane is a valid merge hit but lost its bank), against merges it granted.
+  // cycle (the lane is a valid merge hit but lost its bank), against merges it granted.
   logic [31:0] merge_arb_stall_cnt_dbg;
   logic [31:0] merge_arb_grant_cnt_dbg;
-  // F4d cost, comparable ACROSS the knob: lanes that wanted to capture a response this cycle
+  // Comparable ACROSS the knob: lanes that wanted to capture a response this cycle
   // (resp_is_mshr) against lanes that actually did (resp_capture_fire). The difference is the
-  // Deferral the capture arbiter imposed, whichever form is compiled in.
+  // deferral the capture arbiter imposed, whichever form is compiled in.
   logic [31:0] cap_want_cnt_dbg;
   logic [31:0] cap_fire_cnt_dbg;
   always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -1926,8 +1910,7 @@ module mempool_group_mshr
     longint bp_cyc, bp_fwd, bp_rsp, bp_orphan;
 
     // Was a scan of bypass_track_q, which the deleted table's else-arm tied to '0 -- so this
-    // Vector has been identically zero since fde0369f. Kept as a named constant rather than
-    // Folded into its one consumer, so the probe's intent stays legible.
+    // folded into its one consumer, so the probe's intent stays legible.
 
     always @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
@@ -2009,7 +1992,7 @@ module mempool_group_mshr
   end
 
   // Bank-concentration measurement (settles: is bank-full overflow caused by the hash
-  // Concentrating a temporal batch into few banks, or by genuine aggregate fullness?).
+  // concentrating a temporal batch into few banks, or by genuine aggregate fullness?).
   logic [BankIdW:0] bfb_free_banks_now;   // 0..MshrBankNum
   logic [47:0]      bfb_free_banks_sum;
   logic [31:0]      bfb_alias_events;
@@ -2039,7 +2022,7 @@ module mempool_group_mshr
   end
 `ifndef VERILATOR
   // Address-capture probe (BankHashDump): dump the merge key + target group + current-hash bank of
-  // Bank-full-bypass events in ONE group (group 0), up to a cap, so the actual colliding.
+  // bank-full-bypass events in ONE group (group 0), up to a cap, so the actual colliding.
 `ifdef GROUP_MSHR_BANK_DUMP
   int unsigned bank_dump_cnt;
   always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -2071,9 +2054,8 @@ module mempool_group_mshr
   // Debug-only view of cached/uncached valid entries.
   `ifndef TARGET_SYNTHESIS
   `ifndef VERILATOR
-  // A verbose per-entry debug tracer ([E16D]/[T5*]/[GMA]) lived here behind
-  // +define+GROUP_MSHR_DEBUG_TRACE. Deleted silent by default, read by no
-  // Script, and 214 lines of noise in a file being reviewed. Recover from git if needed.
+  // A verbose per-entry debug tracer lived here behind +define+GROUP_MSHR_DEBUG_TRACE.
+  // Recover it from git history if needed.
   `endif
   `endif
 
@@ -2085,12 +2067,12 @@ module mempool_group_mshr
 `endif
 
   // Loop temporaries for the three drain / response-select arbiters inside the always_comb below,
-  // At module scope rather than as procedural `automatic`s.
+  // at module scope rather than as procedural `automatic`s.
   logic [MshrIdxW-1:0]      drain_sel_base;
   logic [SubIdxW-1:0]       drain_sel_sub_base;                    // A: rotation bases
   logic [MshrNum-1:0]       drain_ent_cand;                        // A: entries offering a beat
   // Bank-narrowed selector. With BankPublish on, at most one entry per bank is selectable,
-  // So the arbitration runs over MshrBankNum candidates instead of MshrNum.
+  // so the arbitration runs over MshrBankNum candidates instead of MshrNum.
   logic [MshrBankNum-1:0][MshrIdxW-1:0] bank_pub_e;    // published entry id per bank (port-indep.)
   logic [MshrBankNum-1:0]   bank_cand, bank_cand_rot, bank_cand_eff, bank_pfx, bank_first;
   logic [BankIdW-1:0]       bank_base, bank_idx, bank_win_d, bank_win;
@@ -2107,10 +2089,10 @@ module mempool_group_mshr
   logic [MshrNum-1:0][MshrMergeReqs-1:0]                      drain_sub_ready;
   tile_group_id_t [MshrNum-1:0][MshrMergeReqs-1:0]            drain_sub_tile;
   logic [MshrNum-1:0][MshrMergeReqs-1:0][RespPortIdW-1:0]     drain_sub_port;
-  // Head-beat DRIVE operands, hoisted per entry (F8's second half, applied to the head beat).
+  // Head-beat DRIVE operands, hoisted per entry (applied to the head beat).
   // The drive read mshr_d[resp_sel_mshr_id[t][p]] directly -- a full-entry MshrNum:1 STRUCT mux per
-  // Lane, 32 of them, plus a second MshrNum:1 for the nested resp_buf_rd_ptr and a burst_len
-  // Comparator per lane. Hoisting turns each into a MshrNum:1 over a NARROW field, computed once.
+  // lane, 32 of them, plus a second MshrNum:1 for the nested resp_buf_rd_ptr and a burst_len
+  // comparator per lane. Hoisting turns each into a MshrNum:1 over a NARROW field, computed once.
   data_t [MshrNum-1:0]                                        drv_data;
   tile_core_id_t [MshrNum-1:0][MshrMergeReqs-1:0]             drv_sub_core;
   meta_id_t [MshrNum-1:0][MshrMergeReqs-1:0]                  drv_sub_meta;
@@ -2120,41 +2102,33 @@ module mempool_group_mshr
   data_t [MshrNum-1:0]                                        drv2_data;
 
   // ------------------------------------------------------------------------------------
-  // Drain scan and drive operands -- a pure function of mshr_q, so it lives OUTSIDE the
-  // entry-update always_comb.
-  //
-  // Every signal written here has exactly one driver and none of them is read back by the
-  // update block before this settles, so splitting it out is behaviour-preserving. It is
-  // worth splitting because the depth is now visible: this block reads REGISTERS only, which
-  // is what the DrainFromQ work established -- previously the `DrainFromQ ? mshr_q : mshr_d`
-  // ternaries hid that, and a reader could not tell whether the drive waited on the capture.
+  // drain scan and drive operands -- a pure function of mshr_q, so it lives OUTSIDE the
+  // entry-update always_comb. Every signal written here has one driver and none is read back by
+  // the update block before this settles, so the split is behaviour-preserving; it also makes
+  // the depth visible, because this block reads REGISTERS only.
   // ------------------------------------------------------------------------------------
   always_comb begin
-    // ---- hoist the (tile,port)-INDEPENDENT half of the drain eligibility test ---- The
-    // Scan below runs inside `for (tile) for (port)` -- 16 x 2 = 32 instances at the 8x8 backend
+    // Hoist the (tile,port)-INDEPENDENT half of the drain eligibility test: the scan below runs
+    // inside `for (tile) for (port)`, 32 instances at the 8x8 backend.
     for (int e = 0; e < MshrNum; e++) begin
       // NOT an `automatic ... = ...` local: an initialiser at declaration inside a procedural
-      // Block is ignored by synthesis (Spyglass SYNTH_89), which this module was cleaned of
-      // Earlier. drain_ent_ok is a module-scope packed vector instead.
+      // block is ignored by synthesis (Spyglass SYNTH_89), which this module was cleaned of
+      // earlier. drain_ent_ok is a module-scope packed vector instead.
       drain_scan_valid[e] = mshr_q_valid[e];
-      // From mshr_q, not mshr_d: the drain SCAN is already mshr_q-sourced (DrainFromQ), so the
-      // drive can only ever touch an entry the registered state selected -- and for such an entry
-      // the two are equal (capture writes at wr_ptr, the drive reads rd_ptr, and the scan requires
-      // resp_buf_cnt != 0, so they are different slots). Reading mshr_d made the drive serially
-      // dependent on the capture pass for no benefit.
+      // mshr_q, not mshr_d: the scan is already q-sourced (DrainFromQ), and for a scanned entry
+      // the two agree -- capture writes at wr_ptr, the drive reads rd_ptr, and the scan requires
+      // resp_buf_cnt != 0, so they address different slots.
       drv_data[e]      = mshr_q[e].resp_buf[mshr_q[e].resp_buf_rd_ptr].data;
-      // Same q-sourcing as drv_data, and the same burst_len==1 special case resp_beat_offset
-      // makes (a single-word entry's only legal beat is 0, so replayed cached data does not
-      // depend on a stale meta_id inside resp_buf). The drain scan already requires
-      // resp_buf_cnt != 0, so the outer guard resp_beat_offset carries is redundant here.
+      // Same q-sourcing. burst_len == 1 forces beat 0: a single-word entry has no other legal
+      // beat, so replayed cached data never depends on a stale beat_off in resp_buf.
       drv_beat_off[e]  = (mshr_q[e].burst_len == BurstLenWidth'(1))
                        ? '0 : mshr_q[e].resp_buf[mshr_q[e].resp_buf_rd_ptr].beat_off;
       drv_burst_one[e] = (mshr_q[e].burst_len == BurstLenWidth'(1));
       drain_ent_ok[e] = drain_scan_valid[e] && (mshr_q[e].resp_buf_cnt != '0) &&
                         (mshr_q[e].state == MSHR_DRAIN_RESP);
       // BOTH entry-level terms must be assigned BEFORE the sub-request loop that reads them --
-      // These are blocking assignments, so an assignment placed after the loop would feed it the
-      // Previous evaluation's value.
+      // these are blocking assignments, so an assignment placed after the loop would feed it the
+      // previous evaluation's value.
       for (int s = 0; s < MshrMergeReqs; s++) begin
         drain_sub_ready[e][s] = drain_ent_ok[e] && mshr_q[e].sub_reqs[s].valid &&
                                 mshr_q[e].beat_pending[s];
@@ -2165,8 +2139,8 @@ module mempool_group_mshr
         drv_sub_core[e][s]    = mshr_q[e].sub_reqs[s].core_id;
         drv_sub_meta[e][s]    = mshr_q[e].sub_reqs[s].meta_id_base;
         // Effective destination port: the ParityDrain pin for multi-beat entries, otherwise the
-        // Requester's own mapped port. Independent of s in the PD2 arm, but kept per-s so the
-        // Consumer is a single uniform compare.
+        // requester's own mapped port. Independent of s in the PD2 arm, but kept per-s so the
+        // consumer is a single uniform compare.
         drain_sub_port[e][s]  = (PD2 && (mshr_q[e].burst_len != BurstLenWidth'(1)))
                               ? (RespPortIdW'(1) + RespPortIdW'(drv_beat_off[e][0]))
                               : map_resp_port_id(mshr_q[e].sub_reqs[s].port_id);
@@ -2175,7 +2149,7 @@ module mempool_group_mshr
     end
   end
   // ParityDrain second-slot equivalents. drain2_sub_port is indexed by ENTRY only: both beats of an
-  // Entry share one parity port, so it does not vary per sub-request.
+  // entry share one parity port, so it does not vary per sub-request.
   logic [MshrNum-1:0]                                         drain2_ent_ok;
   logic [MshrNum-1:0][MshrMergeReqs-1:0]                      drain2_sub_ready;
   tile_group_id_t [MshrNum-1:0][MshrMergeReqs-1:0]            drain2_sub_tile;
@@ -2235,15 +2209,13 @@ module mempool_group_mshr
   logic [MshrBankNum-1:0][RespPortIdW-1:0]   mgb_port;
   tile_core_id_t [MshrBankNum-1:0]           mgb_core;
   meta_id_t [MshrBankNum-1:0]                mgb_meta;
-  // Per-bank ALLOCATION apply. The guarantee here is older than F5a and already stated at the
-  // Allocation site -- "At most one alloc fires per bank per cycle (bank_alloc_taken), so this
-  // Per-bank write never conflicts" -- so this needs no knob: it is unconditionally true.
+  // Per-bank allocation apply. The guarantee is stated at the
+  // allocation site -- "At most one alloc fires per bank per cycle (bank_alloc_taken), so this
+  // per-bank write never conflicts" -- so this needs no knob: it is unconditionally true.
   logic [MshrBankNum-1:0]                    agb_v;
   logic [MshrBankNum-1:0][VictimPtrW-1:0]    agb_way;
 
-
   /// Allocation and merge FIRE terms, from the per-bank grant records and mshr_q only.
-  ///
   /// An entry's bank and way are compile-time constants here, so the arbiter's scatter becomes a
   /// per-entry compare and needs no variable index. The two merge cases set the same value and are
   /// mutually exclusive on state, so the original if / else-if is an OR.
@@ -2279,13 +2251,11 @@ module mempool_group_mshr
   logic [MergeRankW-1:0]                     mgb_slot;   // recomputed from mshr_q
 
   /// PER-BANK RECORD SCATTER, one-hot.
-  ///
   /// Both arbiters emit an LSB-isolated win_oh per bank and their candidate already carries the
   /// bank match, so exactly one lane can ever write a bank's record: the 32-deep mux the
   /// procedural `agb_x[req_bank[t][p]] = ...` form inferred came from the VARIABLE INDEX, not from
   /// contention. Selecting with the arbiter's own one-hot and OR-ing the masked lanes turns 32
   /// levels into 5, and takes the whole record off the always_comb.
-  ///
   /// win_oh implies req_alloc_cand (which carries req_can_merge) for allocation and
   /// req_merge_valid for merge, so accept = valid && ready reproduces each guard exactly.
   logic [NumAllocSlots-1:0]                     arb_accept;
@@ -2384,13 +2354,13 @@ module mempool_group_mshr
     mgb_slot = '0;
     mshr_d      = mshr_q;
     // Clock-gate write flags. Set on the same line as the write they describe (see the entry
-    // Register block), never from a restatement of the write's condition.
+    // register block), never from a restatement of the write's condition.
     mshr_wr_all = '0;
     mshr_id_we  = '0;
     mshr_rb_we  = '0;
     // One-cycle pulses; set only at the two response-side death sites below.
     // Guarded because the DECLARATIONS live in an `ifndef TARGET_SYNTHESIS region: unguarded, these
-    // Reference undefined symbols under synthesis and the module does not analyze at all.
+    // reference undefined symbols under synthesis and the module does not analyze at all.
 `ifndef TARGET_SYNTHESIS
     mshr_resp_hold_timeout_dbg = '0;
     mshr_cache_timeout_dbg     = '0;
@@ -2433,12 +2403,12 @@ module mempool_group_mshr
     stb_hit = '0;
 
     // ------------------------------------------------------------
-    // Request path: merge loads, allocate MSHR, or bypass to NoC
+    // request path: merge loads, allocate MSHR, or bypass to NoC
     // ------------------------------------------------------------
     for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
       for (int port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin
         if (req_in_valid[tile_i][port_i]) begin
-          // Tier-b: default tag 0 (= no MSHR entry / bypass); overwritten with (entry id + 1) on alloc.
+          // default tag 0 (= no MSHR entry / bypass); overwritten with (entry id + 1) on alloc.
           req_out[tile_i][port_i].mshr_tag = '0;
           if (req_in[tile_i][port_i].wdata.amo != '0) begin
             req_out[tile_i][port_i].burst_len = BurstLenWidth'(1);
@@ -2446,7 +2416,7 @@ module mempool_group_mshr
           if (req_merge_valid[tile_i][port_i]) begin
             // Merge hit: accept without touching NoC.
             // Slot and capacity come from the REGISTERED count plus this port's rank, not from
-            // The value earlier ports left in mshr_d.
+            // the value earlier ports left in mshr_d.
             merge_slot = req_fwd_hit[tile_i][port_i]
                        ? MergeRankW'(1)   // forwarded: the leader will be sub_reqs[0]
                        : MergeRankW'(mshr_q[req_merge_mshr_id[tile_i][port_i]].sub_reqs_num +
@@ -2457,7 +2427,7 @@ module mempool_group_mshr
             if (req_in_ready[tile_i][port_i]) begin
               if ((merge_slot + MergeRankW'(1)) <= MergeRankW'(MshrMergeReqs)) begin
                 // RECORD only. The apply runs once per bank after this loop closes, so no
-                // Lane reads what an earlier lane wrote and the 32-deep chain disappears.
+                // lane reads what an earlier lane wrote and the 32-deep chain disappears.
               end
             end
           end else begin
@@ -2477,19 +2447,19 @@ module mempool_group_mshr
             end else if (req_can_merge[tile_i][port_i] && !req_alloc_found[tile_i][port_i] &&
                          (bank_has_free[req_bank[tile_i][port_i]] || cfg_bankfull_bp)) begin
               // Mergeable miss that lost this bank's single allocation slot this cycle, but a free
-              // Way exists: STALL and retry.
+              // way exists: STALL and retry.
               req_in_ready[tile_i][port_i]  = 1'b0;
               req_out_valid[tile_i][port_i] = 1'b0;
             end else begin
               // ALLOCATE (won the per-bank slot) or BYPASS (non-mergeable store/AMO, or a
-              // Mergeable miss whose bank is full): forward this request to the NoC.
+              // mergeable miss whose bank is full): forward this request to the NoC.
               if ((((req_len[tile_i][port_i] == BurstLenWidth'(1)) ?
                      cfg_hold_window_single : cfg_hold_window_burst) != 0) &&
                   req_can_merge[tile_i][port_i] &&
                   req_alloc_found[tile_i][port_i]) begin
                 // Hold-the-fetch: allocate the entry but WITHHOLD its NoC fetch (the replay walker
-                // Below issues it once hold_done). Consume the request locally so the door never
-                // Couples to NoC readiness and never head-of-line-blocks the tile port.
+                // below issues it once hold_done). Consume the request locally so the door never
+                // couples to NoC readiness and never head-of-line-blocks the tile port.
                 req_in_ready[tile_i][port_i]  = 1'b1;
                 req_out_valid[tile_i][port_i] = 1'b0;
               end else begin
@@ -2501,13 +2471,14 @@ module mempool_group_mshr
                 // Bank-full mergeable misses fall through here as a plain bypass).
                 if (req_alloc_found[tile_i][port_i] &&
                     req_in_ready[tile_i][port_i]) begin
-                // Tier-b: stamp the egress NoC request with (allocated entry id + 1) so the returning
-                // Response routes back to this entry by direct index (tag 0 stays the bypass sentinel).
+                // stamp the egress NoC request with (allocated entry id + 1) so the returning
+                // response routes back to this entry by direct index (tag 0 stays the bypass
+                // sentinel).
                 // Per-LANE output, so it stays here.
                 req_out[tile_i][port_i].mshr_tag =
                     MshrTagWidth'(req_alloc_found_mshr_id[tile_i][port_i]) + MshrTagWidth'(1);
                 // RR victim advance: firing on a still-valid CACHED way IS a reclaim -- move that
-                // Bank's scan start just past the evicted way.
+                // bank's scan start just past the evicted way.
                 if (CacheVictimRR && CacheReclaimable) begin
                   evict_vid = int'(req_alloc_found_mshr_id[tile_i][port_i]);
                   evict_vw  = evict_vid & unsigned'(MshrWaysPerBank - 1);
@@ -2521,18 +2492,18 @@ module mempool_group_mshr
               end
             end
             // RECORD the store's byte-merge; the merge itself happens once per entry after
-            // This loop.
+            // this loop.
             if (EnableRespCache && !amo_invalidate &&
                 req_is_store[tile_i][port_i] &&
                 (req_len[tile_i][port_i] == BurstLenWidth'(1)) &&
                 req_in_ready[tile_i][port_i]) begin
               // Bank-scoped: a store can only hit a CACHED entry in its OWN bank, so only this
-              // Request's MshrWaysPerBank ways are examined and hit_e reconstructs the absolute id.
+              // request's MshrWaysPerBank ways are examined and hit_e reconstructs the absolute id.
               for (int way_i = 0; way_i < MshrWaysPerBank; way_i++) begin
                 cache_hit_e =
                     int'(req_bank[tile_i][port_i]) * MshrWaysPerBank + way_i;
                 // Reads only. None of state / resp_buf_cnt / resp_buf_rd_ptr is written by this
-                // Pass any more, so all 32 lanes evaluate against the same entry state.
+                // pass any more, so all 32 lanes evaluate against the same entry state.
                 if (mshr_d_valid[cache_hit_e] && !alloc_inflight[cache_hit_e] &&
                     (mshr_d[cache_hit_e].state == MSHR_CACHED) &&
                     req_addr_hit_way[tile_i][port_i][way_i]) begin
@@ -2549,9 +2520,9 @@ module mempool_group_mshr
     end
 
     // Apply the allocations recorded above, ONE ITERATION PER BANK. The guarantee is the
-    // Allocator's own: bank_win_oh grants at most one allocation per bank per
-    // Cycle, and bank_free_id[b] is by construction a way of bank b. So these MshrBankNum writes
-    // Target distinct entries and need no ordering between them -- exactly the property the old
+    // allocator's own: bank_win_oh grants at most one allocation per bank per
+    // cycle, and bank_free_id[b] is by construction a way of bank b. So these MshrBankNum writes
+    // target distinct entries and need no ordering between them -- exactly the property the old
     for (int e = 0; e < MshrNum; e++) begin
       if (alloc_inflight[e]) begin
         // Recorded, not applied -- see the mshr_alloc_set declaration. No pass below needs to see
@@ -2584,8 +2555,8 @@ module mempool_group_mshr
         mshr_d[e].cache_hit_cnt = '0;
 `endif
         // Hold-the-fetch: arm the per-type hold window (single vs burst). A 0 window (or the
-        // Feature off) means the fetch went out this same cycle on the passthrough, so mark it
-        // Issued immediately.
+        // feature off) means the fetch went out this same cycle on the passthrough, so mark it
+        // issued immediately.
         mshr_d[e].hold_cnt =
             hold_ticks((agb_q_len[e / MshrWaysPerBank] == BurstLenWidth'(1)) ?
                        cfg_hold_window_single : cfg_hold_window_burst);
@@ -2599,14 +2570,14 @@ module mempool_group_mshr
     end
 
     // Apply the merges recorded above, ONE ITERATION PER BANK. OneMergePerBank guarantees at
-    // Most one merge per bank and an entry lies in exactly one bank, so no two of these writes can
-    // Target the same entry -- the 32-deep lane chain becomes MshrBankNum independent writes.
+    // most one merge per bank and an entry lies in exactly one bank, so no two of these writes can
+    // target the same entry -- the 32-deep lane chain becomes MshrBankNum independent writes.
     // B is a loop constant here, so b*MshrWaysPerBank + way is a MshrWaysPerBank:1 select and the
-    // Write is bank-local as well as parallel (the per-lane form was MshrNum:1).
+    // write is bank-local as well as parallel (the per-lane form was MshrNum:1).
     for (int e = 0; e < MshrNum; e++) begin
       if (merge_inflight[e]) begin
-        // Merge_rank is identically zero under this knob, so the slot is just the registered
-        // Count -- no need to have carried it out of the lane loop.
+        // merge_rank is identically zero under this knob, so the slot is just the registered
+        // count -- no need to have carried it out of the lane loop.
         mgb_slot = MergeRankW'(mshr_q[e].sub_reqs_num);
         mshr_id_we[e] = 1'b1;
         mshr_d[e].sub_reqs[mgb_slot].valid        = 1'b1;
@@ -2673,27 +2644,23 @@ module mempool_group_mshr
         end
       end
       if (|stb_bytes[e]) begin
-        // Pointer from mshr_q: the only pass writing resp_buf_rd_ptr before this point is the
-        // allocation, which blanks the entry -- and at CacheReclaimable=0 the allocator only takes
-        // an INVALID way, while stb_hit requires a valid MSHR_CACHED entry. Reading mshr_d put the
-        // allocation arbiter into mshr_rb_we, hence into mshr_rb_en, a clock-gate enable.
+        // Pointer from mshr_q: the only earlier writer of resp_buf_rd_ptr is the allocation, which
+        // blanks the entry and (at CacheReclaimable=0) only takes an INVALID way, while stb_hit
+        // requires a valid MSHR_CACHED entry.
         mshr_rb_we[e][mshr_q[e].resp_buf_rd_ptr] = 1'b1;
-        // The resp_buf_cnt re-arm that stood here was unreachable: stb_hit requires a valid
-        // MSHR_CACHED entry and cached_entry_holds_data asserts such an entry always has
-        // resp_buf_cnt != 0. It was not free -- reading mshr_d.resp_buf_cnt pulled |stb_bytes[e]
-        // (a 32-lane OR rooted at req_in_ready) into every downstream reader of resp_buf_cnt,
-        // reinstating exactly the request-path dependency the SPLIT SOURCING comments remove.
+        // No resp_buf_cnt re-arm here: stb_hit requires a valid MSHR_CACHED entry, and
+        // cached_entry_holds_data asserts such an entry always has resp_buf_cnt != 0.
       end
     end
 
     // Hold-the-fetch replay: issue the withheld fetch of every hold_done entry (window expired, or
-    // Subscriber count reached HoldSubs -- checked on mshr_d so a merge landing THIS cycle
+    // subscriber count reached HoldSubs -- checked on mshr_d so a merge landing THIS cycle
     if (HoldWindowMax != 0) begin
-      // C3 step 1: hold-done and owner lane per ENTRY -- lane-independent, so computed once
-      // Instead of re-derived inside a chain.
+      // Step 1: hold-done and owner lane per ENTRY -- lane-independent, so computed once
+      // instead of re-derived inside a chain.
       for (int e = 0; e < MshrNum; e++) begin
         // Elaboration-constant select: one arm is built, and at ReplayFromQ = 0 every term is
-        // Literally the mshr_d expression it replaced.
+        // literally the mshr_d expression it replaced.
         replay_scan_valid[e] = ReplayFromQ ? mshr_q_valid[e] : mshr_d_valid[e];
         replay_scan_ent[e]   = ReplayFromQ ? mshr_q[e]       : mshr_d[e];
         replay_ready[e] = replay_scan_valid[e] && (replay_scan_ent[e].state == MSHR_WAIT_RESP) &&
@@ -2706,7 +2673,7 @@ module mempool_group_mshr
         replay_own_p[e] = replay_scan_ent[e].sub_reqs[0].port_id;
         replay_rr_mask[e] = MshrIdxW'(e) >= MshrIdxW'(hold_replay_rr_q);
       end
-      // C3 step 2: each lane picks its own winner, in parallel. Lanes are disjoint by construction
+      // Step 2: each lane picks its own winner, in parallel. Lanes are disjoint by construction
       // (one owner lane per entry), so no lane can steal another's candidate.
       for (int t = 0; t < NumTilesPerGroup; t++) begin
         for (int p = 1; p < NumRemoteReqPortsPerTile; p++) begin
@@ -2730,7 +2697,7 @@ module mempool_group_mshr
               req_out_valid[t][p]               = 1'b1;
               req_out[t][p]                     = '0;
               // Read the payload from the SAME view the winner was selected from; mixing them
-              // Would put the 64:1 field mux back on the d-side cone for no benefit.
+              // would put the 64:1 field mux back on the d-side cone for no benefit.
               req_out[t][p].wdata.meta_id       = replay_scan_ent[replay_win_e].sub_reqs[0].meta_id_base;
               req_out[t][p].wdata.core_id       = replay_scan_ent[replay_win_e].sub_reqs[0].core_id;
               req_out[t][p].wen                 = 1'b0;
@@ -2746,7 +2713,6 @@ module mempool_group_mshr
       end
     end
 
-
     if (EnableRespCache && amo_invalidate) begin
       for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
         // From mshr_q: allocation writes MSHR_WAIT_RESP so it can never present CACHED here.
@@ -2760,12 +2726,12 @@ module mempool_group_mshr
       end
     end
 
-    // Cache self-invalidate (idea 1): a CACHED entry (all subscribers drained, sub_reqs_num==0)
-    // That has served its per-type sharing target -- HoldSubsSingle for a scalar/single entry,.
+    // Cache self-invalidate: a CACHED entry (all subscribers drained, sub_reqs_num==0)
+    // that has served its per-type sharing target -- HoldSubsSingle for a scalar/single entry.
     if (CacheSelfInval && EnableRespCache) begin
       for (int e = 0; e < MshrNum; e++) begin
-        // Cfg_cache_reuse_target == 0 keeps the legacy operand (the per-type sharing target), so
-        // This expression is structurally what it was before the CSR existed.
+        // cfg_cache_reuse_target == 0 keeps the legacy operand (the per-type sharing target), so
+        // this expression is structurally what it was before the CSR existed.
         // From mshr_q, with the merge fire term as an explicit veto. This is the one cache retire a
         // merge CAN reach: a merge into a CACHED entry sets state = MSHR_DRAIN_RESP and bumps
         // sub_reqs_num/served_cnt, which the mshr_d form observed and the mshr_q form cannot.
@@ -2785,7 +2751,7 @@ module mempool_group_mshr
     end
 
     // ------------------------------------------------------------
-    // Response path: capture MSHR responses or bypass to group
+    // response path: capture MSHR responses or bypass to group
     // ------------------------------------------------------------
     for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
       for (int port_i = 1; port_i < NumRemoteRespPortsPerTile; port_i++) begin
@@ -2796,7 +2762,7 @@ module mempool_group_mshr
         if (resp_in_valid[tile_i][port_i] &&
             (resp_in[tile_i][port_i].wen == 1'b0) &&
             (resp_in[tile_i][port_i].rdata.amo == '0)) begin
-          // Tier-b: route the response by its round-tripped tag instead of scanning all entries.
+          // route the response by its round-tripped tag instead of scanning all entries.
           if (resp_in[tile_i][port_i].mshr_tag != '0) begin
             resp_tag_cand =
                 mshr_id_t'(resp_in[tile_i][port_i].mshr_tag - MshrTagWidth'(1));
@@ -2823,8 +2789,7 @@ module mempool_group_mshr
                             mshr_q[resp_mshr_id[tile_i][port_i]].sub_reqs[0].meta_id_base);
           mshr_resp_inflight[resp_mshr_id[tile_i][port_i]] = 1'b1;
           // Ready and fire come from the per-entry grant below, not from walking the lanes
-          // And decrementing a slot counter as we go -- that decrement made lane k+1's readiness
-          // Depend on lane k, which is half of why the class-B endpoint sits at 6.94 ns.
+          // and decrementing a slot counter as we go -- that decrement made lane k+1's readiness
         end else begin
           resp_in_ready[tile_i][port_i] = resp_out_ready[tile_i][port_i];
         end
@@ -2832,8 +2797,8 @@ module mempool_group_mshr
         if (resp_in_valid[tile_i][port_i] && !resp_is_mshr[tile_i][port_i]) begin
           resp_out_valid[tile_i][port_i] = 1'b1;
           resp_out[tile_i][port_i] = resp_in[tile_i][port_i];
-          // NO RETAG: a bypassed burst is expanded at the DESTINATION tile, which applies the lane law
-  // There relative to this requester's own core_id/meta_id.
+          // NO RETAG: a bypassed burst is expanded at the DESTINATION tile, which applies the
+          // lane law there relative to this requester's own core_id/meta_id.
           resp_from_bypass[tile_i][port_i] = 1'b1;
         end
       end
@@ -2843,8 +2808,8 @@ module mempool_group_mshr
     cap_want = '0;
     for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
       for (int port_i = 1; port_i < NumRemoteRespPortsPerTile; port_i++) begin
-        // Resp_is_mshr is only set inside `if (resp_in_valid ...)`, so it implies valid: no lane
-        // Can be granted here that the old code would have skipped.
+        // resp_is_mshr is only set inside `if (resp_in_valid ...)`, so it implies valid: no lane
+        // can be granted here that the old code would have skipped.
         if (resp_is_mshr[tile_i][port_i]) begin
           cap_lane = RespLaneW'(tile_i * NumRespPortsActive + (port_i - 1));
           cap_want[resp_mshr_id[tile_i][port_i]][cap_lane] = 1'b1;
@@ -2878,8 +2843,8 @@ module mempool_group_mshr
                                    : (mshr_resp_slots[capb_e2[b]] >= RespBufCountW'(1)));
       end
       // Map back onto the per-entry vectors the rest of the pass reads, so nothing downstream
-      // Changes. The guards matter: a bank with no wanter must not write entry 0 and clobber
-      // Bank 0's grant, since capb_e* default to 0.
+      // changes. The guards matter: a bank with no wanter must not write entry 0 and clobber
+      // bank 0's grant, since capb_e* default to 0.
       cap_first  = '0;
       cap_second = '0;
       cap_g1     = '0;
@@ -2921,7 +2886,7 @@ module mempool_group_mshr
       end
     end
     // Scatter each granted lane's beat to its entry. cap_first / cap_second are one-hot, so at
-    // Most one lane writes each of cap_d0 / cap_d1. Scattering by lane costs 32 iterations;
+    // most one lane writes each of cap_d0 / cap_d1. Scattering by lane costs 32 iterations;
     // Gathering per entry would cost MshrNum x 32 and blow up an already slow elaboration.
     cap_d0 = '0; cap_d1 = '0;
     for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
@@ -2950,15 +2915,13 @@ module mempool_group_mshr
       end
     end
     // One write per entry. Slot order, the pointer and the saturating count reproduce the
-    // Sequential form: the first grant lands on resp_buf_wr_ptr, the second on the slot after
-    // It, and the two guarded increments saturate at RespBufWords exactly as they did.
+    // sequential form: the first grant lands on resp_buf_wr_ptr, the second on the slot after
+    // it, and the two guarded increments saturate at RespBufWords exactly as they did.
     for (int e = 0; e < MshrNum; e++) begin
       if (cap_g1[e] || cap_g2[e]) begin
-        // Register-sourced, deliberately. The only pass that writes resp_buf_wr_ptr before this
-        // point is the allocation (it blanks the entry), and allocation can never touch an entry
-        // the capture writes: way_reclaimable requires mshr_q[e].state == MSHR_CACHED while the
-        // capture requires WAIT_RESP or DRAIN_RESP. Reading mshr_d put the allocation arbiter into
-        // cap_s0, and cap_s0 addresses mshr_rb_we -> mshr_rb_en, the resp_buf clock-gate enable.
+        // Register-sourced: the only earlier writer of resp_buf_wr_ptr is the allocation, and it
+        // can never touch an entry the capture writes -- way_reclaimable requires MSHR_CACHED while
+        // the capture requires WAIT_RESP or DRAIN_RESP.
         cap_s0 = mshr_q[e].resp_buf_wr_ptr;
         cap_n0 = (RespBufWords > 1) ?
                  ((cap_s0 == RespBufPtrW'(RespBufWords - 1)) ? '0 : RespBufPtrW'(cap_s0 + 1'b1))
@@ -2975,21 +2938,18 @@ module mempool_group_mshr
           mshr_rb_we[e][cap_s1]      = 1'b1;
           mshr_d[e].resp_buf[cap_s1] = cap_d1[e];
         end
-        // A count, not two chained saturating increments. The value entering here is
-        // mshr_q[e].resp_buf_cnt: the only earlier writer is the allocation's whole-entry blank, and
-        // capture requires mshr_q_valid, which a freshly allocated entry does not have until the next
-        // edge. Saturating the sum once reproduces the guarded pair exactly -- at cnt ==
-        // RespBufWords-1 with both grants the old form stopped at RespBufWords, and so does this.
+        // One saturating sum, not two chained increments. The value entering is mshr_q
+        // resp_buf_cnt:
+        // the only earlier writer is the allocation's whole-entry blank, and capture requires
+        // mshr_q_valid, which a freshly allocated entry gains only at the next edge.
         cap_cnt_sum = RespBufCountW'(mshr_q[e].resp_buf_cnt)
                     + RespBufCountW'(cap_g1[e]) + RespBufCountW'(cap_g2[e]);
         mshr_d[e].resp_buf_cnt = (cap_cnt_sum > RespBufCountW'(RespBufWords))
                                ? RespBufCountW'(RespBufWords) : cap_cnt_sum;
         mshr_d[e].resp_buf_wr_ptr = cap_g2[e] ? cap_n1 : cap_n0;
-        // From mshr_q, which makes this literally st_cap_hold[e]'s expression (st_cap_fire is 1
-        // inside this guard). burst_len is written only by the allocation, which cannot reach an
-        // sub_reqs_num comes from mshr_d: the no-late-join gate only kept a merge and a capture
-        // apart in the SAME cycle, and the pipeline cut applies a merge one cycle after it is
-        // decided, so a beat can land on top of it.
+        // burst_len from mshr_q: written only by the allocation, which cannot reach an entry the
+        // capture is writing. sub_reqs_num from mshr_d: the cut applies a merge one cycle after it
+        // is decided, so a beat can land on top of that merge.
         if (RespWaitSubsSingle && !amo_invalidate &&
             (mshr_q[e].burst_len == BurstLenWidth'(1)) &&
             (mshr_d[e].sub_reqs_num < SubReqCountW'(cfg_hold_subs_single))) begin
@@ -3001,19 +2961,15 @@ module mempool_group_mshr
       end
     end
 
-    // The per-lane capture form this replaced lives in git history (F3c) if it ever needs diffing.
-
-    // ---- The MSHR_RESP_HOLD predicate, without reading mshr_d ------------------------------
-    // Only the CAPTURE can create MSHR_RESP_HOLD (alloc writes WAIT_RESP, merge writes DRAIN_RESP),
-    // and only a MERGE can clear a pre-existing one. Both are expressible from mshr_q plus their own
-    // fire terms, so this reproduces the value the store force-drain below would have read out of
-    // mshr_d -- without serialising behind the capture's write, which is 129 of the 165 cell levels
-    // on the critical path measured on fix2_head_2p0fp.
-    //
-    // burst_len / sub_reqs_num come from mshr_q: legal because the no-late-join gate on
-    // req_merge_valid (req_addr_hit_drain covers "a response is arriving this cycle") means no merge
-    // can touch an entry the capture is writing. That also makes capture and merge mutually
-    // exclusive on one entry, so the priority below cannot mask a real update.
+    // The MSHR_RESP_HOLD predicate, without reading mshr_d. Only the CAPTURE can create
+    // MSHR_RESP_HOLD (alloc writes WAIT_RESP, merge writes DRAIN_RESP) and only a MERGE can clear a
+    // pre-existing one, so both are expressible from mshr_q plus their own fire terms -- the value
+    // the store force-drain below would have read out of mshr_d, without serialising behind the
+    // capture's write.
+    // burst_len / sub_reqs_num come from mshr_q: the no-late-join gate on req_merge_valid
+    // (req_addr_hit_drain covers "a response is arriving this cycle") means no merge can touch an
+    // entry the capture is writing, so capture and merge are mutually exclusive on one entry and
+    // the priority below cannot mask a real update.
     // mgb_slot needs no recording -- it is already defined as MergeRankW'(mshr_q[e].sub_reqs_num).
     st_cap_fire    = '0;
     st_cap_hold    = '0;
@@ -3041,16 +2997,12 @@ module mempool_group_mshr
           for (int way_i = 0; way_i < MshrWaysPerBank; way_i++) begin
             cache_hit_e =
                 int'(req_bank[tile_i][port_i]) * MshrWaysPerBank + way_i;
-            // Reads only -- every lane sees the same pre-pass entry state, which is what makes the
-            // 32 evaluations independent instead of chained.
-            // st_post_cap holds the same value mshr_d would here, computed from mshr_q plus the
-            // capture/merge fire terms instead of from the capture's write.
-            // All three from mshr_q. The sibling st_post_cap == MSHR_RESP_HOLD already restricts this
-            // to an entry either held in mshr_q or put there by the capture -- never CACHED and never
-            // freshly allocated (st_alloc_fire takes priority and yields MSHR_WAIT_RESP). For such an
-            // entry mshr_d_valid == mshr_q_valid and neither address field has been written, so the
-            // values are identical; reading mshr_d only put 32 lanes x MshrWaysPerBank of address
-            // comparators behind the allocation mux.
+            // Reads only, so the 32 lane evaluations are independent instead of chained.
+            // st_post_cap holds the value mshr_d would, computed from mshr_q plus the capture/merge
+            // fire terms. The sibling st_post_cap == MSHR_RESP_HOLD restricts this to an entry held
+            // in mshr_q or put there by the capture -- never CACHED, never freshly allocated
+            // (st_alloc_fire takes priority and yields MSHR_WAIT_RESP) -- and for such an entry
+            // mshr_d_valid == mshr_q_valid with neither address field written.
             if (mshr_q_valid[cache_hit_e] &&
                 (st_post_cap[cache_hit_e] == MSHR_RESP_HOLD) &&
                 (mshr_q[cache_hit_e].base_addr == req_addr_key[tile_i][port_i]) &&
@@ -3080,11 +3032,10 @@ module mempool_group_mshr
     end
     if (amo_invalidate) begin
       for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
-        // From mshr_q + st_post_cap. Under amo_invalidate the capture cannot write MSHR_RESP_HOLD at
-        // all (st_cap_hold carries !amo_invalidate), so the only writer that can still clear it here
-        // is the store force-drain -- and that writes this identical field set, cacheable included,
-        // so re-firing on such an entry is idempotent. mshr_d_valid == mshr_q_valid for a RESP_HOLD
-        // entry: both retires above are CACHED-gated.
+        // From mshr_q + st_post_cap. Under amo_invalidate the capture cannot write MSHR_RESP_HOLD
+        // (st_cap_hold carries !amo_invalidate), so the only remaining writer is the store
+        // force-drain, which writes this identical field set -- re-firing is idempotent.
+        // mshr_d_valid == mshr_q_valid for a RESP_HOLD entry: both retires above are CACHED-gated.
         if (mshr_q_valid[mshr_i] && (st_post_cap[mshr_i] == MSHR_RESP_HOLD)) begin
           mshr_d[mshr_i].state = MSHR_DRAIN_RESP;
           mshr_d[mshr_i].cacheable = 1'b0;
@@ -3106,11 +3057,9 @@ module mempool_group_mshr
     // Serve-target timeout (group_mshr_serve_timeout).
     if (cfg_serve_timeout != 0) begin
       for (int e = 0; e < MshrNum; e++) begin
-        // Parallel form. MSHR_RESP_HOLD here can only come from the capture (st_cap_hold) or from
-        // mshr_q, and only the store force-drain and the AMO block can have cleared it -- both run
-        // above. !amo_invalidate suffices for the latter because that block converts EVERY RESP_HOLD
-        // entry. mshr_d_valid == mshr_q_valid for such an entry: the two retires above are
-        // CACHED-gated and the allocation's valid-set is deferred to the end of the pass.
+        // Parallel form. MSHR_RESP_HOLD here comes from the capture (st_cap_hold) or from mshr_q,
+        // and only the store force-drain and the AMO block can have cleared it -- both run above.
+        // !amo_invalidate covers the latter because that block converts EVERY RESP_HOLD entry.
         st_hold_live = mshr_q_valid[e] && (st_post_cap[e] == MSHR_RESP_HOLD) &&
                        !st_force_drain[e] && !amo_invalidate;
         // The capture loads the window as a constant, so this is a 2:1 mux off registered state
@@ -3122,7 +3071,7 @@ module mempool_group_mshr
             if (hold_tick[e]) mshr_d[e].hold_cnt = st_hold_src - HoldCntW'(1);
           end else begin
             // Expired: stop waiting for subscribers that are not coming and deliver the buffered
-            // Word to whoever HAS subscribed. Same re-arm the merge-target path performs.
+            // word to whoever HAS subscribed. Same re-arm the merge-target path performs.
 `ifndef TARGET_SYNTHESIS
             mshr_resp_hold_timeout_dbg[e] = 1'b1;
 `endif
@@ -3141,21 +3090,22 @@ module mempool_group_mshr
           end
         // mshr_d_valid STAYS: the AMO invalidate and the self-invalidate above are CACHED-gated and
         // target exactly these entries, so a q-sourced read would age an entry already retired this
-        // cycle. The other three reads are safe -- nothing writes MSHR_CACHED before the finalize, so
-        // state == CACHED is st_post_cap == CACHED; and under that predicate no merge touched the
-        // entry (a merge into a CACHED entry sets st_merge_drain), so sub_reqs_num and hold_cnt are
-        // still their registered values.
+        // cycle. The other three reads are safe -- nothing writes MSHR_CACHED before the finalize,
+        // so state == CACHED is st_post_cap == CACHED; and under that predicate no merge touched
+        // the entry (a merge into a CACHED entry sets st_merge_drain), so sub_reqs_num and hold_cnt
+        // are still their registered values.
         end else if (CacheSelfInval && EnableRespCache && mshr_d_valid[e] &&
                      (st_post_cap[e] == MSHR_CACHED) && !merge_decided[e] &&
                      (mshr_q[e].sub_reqs_num == '0)) begin
           // A cache line that never reaches its sharing target ages out instead of pinning its way
-          // Forever. Entries that DO reach the target are freed earlier by the self-invalidate pass.
+          // forever. Entries that DO reach the target are freed earlier by the self-invalidate
+          // pass.
           if (mshr_q[e].hold_cnt != '0) begin
             if (hold_tick[e]) mshr_d[e].hold_cnt = mshr_q[e].hold_cnt - HoldCntW'(1);
           end else begin
             // Cache line aged out WITHOUT reaching its reuse target: its second cohort never
-            // Completed in time. Distinct from self-invalidate, and the number that says whether
-            // The residency is too SHORT.
+            // completed in time. Distinct from self-invalidate, and the number that says whether
+            // the residency is too SHORT.
 `ifndef TARGET_SYNTHESIS
             mshr_cache_timeout_dbg[e] = 1'b1;
 `endif
@@ -3172,13 +3122,13 @@ module mempool_group_mshr
     for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
       if (mshr_d_valid[mshr_i] && (mshr_d[mshr_i].resp_buf_cnt != '0)) begin
         // For single-word entries (including cached replay), the only legal beat
-        // Index is 0. Use 0 directly so replayed cached data does not depend on
-        // Stale meta_id inside resp_buf.
+        // index is 0. Use 0 directly so replayed cached data does not depend on
+        // stale meta_id inside resp_buf.
         if (mshr_d[mshr_i].burst_len == BurstLenWidth'(1)) begin
           resp_beat_offset[mshr_i] = '0;
         end else begin
           // Computed once at capture (the beat is split across meta_id and core_id, so
-          // Re-deriving it here would mean storing both fields).
+          // re-deriving it here would mean storing both fields).
           resp_beat_offset[mshr_i] =
               mshr_d[mshr_i].resp_buf[mshr_d[mshr_i].resp_buf_rd_ptr].beat_off;
         end
@@ -3189,24 +3139,11 @@ module mempool_group_mshr
 `endif
 
     // Initialize pending-requester bitmap for a new head beat.
-    //
-    // TRIGGER AND DATA BOTH ON mshr_d, and they must stay that way. Sourcing sub_reqs / sub_reqs_num
-    // from mshr_q was shallower but WRONG: a request hitting a CACHED entry merges in and flips the
-    // entry to MSHR_DRAIN_RESP in the same cycle, so the trigger fires while mshr_q still holds the
-    // cache-resident state -- where the fin_cache path below has zeroed sub_reqs and sub_reqs_num.
-    // The guard then blocked the seed outright and the hit never delivered: every merged subscriber
-    // waited forever, 5 of 8 GEMM shapes deadlocked at ~0.1% FPU utilisation, and the reference
-    // 4163-cycle fp16_256x64x256 arm never terminated.
-    //
-    // Both halves are load-bearing -- guard alone, data alone, and dropping the guard were each
-    // measured and each still deadlocked. Seeding an all-zero beat_pending is not a benign no-op:
-    // beat_pending == 0 with state == MSHR_DRAIN_RESP is what the fin logic below reads as "drain
-    // complete", so the buffered beat retires before any subscriber is served.
-    //
-    // no_late_join_burst does NOT cover this: it is gated on req_len > 1, and every stuck request
-    // was a single (bl=1). The cost of reading mshr_d here is the merge in the request path, but
-    // that path is already in this cone -- the trigger reads mshr_d.state, which the same merge
-    // block writes.
+    // Trigger AND data both on mshr_d -- see SOURCING DISCIPLINE. A request hitting a CACHED entry
+    // merges in and flips it to DRAIN_RESP in the same cycle, so mshr_q still shows the
+    // cache-resident state where fin_cache zeroed sub_reqs. An all-zero beat_pending is not a
+    // no-op: with state == DRAIN_RESP the fin logic reads it as "drain complete" and retires the
+    // beat unserved. Free: the trigger already reads mshr_d.state, which the same merge writes.
     for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
       if (mshr_d_valid[mshr_i] &&
           (mshr_d[mshr_i].state == MSHR_DRAIN_RESP) &&
@@ -3220,15 +3157,15 @@ module mempool_group_mshr
     end
 
     // ParityDrain: second-slot beat offset (resp_buf slot rd_ptr+1, burst entries with two
-    // Buffered beats) and its ONE-SHOT pending arm.
+    // buffered beats) and its ONE-SHOT pending arm.
     for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
       if (PD2 && mshr_d_valid[mshr_i] &&
           (mshr_d[mshr_i].burst_len != BurstLenWidth'(1)) &&
           (mshr_d[mshr_i].resp_buf_cnt >= RespBufCountW'(2))) begin
-        // Same sourcing as the head-beat seed: both trigger and data on mshr_d. req_addr_hit_drain
-        // blocks a merge DECISION into a draining entry, but the cut applies a merge one cycle
-        // later, so mshr_d.sub_reqs can carry a subscriber mshr_q does not. beat2_armed is
-        // one-shot, so a slot missed here is never re-seeded and that subscriber is never served.
+        // Trigger and data on mshr_d, like the head-beat seed: req_addr_hit_drain blocks a merge
+        // DECISION into a draining entry, but the cut applies it a cycle later, so mshr_d can carry
+        // a subscriber mshr_q does not. beat2_armed is one-shot -- a slot missed here is never
+        // re-seeded, and that subscriber is never served.
         if ((mshr_d[mshr_i].state == MSHR_DRAIN_RESP) &&
             !mshr_d[mshr_i].beat2_armed &&
             (mshr_q[mshr_i].sub_reqs_num != '0)) begin
@@ -3241,15 +3178,15 @@ module mempool_group_mshr
     end
 
     // ------------------------------------------------------------
-    // Drain captured responses to all recorded sub-requests
+    // drain captured responses to all recorded sub-requests
     // ------------------------------------------------------------
     bp_clr = '0; bp2_clr = '0; sv_clr = '0;
     if (DrainMultiPort) begin
       // Use all available response ports per cycle.
       for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
         for (int port_i = 1; port_i < NumRemoteRespPortsPerTile; port_i++) begin
-          // M4 (audit): bypass MUST take the port -- bypass responses are non-backpressurable by
-          // Contract, while MSHR-targeted responses are buffered (resp_buf) and CAN be
+          // bypass MUST take the port -- bypass responses are non-backpressurable by
+          // contract, while MSHR-targeted responses are buffered (resp_buf) and CAN be
           port_taken[tile_i][port_i] = resp_in_valid[tile_i][port_i] &&
                                        !resp_is_mshr[tile_i][port_i];
           resp_sel_valid[tile_i][port_i] = 1'b0;
@@ -3262,9 +3199,8 @@ module mempool_group_mshr
         end
       end
 
-
-      // ---- opt3 stage 1: one entry published per bank, round-robin, PORT-INDEPENDENT ----
-      // Computed once here, shared by every (tile,port) instance below.
+      // One entry published per bank, round-robin and port-independent: computed once here,
+      // shared by every (tile,port) instance below.
       for (int e = 0; e < MshrNum; e++) begin
         drain_ent_any[e]   = |drain_sub_ready[e];
         drain_published[e] = 1'b0;          // cleared per ENTRY, never per bank
@@ -3276,7 +3212,7 @@ module mempool_group_mshr
         bank_pub_e[b] = '0;
         for (int k = MshrWaysPerBank - 1; k >= 0; k--) begin
           // NOT `automatic int w = ...`: an initialiser at declaration inside a procedural block
-          // Is ignored by synthesis (Spyglass SYNTH_89). bank_scan_w is module scope.
+          // is ignored by synthesis (Spyglass SYNTH_89). bank_scan_w is module scope.
           bank_scan_w = VictimPtrW'(bank_rr_q[b] + VictimPtrW'(k));
           if (drain_ent_any[b * MshrWaysPerBank + bank_scan_w]) begin
             bank_pub_w[b] = VictimPtrW'(bank_scan_w);
@@ -3295,7 +3231,7 @@ module mempool_group_mshr
         for (int port_i = 1; port_i < NumRemoteRespPortsPerTile; port_i++) begin
           if (!port_taken[tile_i][port_i]) begin
             // RR fairness: rotate the entry visit by drain_mshr_rr and the sub_req
-            // Visit by subreq_rr (separate bases) so high-index entries/sub_reqs are not starved.
+            // visit by subreq_rr (separate bases) so high-index entries/sub_reqs are not starved.
             drain_sel_base     = EnableRrFairness ? MshrIdxW'(drain_mshr_rr_q) : '0;
             drain_sel_sub_base = EnableRrFairness ? SubIdxW'(subreq_rr_q) : '0;
             // Per-entry: does this entry offer any sub-request eligible for THIS port?
@@ -3303,7 +3239,7 @@ module mempool_group_mshr
             bank_cand      = '0;
             if (BankPublish) begin
               // Evaluate only the MshrBankNum published entries, not all MshrNum -- the
-              // Per-(tile,port) predicate work drops by MshrWaysPerBank.
+              // per-(tile,port) predicate work drops by MshrWaysPerBank.
               for (int b = 0; b < MshrBankNum; b++) begin
                 for (int s = 0; s < MshrMergeReqs; s++) begin
                   if (bank_pub_v[b] &&
@@ -3327,8 +3263,7 @@ module mempool_group_mshr
             end
             // First candidate entry in rotated order (>= base first, then wrap).
             if (BankPublish) begin
-              // ---- MshrBankNum-wide arbitration, EXACTLY equivalent to the MshrNum-wide
-              // One.
+              // MshrBankNum-wide arbitration, exactly equivalent to the MshrNum-wide one.
               bank_base = drain_sel_base[MshrIdxW-1 -: BankIdW];
               base_way  = drain_sel_base[VictimPtrW-1:0];
               bank_cand_rot = MshrBankNum'({bank_cand, bank_cand} >> bank_base);
@@ -3396,12 +3331,12 @@ module mempool_group_mshr
           if (resp_sel_valid[tile_i][port_i]) begin
             resp_out_valid[tile_i][port_i] = 1'b1;
             // A buffered beat is a READ response by construction: the capture gate only admits
-            // Responses with wen == 0 (resp_is_mshr stays 0 otherwise and the beat takes the
-            // Bypass path), so the stored bit could never be anything but 0.
+            // responses with wen == 0 (resp_is_mshr stays 0 otherwise and the beat takes the
+            // bypass path), so the stored bit could never be anything but 0.
             resp_out[tile_i][port_i].wen = 1'b0;
             resp_out[tile_i][port_i].rdata.data = drv_data[resp_sel_mshr_id[tile_i][port_i]];
             // Re-emit beat b for THIS requester under the lane law: lane from the low BurstLaneW
-            // Bits, row from the rest.
+            // bits, row from the rest.
             resp_out[tile_i][port_i].rdata.core_id =
                 drv_sub_core[resp_sel_mshr_id[tile_i][port_i]]
                             [resp_sel_subreq_idx[tile_i][port_i]] +
@@ -3418,13 +3353,11 @@ module mempool_group_mshr
 
             if (resp_out_ready[tile_i][port_i]) begin
               // Record, do not write. Writing here made lane k+1 read the entry that
-              // Lane k had just modified -- a 32-deep chain for what is only ever a bit clear.
+              // lane k had just modified -- a 32-deep chain for what is only ever a bit clear.
               bp_clr[resp_sel_mshr_id[tile_i][port_i]][
                   resp_sel_subreq_idx[tile_i][port_i]] = 1'b1;
-              // Root-cause fix (): clear sub_req.valid on drain
-              // Handshake to prevent init from re-including it in next
-              // Cycle's beat_pending mask. Without this, MSHR delivers the
-              // Same response 3-5× to the tile (tile 5: 106 resps / 33 reqs
+              // Clear sub_req.valid on the drain handshake so the next cycle's beat_pending
+              // seed cannot re-include it and re-deliver the same response.
               if (drv_burst_one[resp_sel_mshr_id[tile_i][port_i]]) begin
                 sv_clr[resp_sel_mshr_id[tile_i][port_i]][
                     resp_sel_subreq_idx[tile_i][port_i]] = 1'b1;
@@ -3435,11 +3368,11 @@ module mempool_group_mshr
       end
 
       // ParityDrain second-slot service: the beat at rd_ptr+1 drains CONCURRENTLY with the head on
-      // Its own parity port (consecutive beats have opposite parity, so head and slot2 of one
+      // its own parity port (consecutive beats have opposite parity, so head and slot2 of one
       if (PD2) begin
         // Publish at most one second-slot entry per bank. Lane-independent, so it is built
-        // Once here rather than 32 times inside the (tile, resp port) loops below. The way scan is
-        // Rotated by the shared drain RR pointer, so publication reaches every way over time.
+        // once here rather than 32 times inside the (tile, resp port) loops below. The way scan is
+        // rotated by the shared drain RR pointer, so publication reaches every way over time.
         drain2_bank_base = BankIdW'(EnableRrFairness ? (drain_mshr_rr_q / MshrWaysPerBank) : '0);
         for (int e = 0; e < MshrNum; e++) begin
           drain2_ent_any[e] = |drain2_sub_ready[e];
@@ -3448,7 +3381,7 @@ module mempool_group_mshr
           drain2_pub_v[b] = 1'b0;
           drain2_pub_w[b] = '0;
           // Descending scan so the LAST match written is the one closest to the rotation base,
-          // Matching the head-beat publication's form exactly.
+          // matching the head-beat publication's form exactly.
           for (int k = MshrWaysPerBank - 1; k >= 0; k--) begin
             drain2_scan_w = VictimPtrW'((EnableRrFairness ? int'(drain_mshr_rr_q) : 0) + k);
             if (drain2_ent_any[b * MshrWaysPerBank + int'(drain2_scan_w)]) begin
@@ -3465,10 +3398,10 @@ module mempool_group_mshr
             if (!port_taken[tile_i][port_i] && !resp_sel_valid[tile_i][port_i]) begin
               drain2_base     = EnableRrFairness ? MshrIdxW'(drain_mshr_rr_q) : '0;
               // Hoisted: the sub-request base does not depend on kk/ks, but was previously
-              // Re-evaluated inside the inner loop on every unrolled iteration.
+              // re-evaluated inside the inner loop on every unrolled iteration.
               drain2_sub_base = EnableRrFairness ? SubIdxW'(subreq_rr_q) : '0;
               // Entry candidates for the second slot: does this entry offer a beat2 sub-request
-              // For THIS port?
+              // for THIS port?
               drain2_cand = '0;
               drain2_bank_cand = '0;
               drain2_any = 1'b0;
@@ -3513,7 +3446,7 @@ module mempool_group_mshr
                                     ? (drain2_bhi & (~drain2_bhi + MshrBankNum'(1)))
                                     : (drain2_blo & (~drain2_blo + MshrBankNum'(1)));
                 // Re-expand the winning bank to the absolute entry one-hot so everything
-                // Downstream (drain2_idx, drain2_mshr_i, the sub-request scan) is unchanged.
+                // downstream (drain2_idx, drain2_mshr_i, the sub-request scan) is unchanged.
                 for (int b = 0; b < MshrBankNum; b++) begin
                   if (drain2_bfirst[b]) begin
                     drain2_first[b * MshrWaysPerBank + int'(drain2_pub_w[b])] = 1'b1;
@@ -3537,8 +3470,9 @@ module mempool_group_mshr
                 // First eligible sub-request inside the winning entry, same rotated order.
                 for (int ks = 0; ks < MshrMergeReqs; ks++) begin
                   drain2_s = SubIdxW'(drain2_sub_base + SubIdxW'(ks));
-                  // Reuse the hoisted vectors instead of re-reading mshr_d[drain2_mshr_i] -- a 4-bit
-                  // Select in place of a full-entry MshrNum:1 struct mux (F8's second half).
+                  // Reuse the hoisted vectors instead of re-reading mshr_d[drain2_mshr_i] -- a
+                  // 4-bit
+                  // select in place of a full-entry MshrNum:1 struct mux.
                   if (!resp_sel2_valid[tile_i][port_i] &&
                       drain2_sub_ready[drain2_mshr_i][drain2_s] &&
                       (drain2_sub_tile[drain2_mshr_i][drain2_s] == tile_group_id_t'(tile_i)) &&
@@ -3572,7 +3506,7 @@ module mempool_group_mshr
 `ifndef TARGET_SYNTHESIS
               resp_mshr_id_dbg[tile_i][port_i] = drain2_sel_e2;
 `endif
-              // port_taken is NOT set here: both of its readers (:3296, :3465) precede this point,
+              // port_taken is NOT set here: both of its readers  precede this point,
               // so the write was dead. It also made the drain drive a second driver of a signal the
               // select pass owns, which blocked splitting the two apart.
               if (resp_out_ready[tile_i][port_i]) begin
@@ -3590,8 +3524,8 @@ module mempool_group_mshr
     end
 
     // Apply the recorded clears, once per entry. Both drive loops have closed, so this sees
-    // Every request from both, and because they are bit clears the order they were recorded in
-    // Cannot matter. Placed before the finalize pass, which is where the sequential writes landed.
+    // every request from both, and because they are bit clears the order they were recorded in
+    // cannot matter. Placed before the finalize pass, which is where the sequential writes landed.
     for (int e = 0; e < MshrNum; e++) begin
       mshr_d[e].beat_pending  = mshr_d[e].beat_pending  & ~bp_clr[e];
       mshr_d[e].beat_pending2 = mshr_d[e].beat_pending2 & ~bp2_clr[e];
@@ -3601,14 +3535,10 @@ module mempool_group_mshr
     end
 
     // Finalize response draining per beat.
-    //
-    // Pop-count form. The head beat and the ParityDrain second beat used to be applied as two
-    // CHAINED read-modify-writes: resp_buf_rd_ptr, resp_buf_cnt and beats_left were each updated
-    // twice in sequence and state was written up to three times, so the second beat's arithmetic
-    // waited on the first. Every chained CONDITION has an equivalent on the values entering this
-    // pass, which is what lets both pops be decided together and applied once:
-    //     "resp_buf_cnt after the head pop != 0"     ==  resp_buf_cnt >= 2
-    //     "beats_left after the head decrement == 1" ==  beats_left == 2
+    // Pop-count form: both pops are decided on the values entering this pass and applied once,
+    // instead of two chained read-modify-writes of resp_buf_rd_ptr / resp_buf_cnt / beats_left.
+    // "resp_buf_cnt after the head pop != 0"     ==  resp_buf_cnt >= 2
+    // "beats_left after the head decrement == 1" ==  beats_left == 2
     // NOT a bandwidth change: pop == 2 is the same two beats, decided in parallel not in series.
     for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
       resp_head_beat_pending[mshr_i] = 1'b0;
@@ -3645,7 +3575,7 @@ module mempool_group_mshr
         mshr_d[mshr_i].beats_left = '0;
         mshr_d[mshr_i].state = MSHR_CACHED;
         // Re-arm the serve-target timeout for the cache-resident phase: a line whose target is
-        // Never reached would otherwise never self-invalidate, and with CacheReclaimable=0 it
+        // never reached would otherwise never self-invalidate, and with CacheReclaimable=0 it
         mshr_d[mshr_i].hold_cnt = hold_ticks(cfg_cache_hold_ticks_src);
       end else if (fin_head) begin
         // beats_left != 1 is exactly "the head pop does not retire the entry", which is what
@@ -3685,7 +3615,6 @@ module mempool_group_mshr
         if (fin_retire) begin
           mshr_d_valid[mshr_i] = 1'b0;
           // Retire by dropping valid only (see the first retire site for why). beat_pending2 and
-          // beat2_armed are deliberately NOT cleared here -- the original cleared them under
           // `if (mshr_d_valid)`, i.e. never on the retiring path.
         end else begin
           if (mshr_d[mshr_i].beats_left != '0) begin
@@ -3716,8 +3645,6 @@ module mempool_group_mshr
   `include "mempool/mempool_group_mshr_stats.svh"
 `endif
 
-
-
 `ifndef TARGET_SYNTHESIS
   // beat_off is stored in BeatOffW bits (0..MaxBurstWords-1), one bit narrower than the
   // BurstLenWidth value it is cast from. That is only sound because burst_beat_valid() has already
@@ -3735,7 +3662,7 @@ module mempool_group_mshr
   end
 
   // Report a duplicate beat once per cycle, on settled values. See the note at the
-  // Declaration for why this cannot live inside the always_comb that detects it.
+  // declaration for why this cannot live inside the always_comb that detects it.
   always_ff @(posedge clk_i) begin
     if (rst_ni && dup_beat_detected)
       $fatal(1, "MSHR duplicate response beat: mshr=%0d beat=%0d meta=%0d",
@@ -3743,10 +3670,8 @@ module mempool_group_mshr
   end
 `endif
 
-
-
   // --------------------------------------------------------------------------------
-  // Assertions and simulation-only checks. Collected here rather than beside the logic so
+  // assertions and simulation-only checks. Collected here rather than beside the logic so
   // the synthesised body reads uninterrupted; all are `ifndef TARGET_SYNTHESIS / VERILATOR
   // and declare nothing the design uses.
   // --------------------------------------------------------------------------------
@@ -3769,9 +3694,10 @@ module mempool_group_mshr
 
   `ifndef TARGET_SYNTHESIS
   `ifndef VERILATOR
-  // Bank-scoped hit detection (3b) relies on: a valid entry's (address,group) always hashes to its own
-  // Bank. Allocation enforces this (bank_free_id[req_bank] only returns ways of that bank), so if this
-  // Ever fails a request could miss a real hit and allocate a duplicate. Catch any violation early.
+  // Bank-scoped hit detection relies on a valid entry's (address,group) always hashing to its
+  // own bank. Allocation enforces this (bank_free_id[req_bank] only returns ways of that bank), so
+  // if this ever fails a request could miss a real hit and allocate a duplicate. Catch any
+  // violation early.
   generate
     // Interlock firing counters. Distinguishes "the interlocks over-block" from "the extra cycle
     // of entry-visibility latency costs throughput" -- the two have the same symptom in cycles.
@@ -3793,8 +3719,7 @@ module mempool_group_mshr
                    cut_addr_stall_dbg, cut_owner_stall_dbg, cut_alloc_dbg, cut_bench_cyc_dbg);
 
     // ------------------------------------------------------------
-    // Pipeline-cut invariants.
-    //
+    // pipeline-cut invariants.
     // Every other per-entry assertion here checks ONE entry against ITSELF, so a write dropped by
     // a closed clock gate leaves the previous occupant's self-consistent snapshot and all of them
     // pass. These check the cut itself: that a decision in flight lands, lands once, and is not
@@ -3927,11 +3852,10 @@ module mempool_group_mshr
         else $fatal(1, "MSHR resp_buf_cnt out of range: mshr=%0d cnt=%0d depth=%0d",
                     mshr_i, mshr_q[mshr_i].resp_buf_cnt, RespBufWords);
 
-
       // Load-bearing invariant for EnableMshrSingleReq + EnableRespCache: a live
       // CACHED entry must always hold its buffered response (resp_buf_cnt > 0, so
-      // Resp_valid == 1). This is what makes a single-word load to a cached
-      // Address ALWAYS take the merge/hit path (req_hit_mshr) and never
+      // resp_valid == 1). This is what makes a single-word load to a cached
+      // address ALWAYS take the merge/hit path (req_hit_mshr) and never
       cached_entry_holds_data: assert property(
         @(posedge clk_i) disable iff (!rst_ni)
           !mshr_q_valid[mshr_i] ||
@@ -3956,8 +3880,8 @@ module mempool_group_mshr
 
 `ifndef TARGET_SYNTHESIS
       // Guarded on TARGET_SYNTHESIS, not just VERILATOR: beat_seen itself is now
-      // Verification-only, so an assertion that reads it must vanish on exactly the same
-      // Condition as the field or the synthesis build fails on a missing member.
+      // verification-only, so an assertion that reads it must vanish on exactly the same
+      // condition as the field or the synthesis build fails on a missing member.
       beat_done_subset_seen: assert property(
         @(posedge clk_i) disable iff (!rst_ni)
           !mshr_q_valid[mshr_i] ||
@@ -3985,8 +3909,8 @@ module mempool_group_mshr
                     mshr_d[mshr_i].beat_pending);
     end
 
-    // ParityDrain bypass-retag depth invariant (design §4.6): a tile can never have a third
-    // Outstanding bypassed multi-beat burst (VLSU one-insn serialization x <=2 bursts/insn).
+    // A tile can never have a third outstanding bypassed multi-beat burst
+    // (VLSU one-instruction serialization x <=2 bursts/instruction).
     if (StallOnResp) begin : gen_stall_on_resp_assert
       for (genvar at = 0; at < NumTilesPerGroup; at++) begin : gen_sor_tile
         for (genvar ap = 1; ap < NumRemoteReqPortsPerTile; ap++) begin : gen_sor_port
@@ -4001,9 +3925,9 @@ module mempool_group_mshr
       end
     end
 
-    // ParityDrain retag-range invariant (design §6): every burst entry's subscribers must carry
-    // Core_id == 1 (the VLSU burst base port), so the +（b&1) retag lands on exactly {1,2}. A
-    // Violation would misroute odd beats into another core data port (silent corruption).
+    // ParityDrain retag-range invariant: every burst entry's subscribers must carry
+    // core_id == 1 (the VLSU burst base port), so the +(b&1) retag lands on exactly {1,2}. A
+    // violation would misroute odd beats into another core data port (silent corruption).
     if (PD2) begin : gen_pd2_coreid_assert
       for (genvar pd_e = 0; pd_e < MshrNum; pd_e++) begin : gen_pd2_coreid_entry
         for (genvar s = 0; s < MshrMergeReqs; s++) begin : gen_pd2_coreid_sub
@@ -4020,8 +3944,8 @@ module mempool_group_mshr
     end
 
     // Hold-the-fetch invariant: an entry whose fetch has not been issued can have no response
-    // Activity -- it must sit in WAIT_RESP with zero beats seen. A violation means a response
-    // Was captured for a never-sent tag (tag aliasing / capture-guard bug).
+    // activity -- it must sit in WAIT_RESP with zero beats seen. A violation means a response
+    // was captured for a never-sent tag (tag aliasing / capture-guard bug).
     if (HoldWindowMax != 0) begin : gen_hold_assert
       for (genvar he = 0; he < MshrNum; he++) begin : gen_hold_assert_entry
 `ifndef TARGET_SYNTHESIS
@@ -4036,15 +3960,14 @@ module mempool_group_mshr
     end
 
     // If a request merges into an existing burst MSHR entry, the entry must still
-    // Be in its pre-response phase (no beat has been drained yet).
+    // be in its pre-response phase (no beat has been drained yet).
     for (genvar tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin : gen_late_join_guard_tile
       for (genvar port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin : gen_late_join_guard_port
         no_late_join_burst: assert property(
           @(posedge clk_i) disable iff (!rst_ni)
-            // A FORWARDED merge targets an entry being allocated this cycle, so mshr_q still holds
-            // the previous occupant and this decision-cycle test compares against the wrong entry.
-            // req_fwd_hit already requires agb_q_len == req_len, and cut_merge_apply_no_late_join
-            // re-proves the property at the apply cycle, where mshr_q is the right entry.
+            // A FORWARDED merge targets an entry allocated this cycle, so mshr_q still holds the
+            // previous occupant. req_fwd_hit already requires agb_q_len == req_len, and
+            // cut_merge_apply_no_late_join re-proves the property at the apply cycle.
             !(req_in_valid[tile_i][port_i] &&
               req_in_ready[tile_i][port_i] &&
               req_merge_valid[tile_i][port_i] &&
@@ -4097,7 +4020,7 @@ module mempool_group_mshr
     end
 
     // The control group carries every remaining field, so compare the whole entry and let the
-    // Two checks above account for the parts they own.
+    // two checks above account for the parts they own.
     mshr_gate_ctl_no_lost_write: assert property(
       @(posedge clk_i) disable iff (!rst_ni)
         mshr_ctl_en[e] || mshr_id_en[e] || (|mshr_rb_en[e]) ||
