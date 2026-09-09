@@ -335,6 +335,11 @@ module tb_group_mshr_unit;
     foreach (strides[si]) begin
       best_reached = 0; best_shift = 0;
       for (int sh = 0; sh < (1 << MshrCfgShiftW); sh++) begin
+        // The bank hash may only change while the MSHR is EMPTY: a resident entry hashed under the
+        // old shift would no longer map to its own bank, which mshr_entry_in_its_bank rightly
+        // fatals on. The real design enforces this with the mshr_busy_o CSR interlock; the bench
+        // has to honour the same protocol.
+        reset_dut();
         cfg.bank_shift_single = MshrCfgShiftW'(sh);
         for (int b = 0; b < BankNum; b++) hist[b] = 0;
         for (int i = 0; i < 256; i++) begin
