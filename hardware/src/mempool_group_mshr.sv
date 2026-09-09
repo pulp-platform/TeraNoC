@@ -19,8 +19,9 @@ module mempool_group_mshr
   parameter int MshrNum        = `ifdef GROUP_MSHR_NUM `GROUP_MSHR_NUM `else NumTilesPerGroup `endif,
   parameter int MshrMergeWords = 1,
   parameter int MshrMergeReqs  = `ifdef GROUP_MSHR_MERGE_REQS `GROUP_MSHR_MERGE_REQS `else 8 `endif,
-  // Address-banking (Increment 3): the MSHR table is partitioned into MshrNum/MshrWaysPerBank banks,
-  // Each request maps to bank_of({tgt_group,addr}); allocation and the hit search are confined to that
+  // Address-banking: the table is split into MshrNum/MshrWaysPerBank banks. A request maps to
+  // bank_of({tgt_group, addr}), and both allocation and the hit search are confined to that bank --
+  // which is why a same-line cohort always contends for ONE bank.
   parameter int MshrWaysPerBank = `ifdef GROUP_MSHR_WAYS_PER_BANK `GROUP_MSHR_WAYS_PER_BANK `else 4 `endif,
   // MSHR admission policy by effective load length: - single      : req_len == 1 - non-full    : 1
   // < req_len < MshrFullBurstWords - full-burst  : req_len == MshrFullBurstWords req_len is.
@@ -228,8 +229,8 @@ module mempool_group_mshr
   localparam int unsigned HoldPrescaleW = `ifdef GROUP_MSHR_HOLD_PRESCALE_W `GROUP_MSHR_HOLD_PRESCALE_W `else 4 `endif;
   localparam int unsigned HoldPrescaleWSafe = (HoldPrescaleW > 0) ? HoldPrescaleW : 1;
 
-  // DrainFromQ (group_mshr_drain_from_q): source the response-drain eligibility scan from the
-  // REGISTERED entry array instead of the combinational next state.
+  // BankPublish: narrow the drain selector to one published entry per bank, so the sub-request
+  // lookup stays MshrWaysPerBank:1 instead of MshrNum:1.
   localparam bit BankPublish = `ifdef GROUP_MSHR_BANK_PUBLISH `GROUP_MSHR_BANK_PUBLISH `else 1'b0 `endif;
 
   // Source the hold-the-fetch REPLAY walker from the registered array.
@@ -314,9 +315,6 @@ module mempool_group_mshr
   localparam int unsigned RespBufPtrW      = idx_width(RespBufWords);
   localparam int unsigned MergeWordOffset  = (MshrMergeWords <= 1) ? 0 : $clog2(MshrMergeWords);
   localparam int unsigned BurstAlignBits  = (MaxBurstWords > 1) ? $clog2(MaxBurstWords) : 1;
-  // ParityDrain bypass-retag tracking depth (FF-1). Depth 2 encodes "one instruction in flight x
-  // <=2 bursts/insn" -- but the VLSU burst admission scales with the ROB depth, so at ROB64 one
-  // e32,m4 load alone is 4 bursts and a full MSHR bank would overflow the 2 ways -> the depth
   localparam int unsigned TileIdBits       = idx_width(NumTilesPerGroup);
   localparam int unsigned TcdmAddrNoTileW  = $bits(tcdm_addr_t) - TileIdBits;
   localparam int unsigned SpatzNumOutstandingLoads = snitch_pkg::NumIntOutstandingLoads;
@@ -487,8 +485,8 @@ module mempool_group_mshr
     mempool_group_mshr_sub_req_t [MshrMergeReqs-1:0] sub_reqs;
     // Number of valid requester records currently stored in sub_reqs.
     logic [SubReqCountW-1:0] sub_reqs_num;
-    // Cache self-invalidate (group_mshr_cache_self_inval): cumulative count of sub-requests this
-    // Entry has admitted/served over its whole life (owner + every merge, in WAIT_RESP and
+    // Sub-requests this entry has admitted over its whole life: the owner plus every merge, across
+    // WAIT_RESP and any cache-resident phase. Drives the cache reuse target.
     logic [ServedCntW-1:0] served_cnt;
     // Per-head-beat pending mask: bit s=1 means requester s still needs the current
     // Buffered response beat; cleared as each requester is serviced.
@@ -522,7 +520,7 @@ module mempool_group_mshr
     logic [RespBufPtrW-1:0] resp_buf_rd_ptr;
     // Write pointer where the next captured response beat is stored.
     logic [RespBufPtrW-1:0] resp_buf_wr_ptr;
-    // Convenience mirror of (resp_buf_cnt != 0), used by scheduling logic.
+    // Line may be retained as a cache entry after its drain completes.
     logic cacheable;
 `ifndef TARGET_SYNTHESIS
     // Debug: number of cached hits before this entry is reallocated.
@@ -799,8 +797,6 @@ module mempool_group_mshr
   // The real sizing constraint is asserted above: RespBufWords >= 2 x DrainBeatsPerEntry.
   logic      [MshrNum-1:0][RespBufPtrW-1:0]                                    drain2_rd_ptr;
   logic      [MshrNum-1:0][BurstLenWidth-1:0]                                  drain2_beat_off;
-
-  // ParityDrain bypass-retag table (design doc §4.6).
 
   logic      [MshrNum-1:0][RespBufCountW-1:0]                                  mshr_resp_slots;
 
@@ -3613,8 +3609,9 @@ module mempool_group_mshr
 `endif
         mshr_d[mshr_i].beats_left = '0;
         mshr_d[mshr_i].state = MSHR_CACHED;
-        // Re-arm the serve-target timeout for the cache-resident phase: a line whose target is
-        // Never reached would otherwise never self-invalidate, and with CacheReclaimable=0 it
+        // Re-arm the serve-target timeout for the cache-resident phase. A line whose reuse target
+        // is never reached would otherwise never self-invalidate, and at CacheReclaimable=0 it
+        // cannot be evicted either, so its way would be pinned for good.
         mshr_d[mshr_i].hold_cnt = hold_ticks(cfg_cache_hold_ticks_src);
       end else if (fin_head) begin
         // beats_left != 1 is exactly "the head pop does not retire the entry", which is what
@@ -3960,8 +3957,10 @@ module mempool_group_mshr
                     mshr_d[mshr_i].beat_pending);
     end
 
-    // ParityDrain bypass-retag depth invariant (design §4.6): a tile can never have a third
-    // Outstanding bypassed multi-beat burst (VLSU one-insn serialization x <=2 bursts/insn).
+    // NOTE: no_alloc_while_resp_landing below is VACUOUS -- req_in_ready is forced low on
+    // req_addr_hit_drain in the branch above, so its antecedent is unreachable. The property it
+    // names (no allocation over an entry that is draining or receiving) is carried by
+    // cut_alloc_target_free instead. Kept so the name is not lost; do not read it as cover.
     if (StallOnResp) begin : gen_stall_on_resp_assert
       for (genvar at = 0; at < NumTilesPerGroup; at++) begin : gen_sor_tile
         for (genvar ap = 1; ap < NumRemoteReqPortsPerTile; ap++) begin : gen_sor_port
