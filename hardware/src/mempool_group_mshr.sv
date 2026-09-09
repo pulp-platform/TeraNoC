@@ -799,6 +799,19 @@ module mempool_group_mshr
   // ParityDrain bypass-retag table (design doc §4.6).
 
   logic      [MshrNum-1:0][RespBufCountW-1:0]                                  mshr_resp_slots;
+
+  /// Response admission credit, per entry. A pure register-to-output cone: it reads mshr_q only,
+  /// so it does not depend on this cycle's request pass. Two earlier mshr_d writes to resp_buf_cnt
+  /// are deliberately not seen -- allocation cannot be captured into (resp_is_mshr needs
+  /// mshr_q_valid), and the store byte-merge only touches MSHR_CACHED entries while capture needs
+  /// WAIT_RESP/DRAIN_RESP, so the worst divergence is 0 vs 1 against 4 slots.
+  generate
+    for (genvar e = 0; e < MshrNum; e++) begin : gen_resp_slots
+      assign mshr_resp_slots[e] =
+          (mshr_q_valid[e] && (mshr_q[e].resp_buf_cnt < RespBufWords))
+            ? (RespBufCountW'(RespBufWords) - mshr_q[e].resp_buf_cnt) : '0;
+    end
+  endgenerate
   logic      [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]             resp_capture_fire;
   logic      [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]
              [BurstLenWidth-1:0]                                               resp_capture_beat_offset;
@@ -2739,22 +2752,6 @@ module mempool_group_mshr
     // ------------------------------------------------------------
     // Response path: capture MSHR responses or bypass to group
     // ------------------------------------------------------------
-    for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
-      // mshr_q, so the admission is a pure register-to-output cone with no dependence on this
-      // cycle's request pass. Two writes to resp_buf_cnt happen earlier in mshr_d and are NOT seen
-      // here; neither can matter:
-      //  - allocation: resp_is_mshr requires mshr_q_valid, which a freshly allocated entry does not
-      //    have until the next edge, so no response can be captured into it this cycle;
-      //  - the store byte-merge (:2360) fires only on MSHR_CACHED entries, while capture requires
-      //    WAIT_RESP/DRAIN_RESP -- disjoint -- and only when cnt == 0, so the worst divergence is
-      //    0 vs 1 and 4 slots still leaves >= 3 free against the 2 needed.
-      if (mshr_q_valid[mshr_i] && (mshr_q[mshr_i].resp_buf_cnt < RespBufWords)) begin
-        mshr_resp_slots[mshr_i] = RespBufCountW'(RespBufWords) - mshr_q[mshr_i].resp_buf_cnt;
-      end else begin
-        mshr_resp_slots[mshr_i] = '0;
-      end
-    end
-
     for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
       for (int port_i = 1; port_i < NumRemoteRespPortsPerTile; port_i++) begin
         resp_capture_fire[tile_i][port_i] = 1'b0;

@@ -17024,3 +17024,26 @@ RTL.
 
 **Status.** No OOC has yet been run on CUT RTL, so the cut's cost is measured and its benefit is
 not. That is the next thing to close.
+
+## 2026-09-09 02:35 — group MSHR: lift the response-admission credit out of the big always_comb
+
+**Purpose.** First of the ranked `always_comb` disaggregation steps. `mshr_resp_slots` was computed
+inside the 1,400-line block but reads `mshr_q` ONLY and is written nowhere else, so it has no order
+dependence on the passes around it -- the property that makes an extraction safe.
+
+**Implementation.** Per-entry continuous assigns in a `gen_resp_slots` generate block. The two
+earlier `mshr_d` writes to `resp_buf_cnt` that it deliberately does not see are argued in place:
+allocation cannot be captured into (`resp_is_mshr` needs `mshr_q_valid`), and the store byte-merge
+only touches MSHR_CACHED entries while capture needs WAIT_RESP/DRAIN_RESP, so the worst divergence
+is 0 vs 1 against 4 slots.
+
+**Result.** vopt clean; unit bench cohort 16 cycles / 1 NoC request, identical to fwd4; cluster run
+on vg_fp16_512x64x256 = **7133 cycles, exactly fwd4's number**. A pure extraction must not change
+behaviour, and it did not.
+
+**Note for the next step.** `mshr_resp_inflight` was verified term-for-term identical to
+`req_resp_seen` (same valid / wen / amo / tag / mshr_q_valid / state / owner-tile / burst_beat_valid
+predicate, same candidate id), so the `mshr_resp_inflight[e_abs]` term in `req_addr_hit_drain_way`
+is redundant. Deleting it removes a response->request combinational edge that runs THROUGH the big
+always_comb, which is the remaining item with real timing value -- but it touches the riskiest
+boundary in the module and gets its own build and sweep rather than being bundled here.
