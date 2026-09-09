@@ -643,6 +643,8 @@ module mempool_group_mshr
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_hit_mshr_sel_valid;
   mshr_id_t  [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_hit_mshr_sel_id;
   logic      [MshrNum-1:0]                                                     mshr_hit_req;
+  /// Per-entry, per-lane hit terms feeding mshr_hit_req. Only generated at CacheReclaimable=1.
+  logic [MshrNum-1:0][NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]      mshr_hit_req_lane;
 
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                                 req_merge_valid;
   mshr_id_t  [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                                 req_merge_mshr_id;
@@ -1307,17 +1309,16 @@ module mempool_group_mshr
 
   // Mshr_hit_req[e]: is entry e address-hit by some request this cycle?
   if (CacheReclaimable) begin : gen_mshr_hit_req
-    always_comb begin
-      mshr_hit_req = '0;
-      for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
-        for (int port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin
-          for (int way_i = 0; way_i < MshrWaysPerBank; way_i++) begin
-            if (req_hit_way[tile_i][port_i][way_i]) begin
-              mshr_hit_req[int'(req_bank[tile_i][port_i]) * MshrWaysPerBank + way_i] = 1'b1;
-            end
-          end
+    for (genvar e = 0; e < MshrNum; e++) begin : gen_hit_req_e
+      localparam int unsigned HrBank = e / MshrWaysPerBank;
+      localparam int unsigned HrWay  = e % MshrWaysPerBank;
+      for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_hit_req_t
+        for (genvar pp = 1; pp < NumRemoteReqPortsPerTile; pp++) begin : gen_hit_req_p
+          assign mshr_hit_req_lane[e][t][pp] =
+              (req_bank[t][pp] == BankIdW'(HrBank)) && req_hit_way[t][pp][HrWay];
         end
       end
+      assign mshr_hit_req[e] = |mshr_hit_req_lane[e];
     end
   end else begin : gen_mshr_hit_req_tie
     assign mshr_hit_req = '0;

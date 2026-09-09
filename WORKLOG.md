@@ -17102,3 +17102,33 @@ sweep scripts restoring their stale backups, the second time landing comment edi
 commits old. All eleven backup files are now re-pointed at the worktree as a step in every edit
 cycle, and a comment-only change is checked with
 `git diff | grep -v '^[+-]\s*//'` -- which is what caught it.
+
+## 2026-09-09 14:10 — group MSHR: mshr_hit_req scatter becomes a per-entry compare
+
+**Purpose.** `mshr_hit_req[req_bank[t][p]*WaysPerBank + way_i] = 1'b1` walked 32 lanes writing
+through a SIGNAL index, so synthesis built a 32-deep chain. In a generate the entry's bank and way
+are compile-time constants, so it becomes one compare per lane plus an OR reduction: 32 levels -> 5.
+
+**Note on scope.** The block is gated on `CacheReclaimable`, which the shipping config sets to 0 --
+so this generates NOTHING today and buys no timing in the current build. Done anyway because the
+cost when the knob is off is exactly zero (the code is not generated), and a latent 32-deep chain
+that appears the moment someone enables the path is precisely the kind of thing that ambushes a
+backend run. Fixing it while the structure is understood is far cheaper than rediscovering it.
+
+**Correction to an earlier estimate.** This was previously called "may be the largest single win on
+the no-cut path", from noticing it is a 32-lane scatter sitting in the `decode -> arbiter` segment.
+That reasoning never checked whether the code exists. It does not, at `CacheReclaimable=0`. The
+no-cut timing estimate that rested on it is withdrawn -- neither remaining optimisation attacks the
+segment that sets WNS on the pre-cut design, so "the opts remove the need for the cut" is now
+judged unlikely rather than plausible.
+
+**Verified like-for-like.** A reference was built from HEAD with the SAME knob on, so the
+comparison is on the arm where the code is generated:
+
+| build | knob | cohort |
+|---|---|---|
+| HEAD reference | CacheReclaimable=1 | 16 cycles, 1 NoC req |
+| rewrite | CacheReclaimable=1 | 16 cycles, 1 NoC req |
+| rewrite | CacheReclaimable=0 (shipping) | 16 cycles, 1 NoC req |
+
+Both arms vopt clean.
