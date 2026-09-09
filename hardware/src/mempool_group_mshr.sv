@@ -778,6 +778,9 @@ module mempool_group_mshr
   localparam int unsigned NumReqLanes         = NumTilesPerGroup * NumReqPortsActiveF3;
   localparam int unsigned StrbW               = $bits(strb_t);
   logic [MshrNum-1:0][NumReqLanes-1:0]                                         stb_hit;
+  // Entry-side half of the store byte-merge hit, reduced per entry so a lane selects one bit
+  // instead of muxing valid / alloc_inflight / state and comparing afterwards.
+  logic [MshrNum-1:0]                                                          stb_ent_ok;
   logic [NumReqLanes-1:0][StrbW-1:0]                                           stb_be;
   data_t [NumReqLanes-1:0]                                                     stb_wd;
   logic [RespLaneW-1:0]                                                        stb_lane;
@@ -2438,6 +2441,13 @@ module mempool_group_mshr
     merge_same_mask = '0;
 
     stb_hit = '0;
+    // Hoisted out of the lane loop below: none of valid / alloc_inflight / state is written by that
+    // loop (the allocation is recorded, not applied), so all 32 lanes see the same entry state and
+    // this is evaluated once per entry at a CONSTANT index.
+    for (int e = 0; e < MshrNum; e++) begin
+      stb_ent_ok[e] = mshr_d_valid[e] && !alloc_inflight[e] &&
+                      (mshr_d[e].state == MSHR_CACHED);
+    end
 
     // ------------------------------------------------------------
     // request path: merge loads, allocate MSHR, or bypass to NoC
@@ -2529,11 +2539,8 @@ module mempool_group_mshr
               for (int way_i = 0; way_i < MshrWaysPerBank; way_i++) begin
                 cache_hit_e =
                     int'(req_bank[tile_i][port_i]) * MshrWaysPerBank + way_i;
-                // Reads only. None of state / resp_buf_cnt / resp_buf_rd_ptr is written by this
-                // pass any more, so all 32 lanes evaluate against the same entry state.
-                if (mshr_d_valid[cache_hit_e] && !alloc_inflight[cache_hit_e] &&
-                    (mshr_d[cache_hit_e].state == MSHR_CACHED) &&
-                    req_addr_hit_way[tile_i][port_i][way_i]) begin
+                // Both terms are one bit selected on req_bank, not a state mux plus a compare.
+                if (stb_ent_ok[cache_hit_e] && req_addr_hit_way[tile_i][port_i][way_i]) begin
                   stb_lane = RespLaneW'(tile_i * NumReqPortsActive + (port_i - 1));
                   stb_hit[cache_hit_e][stb_lane] = 1'b1;
                 end
