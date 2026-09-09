@@ -17132,3 +17132,34 @@ comparison is on the arm where the code is generated:
 | rewrite | CacheReclaimable=0 (shipping) | 16 cycles, 1 NoC req |
 
 Both arms vopt clean.
+
+## 2026-09-09 16:50 — group MSHR: apply loops become per-entry, killing 49 variable-index writes
+
+**Purpose.** Both apply loops iterated over BANKS and wrote `mshr_d[agb_e]` / `mshr_d[mgb_e]`, where
+the id is a SIGNAL (`b*WaysPerBank + agb_q_way[b]`). That is a 64-wide write decode plus a 64:1
+payload mux per field.
+
+**Implementation.** Iterate over ENTRIES instead. A static `for (int e...)` is unrolled by synthesis,
+so `e` is a constant index where `agb_e` was a signal, and the bank folds too:
+
+    for (int e = 0; e < MshrNum; e++)
+      if (alloc_inflight[e])
+        mshr_d[e].base_addr = agb_q_addr[e / MshrWaysPerBank];
+
+No new logic was needed: `alloc_inflight[e]` / `merge_inflight[e]` already existed as exactly the
+right per-entry fire terms, built for the pipeline cut.
+
+**Effect.** 49 variable-indexed references removed -- 22 `mshr_d[agb_e]`, 27 `mshr_d[mgb_e]`, plus
+`mshr_alloc_set`, `mshr_wr_all`, `mshr_id_we` and 7 `mshr_q[mgb_e]` reads. `agb_e` and `mgb_e` are
+deleted. The payoff is larger than the mux count suggests because `mshr_wr_all` and `mshr_id_we` are
+CLOCK-GATE ENABLES, which sit on a ~0.175 ns tighter deadline than ordinary paths.
+
+**Verified.** vopt clean; the full 8-test unit suite passes with 0 failures (throughput 32.00
+accepts/cycle, cohort 16 cycles / 1 NoC req, latency +4, capacity, bank-hash sweep, staggered,
+response delivery, burst). The vg_fp16_512x64x256 cluster run that must return 7133 was still in
+flight at commit time.
+
+**Backend, in progress.** `cut_2p0` reached SETUP=0.00 at Ph30 of initial_opto -- the CUT RTL is on
+track to close 2 ns, at 130,913 um^2 against pre-cut `fixF_2p0`'s 119,064 (about +10% area).
+`cut_1p0` is at Ph24 with SETUP 13,178, which is not yet a verdict: `chain_1p2` held 13,729 flat for
+30 iterations before dropping 85%.

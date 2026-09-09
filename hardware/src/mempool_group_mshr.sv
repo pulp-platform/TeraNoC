@@ -2185,7 +2185,6 @@ module mempool_group_mshr
   logic [MshrBankNum-1:0][RespPortIdW-1:0]   mgb_port;
   tile_core_id_t [MshrBankNum-1:0]           mgb_core;
   meta_id_t [MshrBankNum-1:0]                mgb_meta;
-  mshr_id_t                                  mgb_e;      // b*Ways + way, rebuilt per bank
   // Per-bank ALLOCATION apply. The guarantee here is older than F5a and already stated at the
   // Allocation site -- "At most one alloc fires per bank per cycle (bank_alloc_taken), so this
   // Per-bank write never conflicts" -- so this needs no knob: it is unconditionally true.
@@ -2227,7 +2226,6 @@ module mempool_group_mshr
   logic [MshrBankNum-1:0][RespPortIdW-1:0]   agb_port;
   tile_core_id_t [MshrBankNum-1:0]           agb_core;
   meta_id_t [MshrBankNum-1:0]                agb_meta;
-  mshr_id_t                                  agb_e;
   logic [MergeRankW-1:0]                     mgb_slot;   // recomputed from mshr_q
 
   /// PER-BANK RECORD SCATTER, one-hot.
@@ -2333,9 +2331,7 @@ module mempool_group_mshr
 
   always_comb begin
     // Defaults
-    mgb_e    = '0;
     mgb_slot = '0;
-    agb_e    = '0;
     mshr_d      = mshr_q;
     // Clock-gate write flags. Set on the same line as the write they describe (see the entry
     // Register block), never from a restatement of the write's condition.
@@ -2512,50 +2508,49 @@ module mempool_group_mshr
     // Allocator's own: bank_win_oh grants at most one allocation per bank per
     // Cycle, and bank_free_id[b] is by construction a way of bank b. So these MshrBankNum writes
     // Target distinct entries and need no ordering between them -- exactly the property the old
-    for (int b = 0; b < MshrBankNum; b++) begin
-      if (agb_q_v[b]) begin
-        agb_e = mshr_id_t'(b * MshrWaysPerBank + int'(agb_q_way[b]));
+    for (int e = 0; e < MshrNum; e++) begin
+      if (alloc_inflight[e]) begin
         // Recorded, not applied -- see the mshr_alloc_set declaration. No pass below needs to see
         // this entry as valid: a response cannot arrive for an entry allocated this cycle
         // (no_alloc_while_resp_landing asserts exactly that), and every clear guard excludes
         // MSHR_WAIT_RESP, which is what allocation writes.
-        mshr_alloc_set[agb_e] = 1'b1;
-        mshr_d[agb_e]       = '0;
-        mshr_wr_all[agb_e]  = 1'b1;
-        mshr_d[agb_e].base_addr    = agb_q_addr[b];
-        mshr_d[agb_e].tgt_group_id = agb_q_grp[b];
-        mshr_d[agb_e].burst_len    = agb_q_len[b];
-        mshr_d[agb_e].state        = MSHR_WAIT_RESP;
-        mshr_d[agb_e].cacheable    = 1'b1;
-        mshr_d[agb_e].beats_left   = agb_q_len[b];
-        mshr_d[agb_e].beat_pending  = '0;
-        mshr_d[agb_e].beat_pending2 = '0;
-        mshr_d[agb_e].beat2_armed   = 1'b0;
+        mshr_alloc_set[e] = 1'b1;
+        mshr_d[e]       = '0;
+        mshr_wr_all[e]  = 1'b1;
+        mshr_d[e].base_addr    = agb_q_addr[e / MshrWaysPerBank];
+        mshr_d[e].tgt_group_id = agb_q_grp[e / MshrWaysPerBank];
+        mshr_d[e].burst_len    = agb_q_len[e / MshrWaysPerBank];
+        mshr_d[e].state        = MSHR_WAIT_RESP;
+        mshr_d[e].cacheable    = 1'b1;
+        mshr_d[e].beats_left   = agb_q_len[e / MshrWaysPerBank];
+        mshr_d[e].beat_pending  = '0;
+        mshr_d[e].beat_pending2 = '0;
+        mshr_d[e].beat2_armed   = 1'b0;
 `ifndef TARGET_SYNTHESIS
-        mshr_d[agb_e].beat_seen = '0;
-        mshr_d[agb_e].beat_done = '0;
+        mshr_d[e].beat_seen = '0;
+        mshr_d[e].beat_done = '0;
 `endif
         // Owner request is always stored in sub_reqs[0].
-        mshr_d[agb_e].sub_reqs[0].valid        = 1'b1;
-        mshr_d[agb_e].sub_reqs[0].tile_id      = agb_q_tile[b];
-        mshr_d[agb_e].sub_reqs[0].port_id      = agb_q_port[b];
-        mshr_d[agb_e].sub_reqs[0].core_id      = agb_q_core[b];
-        mshr_d[agb_e].sub_reqs[0].meta_id_base = agb_q_meta[b];
+        mshr_d[e].sub_reqs[0].valid        = 1'b1;
+        mshr_d[e].sub_reqs[0].tile_id      = agb_q_tile[e / MshrWaysPerBank];
+        mshr_d[e].sub_reqs[0].port_id      = agb_q_port[e / MshrWaysPerBank];
+        mshr_d[e].sub_reqs[0].core_id      = agb_q_core[e / MshrWaysPerBank];
+        mshr_d[e].sub_reqs[0].meta_id_base = agb_q_meta[e / MshrWaysPerBank];
 `ifndef TARGET_SYNTHESIS
-        mshr_d[agb_e].cache_hit_cnt = '0;
+        mshr_d[e].cache_hit_cnt = '0;
 `endif
         // Hold-the-fetch: arm the per-type hold window (single vs burst). A 0 window (or the
         // Feature off) means the fetch went out this same cycle on the passthrough, so mark it
         // Issued immediately.
-        mshr_d[agb_e].hold_cnt =
-            hold_ticks((agb_q_len[b] == BurstLenWidth'(1)) ?
+        mshr_d[e].hold_cnt =
+            hold_ticks((agb_q_len[e / MshrWaysPerBank] == BurstLenWidth'(1)) ?
                        cfg_hold_window_single : cfg_hold_window_burst);
-        mshr_d[agb_e].issued =
-            (((agb_q_len[b] == BurstLenWidth'(1)) ?
+        mshr_d[e].issued =
+            (((agb_q_len[e / MshrWaysPerBank] == BurstLenWidth'(1)) ?
               cfg_hold_window_single : cfg_hold_window_burst) == 0);
-        mshr_d[agb_e].sub_reqs_num = SubReqCountW'(1);
+        mshr_d[e].sub_reqs_num = SubReqCountW'(1);
         // Cache self-invalidate: the owner is the first served sub-request.
-        mshr_d[agb_e].served_cnt = ServedCntW'(1);
+        mshr_d[e].served_cnt = ServedCntW'(1);
       end
     end
 
@@ -2564,56 +2559,55 @@ module mempool_group_mshr
     // Target the same entry -- the 32-deep lane chain becomes MshrBankNum independent writes.
     // B is a loop constant here, so b*MshrWaysPerBank + way is a MshrWaysPerBank:1 select and the
     // Write is bank-local as well as parallel (the per-lane form was MshrNum:1).
-    for (int b = 0; b < MshrBankNum; b++) begin
-      if (mgb_q_v[b]) begin
-        mgb_e = mshr_id_t'(b * MshrWaysPerBank + int'(mgb_q_way[b]));
+    for (int e = 0; e < MshrNum; e++) begin
+      if (merge_inflight[e]) begin
         // Merge_rank is identically zero under this knob, so the slot is just the registered
         // Count -- no need to have carried it out of the lane loop.
-        mgb_slot = MergeRankW'(mshr_q[mgb_e].sub_reqs_num);
-        mshr_id_we[mgb_e] = 1'b1;
-        mshr_d[mgb_e].sub_reqs[mgb_slot].valid        = 1'b1;
-        mshr_d[mgb_e].sub_reqs[mgb_slot].tile_id      = mgb_q_tile[b];
-        mshr_d[mgb_e].sub_reqs[mgb_slot].port_id      = mgb_q_port[b];
-        mshr_d[mgb_e].sub_reqs[mgb_slot].core_id      = mgb_q_core[b];
-        mshr_d[mgb_e].sub_reqs[mgb_slot].meta_id_base = mgb_q_meta[b];
-        mshr_d[mgb_e].sub_reqs_num = SubReqCountW'(mgb_slot + MergeRankW'(1));
+        mgb_slot = MergeRankW'(mshr_q[e].sub_reqs_num);
+        mshr_id_we[e] = 1'b1;
+        mshr_d[e].sub_reqs[mgb_slot].valid        = 1'b1;
+        mshr_d[e].sub_reqs[mgb_slot].tile_id      = mgb_q_tile[e / MshrWaysPerBank];
+        mshr_d[e].sub_reqs[mgb_slot].port_id      = mgb_q_port[e / MshrWaysPerBank];
+        mshr_d[e].sub_reqs[mgb_slot].core_id      = mgb_q_core[e / MshrWaysPerBank];
+        mshr_d[e].sub_reqs[mgb_slot].meta_id_base = mgb_q_meta[e / MshrWaysPerBank];
+        mshr_d[e].sub_reqs_num = SubReqCountW'(mgb_slot + MergeRankW'(1));
         // The entry may have turned DRAIN_RESP between the decision and now (serve timeout, store
         // force-drain, AMO). Neither state branch below fires then, and the head seed is skipped
         // because beat_pending is already non-zero, so this subscriber would never be drained.
-        if (mshr_q[mgb_e].state == MSHR_DRAIN_RESP) begin
-          mshr_d[mgb_e].beat_pending[mgb_slot] = 1'b1;
-          if (PD2 && mshr_q[mgb_e].beat2_armed) mshr_d[mgb_e].beat_pending2[mgb_slot] = 1'b1;
+        if (mshr_q[e].state == MSHR_DRAIN_RESP) begin
+          mshr_d[e].beat_pending[mgb_slot] = 1'b1;
+          if (PD2 && mshr_q[e].beat2_armed) mshr_d[e].beat_pending2[mgb_slot] = 1'b1;
         end
-        mshr_d[mgb_e].served_cnt   = mshr_q[mgb_e].served_cnt + ServedCntW'(1);
+        mshr_d[e].served_cnt   = mshr_q[e].served_cnt + ServedCntW'(1);
 `ifndef TARGET_SYNTHESIS
-        if (EnableRespCache && (mshr_q[mgb_e].state == MSHR_CACHED)) begin
-          mshr_d[mgb_e].cache_hit_cnt = mshr_d[mgb_e].cache_hit_cnt + 1'b1;
+        if (EnableRespCache && (mshr_q[e].state == MSHR_CACHED)) begin
+          mshr_d[e].cache_hit_cnt = mshr_d[e].cache_hit_cnt + 1'b1;
         end
 `endif
-        if (EnableRespCache && (mshr_q[mgb_e].state == MSHR_CACHED)) begin
-          mshr_d[mgb_e].state         = MSHR_DRAIN_RESP;
-          mshr_d[mgb_e].beats_left    = BurstLenWidth'(1);
-          mshr_d[mgb_e].beat_pending  = '0;
-          mshr_d[mgb_e].beat_pending2 = '0;
-          mshr_d[mgb_e].beat2_armed   = 1'b0;
+        if (EnableRespCache && (mshr_q[e].state == MSHR_CACHED)) begin
+          mshr_d[e].state         = MSHR_DRAIN_RESP;
+          mshr_d[e].beats_left    = BurstLenWidth'(1);
+          mshr_d[e].beat_pending  = '0;
+          mshr_d[e].beat_pending2 = '0;
+          mshr_d[e].beat2_armed   = 1'b0;
 `ifndef TARGET_SYNTHESIS
-          mshr_d[mgb_e].beat_seen     = '0;
-          mshr_d[mgb_e].beat_seen[0]  = 1'b1;
-          mshr_d[mgb_e].beat_done     = '0;
+          mshr_d[e].beat_seen     = '0;
+          mshr_d[e].beat_seen[0]  = 1'b1;
+          mshr_d[e].beat_done     = '0;
 `endif
         end else if (RespWaitSubsSingle &&
-                     (mshr_q[mgb_e].state == MSHR_RESP_HOLD) &&
+                     (mshr_q[e].state == MSHR_RESP_HOLD) &&
                      ((mgb_slot + MergeRankW'(1)) >=
                       SubReqCountW'(cfg_hold_subs_single))) begin
-          mshr_d[mgb_e].state         = MSHR_DRAIN_RESP;
-          mshr_d[mgb_e].beats_left    = BurstLenWidth'(1);
-          mshr_d[mgb_e].beat_pending  = '0;
-          mshr_d[mgb_e].beat_pending2 = '0;
-          mshr_d[mgb_e].beat2_armed   = 1'b0;
+          mshr_d[e].state         = MSHR_DRAIN_RESP;
+          mshr_d[e].beats_left    = BurstLenWidth'(1);
+          mshr_d[e].beat_pending  = '0;
+          mshr_d[e].beat_pending2 = '0;
+          mshr_d[e].beat2_armed   = 1'b0;
 `ifndef TARGET_SYNTHESIS
-          mshr_d[mgb_e].beat_seen     = '0;
-          mshr_d[mgb_e].beat_seen[0]  = 1'b1;
-          mshr_d[mgb_e].beat_done     = '0;
+          mshr_d[e].beat_seen     = '0;
+          mshr_d[e].beat_seen[0]  = 1'b1;
+          mshr_d[e].beat_done     = '0;
 `endif
         end
       end
