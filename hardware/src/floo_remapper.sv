@@ -70,12 +70,19 @@ generate
 
     if (Interleaved == 1'b1) begin : gen_interleaved_remap
       payload_t [GroupSize-1:0] inp_data_intlv;
+      payload_t [GroupSize-1:0] oup_data_intlv;
       logic     [GroupSize-1:0] inp_valid_intlv;
       logic     [GroupSize-1:0] inp_ready_intlv;
+      logic     [GroupSize-1:0] oup_valid_intlv;
+      logic     [GroupSize-1:0] oup_ready_intlv;
       for (genvar i = 0; i < GroupSize; i++) begin : gen_intlv
         assign inp_data_intlv[i]   = inp_data_i[g + i * NumGroup];
         assign inp_valid_intlv[i]  = inp_valid_i[g + i * NumGroup];
         assign inp_ready_o[g + i * NumGroup] = inp_ready_intlv[i];
+        // Keep input and output bundles identical.
+        assign oup_data_o[g + i * NumGroup] = oup_data_intlv[i];
+        assign oup_valid_o[g + i * NumGroup] = oup_valid_intlv[i];
+        assign oup_ready_intlv[i] = oup_ready_i[g + i * NumGroup];
       end
       stream_xbar #(
         .NumInp(GroupSize),
@@ -92,10 +99,10 @@ generate
         .sel_i  (sel_q),
         .valid_i(inp_valid_intlv),
         .ready_o(inp_ready_intlv),
-        .data_o (oup_data_o[start_idx +: GroupSize]),
+        .data_o (oup_data_intlv),
         .idx_o  (),
-        .valid_o(oup_valid_o[start_idx +: GroupSize]),
-        .ready_i(oup_ready_i[start_idx +: GroupSize])
+        .valid_o(oup_valid_intlv),
+        .ready_i(oup_ready_intlv)
       );
     end else begin: gen_non_interleaved_remap
       stream_xbar #(
