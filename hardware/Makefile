@@ -279,6 +279,7 @@ group_mshr_bankfull_backpressure ?=
 group_mshr_cache_self_inval ?=
 group_mshr_cache_store_update ?=
 group_mshr_cache_amo_inval ?=
+group_mshr_store_force_drain ?=
 # RR cache-victim selection. 0/unset = legacy lowest-index reclaimable CACHED way (way-0
 # thrash); 1 = per-bank round-robin victim start pointer, advanced past the evicted way only
 # when a reclaim actually fires. Bit-identical when 0.
@@ -422,6 +423,9 @@ ifneq ($(strip $(group_mshr_cache_store_update)),)
 endif
 ifneq ($(strip $(group_mshr_cache_amo_inval)),)
   vlog_defs += -DGROUP_MSHR_CACHE_AMO_INVAL=$(group_mshr_cache_amo_inval)
+endif
+ifneq ($(strip $(group_mshr_store_force_drain)),)
+  vlog_defs += -DGROUP_MSHR_STORE_FORCE_DRAIN=$(group_mshr_store_force_drain)
 endif
 ifneq ($(strip $(group_mshr_resp_cache)),)
   vlog_defs += -DGROUP_MSHR_RESP_CACHE=$(group_mshr_resp_cache)

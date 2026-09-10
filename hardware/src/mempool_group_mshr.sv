@@ -202,6 +202,14 @@ module mempool_group_mshr
   // silently. Turn a knob on for any workload that does not hold that property.
   localparam bit CacheStoreUpdate = `ifdef GROUP_MSHR_CACHE_STORE_UPDATE `GROUP_MSHR_CACHE_STORE_UPDATE `else 1'b0 `endif;
   localparam bit CacheAmoInval    = `ifdef GROUP_MSHR_CACHE_AMO_INVAL `GROUP_MSHR_CACHE_AMO_INVAL `else 1'b0 `endif;
+  // Store force-drain: the third store-coherence mechanism, guarding the HOLD window rather than
+  // the cache. RespWaitSubsSingle parks a returned single-word response in MSHR_RESP_HOLD hoping
+  // more readers join; a store to that address goes to memory and leaves the held copy stale, so
+  // this flushes the entry and clears cacheable before anyone can merge into it.
+  // OFF by default for the same reason as its two siblings: it can only fire when a store hits an
+  // address the MSHR is holding a load response for, which a read-only-A/B, write-only-C GEMM
+  // never does. The assertion below fails the run if that assumption ever breaks.
+  localparam bit StoreForceDrain  = `ifdef GROUP_MSHR_STORE_FORCE_DRAIN `GROUP_MSHR_STORE_FORCE_DRAIN `else 1'b0 `endif;
   // Cache reuse target / cache-phase timeout (group_mshr_cache_reuse_target, _cache_timeout).
   localparam int unsigned CacheReuseTarget = `ifdef GROUP_MSHR_CACHE_REUSE_TARGET `GROUP_MSHR_CACHE_REUSE_TARGET `else 0 `endif;
   localparam int unsigned CacheTimeout = `ifdef GROUP_MSHR_CACHE_TIMEOUT `GROUP_MSHR_CACHE_TIMEOUT `else 0 `endif;
@@ -3174,7 +3182,8 @@ module mempool_group_mshr
         // kills the merge branch and both mergeable-stall branches, and the hold arm needs
         // req_can_merge too -- leaving only the owner-inflight stall and the NoC handshake. The
         // general req_in_ready carries both arbiters; these two operands do not.
-        if (req_in_valid[tile_i][port_i] && req_is_store[tile_i][port_i] &&
+        if (StoreForceDrain &&
+            req_in_valid[tile_i][port_i] && req_is_store[tile_i][port_i] &&
             !req_owner_inflight[tile_i][port_i] && req_out_ready[tile_i][port_i] &&
             (req_len[tile_i][port_i] == BurstLenWidth'(1))) begin
           for (int way_i = 0; way_i < MshrWaysPerBank; way_i++) begin
@@ -3938,6 +3947,28 @@ module mempool_group_mshr
     //   pc_tile_both : of those, cycles in which BOTH ports were valid
     //   pc_both_rdy  : both valid AND both accepted -- the only case a 2:1 merge would slow down
     logic [31:0] pc_tile_any_dbg, pc_tile_both_dbg, pc_both_rdy_dbg;
+    // Store-force-drain opportunity counter. Evaluated from the SAME terms as the real decision but
+    // WITHOUT the StoreForceDrain gate, so it still measures how often the mechanism would have
+    // fired while the knob is off -- a counter that the knob silences would answer nothing.
+    logic [31:0] sfd_hit_cnt_dbg;
+    logic [MshrNum-1:0] sfd_would_fire;
+    always_comb begin
+      sfd_would_fire = '0;
+      for (int t = 0; t < NumTilesPerGroup; t++) begin
+        for (int pp = 1; pp < NumRemoteReqPortsPerTile; pp++) begin
+          if (req_in_valid[t][pp] && req_is_store[t][pp] &&
+              !req_owner_inflight[t][pp] && req_out_ready[t][pp] &&
+              (req_len[t][pp] == BurstLenWidth'(1))) begin
+            for (int w = 0; w < MshrWaysPerBank; w++) begin
+              if (req_addr_hit_way[t][pp][w] &&
+                  st_hold_post_cap[int'(req_bank[t][pp]) * MshrWaysPerBank + w]) begin
+                sfd_would_fire[int'(req_bank[t][pp]) * MshrWaysPerBank + w] = 1'b1;
+              end
+            end
+          end
+        end
+      end
+    end
     logic [$clog2(NumTilesPerGroup+1)-1:0] pc_any_now, pc_both_now, pc_rdy_now;
     always_comb begin
       pc_any_now = '0; pc_both_now = '0; pc_rdy_now = '0;
@@ -3953,6 +3984,7 @@ module mempool_group_mshr
       if (!rst_ni) begin
         cut_addr_stall_dbg  <= '0;
         pc_tile_any_dbg     <= '0;
+        sfd_hit_cnt_dbg     <= '0;
         pc_tile_both_dbg    <= '0;
         pc_both_rdy_dbg     <= '0;
         cut_owner_stall_dbg <= '0;
@@ -3968,12 +4000,28 @@ module mempool_group_mshr
         pc_tile_any_dbg  <= pc_tile_any_dbg  + 32'(pc_any_now);
         pc_tile_both_dbg <= pc_tile_both_dbg + 32'(pc_both_now);
         pc_both_rdy_dbg  <= pc_both_rdy_dbg  + 32'(pc_rdy_now);
+        sfd_hit_cnt_dbg  <= sfd_hit_cnt_dbg  + 32'($countones(sfd_would_fire));
       end
     end
     final $display("[CUTSTALL] fwd_hits=%0d owner_stalls=%0d allocations=%0d cycles=%0d",
                    cut_addr_stall_dbg, cut_owner_stall_dbg, cut_alloc_dbg, cut_bench_cyc_dbg);
     final $display("[PORTCONC] tile_any=%0d tile_both=%0d both_ready=%0d cycles=%0d",
                    pc_tile_any_dbg, pc_tile_both_dbg, pc_both_rdy_dbg, cut_bench_cyc_dbg);
+    final $display("[SFD] group=%0d store_hits_held_entry=%0d knob=%0d",
+                   group_id_i, sfd_hit_cnt_dbg, StoreForceDrain);
+
+    // With the knob off nothing flushes a held entry, so a store landing on one would leave a
+    // stale copy for a later merge to read. The knob is off because that never happens on this
+    // workload -- assert it rather than assume it.
+    if (!StoreForceDrain) begin : gen_no_store_hits_held
+      for (genvar se = 0; se < MshrNum; se++) begin : gen_nshh_e
+        store_never_hits_held: assert property(
+          @(posedge clk_i) disable iff (!rst_ni) !sfd_would_fire[se])
+          else $fatal(1,
+              "store hit a RESP_HOLD entry %0d with group_mshr_store_force_drain off -- stale data",
+              se);
+      end
+    end
 
     // ------------------------------------------------------------
     // pipeline-cut invariants.

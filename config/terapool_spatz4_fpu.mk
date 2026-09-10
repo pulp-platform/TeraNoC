@@ -476,6 +476,10 @@ group_mshr_cache_self_inval ?= 1
 # mempool_group_mshr.sv fail the run if a store or AMO ever lands on a cached line while off.
 group_mshr_cache_store_update ?= 0
 group_mshr_cache_amo_inval ?= 0
+# Store force-drain: flushes a MSHR_RESP_HOLD entry when a store hits its address. OFF for the
+# same reason as the two above -- a read-only-A/B, write-only-C GEMM never stores to an address the
+# MSHR is holding a load response for. [SFD] counts the opportunities regardless of the knob.
+group_mshr_store_force_drain ?= 0
 # Response cache (MSHR_CACHED): 1 = keep responded entries as a small read-response cache;
 # 0 = MSHR_DRAIN_RESP -> MSHR_IDLE directly, no same-address reuse. Set 0 to remove the
 # cohort-splitting path described in mempool_group_mshr.sv (EnableRespCache).
