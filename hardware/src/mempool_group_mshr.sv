@@ -1318,7 +1318,9 @@ module mempool_group_mshr
         tile_group_id_t mo_ot;
         assign mo_ot = mshr_q[e].sub_reqs[0].tile_id;
         assign mo_ovlp[e][p] =
-            req_can_merge[mo_ot][p] &&
+            // req_can_merge is NOT tested here: both readers of req_meta_conflict already AND
+            // req_can_merge[tile_i][port_i], which under mo_owner_oh is this same signal. Testing
+            // it here only added a NumTilesPerGroup:1 mux per entry per port.
             mshr_q_valid[e] &&
             ((mshr_q[e].state == MSHR_WAIT_RESP) ||
              (mshr_q[e].state == MSHR_DRAIN_RESP) ||
@@ -1326,7 +1328,9 @@ module mempool_group_mshr
             (mshr_q[e].sub_reqs[0].core_id == req_in[mo_ot][p].wdata.core_id) &&
             // Length guards are load-bearing -- see the per-lane form for why.
             (mshr_q[e].burst_len != '0) &&
-            (req_len[mo_ot][p] != '0) &&
+            // req_len != 0 is not tested: len_o is `? 1 : len_raw_o` and len_raw_o is
+            // `? 1 : burst_len` with the zero case yielding 1, so it is >= 1 by construction.
+            // Synthesis cannot fold that across the req_decode ungroup boundary.
             ((meta_id_t'(mshr_q[e].sub_reqs[0].meta_id_base -
                          req_in[mo_ot][p].wdata.meta_id) < req_len[mo_ot][p]) ||
              (meta_id_t'(req_in[mo_ot][p].wdata.meta_id -
