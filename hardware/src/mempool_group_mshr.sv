@@ -3344,7 +3344,12 @@ module mempool_group_mshr
     // no-op: with state == DRAIN_RESP the fin logic reads it as "drain complete" and retires the
     // beat unserved. Free: the trigger already reads mshr_d.state, which the same merge writes.
     for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
-      if (mshr_d_valid[mshr_i] &&
+      // mshr_ctl_en, not mshr_d_valid: it is a superset (mshr_q_valid | alloc_inflight) built
+      // only from registers, so it does not drag merge_decided and the merge arbiter onto this
+      // cone. It over-asserts on exactly two entries -- one retired this cycle and one allocated
+      // this cycle -- and the state test below excludes both: a retire leaves state at CACHED
+      // (retire drops valid only), and an allocation writes MSHR_WAIT_RESP.
+      if (mshr_ctl_en[mshr_i] &&
           (mshr_d[mshr_i].state == MSHR_DRAIN_RESP) &&
           (mshr_d[mshr_i].resp_buf_cnt != '0) &&
           (mshr_d[mshr_i].beat_pending == '0) &&
@@ -3794,7 +3799,9 @@ module mempool_group_mshr
       fin_retire    = 1'b0;
       fin_pop       = 2'd0;
 
-      if (mshr_d_valid[mshr_i] && (mshr_d[mshr_i].resp_buf_cnt != '0) &&
+      // Same substitution as the head-beat seed, and safe for the same reason: the
+      // MSHR_DRAIN_RESP test excludes both entries mshr_ctl_en adds.
+      if (mshr_ctl_en[mshr_i] && (mshr_d[mshr_i].resp_buf_cnt != '0) &&
           (mshr_d[mshr_i].state == MSHR_DRAIN_RESP)) begin
         resp_head_beat_pending[mshr_i] = |mshr_d[mshr_i].beat_pending;
         if (!resp_head_beat_pending[mshr_i]) begin
@@ -4251,6 +4258,19 @@ module mempool_group_mshr
           else $fatal(1,
               "AMO seen while entry %0d is CACHED with group_mshr_cache_amo_inval off", ae);
       end
+    end
+
+    // The two mshr_ctl_en substitutions above are sound only while no entry that mshr_ctl_en
+    // admits but mshr_d_valid does not can present MSHR_DRAIN_RESP. Assert it rather than rely on
+    // the reasoning: a retire leaves state at CACHED, an allocation writes MSHR_WAIT_RESP.
+    for (genvar ce = 0; ce < MshrNum; ce++) begin : gen_ctl_en_superset
+      ctl_en_extra_not_draining: assert property(
+        @(posedge clk_i) disable iff (!rst_ni)
+          !(mshr_ctl_en[ce] && !mshr_d_valid[ce] &&
+            (mshr_d[ce].state == MSHR_DRAIN_RESP)))
+        else $fatal(1,
+            "entry %0d is DRAIN_RESP while mshr_ctl_en over-asserts -- the finalize gate substitution is unsafe",
+            ce);
     end
 
     // A tile can never have a third outstanding bypassed multi-beat burst
