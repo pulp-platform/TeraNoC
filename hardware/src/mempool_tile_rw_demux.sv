@@ -99,9 +99,20 @@ module mempool_tile_rw_demux
                                                 ((c + req_rr_q) % NumWrCapablePorts));
 
     end else if (NocPortHash[0] && (NumRemoteReqPortsPerTile > 2)) begin
-      // Round-robin port spreading: each remote request uses the current
-      // round-robin pointer, which advances on every handshake.
-      assign remote_req_interco_tgt_sel_o[c] = group_id_is_local[c] ? 0 : (1 + req_rr_q);
+      // Spatial + temporal spreading, the same form the type-based branch above uses.
+      //
+      // req_rr_q alone spreads across CYCLES but not WITHIN one: every requester in the tile reads
+      // the same pointer, so all of them pick the same port that cycle, queue at it, and leave the
+      // other idle. `c` here is the requester index (the tile passes NumCoresPerTile *
+      // NumDataPortsPerCore as this module's NumCoresPerTile), and a Spatz core presents up to
+      // NumDataPortsPerCore of them at once -- one scalar plus NumMemPortsPerSpatz VLSU ports.
+      //
+      // A burst vector load issues ONE request on ONE VLSU port, so for the GEMM prefill traffic
+      // `c` is a constant offset and behaviour is unchanged; the spreading is for the rest --
+      // unbursted vector loads, scalar loads sharing a cycle with vector traffic, and the vector
+      // stores that bypass the group MSHR.
+      assign remote_req_interco_tgt_sel_o[c] =
+          group_id_is_local[c] ? 0 : (1 + ((c + req_rr_q) % NumRemotePorts));
 
     end else begin
       assign remote_req_interco_tgt_sel_o[c] = group_id_is_local[c] ? 0 : (1 + (c % (NumRemoteReqPortsPerTile - 1)));
