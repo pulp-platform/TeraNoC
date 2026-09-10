@@ -851,6 +851,12 @@ module mempool_group_mshr
                                               (NumRemoteReqPortsPerTile - 1) : 1;
   localparam int unsigned NumAllocSlots     = NumTilesPerGroup * NumReqPortsActive;
   localparam int unsigned AllocRrW          = idx_width(NumAllocSlots);
+  // One arbiter PER PORT, each NumTilesPerGroup wide, instead of one NumAllocSlots-wide arbiter.
+  // The OR-reduce and the LSB-isolate both scale with log2(slots), so halving the width takes one
+  // level off each; the per-bank combine below adds one back, for a small net gain. It is done
+  // this way rather than by muxing the two ports into one stream because the ports usually hash to
+  // DIFFERENT banks, where they contend for nothing -- a pre-mux would serialise them anyway.
+  localparam int unsigned NumPortSlots      = NumTilesPerGroup;
   // Sized by NumAllocSlots, so these must follow it rather than sit beside req_merge_*.
   logic [NumAllocSlots-1:0] merge_same_mask;   // earlier ports targeting the SAME entry
   logic [AllocRrW-1:0]      alloc_rr_q, alloc_rr_d;
@@ -1496,6 +1502,13 @@ module mempool_group_mshr
   logic [NumAllocSlots-1:0][MshrBankNum-1:0] arb_bank_oh;
   logic [NumAllocSlots-1:0]                  alloc_rr_mask;   // 1 = slot is at/above the RR base
   logic [MshrBankNum-1:0][NumAllocSlots-1:0] bank_win_oh;     // one-hot winner per bank
+  // Per-port slices of the flattened candidate/bank/mask vectors, and each port's own winner.
+  logic [NumReqPortsActive-1:0][NumPortSlots-1:0]                  alloc_cand_p, merge_cand_p;
+  logic [NumReqPortsActive-1:0][NumPortSlots-1:0][MshrBankNum-1:0] arb_bank_oh_p;
+  logic [NumReqPortsActive-1:0][NumPortSlots-1:0]                  alloc_rr_mask_p;
+  logic [NumReqPortsActive-1:0][MshrBankNum-1:0][NumPortSlots-1:0] win_oh_p, merge_win_oh_p;
+  logic [MshrBankNum-1:0][NumReqPortsActive-1:0]                   alloc_any_p, merge_any_p;
+  logic [MshrBankNum-1:0][NumReqPortsActive-1:0]                   alloc_pick_p, merge_pick_p;
 
   // Loop temporaries for the allocation arbiter, declared at module scope rather than as
   // procedural `automatic`s inside the always_comb below.
@@ -1534,15 +1547,55 @@ module mempool_group_mshr
   end
 
   // A bank with no free way grants nobody; its candidates fall through to stall/bypass unchanged.
-  mempool_group_mshr_bank_arb #(
-    .NumSlots(NumAllocSlots), .NumBanks(MshrBankNum), .BankIdW(BankIdW)
-  ) i_alloc_arb (
-    .cand_i      (alloc_cand_flat),
-    .bank_oh_i   (arb_bank_oh),
-    .rr_mask_i   (alloc_rr_mask),
-    .bank_gate_i (bank_has_free),
-    .win_oh_o    (bank_win_oh)
-  );
+  // Slot Sl = t * NumReqPortsActive + (p-1), so port p owns the slots with (Sl % ports) == p-1.
+  generate
+    for (genvar pp = 0; pp < NumReqPortsActive; pp++) begin : gen_arb_port
+      for (genvar tt = 0; tt < NumPortSlots; tt++) begin : gen_arb_port_slot
+        localparam int unsigned SlF = tt * NumReqPortsActive + pp;
+        assign alloc_cand_p   [pp][tt] = alloc_cand_flat    [SlF];
+        assign merge_cand_p   [pp][tt] = merge_arb_cand_flat[SlF];
+        assign arb_bank_oh_p  [pp][tt] = arb_bank_oh        [SlF];
+        assign alloc_rr_mask_p[pp][tt] = alloc_rr_mask      [SlF];
+      end
+      mempool_group_mshr_bank_arb #(
+        .NumSlots(NumPortSlots), .NumBanks(MshrBankNum), .BankIdW(BankIdW)
+      ) i_alloc_arb (
+        .cand_i (alloc_cand_p[pp]), .bank_oh_i (arb_bank_oh_p[pp]),
+        .rr_mask_i (alloc_rr_mask_p[pp]), .bank_gate_i (bank_has_free),
+        .win_oh_o (win_oh_p[pp])
+      );
+      mempool_group_mshr_bank_arb #(
+        .NumSlots(NumPortSlots), .NumBanks(MshrBankNum), .BankIdW(BankIdW)
+      ) i_merge_arb (
+        .cand_i (merge_cand_p[pp]), .bank_oh_i (arb_bank_oh_p[pp]),
+        .rr_mask_i (alloc_rr_mask_p[pp]), .bank_gate_i ({MshrBankNum{1'b1}}),
+        .win_oh_o (merge_win_oh_p[pp])
+      );
+    end
+
+    // A bank can grant one slot per cycle, so where both ports produced a winner for the SAME bank
+    // one must yield -- and only there. Different banks are untouched, which is why this costs no
+    // throughput. The preference alternates with the allocation rotation base, so neither port can
+    // starve the other on a persistently contended bank.
+    for (genvar b = 0; b < MshrBankNum; b++) begin : gen_arb_combine
+      for (genvar pp = 0; pp < NumReqPortsActive; pp++) begin : gen_arb_combine_p
+        assign alloc_any_p[b][pp] = |win_oh_p      [pp][b];
+        assign merge_any_p[b][pp] = |merge_win_oh_p[pp][b];
+      end
+      assign alloc_pick_p[b][0] = alloc_any_p[b][0] && (!alloc_any_p[b][1] || !alloc_rr_q[0]);
+      assign alloc_pick_p[b][1] = alloc_any_p[b][1] && !alloc_pick_p[b][0];
+      assign merge_pick_p[b][0] = merge_any_p[b][0] && (!merge_any_p[b][1] || !alloc_rr_q[0]);
+      assign merge_pick_p[b][1] = merge_any_p[b][1] && !merge_pick_p[b][0];
+      for (genvar tt = 0; tt < NumPortSlots; tt++) begin : gen_arb_combine_slot
+        for (genvar pp = 0; pp < NumReqPortsActive; pp++) begin : gen_arb_combine_slot_p
+          assign bank_win_oh      [b][tt * NumReqPortsActive + pp] =
+              win_oh_p      [pp][b][tt] && alloc_pick_p[b][pp];
+          assign bank_merge_win_oh[b][tt * NumReqPortsActive + pp] =
+              merge_win_oh_p[pp][b][tt] && merge_pick_p[b][pp];
+        end
+      end
+    end
+  endgenerate
 
   // Return the per-bank one-hot grant to its (tile,port) requester. The arbiter builds its request
   // vector as `cand && (bank == b)` (mempool_group_mshr_bank_arb), so a slot can only ever win in
@@ -1606,17 +1659,6 @@ module mempool_group_mshr
     end
   end
 
-  // Ungated: an entry that is already resident is always a legal merge target. Shares the
-  // allocation rotation base, so a high-index tile is not perpetually beaten to a contended bank.
-  mempool_group_mshr_bank_arb #(
-    .NumSlots(NumAllocSlots), .NumBanks(MshrBankNum), .BankIdW(BankIdW)
-  ) i_merge_arb (
-    .cand_i      (merge_arb_cand_flat),
-    .bank_oh_i   (arb_bank_oh),
-    .rr_mask_i   (alloc_rr_mask),
-    .bank_gate_i ({MshrBankNum{1'b1}}),
-    .win_oh_o    (bank_merge_win_oh)
-  );
 
 `ifndef TARGET_SYNTHESIS
   always_comb begin
