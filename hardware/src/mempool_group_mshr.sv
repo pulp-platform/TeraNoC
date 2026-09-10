@@ -660,6 +660,15 @@ module mempool_group_mshr
   // an operand and comparing afterwards.
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrBankNum-1:0] req_bank_oh;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrBankNum-1:0] req_fwd_eq;
+  // The address/group key compared against EVERY bank's way-w entry, off operands that are ready
+  // before req_bank. req_bank then selects one bit instead of selecting the entry and comparing.
+  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrWaysPerBank-1:0][MshrBankNum-1:0] req_key_eq;
+  // e_abs at module scope rather than inside the generate: a declaration in a generate block gets
+  // a hierarchical name that wave scripts and assertions cannot follow.
+  mshr_id_t [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrWaysPerBank-1:0] req_e_abs;
+  // The pre-rewrite form, kept ONLY so an assertion can prove the two agree every cycle. Nothing
+  // synthesised reads it, so it disappears from the netlist.
+  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrWaysPerBank-1:0] req_addr_hit_way_old;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][VictimPtrW-1:0]  req_fwd_way;
   mshr_id_t  [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_fwd_id;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_hit_mshr_sel_valid;
@@ -1217,10 +1226,26 @@ module mempool_group_mshr
       for (genvar port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin : gen_req_mshr_lookup_port
         for (genvar way_i = 0; way_i < MshrWaysPerBank; way_i++) begin : gen_req_mshr_lookup_way
           // Absolute entry id of this request's bank way (dynamic mux on req_bank).
-          mshr_id_t e_abs;
-          assign e_abs =
+          wire mshr_id_t e_abs = req_e_abs[tile_i][port_i][way_i];
+          assign req_e_abs[tile_i][port_i][way_i] =
               mshr_id_t'(int'(req_bank[tile_i][port_i]) * MshrWaysPerBank + way_i);
+          // Compare-then-mux on the widest test in the cone: every bank's way-w entry is compared
+          // in parallel against req_addr_key and tgt_group_id, both ready before req_bank, and the
+          // bank one-hot picks one bit. The old form muxed base_addr and tgt_group_id on req_bank
+          // and only then compared, putting a wide mux and a ~20-bit comparator in series after
+          // the latest signal here.
+          for (genvar bk = 0; bk < MshrBankNum; bk++) begin : gen_req_key_eq
+            assign req_key_eq[tile_i][port_i][way_i][bk] =
+                mshr_q_valid[bk * MshrWaysPerBank + way_i] &&
+                (mshr_q[bk * MshrWaysPerBank + way_i].base_addr ==
+                     req_addr_key[tile_i][port_i]) &&
+                (mshr_q[bk * MshrWaysPerBank + way_i].tgt_group_id ==
+                     req_in[tile_i][port_i].tgt_group_id);
+          end
           assign req_addr_hit_way[tile_i][port_i][way_i] =
+              req_in_valid[tile_i][port_i] &&
+              |(req_bank_oh[tile_i][port_i] & req_key_eq[tile_i][port_i][way_i]);
+          assign req_addr_hit_way_old[tile_i][port_i][way_i] =
               req_in_valid[tile_i][port_i] &&
               mshr_q_valid[e_abs] &&
               (mshr_q[e_abs].base_addr == req_addr_key[tile_i][port_i]) &&
@@ -4311,6 +4336,20 @@ module mempool_group_mshr
             !(amo_invalidate && mshr_q_valid[ae] && (mshr_q[ae].state == MSHR_CACHED)))
           else $fatal(1,
               "AMO seen while entry %0d is CACHED with group_mshr_cache_amo_inval off", ae);
+      end
+    end
+
+    // Compare-then-mux equivalence: selecting one comparison result with the bank one-hot must
+    // give exactly what selecting the entry and then comparing gave.
+    for (genvar qt = 0; qt < NumTilesPerGroup; qt++) begin : gen_hitway_eq_t
+      for (genvar qp = 1; qp < NumRemoteReqPortsPerTile; qp++) begin : gen_hitway_eq_p
+        for (genvar qw = 0; qw < MshrWaysPerBank; qw++) begin : gen_hitway_eq_w
+          hitway_compare_then_mux_equiv: assert property(
+            @(posedge clk_i) disable iff (!rst_ni)
+              req_addr_hit_way[qt][qp][qw] == req_addr_hit_way_old[qt][qp][qw])
+            else $fatal(1,
+                "req_addr_hit_way rewrite diverged at tile %0d port %0d way %0d", qt, qp, qw);
+        end
       end
     end
 
