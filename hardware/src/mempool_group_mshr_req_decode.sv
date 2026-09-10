@@ -38,6 +38,10 @@ module mempool_group_mshr_req_decode
   output tcdm_addr_t [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              tile_addr_o,
   output tcdm_addr_t [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              tile_addr_key_o,
   output tcdm_addr_t [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              addr_key_o,
+  // The two forms addr_key_o selects between, published unmuxed so the bank hash can start its
+  // barrel select without waiting on req_len_is_burst.
+  output tcdm_addr_t [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              addr_key_burst_o,
+  output tcdm_addr_t [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              addr_key_single_o,
   output logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                    is_load_o,
   output logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                    is_store_o,
   output logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                    is_single_o,
@@ -84,10 +88,14 @@ module mempool_group_mshr_req_decode
             ? {tile_addr_o[t][p][$bits(tcdm_addr_t)-TileIdBits-1:BurstAlignBits],
                {BurstAlignBits{1'b0}}}
             : '0;
+        assign addr_key_burst_o[t][p] =
+            {{tile_addr_o[t][p][$bits(tcdm_addr_t)-TileIdBits-1:BurstAlignBits],
+              {BurstAlignBits{1'b0}}}, tile_id_o[t][p]};
+        assign addr_key_single_o[t][p] = merge_addr_key(req_i[t][p].tgt_addr);
         assign addr_key_o[t][p] = !req_valid_i[t][p] ? '0
                                 : req_len_is_burst[t][p]
-                                    ? {tile_addr_key_o[t][p], tile_id_o[t][p]}
-                                    : merge_addr_key(req_i[t][p].tgt_addr);
+                                    ? addr_key_burst_o[t][p]
+                                    : addr_key_single_o[t][p];
 
         assign is_single_o    [t][p] = req_valid_i[t][p] &&
                                        (len_o[t][p] == BurstLenWidth'(1));

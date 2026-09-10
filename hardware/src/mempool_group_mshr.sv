@@ -402,7 +402,13 @@ module mempool_group_mshr
            BankBurstBits, BankIdW);
 
   // Map a (target group, merge address key, request type) to its MSHR bank.
-  function automatic logic [BankIdW-1:0] mshr_bank_of(input tcdm_addr_t addr_key, input group_id_t grp,
+  // key_burst / key_single are the two forms addr_key selects between. Mode 3 hashes each with the
+  // shift that applies to it, so the barrel selects do not wait on the key mux; every other mode
+  // takes the already-muxed addr_key. Callers holding a registered key pass it for all three.
+  function automatic logic [BankIdW-1:0] mshr_bank_of(input tcdm_addr_t addr_key,
+                                                      input tcdm_addr_t key_burst,
+                                                      input tcdm_addr_t key_single,
+                                                      input group_id_t grp,
                                                       input logic is_single,
                                                       input logic [mempool_pkg::MshrCfgShiftW-1:0] sh_single,
                                                       input logic [mempool_pkg::MshrCfgShiftW-1:0] sh_burst,
@@ -410,23 +416,28 @@ module mempool_group_mshr
     logic [BankIdW-1:0]              b;
     logic [$bits(tcdm_addr_t)-1:0]   mix;
     logic [WordAddrW-1:0]            word_addr;
+    logic [WordAddrW-1:0]            word_addr_burst, word_addr_single;
     b = BankIdW'(grp);
     if (BankHash == 3) begin
       // Field-select on the reconstructed LINEAR word address (pure re-wiring: put the group field
       // back above the tile field).
-      word_addr = { addr_key[$bits(tcdm_addr_t)-1 : TileIdBits + BankInTileW], // bank_row (high)
-                    grp[GroupBits-1:0],                                        // group
-                    addr_key[TileIdBits-1:0],                                  // tile
-                    addr_key[TileIdBits +: BankInTileW] };                     // bank_in_tile (low)
+      word_addr_burst  = { key_burst[$bits(tcdm_addr_t)-1 : TileIdBits + BankInTileW],
+                           grp[GroupBits-1:0],
+                           key_burst[TileIdBits-1:0],
+                           key_burst[TileIdBits +: BankInTileW] };
+      word_addr_single = { key_single[$bits(tcdm_addr_t)-1 : TileIdBits + BankInTileW],
+                           grp[GroupBits-1:0],
+                           key_single[TileIdBits-1:0],
+                           key_single[TileIdBits +: BankInTileW] };
       if (is_single) begin
-        b = word_addr[sh_single +: BankIdW];
+        b = word_addr_single[sh_single +: BankIdW];
       end else if (!burst_bits) begin
-        b = word_addr[sh_burst +: BankIdW];
+        b = word_addr_burst[sh_burst +: BankIdW];
       end else begin
         // ONE intra-load bit: the high BankIdW-1 bits from the p-slice gap at sh_burst, plus the
         // bit just above the burst boundary.
-        b = { word_addr[sh_burst +: BankIdW - 1],
-              word_addr[BurstAlignBits +: 1] };
+        b = { word_addr_burst[sh_burst +: BankIdW - 1],
+              word_addr_burst[BurstAlignBits +: 1] };
       end
     end else if (BankHash == 0) begin
       // Legacy: each bank bit is the XOR of a fixed stride-BankIdW subset of address bits.
@@ -623,6 +634,11 @@ module mempool_group_mshr
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]
              [BurstLenWidth-1:0]                                              req_len_raw;
   tcdm_addr_t[NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_addr_key;
+  tcdm_addr_t[NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_addr_key_burst;
+`ifndef TARGET_SYNTHESIS
+  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][BankIdW-1:0]      req_bank_ref;
+`endif
+  tcdm_addr_t[NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_addr_key_single;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][BankIdW-1:0] req_bank;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]
              [TileIdBits-1:0]                                                 req_tile_id;
@@ -1136,6 +1152,8 @@ module mempool_group_mshr
     .tile_addr_o         (req_tile_addr),
     .tile_addr_key_o     (req_tile_addr_key),
     .addr_key_o          (req_addr_key),
+    .addr_key_burst_o    (req_addr_key_burst),
+    .addr_key_single_o   (req_addr_key_single),
     .is_load_o           (req_is_load),
     .is_store_o          (req_is_store),
     .is_single_o         (req_is_single),
@@ -1214,9 +1232,27 @@ module mempool_group_mshr
         // Type comes from the CLAMPED req_is_single, not req_len_raw: a store or a
         // misaligned burst is forced to req_len=1 and must bank like a single (see BankSelShift*).
         assign req_bank[tile_i][port_i] =
-            mshr_bank_of(req_addr_key[tile_i][port_i], req_in[tile_i][port_i].tgt_group_id,
+            mshr_bank_of(req_addr_key[tile_i][port_i],
+                         req_addr_key_burst[tile_i][port_i],
+                         req_addr_key_single[tile_i][port_i],
+                         req_in[tile_i][port_i].tgt_group_id,
                          req_is_single[tile_i][port_i],
                          cfg_bank_shift_single, cfg_bank_shift_burst, cfg_bank_burst_bits);
+`ifndef TARGET_SYNTHESIS
+        // The split keys are not zeroed on an invalid request the way addr_key is, so equivalence
+        // is claimed only where req_bank is consumed.
+        assign req_bank_ref[tile_i][port_i] =
+            mshr_bank_of(req_addr_key[tile_i][port_i], req_addr_key[tile_i][port_i],
+                         req_addr_key[tile_i][port_i], req_in[tile_i][port_i].tgt_group_id,
+                         req_is_single[tile_i][port_i],
+                         cfg_bank_shift_single, cfg_bank_shift_burst, cfg_bank_burst_bits);
+        req_bank_split_equiv: assert property(
+          @(posedge clk_i) disable iff (!rst_ni)
+            req_in_valid[tile_i][port_i] |->
+              (req_bank[tile_i][port_i] == req_bank_ref[tile_i][port_i]))
+          else $fatal(1, "tile %0d port %0d: split bank hash %0d != muxed-key %0d",
+                      tile_i, port_i, req_bank[tile_i][port_i], req_bank_ref[tile_i][port_i]);
+`endif
       end
     end
   endgenerate
@@ -4186,13 +4222,15 @@ module mempool_group_mshr
       mshr_entry_in_its_bank: assert property(
         @(posedge clk_i) disable iff (!rst_ni)
         mshr_q_valid[mshr_i] |->
-          (mshr_bank_of(mshr_q[mshr_i].base_addr, mshr_q[mshr_i].tgt_group_id,
+          (mshr_bank_of(mshr_q[mshr_i].base_addr, mshr_q[mshr_i].base_addr,
+                        mshr_q[mshr_i].base_addr, mshr_q[mshr_i].tgt_group_id,
                         mshr_q[mshr_i].burst_len == BurstLenWidth'(1),
                         cfg_bank_shift_single, cfg_bank_shift_burst, cfg_bank_burst_bits) ==
            BankIdW'(mshr_i / MshrWaysPerBank)))
         else $fatal(1, "MSHR entry %0d not in its address bank (got %0d, expected %0d)",
                     mshr_i,
-                    mshr_bank_of(mshr_q[mshr_i].base_addr, mshr_q[mshr_i].tgt_group_id,
+                    mshr_bank_of(mshr_q[mshr_i].base_addr, mshr_q[mshr_i].base_addr,
+                        mshr_q[mshr_i].base_addr, mshr_q[mshr_i].tgt_group_id,
                                  mshr_q[mshr_i].burst_len == BurstLenWidth'(1),
                                  cfg_bank_shift_single, cfg_bank_shift_burst, cfg_bank_burst_bits),
                     mshr_i / MshrWaysPerBank);
