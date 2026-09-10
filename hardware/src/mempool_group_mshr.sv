@@ -625,6 +625,8 @@ module mempool_group_mshr
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrWaysPerBank-1:0] req_hit_way;
   // Merge capacity for this way, evaluated where the entry index is still the EARLY req_bank.
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrWaysPerBank-1:0] req_hit_cap_way;
+  // Same-address exclusion for the meta-overlap test, evaluated where the tile is a loop constant.
+  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrNum-1:0] req_same_addr_ent;
   // Meta-overlap is a CROSS-address check (same tile+core, different address, overlapping meta_id
   // range) that protects core-side (core,meta_id) response uniqueness.
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrNum-1:0]         req_meta_ovlp_map;
@@ -1225,8 +1227,19 @@ module mempool_group_mshr
         // address.
         if (MetaOvlpByOwner) begin : gen_req_meta_ovlp_owner
           for (genvar mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin : gen_map
+            // Same-address exclusion, moved here from mo_ovlp: there the owner tile is a signal,
+            // so it muxed req_addr_hit_way -- the deepest term in the lookup -- through a
+            // NumTilesPerGroup:1 select. Here tile_i is a loop constant and no mux exists. Exact:
+            // mo_owner_oh[e][t] implies sub_reqs[0].tile_id == t, so under it the two forms read
+            // the same signals, and where mo_owner_oh is 0 the product is 0 either way.
+            // Bank-local, as before: a same-address entry must lie in the request's own bank, so
+            // the bank compare plus the bank-scoped req_addr_hit_way is the whole test.
+            assign req_same_addr_ent[tile_i][port_i][mshr_i] =
+                (req_bank[tile_i][port_i] == BankIdW'(mshr_i / MshrWaysPerBank)) &&
+                req_addr_hit_way[tile_i][port_i][mshr_i % MshrWaysPerBank];
             assign req_meta_ovlp_map[tile_i][port_i][mshr_i] =
-                mo_owner_oh[mshr_i][tile_i] && mo_ovlp[mshr_i][port_i];
+                mo_owner_oh[mshr_i][tile_i] && mo_ovlp[mshr_i][port_i] &&
+                !req_same_addr_ent[tile_i][port_i][mshr_i];
           end
         end else begin : gen_req_meta_ovlp_perlane
           for (genvar mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin : gen_req_meta_ovlp
@@ -1305,11 +1318,6 @@ module mempool_group_mshr
              (mshr_q[e].state == MSHR_DRAIN_RESP) ||
              (mshr_q[e].state == MSHR_RESP_HOLD)) &&
             (mshr_q[e].sub_reqs[0].core_id == req_in[mo_ot][p].wdata.core_id) &&
-            // Same-address exclusion, bank-local exactly as in the per-lane form: a same-address
-            // entry must lie in the request's own bank, so req_addr_hit_way (already bank-scoped)
-            // carries it and no extra address comparator appears here.
-            !((req_bank[mo_ot][p] == BankIdW'(e / MshrWaysPerBank)) &&
-              req_addr_hit_way[mo_ot][p][e % MshrWaysPerBank]) &&
             // Length guards are load-bearing -- see the per-lane form for why.
             (mshr_q[e].burst_len != '0) &&
             (req_len[mo_ot][p] != '0) &&
