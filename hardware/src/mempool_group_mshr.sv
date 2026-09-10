@@ -2328,6 +2328,12 @@ module mempool_group_mshr
   // req_in_valid STAYS: req_can_merge is a pure decode of wen/amo and req_fwd_hit does not carry
   // valid either, so req_merge_valid can be high on an invalid lane and the arbiter can grant it.
   logic [NumAllocSlots-1:0]                     merge_accept;
+  // Allocation accept, by the same argument. bank_win_oh[b][s] implies req_alloc_cand[s], which
+  // carries req_can_merge, !req_hit_mshr, !req_fwd_hit, !req_addr_hit_drain and
+  // !req_meta_conflict. Walk the ready chain with that: req_hit_mshr_sel_valid is 0 so the merge
+  // branch is dead; branch 1 needs drain or conflict; branch 3 needs !req_alloc_found, which the
+  // grant contradicts. Only the owner-inflight stall and the hold/NoC arm survive.
+  logic [NumAllocSlots-1:0]                     alloc_accept, arb_hold_nz;
   tcdm_addr_t [NumAllocSlots-1:0]               arb_addr;
   group_id_t [NumAllocSlots-1:0]                arb_grp;
   logic [NumAllocSlots-1:0][BurstLenWidth-1:0]  arb_len;
@@ -2344,6 +2350,11 @@ module mempool_group_mshr
         localparam int unsigned Sl = t * NumReqPortsActive + (p - 1);
         assign arb_accept[Sl]   = req_in_valid[t][p] && req_in_ready[t][p];
         assign merge_accept[Sl] = req_in_valid[t][p] && req_hit_cap_sel[t][p];
+        assign arb_hold_nz[Sl]  = ((((req_len[t][p] == BurstLenWidth'(1)) ? cfg_hold_window_single
+                                                                         : cfg_hold_window_burst)
+                                    != '0));
+        assign alloc_accept[Sl] = req_in_valid[t][p] && !req_owner_inflight[t][p] &&
+                                  (arb_hold_nz[Sl] || req_out_ready[t][p]);
         assign arb_addr  [Sl] = req_addr_key[t][p];
         assign arb_grp   [Sl] = req_in[t][p].tgt_group_id;
         assign arb_len   [Sl] = req_len[t][p];
@@ -2357,7 +2368,7 @@ module mempool_group_mshr
     end
 
     for (genvar b = 0; b < MshrBankNum; b++) begin : gen_arb_record
-      assign agb_sel[b] = bank_win_oh[b]       & arb_accept;
+      assign agb_sel[b] = bank_win_oh[b]       & alloc_accept;
       assign mgb_sel[b] = bank_merge_win_oh[b] & merge_accept;
       assign agb_v[b]   = |agb_sel[b];
       assign mgb_v[b]   = |mgb_sel[b];
