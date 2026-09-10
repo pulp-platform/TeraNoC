@@ -655,6 +655,12 @@ module mempool_group_mshr
   /// is b*MshrWaysPerBank + agb_q_way[b], so the follower merges into the leader's entry at once.
   /// b*WaysPerBank + agb_q_way[b], so the follower merges into the leader's entry immediately.
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_fwd_hit;
+  // Bank one-hot, decoded once per lane. req_bank is late; everything it used to SELECT is
+  // register-fed, so comparing per bank and selecting one result bit is shallower than selecting
+  // an operand and comparing afterwards.
+  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrBankNum-1:0] req_bank_oh;
+  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrBankNum-1:0] req_fwd_eq;
+  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][VictimPtrW-1:0]  req_fwd_way;
   mshr_id_t  [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_fwd_id;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_hit_mshr_sel_valid;
   mshr_id_t  [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_hit_mshr_sel_id;
@@ -1327,17 +1333,41 @@ module mempool_group_mshr
         // Exactly the req_addr_hit_way key, compared against the in-flight allocation record.
         // agb_q_len keeps a different-length request free to allocate its own entry, as req_hit_way
         // would have let it.
+        // Compare-then-mux: all MshrBankNum records are compared in parallel against operands
+        // that are ready well before req_bank, and req_bank then picks one BIT. The old form
+        // selected ~20 bits of record with req_bank and only then compared, putting a wide mux
+        // and a comparator in series after the latest signal in this cone.
+        for (genvar bank_i = 0; bank_i < MshrBankNum; bank_i++) begin : gen_req_fwd_eq
+          assign req_bank_oh[tile_i][port_i][bank_i] =
+              (req_bank[tile_i][port_i] == BankIdW'(bank_i));
+          assign req_fwd_eq[tile_i][port_i][bank_i] =
+              agb_q_v[bank_i] &&
+              (agb_q_addr[bank_i] == req_addr_key[tile_i][port_i]) &&
+              (agb_q_grp [bank_i] == req_in[tile_i][port_i].tgt_group_id) &&
+              (agb_q_len [bank_i] == req_len[tile_i][port_i]);
+        end
         assign req_fwd_hit[tile_i][port_i] =
-            req_can_merge[tile_i][port_i] && agb_q_v[req_bank[tile_i][port_i]] &&
-            (agb_q_addr[req_bank[tile_i][port_i]] == req_addr_key[tile_i][port_i]) &&
-            (agb_q_grp [req_bank[tile_i][port_i]] == req_in[tile_i][port_i].tgt_group_id) &&
-            (agb_q_len [req_bank[tile_i][port_i]] == req_len[tile_i][port_i]);
+            req_can_merge[tile_i][port_i] &&
+            |(req_bank_oh[tile_i][port_i] & req_fwd_eq[tile_i][port_i]);
         assign req_fwd_id[tile_i][port_i] =
             mshr_id_t'(int'(req_bank[tile_i][port_i]) * MshrWaysPerBank +
-                       int'(agb_q_way[req_bank[tile_i][port_i]]));
+                       int'(req_fwd_way[tile_i][port_i]));
       end
     end
   endgenerate
+
+  // The forwarded way, selected with the same one-hot rather than indexed by req_bank.
+  always_comb begin
+    for (int t = 0; t < NumTilesPerGroup; t++) begin
+      for (int p = 1; p < NumRemoteReqPortsPerTile; p++) begin
+        req_fwd_way[t][p] = '0;
+        for (int b = 0; b < MshrBankNum; b++) begin
+          req_fwd_way[t][p] = req_fwd_way[t][p] |
+              ({VictimPtrW{req_bank_oh[t][p][b]}} & agb_q_way[b]);
+        end
+      end
+    end
+  end
 
   // Meta-range overlap, computed ONCE PER ENTRY (see MetaOvlpByOwner).
   generate
