@@ -2565,6 +2565,39 @@ module mempool_group_mshr
   logic [MshrIdxW-1:0]      drain2_base, drain2_mshr_i;            // B
   logic [SubIdxW-1:0]       drain2_sub_base, drain2_s;             // B
 
+  // Per-lane replay selection, computed unconditionally. Pure code motion: none of these reads
+  // req_out_valid, so evaluating them ahead of the ready chain changes nothing but their arrival.
+  generate
+    for (genvar rt = 0; rt < NumTilesPerGroup; rt++) begin : gen_replay_lane_t
+      for (genvar rp = 1; rp < NumRemoteReqPortsPerTile; rp++) begin : gen_replay_lane
+        for (genvar re = 0; re < MshrNum; re++) begin : gen_replay_cand
+          assign replay_cand_l[rt][rp][re] =
+              replay_ready[re] && (replay_own_t[re] == tile_group_id_t'(rt)) &&
+              (replay_own_p[re] == RespPortIdW'(rp));
+        end
+        assign replay_hi_l[rt][rp] = replay_cand_l[rt][rp] &  replay_rr_mask;
+        assign replay_lo_l[rt][rp] = replay_cand_l[rt][rp] & ~replay_rr_mask;
+        assign replay_win_l[rt][rp] =
+            (replay_hi_l[rt][rp] != '0)
+              ? (replay_hi_l[rt][rp] & (~replay_hi_l[rt][rp] + MshrNum'(1)))
+              : (replay_lo_l[rt][rp] & (~replay_lo_l[rt][rp] + MshrNum'(1)));
+      end
+    end
+  endgenerate
+
+  // The winner's payload, selected with the one-hot rather than an encoded index.
+  always_comb begin
+    for (int rt = 0; rt < NumTilesPerGroup; rt++) begin
+      for (int rp = 1; rp < NumRemoteReqPortsPerTile; rp++) begin
+        replay_sel_l[rt][rp] = '0;
+        for (int re = 0; re < MshrNum; re++) begin
+          replay_sel_l[rt][rp] = replay_sel_l[rt][rp] |
+              ({$bits(replay_payload_t){replay_win_l[rt][rp][re]}} & replay_payload[re]);
+        end
+      end
+    end
+  end
+
   always_comb begin
     // Defaults
     mgb_slot = '0;
@@ -2913,38 +2946,6 @@ module mempool_group_mshr
             replay_issued_set                 = replay_issued_set | replay_win_l[t][p];
           end
 
-  // Per-lane replay selection, computed unconditionally. Pure code motion: none of these reads
-  // req_out_valid, so evaluating them ahead of the ready chain changes nothing but their arrival.
-  generate
-    for (genvar rt = 0; rt < NumTilesPerGroup; rt++) begin : gen_replay_lane_t
-      for (genvar rp = 1; rp < NumRemoteReqPortsPerTile; rp++) begin : gen_replay_lane
-        for (genvar re = 0; re < MshrNum; re++) begin : gen_replay_cand
-          assign replay_cand_l[rt][rp][re] =
-              replay_ready[re] && (replay_own_t[re] == tile_group_id_t'(rt)) &&
-              (replay_own_p[re] == RespPortIdW'(rp));
-        end
-        assign replay_hi_l[rt][rp] = replay_cand_l[rt][rp] &  replay_rr_mask;
-        assign replay_lo_l[rt][rp] = replay_cand_l[rt][rp] & ~replay_rr_mask;
-        assign replay_win_l[rt][rp] =
-            (replay_hi_l[rt][rp] != '0)
-              ? (replay_hi_l[rt][rp] & (~replay_hi_l[rt][rp] + MshrNum'(1)))
-              : (replay_lo_l[rt][rp] & (~replay_lo_l[rt][rp] + MshrNum'(1)));
-      end
-    end
-  endgenerate
-
-  // The winner's payload, selected with the one-hot rather than an encoded index.
-  always_comb begin
-    for (int rt = 0; rt < NumTilesPerGroup; rt++) begin
-      for (int rp = 1; rp < NumRemoteReqPortsPerTile; rp++) begin
-        replay_sel_l[rt][rp] = '0;
-        for (int re = 0; re < MshrNum; re++) begin
-          replay_sel_l[rt][rp] = replay_sel_l[rt][rp] |
-              ({$bits(replay_payload_t){replay_win_l[rt][rp][re]}} & replay_payload[re]);
-        end
-      end
-    end
-  end
         end
       end
       for (int e = 0; e < MshrNum; e++) begin
