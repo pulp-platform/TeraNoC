@@ -867,6 +867,12 @@ module mempool_group_mshr
   logic [MshrNum-1:0]                                        replay_rr_mask;
   logic [MshrNum-1:0]                                        replay_cand, replay_hi, replay_lo, replay_win_oh;
   logic [MshrIdxW-1:0]                                       replay_win_e;
+  // Replay winners accumulated across the lane loop, applied once per entry afterwards. Writing
+  // mshr_d[replay_win_e].issued inside the loop made lane k+1 depend on lane k -- a 32-deep
+  // last-writer chain on a bit that is only ever set. An OR is associative, so the tool balances
+  // it; the scatter it replaces could not be. Lanes are disjoint by construction (one owner lane
+  // per entry), which is what makes the OR equivalent to the priority form.
+  logic [MshrNum-1:0]                                        replay_issued_set;
   // BankPublish splits the entry-space rotation base into {bank, way} by bit position. idx_width()
   // floors at 1 for a single-element axis, so with MshrBankNum==1 or MshrWaysPerBank==1 the two
   // halves no longer tile the entry index and the split would silently select the wrong bank.
@@ -2737,6 +2743,7 @@ module mempool_group_mshr
       end
       // Step 2: each lane picks its own winner, in parallel. Lanes are disjoint by construction
       // (one owner lane per entry), so no lane can steal another's candidate.
+      replay_issued_set = '0;
       for (int t = 0; t < NumTilesPerGroup; t++) begin
         for (int p = 1; p < NumRemoteReqPortsPerTile; p++) begin
           if (!req_out_valid[t][p] && req_out_ready[t][p]) begin
@@ -2768,10 +2775,14 @@ module mempool_group_mshr
               req_out[t][p].tgt_addr            = replay_scan_ent[replay_win_e].base_addr;
               req_out[t][p].burst_len           = replay_scan_ent[replay_win_e].burst_len;
               req_out[t][p].mshr_tag            = MshrTagWidth'(replay_win_e) + MshrTagWidth'(1);
-              mshr_d[replay_win_e].issued       = 1'b1;
+              // RECORD, do not write: the apply runs once per entry below.
+              replay_issued_set                 = replay_issued_set | replay_win_oh;
             end
           end
         end
+      end
+      for (int e = 0; e < MshrNum; e++) begin
+        if (replay_issued_set[e]) mshr_d[e].issued = 1'b1;
       end
     end
 
