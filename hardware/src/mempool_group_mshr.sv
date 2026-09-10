@@ -1706,7 +1706,6 @@ module mempool_group_mshr
     end
   end
 
-  `FF(mshr_q_valid, mshr_d_valid, '0)
 
   // Entry register, split by WRITE FREQUENCY so the wide fields can be clock gated.
   localparam int unsigned MshrGateBitsIdent =
@@ -1749,6 +1748,14 @@ module mempool_group_mshr
       end
     end
   end
+
+  // Enabled, not a bare `FF: a plain flop lets the tool invent the gate enable from all of
+  // mshr_d_valid, putting that whole cone on a gating check. mshr_ctl_en is a safe superset.
+  generate
+    for (genvar e = 0; e < MshrNum; e++) begin : gen_mshr_valid_ff
+      `FFL(mshr_q_valid[e], mshr_d_valid[e], mshr_ctl_en[e], '0)
+    end
+  endgenerate
 
   for (genvar e = 0; e < MshrNum; e++) begin : gen_mshr_entry_reg
     `FFL(mshr_q[e].base_addr,    mshr_d[e].base_addr,    mshr_id_en[e], '0)
