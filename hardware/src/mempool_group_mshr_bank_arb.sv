@@ -39,6 +39,7 @@ module mempool_group_mshr_bank_arb #(
   logic [NumBanks-1:0][NumSlots-1:0] req_per_bank_rr_high, req_per_bank_rr_low;
   logic [NumBanks-1:0]               req_per_bank_rr_high_non_empty, req_per_bank_rr_low_non_empty;
   logic [NumBanks-1:0][NumSlots-1:0] req_per_bank_rr_high_oh, req_per_bank_rr_low_oh;
+  logic [NumBanks-1:0][NumSlots-1:0] pfx_high, pfx_low;   // doubling prefix-OR, see below
 
   genvar b, s;
 
@@ -56,8 +57,20 @@ module mempool_group_mshr_bank_arb #(
       assign req_per_bank_rr_low[b]  = req_per_bank[b] & ~rr_mask_i;
       assign req_per_bank_rr_high_non_empty[b] = (|req_per_bank_rr_high[b] == 1'b1);
       assign req_per_bank_rr_low_non_empty [b] = (|req_per_bank_rr_low [b] == 1'b1);
-      assign req_per_bank_rr_high_oh[b] = req_per_bank_rr_high[b] & (~req_per_bank_rr_high[b] + 1);
-      assign req_per_bank_rr_low_oh [b] = req_per_bank_rr_low [b] & (~req_per_bank_rr_low [b] + 1);
+      // Prefix-OR isolate rather than `v & (-v)`: the two's-complement form maps to a carry chain
+      // across NumSlots, which the placed netlist showed rippling ten positions. The doubling
+      // prefix below is log2(NumSlots) OR levels plus one AND, and is the same idiom the drain
+      // select already uses. Identical result: both keep only the lowest set bit.
+      always_comb begin
+        pfx_high[b] = req_per_bank_rr_high[b];
+        pfx_low [b] = req_per_bank_rr_low [b];
+        for (int st = 1; st < NumSlots; st = st << 1) begin
+          pfx_high[b] = pfx_high[b] | (pfx_high[b] << st);
+          pfx_low [b] = pfx_low [b] | (pfx_low [b] << st);
+        end
+      end
+      assign req_per_bank_rr_high_oh[b] = pfx_high[b] & ~(pfx_high[b] << 1);
+      assign req_per_bank_rr_low_oh [b] = pfx_low [b] & ~(pfx_low [b] << 1);
 
       assign win_oh_o[b] = {NumSlots{bank_gate_i[b]}} &
                            (req_per_bank_rr_high_non_empty[b] ? req_per_bank_rr_high_oh[b]
