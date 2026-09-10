@@ -277,6 +277,8 @@ group_mshr_bankfull_backpressure ?=
 # done cache line into an INVALID way that the invalid-first allocator prefers. Whether an idle
 # CACHED line is also reclaimable by allocation is controlled by group_mshr_cache_reclaimable.
 group_mshr_cache_self_inval ?=
+group_mshr_cache_store_update ?=
+group_mshr_cache_amo_inval ?=
 # RR cache-victim selection. 0/unset = legacy lowest-index reclaimable CACHED way (way-0
 # thrash); 1 = per-bank round-robin victim start pointer, advanced past the evicted way only
 # when a reclaim actually fires. Bit-identical when 0.
@@ -414,6 +416,12 @@ ifneq ($(strip $(group_mshr_bank_hash)),)
 endif
 ifneq ($(strip $(group_mshr_cache_self_inval)),)
   vlog_defs += -DGROUP_MSHR_CACHE_SELF_INVAL=$(group_mshr_cache_self_inval)
+endif
+ifneq ($(strip $(group_mshr_cache_store_update)),)
+  vlog_defs += -DGROUP_MSHR_CACHE_STORE_UPDATE=$(group_mshr_cache_store_update)
+endif
+ifneq ($(strip $(group_mshr_cache_amo_inval)),)
+  vlog_defs += -DGROUP_MSHR_CACHE_AMO_INVAL=$(group_mshr_cache_amo_inval)
 endif
 ifneq ($(strip $(group_mshr_resp_cache)),)
   vlog_defs += -DGROUP_MSHR_RESP_CACHE=$(group_mshr_resp_cache)

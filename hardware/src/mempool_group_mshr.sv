@@ -193,6 +193,15 @@ module mempool_group_mshr
   // per-type sharing target -- HoldSubsSingle for a scalar/single entry, HoldSubsBurst for a burst
   // -- retires itself instead of waiting for the cache timeout.
   localparam bit CacheSelfInval = `ifdef GROUP_MSHR_CACHE_SELF_INVAL `GROUP_MSHR_CACHE_SELF_INVAL `else 1'b0 `endif;
+  // Response-cache coherence against incoming stores/AMOs. Both default OFF: on the target GEMM
+  // workload neither ever fires (measured store_update = 0 and amo_inval = 0 against 67,882 cache
+  // hits, the cache retiring entirely through self-invalidate), while between them they carry the
+  // store byte-merge into resp_buf.data and the only request-fed writer of mshr_d_valid.
+  // With a knob off, the corresponding assertion below makes the "never fires" property CHECKED
+  // rather than assumed -- a store or AMO landing on a cached line would otherwise read stale data
+  // silently. Turn a knob on for any workload that does not hold that property.
+  localparam bit CacheStoreUpdate = `ifdef GROUP_MSHR_CACHE_STORE_UPDATE `GROUP_MSHR_CACHE_STORE_UPDATE `else 1'b0 `endif;
+  localparam bit CacheAmoInval    = `ifdef GROUP_MSHR_CACHE_AMO_INVAL `GROUP_MSHR_CACHE_AMO_INVAL `else 1'b0 `endif;
   // Cache reuse target / cache-phase timeout (group_mshr_cache_reuse_target, _cache_timeout).
   localparam int unsigned CacheReuseTarget = `ifdef GROUP_MSHR_CACHE_REUSE_TARGET `GROUP_MSHR_CACHE_REUSE_TARGET `else 0 `endif;
   localparam int unsigned CacheTimeout = `ifdef GROUP_MSHR_CACHE_TIMEOUT `GROUP_MSHR_CACHE_TIMEOUT `else 0 `endif;
@@ -2445,7 +2454,7 @@ module mempool_group_mshr
     // loop (the allocation is recorded, not applied), so all 32 lanes see the same entry state and
     // this is evaluated once per entry at a CONSTANT index.
     for (int e = 0; e < MshrNum; e++) begin
-      stb_ent_ok[e] = mshr_d_valid[e] && !alloc_inflight[e] &&
+      stb_ent_ok[e] = CacheStoreUpdate && mshr_d_valid[e] && !alloc_inflight[e] &&
                       (mshr_d[e].state == MSHR_CACHED);
     end
 
@@ -2530,7 +2539,7 @@ module mempool_group_mshr
             end
             // RECORD the store's byte-merge; the merge itself happens once per entry after
             // this loop.
-            if (EnableRespCache && !amo_invalidate &&
+            if (CacheStoreUpdate && EnableRespCache && !amo_invalidate &&
                 req_is_store[tile_i][port_i] &&
                 (req_len[tile_i][port_i] == BurstLenWidth'(1)) &&
                 req_in_ready[tile_i][port_i]) begin
@@ -2667,7 +2676,7 @@ module mempool_group_mshr
     stb_bytes = '0; stb_ovl = '0;
     for (int e = 0; e < MshrNum; e++) begin
       for (int b = 0; b < StrbW; b++) begin
-        stb_bytes[e][b] = |stb_byte_req[e][b];
+        stb_bytes[e][b] = CacheStoreUpdate && (|stb_byte_req[e][b]);
 `ifndef TARGET_SYNTHESIS
         // Two lanes writing one byte in one cycle -- a statistic, not a hazard: the winner is
         // defined (highest lane), exactly as the sequential form defined it.
@@ -2747,7 +2756,7 @@ module mempool_group_mshr
       end
     end
 
-    if (EnableRespCache && amo_invalidate) begin
+    if (CacheAmoInval && EnableRespCache && amo_invalidate) begin
       for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
         // From mshr_q: allocation writes MSHR_WAIT_RESP so it can never present CACHED here.
         // !merge_inflight is required: a merge decided before amo_invalidate rose is applied
@@ -3071,7 +3080,7 @@ module mempool_group_mshr
 `endif
       end
     end
-    if (amo_invalidate) begin
+    if (CacheAmoInval && amo_invalidate) begin
       for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
         // From mshr_q + st_post_cap. Under amo_invalidate the capture cannot write MSHR_RESP_HOLD
         // (st_cap_hold carries !amo_invalidate), so the only remaining writer is the store
@@ -3993,6 +4002,38 @@ module mempool_group_mshr
                     mshr_d[mshr_i].sub_reqs[0].meta_id_base,
                     mshr_d[mshr_i].sub_reqs_num,
                     mshr_d[mshr_i].beat_pending);
+    end
+
+    // With CacheStoreUpdate / CacheAmoInval off the cache has no coherence mechanism against an
+    // incoming store or AMO, so a hit on a CACHED entry would silently serve stale data. The knobs
+    // are off because that never happens on the target workload -- assert it rather than trust it.
+    if (!CacheStoreUpdate && EnableRespCache) begin : gen_no_store_hit_assert
+      for (genvar nt = 0; nt < NumTilesPerGroup; nt++) begin : gen_nsh_tile
+        for (genvar np = 1; np < NumRemoteReqPortsPerTile; np++) begin : gen_nsh_port
+          for (genvar nw = 0; nw < MshrWaysPerBank; nw++) begin : gen_nsh_way
+            cache_store_never_hits: assert property(
+              @(posedge clk_i) disable iff (!rst_ni)
+                !(req_in_valid[nt][np] && req_in_ready[nt][np] && req_is_store[nt][np] &&
+                  (req_len[nt][np] == BurstLenWidth'(1)) &&
+                  req_addr_hit_way[nt][np][nw] &&
+                  mshr_q_valid[mshr_id_t'(int'(req_bank[nt][np]) * MshrWaysPerBank + nw)] &&
+                  (mshr_q[mshr_id_t'(int'(req_bank[nt][np]) * MshrWaysPerBank + nw)].state
+                     == MSHR_CACHED)))
+              else $fatal(1,
+                  "store hit a CACHED entry with group_mshr_cache_store_update off (tile %0d port %0d way %0d)",
+                  nt, np, nw);
+          end
+        end
+      end
+    end
+    if (!CacheAmoInval && EnableRespCache) begin : gen_no_amo_hit_assert
+      for (genvar ae = 0; ae < MshrNum; ae++) begin : gen_nah_entry
+        cache_amo_never_hits: assert property(
+          @(posedge clk_i) disable iff (!rst_ni)
+            !(amo_invalidate && mshr_q_valid[ae] && (mshr_q[ae].state == MSHR_CACHED)))
+          else $fatal(1,
+              "AMO seen while entry %0d is CACHED with group_mshr_cache_amo_inval off", ae);
+      end
     end
 
     // A tile can never have a third outstanding bypassed multi-beat burst

@@ -470,6 +470,12 @@ group_mshr_bank_shift_single ?= 9
 # allocator prefers -- keeping other cache lines resident longer. Reclaim-on-demand is controlled
 # separately by group_mshr_cache_reclaimable below.
 group_mshr_cache_self_inval ?= 1
+# Response-cache coherence against stores/AMOs. OFF: neither fires on this workload (measured
+# store_update = 0, amo_inval = 0 against 67,882 cache hits), and between them they own the store
+# byte-merge into resp_buf.data and the only request-fed writer of mshr_d_valid. Assertions in
+# mempool_group_mshr.sv fail the run if a store or AMO ever lands on a cached line while off.
+group_mshr_cache_store_update ?= 0
+group_mshr_cache_amo_inval ?= 0
 # Response cache (MSHR_CACHED): 1 = keep responded entries as a small read-response cache;
 # 0 = MSHR_DRAIN_RESP -> MSHR_IDLE directly, no same-address reuse. Set 0 to remove the
 # cohort-splitting path described in mempool_group_mshr.sv (EnableRespCache).
