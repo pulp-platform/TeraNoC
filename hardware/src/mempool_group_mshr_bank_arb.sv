@@ -26,7 +26,13 @@ module mempool_group_mshr_bank_arb #(
   input  logic [NumSlots-1:0][NumBanks-1:0]  bank_oh_i,   // bank the slot targets, PRE-DECODED
   input  logic [NumSlots-1:0]                rr_mask_i,   // 1 = slot at/above the rotation base
   input  logic [NumBanks-1:0]                bank_gate_i, // 0 = this bank grants nobody
-  output logic [NumBanks-1:0][NumSlots-1:0]  win_oh_o     // one-hot winner per bank
+  output logic [NumBanks-1:0][NumSlots-1:0]  win_oh_o,    // one-hot winner per bank
+  // "this bank granted somebody", WITHOUT waiting for the one-hot. It is the OR-reduce that the
+  // priority split already needs, so it lands ~3 levels earlier than |win_oh_o, which must wait
+  // for the LSB-isolate and the select mux. A caller whose grant implies its accept can drive a
+  // clock-gate enable from this instead -- that enable is a gating check, the tightest in the
+  // design, so the levels are worth more here than anywhere else.
+  output logic [NumBanks-1:0]                any_o
 );
 
   logic [NumBanks-1:0][NumSlots-1:0] req_per_bank;
@@ -56,6 +62,10 @@ module mempool_group_mshr_bank_arb #(
       assign win_oh_o[b] = {NumSlots{bank_gate_i[b]}} &
                            (req_per_bank_rr_high_non_empty[b] ? req_per_bank_rr_high_oh[b]
                                                               : req_per_bank_rr_low_oh[b]);
+      // Equal to |win_oh_o[b] by construction: the isolate of a non-empty vector is non-empty,
+      // and both halves are gated identically.
+      assign any_o[b] = bank_gate_i[b] &
+                        (req_per_bank_rr_high_non_empty[b] | req_per_bank_rr_low_non_empty[b]);
     end
   endgenerate
 

@@ -1507,6 +1507,8 @@ module mempool_group_mshr
   logic [NumReqPortsActive-1:0][NumPortSlots-1:0][MshrBankNum-1:0] arb_bank_oh_p;
   logic [NumReqPortsActive-1:0][NumPortSlots-1:0]                  alloc_rr_mask_p;
   logic [NumReqPortsActive-1:0][MshrBankNum-1:0][NumPortSlots-1:0] win_oh_p, merge_win_oh_p;
+  // "bank granted somebody", straight out of each arbiter's OR-reduce -- see any_o there.
+  logic [NumReqPortsActive-1:0][MshrBankNum-1:0]                   alloc_any_o, merge_any_o;
   logic [MshrBankNum-1:0][NumReqPortsActive-1:0]                   alloc_any_p, merge_any_p;
   logic [MshrBankNum-1:0][NumReqPortsActive-1:0]                   alloc_pick_p, merge_pick_p;
 
@@ -1535,7 +1537,11 @@ module mempool_group_mshr
     for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
       for (int port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin
         alloc_slot_idx = AllocRrW'(tile_i * NumReqPortsActive + (port_i - 1));
-        alloc_cand_flat[alloc_slot_idx] = req_alloc_cand[tile_i][port_i];
+        // req_in_valid folded in: the arbiter must not grant an invalid lane, and with it folded
+        // the grant implies the valid half of the accept. req_alloc_cand is built from decode and
+        // hit terms, none of which carries valid.
+        alloc_cand_flat[alloc_slot_idx] = req_in_valid[tile_i][port_i] &&
+                                          req_alloc_cand[tile_i][port_i];
       end
     end
     // Thermometer mask from the rotation base, computed once and shared by every bank.
@@ -1562,14 +1568,14 @@ module mempool_group_mshr
       ) i_alloc_arb (
         .cand_i (alloc_cand_p[pp]), .bank_oh_i (arb_bank_oh_p[pp]),
         .rr_mask_i (alloc_rr_mask_p[pp]), .bank_gate_i (bank_has_free),
-        .win_oh_o (win_oh_p[pp])
+        .win_oh_o (win_oh_p[pp]), .any_o (alloc_any_o[pp])
       );
       mempool_group_mshr_bank_arb #(
         .NumSlots(NumPortSlots), .NumBanks(MshrBankNum), .BankIdW(BankIdW)
       ) i_merge_arb (
         .cand_i (merge_cand_p[pp]), .bank_oh_i (arb_bank_oh_p[pp]),
         .rr_mask_i (alloc_rr_mask_p[pp]), .bank_gate_i ({MshrBankNum{1'b1}}),
-        .win_oh_o (merge_win_oh_p[pp])
+        .win_oh_o (merge_win_oh_p[pp]), .any_o (merge_any_o[pp])
       );
     end
 
@@ -1579,8 +1585,10 @@ module mempool_group_mshr
     // starve the other on a persistently contended bank.
     for (genvar b = 0; b < MshrBankNum; b++) begin : gen_arb_combine
       for (genvar pp = 0; pp < NumReqPortsActive; pp++) begin : gen_arb_combine_p
-        assign alloc_any_p[b][pp] = |win_oh_p      [pp][b];
-        assign merge_any_p[b][pp] = |merge_win_oh_p[pp][b];
+        // From the arbiter's OR-reduce, not from |win_oh: identical value, ~3 levels earlier,
+        // because it does not wait for the LSB-isolate or the select mux.
+        assign alloc_any_p[b][pp] = alloc_any_o[pp][b];
+        assign merge_any_p[b][pp] = merge_any_o[pp][b];
       end
       assign alloc_pick_p[b][0] = alloc_any_p[b][0] && (!alloc_any_p[b][1] || !alloc_rr_q[0]);
       assign alloc_pick_p[b][1] = alloc_any_p[b][1] && !alloc_pick_p[b][0];
@@ -1653,7 +1661,8 @@ module mempool_group_mshr
         // a different lane in the bank wins instead. NOT bit-exact -- it changes which lane merges
         // -- but nothing is lost (a capless lane still stalls and retries) and no merge can
         // overflow, since the same test decides. Judge it on merge_arb_stall/grant, not on cycles.
-        merge_arb_cand_flat[merge_arb_slot_idx] = req_merge_valid[tile_i][port_i] &&
+        merge_arb_cand_flat[merge_arb_slot_idx] = req_in_valid[tile_i][port_i] &&
+                                                  req_merge_valid[tile_i][port_i] &&
                                                   req_hit_cap_sel[tile_i][port_i];
       end
     end
@@ -2388,7 +2397,6 @@ module mempool_group_mshr
   // implied by the grant. Only the capacity bit is left to check.
   // req_in_valid STAYS: req_can_merge is a pure decode of wen/amo and req_fwd_hit does not carry
   // valid either, so req_merge_valid can be high on an invalid lane and the arbiter can grant it.
-  logic [NumAllocSlots-1:0]                     merge_accept;
   // Allocation accept, by the same argument. bank_win_oh[b][s] implies req_alloc_cand[s], which
   // carries req_can_merge, !req_hit_mshr, !req_fwd_hit, !req_addr_hit_drain and
   // !req_meta_conflict. Walk the ready chain with that: req_hit_mshr_sel_valid is 0 so the merge
@@ -2411,14 +2419,16 @@ module mempool_group_mshr
         localparam int unsigned Sl = t * NumReqPortsActive + (p - 1);
         assign arb_accept[Sl]   = req_in_valid[t][p] && req_in_ready[t][p];
         // The grant now implies capacity, so only validity is left to check here.
-        assign merge_accept[Sl] = req_in_valid[t][p];
         for (genvar ab = 0; ab < MshrBankNum; ab++) begin : gen_arb_bank_oh
           assign arb_bank_oh[Sl][ab] = (req_bank[t][p] == BankIdW'(ab));
         end
         assign arb_hold_nz[Sl]  = ((((req_len[t][p] == BurstLenWidth'(1)) ? cfg_hold_window_single
                                                                          : cfg_hold_window_burst)
                                     != '0));
-        assign alloc_accept[Sl] = req_in_valid[t][p] && !req_owner_inflight[t][p] &&
+        // req_in_valid is in the candidate now. req_out_ready must NOT be folded there: branch 3
+        // of the ready chain would stall the lane and drop req_out_valid, making valid depend on
+        // ready. So the allocation keeps a narrow accept.
+        assign alloc_accept[Sl] = !req_owner_inflight[t][p] &&
                                   (arb_hold_nz[Sl] || req_out_ready[t][p]);
         assign arb_addr  [Sl] = req_addr_key[t][p];
         assign arb_grp   [Sl] = req_in[t][p].tgt_group_id;
@@ -2434,9 +2444,13 @@ module mempool_group_mshr
 
     for (genvar b = 0; b < MshrBankNum; b++) begin : gen_arb_record
       assign agb_sel[b] = bank_win_oh[b]       & alloc_accept;
-      assign mgb_sel[b] = bank_merge_win_oh[b] & merge_accept;
+      assign mgb_sel[b] = bank_merge_win_oh[b];   // the grant implies the whole merge accept
       assign agb_v[b]   = |agb_sel[b];
-      assign mgb_v[b]   = |mgb_sel[b];
+      // NOT |mgb_sel[b]: a merge grant already implies validity and capacity, so the enable is
+      // just "some port's arbiter granted this bank" -- and pick implies any, so the OR over the
+      // two ports' picks reduces to the OR of their any_o. That takes the LSB-isolate and the
+      // select mux off this clock-gate enable, which is the tightest check in the block.
+      assign mgb_v[b]   = |merge_any_p[b];
 
       always_comb begin
         agb_way [b] = '0; agb_addr[b] = '0; agb_grp [b] = '0; agb_len [b] = '0;
