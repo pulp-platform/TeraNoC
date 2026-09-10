@@ -3052,8 +3052,13 @@ module mempool_group_mshr
     st_force_drain = '0;
     for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
       for (int port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin
-        if (req_in_valid[tile_i][port_i] && req_in_ready[tile_i][port_i] &&
-            req_is_store[tile_i][port_i] &&
+        // req_in_ready is written out rather than read, because it COLLAPSES under req_is_store
+        // and synthesis cannot see it: is_store implies !is_load implies !req_can_merge, which
+        // kills the merge branch and both mergeable-stall branches, and the hold arm needs
+        // req_can_merge too -- leaving only the owner-inflight stall and the NoC handshake. The
+        // general req_in_ready carries both arbiters; these two operands do not.
+        if (req_in_valid[tile_i][port_i] && req_is_store[tile_i][port_i] &&
+            !req_owner_inflight[tile_i][port_i] && req_out_ready[tile_i][port_i] &&
             (req_len[tile_i][port_i] == BurstLenWidth'(1))) begin
           for (int way_i = 0; way_i < MshrWaysPerBank; way_i++) begin
             cache_hit_e =
