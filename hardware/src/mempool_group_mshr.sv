@@ -1531,8 +1531,11 @@ module mempool_group_mshr
         end
         assign req_alloc_found[tile_i][port_i] = |alloc_grant_bank[tile_i][port_i];
         assign req_merge_ready[tile_i][port_i] = |merge_grant_bank[tile_i][port_i];
-        assign req_alloc_found_mshr_id[tile_i][port_i] =
-            req_alloc_found[tile_i][port_i] ? bank_free_id[req_bank[tile_i][port_i]] : '0;
+        // Unqualified: bank_free_id is register-fed and req_bank is early, so the id is shallow;
+        // the grant qualifier only put the allocation arbiter on it. Every synthesised reader is
+        // already under the grant -- the record under agb_v, the tag stamp under req_alloc_found --
+        // and the CacheVictimRR reader is not generated at CacheReclaimable=0.
+        assign req_alloc_found_mshr_id[tile_i][port_i] = bank_free_id[req_bank[tile_i][port_i]];
       end
     end
   endgenerate
@@ -2304,6 +2307,13 @@ module mempool_group_mshr
   /// win_oh implies req_alloc_cand (which carries req_can_merge) for allocation and
   /// req_merge_valid for merge, so accept = valid && ready reproduces each guard exactly.
   logic [NumAllocSlots-1:0]                     arb_accept;
+  // Merge accept, without re-deriving what the grant already proves. bank_merge_win_oh[b][s]
+  // implies merge_arb_cand_flat[s] = req_merge_valid[s], so the ready chain takes its FIRST
+  // branch, req_in_ready = req_merge_ready && req_hit_cap_sel -- and req_merge_ready[s] is itself
+  // implied by the grant. Only the capacity bit is left to check.
+  // req_in_valid STAYS: req_can_merge is a pure decode of wen/amo and req_fwd_hit does not carry
+  // valid either, so req_merge_valid can be high on an invalid lane and the arbiter can grant it.
+  logic [NumAllocSlots-1:0]                     merge_accept;
   tcdm_addr_t [NumAllocSlots-1:0]               arb_addr;
   group_id_t [NumAllocSlots-1:0]                arb_grp;
   logic [NumAllocSlots-1:0][BurstLenWidth-1:0]  arb_len;
@@ -2318,7 +2328,8 @@ module mempool_group_mshr
     for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_arb_lane_t
       for (genvar p = 1; p < NumRemoteReqPortsPerTile; p++) begin : gen_arb_lane_p
         localparam int unsigned Sl = t * NumReqPortsActive + (p - 1);
-        assign arb_accept[Sl] = req_in_valid[t][p] && req_in_ready[t][p];
+        assign arb_accept[Sl]   = req_in_valid[t][p] && req_in_ready[t][p];
+        assign merge_accept[Sl] = req_in_valid[t][p] && req_hit_cap_sel[t][p];
         assign arb_addr  [Sl] = req_addr_key[t][p];
         assign arb_grp   [Sl] = req_in[t][p].tgt_group_id;
         assign arb_len   [Sl] = req_len[t][p];
@@ -2333,7 +2344,7 @@ module mempool_group_mshr
 
     for (genvar b = 0; b < MshrBankNum; b++) begin : gen_arb_record
       assign agb_sel[b] = bank_win_oh[b]       & arb_accept;
-      assign mgb_sel[b] = bank_merge_win_oh[b] & arb_accept;
+      assign mgb_sel[b] = bank_merge_win_oh[b] & merge_accept;
       assign agb_v[b]   = |agb_sel[b];
       assign mgb_v[b]   = |mgb_sel[b];
 
@@ -2343,19 +2354,19 @@ module mempool_group_mshr
         mgb_way [b] = '0; mgb_tile[b] = '0; mgb_port[b] = '0;
         mgb_core[b] = '0; mgb_meta[b] = '0;
         for (int s = 0; s < NumAllocSlots; s++) begin
-          agb_way [b] |= {VictimPtrW      {agb_sel[b][s]}} & arb_awy [s];
-          agb_addr[b] |= {$bits(tcdm_addr_t){agb_sel[b][s]}} & arb_addr[s];
-          agb_grp [b] |= {$bits(group_id_t) {agb_sel[b][s]}} & arb_grp [s];
-          agb_len [b] |= {BurstLenWidth   {agb_sel[b][s]}} & arb_len [s];
-          agb_tile[b] |= {$bits(tile_group_id_t){agb_sel[b][s]}} & arb_tile[s];
-          agb_port[b] |= {RespPortIdW     {agb_sel[b][s]}} & arb_port[s];
-          agb_core[b] |= {$bits(tile_core_id_t){agb_sel[b][s]}} & arb_core[s];
-          agb_meta[b] |= {$bits(meta_id_t) {agb_sel[b][s]}} & arb_meta[s];
-          mgb_way [b] |= {VictimPtrW      {mgb_sel[b][s]}} & arb_mwy [s];
-          mgb_tile[b] |= {$bits(tile_group_id_t){mgb_sel[b][s]}} & arb_tile[s];
-          mgb_port[b] |= {RespPortIdW     {mgb_sel[b][s]}} & arb_port[s];
-          mgb_core[b] |= {$bits(tile_core_id_t){mgb_sel[b][s]}} & arb_core[s];
-          mgb_meta[b] |= {$bits(meta_id_t) {mgb_sel[b][s]}} & arb_meta[s];
+          agb_way [b] |= {VictimPtrW      {bank_win_oh[b][s]}} & arb_awy [s];
+          agb_addr[b] |= {$bits(tcdm_addr_t){bank_win_oh[b][s]}} & arb_addr[s];
+          agb_grp [b] |= {$bits(group_id_t) {bank_win_oh[b][s]}} & arb_grp [s];
+          agb_len [b] |= {BurstLenWidth   {bank_win_oh[b][s]}} & arb_len [s];
+          agb_tile[b] |= {$bits(tile_group_id_t){bank_win_oh[b][s]}} & arb_tile[s];
+          agb_port[b] |= {RespPortIdW     {bank_win_oh[b][s]}} & arb_port[s];
+          agb_core[b] |= {$bits(tile_core_id_t){bank_win_oh[b][s]}} & arb_core[s];
+          agb_meta[b] |= {$bits(meta_id_t) {bank_win_oh[b][s]}} & arb_meta[s];
+          mgb_way [b] |= {VictimPtrW      {bank_merge_win_oh[b][s]}} & arb_mwy [s];
+          mgb_tile[b] |= {$bits(tile_group_id_t){bank_merge_win_oh[b][s]}} & arb_tile[s];
+          mgb_port[b] |= {RespPortIdW     {bank_merge_win_oh[b][s]}} & arb_port[s];
+          mgb_core[b] |= {$bits(tile_core_id_t){bank_merge_win_oh[b][s]}} & arb_core[s];
+          mgb_meta[b] |= {$bits(meta_id_t) {bank_merge_win_oh[b][s]}} & arb_meta[s];
         end
       end
     end
@@ -3797,9 +3808,31 @@ module mempool_group_mshr
     // Interlock firing counters. Distinguishes "the interlocks over-block" from "the extra cycle
     // of entry-visibility latency costs throughput" -- the two have the same symptom in cycles.
     logic [31:0] cut_addr_stall_dbg, cut_owner_stall_dbg, cut_alloc_dbg, cut_bench_cyc_dbg;
+    // Port-concurrency probe. The two remote request ports of a tile arbitrate independently
+    // today, which is what makes NumAllocSlots 32 and sets the OR-32 + 32-bit LSB-isolate in both
+    // bank arbiters. If a tile almost never presents two requests in the same cycle, a 2:1
+    // round-robin per tile would halve the arbitration width for almost no throughput.
+    //   pc_tile_any  : cycles in which the tile had at least one valid request
+    //   pc_tile_both : of those, cycles in which BOTH ports were valid
+    //   pc_both_rdy  : both valid AND both accepted -- the only case a 2:1 merge would slow down
+    logic [31:0] pc_tile_any_dbg, pc_tile_both_dbg, pc_both_rdy_dbg;
+    logic [$clog2(NumTilesPerGroup+1)-1:0] pc_any_now, pc_both_now, pc_rdy_now;
+    always_comb begin
+      pc_any_now = '0; pc_both_now = '0; pc_rdy_now = '0;
+      for (int pt = 0; pt < NumTilesPerGroup; pt++) begin
+        if (|req_in_valid[pt]) pc_any_now  = pc_any_now  + 1'b1;
+        if (&req_in_valid[pt]) begin
+          pc_both_now = pc_both_now + 1'b1;
+          if (&req_in_ready[pt]) pc_rdy_now = pc_rdy_now + 1'b1;
+        end
+      end
+    end
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
         cut_addr_stall_dbg  <= '0;
+        pc_tile_any_dbg     <= '0;
+        pc_tile_both_dbg    <= '0;
+        pc_both_rdy_dbg     <= '0;
         cut_owner_stall_dbg <= '0;
         cut_alloc_dbg       <= '0;
         cut_bench_cyc_dbg   <= '0;
@@ -3808,10 +3841,17 @@ module mempool_group_mshr
         cut_owner_stall_dbg <= cut_owner_stall_dbg + 32'($countones(req_owner_inflight));
         cut_alloc_dbg       <= cut_alloc_dbg       + 32'($countones(agb_v));
         cut_bench_cyc_dbg   <= cut_bench_cyc_dbg   + 32'd1;
+        // Sum across tiles COMBINATIONALLY first: 16 non-blocking increments of one variable in
+        // one cycle would leave only the last, counting at most 1 per cycle instead of per tile.
+        pc_tile_any_dbg  <= pc_tile_any_dbg  + 32'(pc_any_now);
+        pc_tile_both_dbg <= pc_tile_both_dbg + 32'(pc_both_now);
+        pc_both_rdy_dbg  <= pc_both_rdy_dbg  + 32'(pc_rdy_now);
       end
     end
     final $display("[CUTSTALL] fwd_hits=%0d owner_stalls=%0d allocations=%0d cycles=%0d",
                    cut_addr_stall_dbg, cut_owner_stall_dbg, cut_alloc_dbg, cut_bench_cyc_dbg);
+    final $display("[PORTCONC] tile_any=%0d tile_both=%0d both_ready=%0d cycles=%0d",
+                   pc_tile_any_dbg, pc_tile_both_dbg, pc_both_rdy_dbg, cut_bench_cyc_dbg);
 
     // ------------------------------------------------------------
     // pipeline-cut invariants.
