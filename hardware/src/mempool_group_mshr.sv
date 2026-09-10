@@ -642,10 +642,11 @@ module mempool_group_mshr
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][BankIdW-1:0] req_bank;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]
              [TileIdBits-1:0]                                                 req_tile_id;
-  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]
-             [TcdmAddrNoTileW-1:0]                                            req_tile_addr;
-  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]
-             [TcdmAddrNoTileW-1:0]                                            req_tile_addr_key;
+  // tcdm_addr_t, matching the decode's port type. A narrower element width does not truncate each
+  // element -- a port connection truncates the flattened array, which stitches every lane after the
+  // first out of its neighbours' address bits.
+  tcdm_addr_t[NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_tile_addr;
+  tcdm_addr_t[NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_tile_addr_key;
   // Bank-scoped hit detection: each request compares its address against only the
   // MshrWaysPerBank entries of its own bank (req_bank), not all MshrNum.
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrWaysPerBank-1:0] req_addr_hit_way;
