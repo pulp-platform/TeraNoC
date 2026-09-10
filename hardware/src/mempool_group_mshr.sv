@@ -866,7 +866,20 @@ module mempool_group_mshr
   logic [MshrNum-1:0][RespPortIdW-1:0]                       replay_own_p;
   logic [MshrNum-1:0]                                        replay_rr_mask;
   logic [MshrNum-1:0]                                        replay_cand, replay_hi, replay_lo, replay_win_oh;
-  logic [MshrIdxW-1:0]                                       replay_win_e;
+  // The winner's payload, packed. Selecting ONE wide vector per lane costs MshrNum masked ORs
+  // instead of MshrNum x (one per field), which is what makes the one-hot form affordable here --
+  // per-field selection would be MshrNum x NumReqLanes x 7 statements in an already slow
+  // elaboration. The entry index rides along, so the one-hot never has to be encoded at all.
+  typedef struct packed {
+    meta_id_t                 meta;
+    tile_core_id_t            core;
+    group_id_t                grp;
+    tcdm_addr_t               addr;
+    logic [BurstLenWidth-1:0] len;
+    logic [MshrIdxW-1:0]      idx;
+  } replay_payload_t;
+  replay_payload_t [MshrNum-1:0]                             replay_payload;
+  replay_payload_t                                           replay_sel;
   // Replay winners accumulated across the lane loop, applied once per entry afterwards. Writing
   // mshr_d[replay_win_e].issued inside the loop made lane k+1 depend on lane k -- a 32-deep
   // last-writer chain on a bit that is only ever set. An OR is associative, so the tool balances
@@ -2751,6 +2764,12 @@ module mempool_group_mshr
                            (replay_scan_ent[e].sub_reqs_num >=
                             SubReqCountW'((replay_scan_ent[e].burst_len == BurstLenWidth'(1)) ?
                                           cfg_hold_subs_single : cfg_hold_subs_burst)));
+        replay_payload[e].meta = replay_scan_ent[e].sub_reqs[0].meta_id_base;
+        replay_payload[e].core = replay_scan_ent[e].sub_reqs[0].core_id;
+        replay_payload[e].grp  = replay_scan_ent[e].tgt_group_id;
+        replay_payload[e].addr = replay_scan_ent[e].base_addr;
+        replay_payload[e].len  = replay_scan_ent[e].burst_len;
+        replay_payload[e].idx  = MshrIdxW'(e);
         replay_own_t[e] = replay_scan_ent[e].sub_reqs[0].tile_id;
         replay_own_p[e] = replay_scan_ent[e].sub_reqs[0].port_id;
         replay_rr_mask[e] = MshrIdxW'(e) >= MshrIdxW'(hold_replay_rr_q);
@@ -2773,22 +2792,23 @@ module mempool_group_mshr
               replay_lo     = replay_cand & ~replay_rr_mask;
               replay_win_oh = (replay_hi != '0) ? (replay_hi & (~replay_hi + MshrNum'(1)))
                                                 : (replay_lo & (~replay_lo + MshrNum'(1)));
-              replay_win_e  = '0;
-              for (int b = 0; b < MshrNum; b++) begin
-                if (replay_win_oh[b]) replay_win_e |= MshrIdxW'(b);
+              // Select with the one-hot instead of encoding it and indexing: the encode and the
+              // MshrNum:1 mux were a round trip from "this one" to a number and straight back.
+              replay_sel = '0;
+              for (int e = 0; e < MshrNum; e++) begin
+                replay_sel = replay_sel |
+                    ({$bits(replay_payload_t){replay_win_oh[e]}} & replay_payload[e]);
               end
               req_out_valid[t][p]               = 1'b1;
               req_out[t][p]                     = '0;
-              // Read the payload from the SAME view the winner was selected from; mixing them
-              // would put the 64:1 field mux back on the d-side cone for no benefit.
-              req_out[t][p].wdata.meta_id       = replay_scan_ent[replay_win_e].sub_reqs[0].meta_id_base;
-              req_out[t][p].wdata.core_id       = replay_scan_ent[replay_win_e].sub_reqs[0].core_id;
+              req_out[t][p].wdata.meta_id       = replay_sel.meta;
+              req_out[t][p].wdata.core_id       = replay_sel.core;
               req_out[t][p].wen                 = 1'b0;
               req_out[t][p].be                  = '1;
-              req_out[t][p].tgt_group_id        = replay_scan_ent[replay_win_e].tgt_group_id;
-              req_out[t][p].tgt_addr            = replay_scan_ent[replay_win_e].base_addr;
-              req_out[t][p].burst_len           = replay_scan_ent[replay_win_e].burst_len;
-              req_out[t][p].mshr_tag            = MshrTagWidth'(replay_win_e) + MshrTagWidth'(1);
+              req_out[t][p].tgt_group_id        = replay_sel.grp;
+              req_out[t][p].tgt_addr            = replay_sel.addr;
+              req_out[t][p].burst_len           = replay_sel.len;
+              req_out[t][p].mshr_tag            = MshrTagWidth'(replay_sel.idx) + MshrTagWidth'(1);
               // RECORD, do not write: the apply runs once per entry below.
               replay_issued_set                 = replay_issued_set | replay_win_oh;
             end
