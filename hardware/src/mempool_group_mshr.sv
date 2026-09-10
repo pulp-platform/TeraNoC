@@ -1595,7 +1595,13 @@ module mempool_group_mshr
     for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
       for (int port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin
         merge_arb_slot_idx = AllocRrW'(tile_i * NumReqPortsActive + (port_i - 1));
-        merge_arb_cand_flat[merge_arb_slot_idx] = req_merge_valid[tile_i][port_i];
+        // Capacity folded into the CANDIDATE, not applied to the grant. A lane with no room can
+        // no longer win a bank's merge slot and then be refused, wasting that slot for the cycle;
+        // a different lane in the bank wins instead. NOT bit-exact -- it changes which lane merges
+        // -- but nothing is lost (a capless lane still stalls and retries) and no merge can
+        // overflow, since the same test decides. Judge it on merge_arb_stall/grant, not on cycles.
+        merge_arb_cand_flat[merge_arb_slot_idx] = req_merge_valid[tile_i][port_i] &&
+                                                  req_hit_cap_sel[tile_i][port_i];
       end
     end
   end
@@ -2362,7 +2368,8 @@ module mempool_group_mshr
       for (genvar p = 1; p < NumRemoteReqPortsPerTile; p++) begin : gen_arb_lane_p
         localparam int unsigned Sl = t * NumReqPortsActive + (p - 1);
         assign arb_accept[Sl]   = req_in_valid[t][p] && req_in_ready[t][p];
-        assign merge_accept[Sl] = req_in_valid[t][p] && req_hit_cap_sel[t][p];
+        // The grant now implies capacity, so only validity is left to check here.
+        assign merge_accept[Sl] = req_in_valid[t][p];
         for (genvar ab = 0; ab < MshrBankNum; ab++) begin : gen_arb_bank_oh
           assign arb_bank_oh[Sl][ab] = (req_bank[t][p] == BankIdW'(ab));
         end
@@ -2526,8 +2533,9 @@ module mempool_group_mshr
             // req_hit_way and selected with it, so no entry array is read at the selected id here.
             // The merge itself is RECORDED by the arbiter; the apply runs once per bank after this
             // loop closes, so no lane reads what an earlier lane wrote.
-            req_in_ready[tile_i][port_i] =
-                req_merge_ready[tile_i][port_i] && req_hit_cap_sel[tile_i][port_i];
+            // req_merge_ready implies capacity now that it is part of the arbiter's candidate,
+            // so the explicit test is redundant and only lengthened the ready output.
+            req_in_ready[tile_i][port_i] = req_merge_ready[tile_i][port_i];
           end else begin
             // Not a merge into a resident entry: decide STALL / ALLOCATE / BYPASS.
             if (req_can_merge[tile_i][port_i] &&
