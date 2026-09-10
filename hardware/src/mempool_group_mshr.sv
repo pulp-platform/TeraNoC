@@ -581,6 +581,10 @@ module mempool_group_mshr
   logic [MshrNum-1:0][RespBufWords-1:0]                                        mshr_rb_we;
   mempool_group_mshr_t [MshrNum-1:0]                                           mshr_q;
   logic                [MshrNum-1:0]                                           mshr_d_valid;
+`ifndef TARGET_SYNTHESIS
+  // Entries the two gates above admit but mshr_d_valid does not; checked below.
+  logic                [MshrNum-1:0]                                           gate_extra;
+`endif
   logic                [MshrNum-1:0]                                           mshr_q_valid;
   // Occupancy, exported so the CSR file can refuse a bank-hash change while entries are resident.
   // Hold-the-fetch replay walk start pointer (rotates every cycle for fairness among held
@@ -2644,6 +2648,9 @@ module mempool_group_mshr
     dup_beat_mshr = 0; dup_beat_beat = 0; dup_beat_meta = 0;
 `endif
     mshr_d_valid   = mshr_q_valid;
+`ifndef TARGET_SYNTHESIS
+    gate_extra     = '0;
+`endif
     mshr_alloc_set = '0;
     victim_rr_d = victim_rr_q;
 
@@ -2970,7 +2977,6 @@ module mempool_group_mshr
             // RECORD, do not write: the apply runs once per entry below.
             replay_issued_set                 = replay_issued_set | replay_win_l[t][p];
           end
-
         end
       end
       for (int e = 0; e < MshrNum; e++) begin
@@ -3423,12 +3429,15 @@ module mempool_group_mshr
     // no-op: with state == DRAIN_RESP the fin logic reads it as "drain complete" and retires the
     // beat unserved. Free: the trigger already reads mshr_d.state, which the same merge writes.
     for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
-      // mshr_ctl_en, not mshr_d_valid: it is a superset (mshr_q_valid | alloc_inflight) built
-      // only from registers, so it does not drag merge_decided and the merge arbiter onto this
-      // cone. It over-asserts on exactly two entries -- one retired this cycle and one allocated
-      // this cycle -- and the state test below excludes both: a retire leaves state at CACHED
-      // (retire drops valid only), and an allocation writes MSHR_WAIT_RESP.
-      if (mshr_ctl_en[mshr_i] &&
+`ifndef TARGET_SYNTHESIS
+      gate_extra[mshr_i] = gate_extra[mshr_i] | (mshr_q_valid[mshr_i] & ~mshr_d_valid[mshr_i]);
+`endif
+      // mshr_q_valid, not mshr_d_valid: it is registered, so it does not drag merge_decided and
+      // the merge arbiter onto this cone, and it is an exact superset here -- the only writer that
+      // sets mshr_d_valid runs after this loop, so mshr_d_valid can only be mshr_q_valid minus the
+      // retires above. The entries it adds are retiring this cycle; every write below is
+      // entry-local and the entry goes invalid, which gate_extra_dead_next_cycle checks.
+      if (mshr_q_valid[mshr_i] &&
           (mshr_d[mshr_i].state == MSHR_DRAIN_RESP) &&
           (mshr_d[mshr_i].resp_buf_cnt != '0) &&
           (mshr_d[mshr_i].beat_pending == '0) &&
@@ -3878,9 +3887,11 @@ module mempool_group_mshr
       fin_retire    = 1'b0;
       fin_pop       = 2'd0;
 
-      // Same substitution as the head-beat seed, and safe for the same reason: the
-      // MSHR_DRAIN_RESP test excludes both entries mshr_ctl_en adds.
-      if (mshr_ctl_en[mshr_i] && (mshr_d[mshr_i].resp_buf_cnt != '0) &&
+`ifndef TARGET_SYNTHESIS
+      gate_extra[mshr_i] = gate_extra[mshr_i] | (mshr_q_valid[mshr_i] & ~mshr_d_valid[mshr_i]);
+`endif
+      // Same substitution as the head-beat seed, and safe for the same reason.
+      if (mshr_q_valid[mshr_i] && (mshr_d[mshr_i].resp_buf_cnt != '0) &&
           (mshr_d[mshr_i].state == MSHR_DRAIN_RESP)) begin
         resp_head_beat_pending[mshr_i] = |mshr_d[mshr_i].beat_pending;
         if (!resp_head_beat_pending[mshr_i]) begin
@@ -4353,16 +4364,16 @@ module mempool_group_mshr
       end
     end
 
-    // The two mshr_ctl_en substitutions above are sound only while no entry that mshr_ctl_en
-    // admits but mshr_d_valid does not can present MSHR_DRAIN_RESP. Assert it rather than rely on
-    // the reasoning: a retire leaves state at CACHED, an allocation writes MSHR_WAIT_RESP.
-    for (genvar ce = 0; ce < MshrNum; ce++) begin : gen_ctl_en_superset
-      ctl_en_extra_not_draining: assert property(
+    // The two mshr_q_valid substitutions above run the seed and the finalize on entries that
+    // mshr_d_valid excludes. Every write they make is entry-local, so this is safe exactly while
+    // such an entry is dead next cycle -- if one were instead allocated (mshr_alloc_set applies
+    // after both gates), the extra writes would land in the fresh entry.
+    for (genvar ce = 0; ce < MshrNum; ce++) begin : gen_gate_extra
+      gate_extra_dead_next_cycle: assert property(
         @(posedge clk_i) disable iff (!rst_ni)
-          !(mshr_ctl_en[ce] && !mshr_d_valid[ce] &&
-            (mshr_d[ce].state == MSHR_DRAIN_RESP)))
+          gate_extra[ce] |=> !mshr_q_valid[ce])
         else $fatal(1,
-            "entry %0d is DRAIN_RESP while mshr_ctl_en over-asserts -- the finalize gate substitution is unsafe",
+            "entry %0d took the seed/finalize gate while mshr_d_valid excluded it, then stayed valid",
             ce);
     end
 
