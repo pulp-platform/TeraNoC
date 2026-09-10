@@ -1479,7 +1479,8 @@ module mempool_group_mshr
   // Per-bank single allocation per cycle: at most one candidate per bank is granted a new entry
   // (taking that bank's free way).
   logic [NumAllocSlots-1:0]                  alloc_cand_flat;
-  logic [NumAllocSlots-1:0][BankIdW-1:0]     alloc_bank_flat;
+  // Slot -> bank, decoded ONCE and shared by both arbiters (they differ only in cand_i).
+  logic [NumAllocSlots-1:0][MshrBankNum-1:0] arb_bank_oh;
   logic [NumAllocSlots-1:0]                  alloc_rr_mask;   // 1 = slot is at/above the RR base
   logic [MshrBankNum-1:0][NumAllocSlots-1:0] bank_win_oh;     // one-hot winner per bank
 
@@ -1495,7 +1496,6 @@ module mempool_group_mshr
   // Separate signals rather than reuse: a module-scope variable may have only one combinational
   // driver.
   logic [NumAllocSlots-1:0]                  merge_arb_cand_flat;
-  logic [NumAllocSlots-1:0][BankIdW-1:0]     merge_arb_bank_flat;
   logic [MshrBankNum-1:0][NumAllocSlots-1:0] bank_merge_win_oh;   // one-hot merge winner per bank
   logic [AllocRrW-1:0]                       merge_arb_slot_idx;      // flatten block
 `ifndef TARGET_SYNTHESIS
@@ -1504,14 +1504,12 @@ module mempool_group_mshr
 
   always_comb begin
     alloc_cand_flat = '0;
-    alloc_bank_flat = '0;
     // Slot = tile*NumReqPortsActive + (port-1) is a bijection over the active req ports
     // (1..NumRemoteReqPortsPerTile-1); the * and + are constant folds, not arithmetic.
     for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
       for (int port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin
         alloc_slot_idx = AllocRrW'(tile_i * NumReqPortsActive + (port_i - 1));
         alloc_cand_flat[alloc_slot_idx] = req_alloc_cand[tile_i][port_i];
-        alloc_bank_flat[alloc_slot_idx] = req_bank[tile_i][port_i];
       end
     end
     // Thermometer mask from the rotation base, computed once and shared by every bank.
@@ -1527,7 +1525,7 @@ module mempool_group_mshr
     .NumSlots(NumAllocSlots), .NumBanks(MshrBankNum), .BankIdW(BankIdW)
   ) i_alloc_arb (
     .cand_i      (alloc_cand_flat),
-    .bank_i      (alloc_bank_flat),
+    .bank_oh_i   (arb_bank_oh),
     .rr_mask_i   (alloc_rr_mask),
     .bank_gate_i (bank_has_free),
     .win_oh_o    (bank_win_oh)
@@ -1581,12 +1579,10 @@ module mempool_group_mshr
   // rotation base, so a high-index tile is not perpetually beaten to a contended bank.
   always_comb begin
     merge_arb_cand_flat = '0;
-    merge_arb_bank_flat = '0;
     for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
       for (int port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin
         merge_arb_slot_idx = AllocRrW'(tile_i * NumReqPortsActive + (port_i - 1));
         merge_arb_cand_flat[merge_arb_slot_idx] = req_merge_valid[tile_i][port_i];
-        merge_arb_bank_flat[merge_arb_slot_idx] = req_bank[tile_i][port_i];
       end
     end
   end
@@ -1597,7 +1593,7 @@ module mempool_group_mshr
     .NumSlots(NumAllocSlots), .NumBanks(MshrBankNum), .BankIdW(BankIdW)
   ) i_merge_arb (
     .cand_i      (merge_arb_cand_flat),
-    .bank_i      (merge_arb_bank_flat),
+    .bank_oh_i   (arb_bank_oh),
     .rr_mask_i   (alloc_rr_mask),
     .bank_gate_i ({MshrBankNum{1'b1}}),
     .win_oh_o    (bank_merge_win_oh)
@@ -2354,6 +2350,9 @@ module mempool_group_mshr
         localparam int unsigned Sl = t * NumReqPortsActive + (p - 1);
         assign arb_accept[Sl]   = req_in_valid[t][p] && req_in_ready[t][p];
         assign merge_accept[Sl] = req_in_valid[t][p] && req_hit_cap_sel[t][p];
+        for (genvar ab = 0; ab < MshrBankNum; ab++) begin : gen_arb_bank_oh
+          assign arb_bank_oh[Sl][ab] = (req_bank[t][p] == BankIdW'(ab));
+        end
         assign arb_hold_nz[Sl]  = ((((req_len[t][p] == BurstLenWidth'(1)) ? cfg_hold_window_single
                                                                          : cfg_hold_window_burst)
                                     != '0));

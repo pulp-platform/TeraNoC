@@ -9,6 +9,10 @@
 /// slot targets; a slot appears only in its own bank's vector, so the banks arbitrate independently
 /// and in parallel.
 ///
+/// The bank is passed PRE-DECODED. The two instances share one req_bank, so an encoded port made
+/// each of them build its own NumSlots x NumBanks compare -- twice the comparators and twice the
+/// fanout on an early signal. Decoding once in the parent is the same depth for half the gates.
+///
 /// Priority: split each bank's request vector at the rotation base (rr_mask_i is a thermometer
 /// mask, 1 = slot at or above the base), take the lowest set bit of the high half, else of the low
 /// half. That is exactly "first candidate at or after the base, wrapping", in one priority encode
@@ -19,7 +23,7 @@ module mempool_group_mshr_bank_arb #(
   parameter int unsigned BankIdW  = 4
 ) (
   input  logic [NumSlots-1:0]                cand_i,      // slot wants a grant
-  input  logic [NumSlots-1:0][BankIdW-1:0]   bank_i,      // bank the slot targets
+  input  logic [NumSlots-1:0][NumBanks-1:0]  bank_oh_i,   // bank the slot targets, PRE-DECODED
   input  logic [NumSlots-1:0]                rr_mask_i,   // 1 = slot at/above the rotation base
   input  logic [NumBanks-1:0]                bank_gate_i, // 0 = this bank grants nobody
   output logic [NumBanks-1:0][NumSlots-1:0]  win_oh_o     // one-hot winner per bank
@@ -35,7 +39,7 @@ module mempool_group_mshr_bank_arb #(
   generate
     for (b = 0; b < NumBanks; b++) begin : gen_req_per_bank_b
       for (s = 0; s < NumSlots; s++) begin : gen_req_per_bank_s
-        assign req_per_bank[b][s] = cand_i[s] && (bank_i[s] == b);
+        assign req_per_bank[b][s] = cand_i[s] && bank_oh_i[s][b];
       end
     end
   endgenerate
