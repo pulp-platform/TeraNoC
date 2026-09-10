@@ -894,6 +894,13 @@ module mempool_group_mshr
   } replay_payload_t;
   replay_payload_t [MshrNum-1:0]                             replay_payload;
   replay_payload_t                                           replay_sel;
+  // Per-lane replay selection, hoisted OUT of the req_out_valid gate below. Nothing here reads
+  // req_out_valid: replay_ready, replay_own_t/p, replay_payload and replay_rr_mask are all mshr_q
+  // or CSR fed. Computing it under that gate put a 64-wide candidate scan, a 64-bit isolate and a
+  // 64-way payload select AFTER the ready chain, for no reason -- the gate only has to pick.
+  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrNum-1:0] replay_cand_l, replay_win_l;
+  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrNum-1:0] replay_hi_l, replay_lo_l;
+  replay_payload_t [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]   replay_sel_l;
   // Replay winners accumulated across the lane loop, applied once per entry afterwards. Writing
   // mshr_d[replay_win_e].issued inside the loop made lane k+1 depend on lane k -- a 32-deep
   // last-writer chain on a bit that is only ever set. An OR is associative, so the tool balances
@@ -2858,40 +2865,56 @@ module mempool_group_mshr
       replay_issued_set = '0;
       for (int t = 0; t < NumTilesPerGroup; t++) begin
         for (int p = 1; p < NumRemoteReqPortsPerTile; p++) begin
-          if (!req_out_valid[t][p] && req_out_ready[t][p]) begin
-            replay_cand = '0;
-            for (int e = 0; e < MshrNum; e++) begin
-              if (replay_ready[e] && (replay_own_t[e] == tile_group_id_t'(t)) &&
-                  (replay_own_p[e] == RespPortIdW'(p))) begin
-                replay_cand[e] = 1'b1;
-              end
-            end
-            if (|replay_cand) begin
-              replay_hi     = replay_cand &  replay_rr_mask;
-              replay_lo     = replay_cand & ~replay_rr_mask;
-              replay_win_oh = (replay_hi != '0) ? (replay_hi & (~replay_hi + MshrNum'(1)))
-                                                : (replay_lo & (~replay_lo + MshrNum'(1)));
-              // Select with the one-hot instead of encoding it and indexing: the encode and the
-              // MshrNum:1 mux were a round trip from "this one" to a number and straight back.
-              replay_sel = '0;
-              for (int e = 0; e < MshrNum; e++) begin
-                replay_sel = replay_sel |
-                    ({$bits(replay_payload_t){replay_win_oh[e]}} & replay_payload[e]);
-              end
-              req_out_valid[t][p]               = 1'b1;
-              req_out[t][p]                     = '0;
-              req_out[t][p].wdata.meta_id       = replay_sel.meta;
-              req_out[t][p].wdata.core_id       = replay_sel.core;
-              req_out[t][p].wen                 = 1'b0;
-              req_out[t][p].be                  = '1;
-              req_out[t][p].tgt_group_id        = replay_sel.grp;
-              req_out[t][p].tgt_addr            = replay_sel.addr;
-              req_out[t][p].burst_len           = replay_sel.len;
-              req_out[t][p].mshr_tag            = MshrTagWidth'(replay_sel.idx) + MshrTagWidth'(1);
-              // RECORD, do not write: the apply runs once per entry below.
-              replay_issued_set                 = replay_issued_set | replay_win_oh;
-            end
+          // Everything the replay needs is precomputed in gen_replay_lane; the ready chain only
+          // reaches this final select, instead of the candidate scan, the isolate and the payload
+          // OR that used to sit behind it.
+          if (!req_out_valid[t][p] && req_out_ready[t][p] && (|replay_cand_l[t][p])) begin
+            req_out_valid[t][p]               = 1'b1;
+            req_out[t][p]                     = '0;
+            req_out[t][p].wdata.meta_id       = replay_sel_l[t][p].meta;
+            req_out[t][p].wdata.core_id       = replay_sel_l[t][p].core;
+            req_out[t][p].wen                 = 1'b0;
+            req_out[t][p].be                  = '1;
+            req_out[t][p].tgt_group_id        = replay_sel_l[t][p].grp;
+            req_out[t][p].tgt_addr            = replay_sel_l[t][p].addr;
+            req_out[t][p].burst_len           = replay_sel_l[t][p].len;
+            req_out[t][p].mshr_tag            = MshrTagWidth'(replay_sel_l[t][p].idx) + MshrTagWidth'(1);
+            // RECORD, do not write: the apply runs once per entry below.
+            replay_issued_set                 = replay_issued_set | replay_win_l[t][p];
           end
+
+  // Per-lane replay selection, computed unconditionally. Pure code motion: none of these reads
+  // req_out_valid, so evaluating them ahead of the ready chain changes nothing but their arrival.
+  generate
+    for (genvar rt = 0; rt < NumTilesPerGroup; rt++) begin : gen_replay_lane_t
+      for (genvar rp = 1; rp < NumRemoteReqPortsPerTile; rp++) begin : gen_replay_lane
+        for (genvar re = 0; re < MshrNum; re++) begin : gen_replay_cand
+          assign replay_cand_l[rt][rp][re] =
+              replay_ready[re] && (replay_own_t[re] == tile_group_id_t'(rt)) &&
+              (replay_own_p[re] == RespPortIdW'(rp));
+        end
+        assign replay_hi_l[rt][rp] = replay_cand_l[rt][rp] &  replay_rr_mask;
+        assign replay_lo_l[rt][rp] = replay_cand_l[rt][rp] & ~replay_rr_mask;
+        assign replay_win_l[rt][rp] =
+            (replay_hi_l[rt][rp] != '0)
+              ? (replay_hi_l[rt][rp] & (~replay_hi_l[rt][rp] + MshrNum'(1)))
+              : (replay_lo_l[rt][rp] & (~replay_lo_l[rt][rp] + MshrNum'(1)));
+      end
+    end
+  endgenerate
+
+  // The winner's payload, selected with the one-hot rather than an encoded index.
+  always_comb begin
+    for (int rt = 0; rt < NumTilesPerGroup; rt++) begin
+      for (int rp = 1; rp < NumRemoteReqPortsPerTile; rp++) begin
+        replay_sel_l[rt][rp] = '0;
+        for (int re = 0; re < MshrNum; re++) begin
+          replay_sel_l[rt][rp] = replay_sel_l[rt][rp] |
+              ({$bits(replay_payload_t){replay_win_l[rt][rp][re]}} & replay_payload[re]);
+        end
+      end
+    end
+  end
         end
       end
       for (int e = 0; e < MshrNum; e++) begin
