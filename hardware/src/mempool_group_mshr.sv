@@ -1669,7 +1669,10 @@ module mempool_group_mshr
   // "bank granted somebody", straight out of each arbiter's OR-reduce -- see any_o there.
   logic [NumReqPortsActive-1:0][MshrBankNum-1:0]                   alloc_any_o, merge_any_o;
   logic [MshrBankNum-1:0][NumReqPortsActive-1:0]                   alloc_any_p, merge_any_p;
-  logic [MshrBankNum-1:0][NumReqPortsActive-1:0]                   alloc_pick_p, merge_pick_p;
+  /// The OTHER port's veto. win_oh_p already implies that port's own any_o -- the isolate of a
+  /// non-empty vector is non-empty, and both halves carry the same bank gate -- so win && pick
+  /// equals win && yield, and the port's own OR-reduce leaves the grant path.
+  logic [MshrBankNum-1:0][NumReqPortsActive-1:0]                   alloc_yield_p, merge_yield_p;
 
   // Loop temporaries for the allocation arbiter, declared at module scope rather than as
   // procedural `automatic`s inside the always_comb below.
@@ -1767,16 +1770,16 @@ module mempool_group_mshr
         assign alloc_any_p[b][pp] = alloc_any_o[pp][b];
         assign merge_any_p[b][pp] = merge_any_o[pp][b];
       end
-      assign alloc_pick_p[b][0] = alloc_any_p[b][0] && (!alloc_any_p[b][1] || !alloc_rr_q[0]);
-      assign alloc_pick_p[b][1] = alloc_any_p[b][1] && !alloc_pick_p[b][0];
-      assign merge_pick_p[b][0] = merge_any_p[b][0] && (!merge_any_p[b][1] || !alloc_rr_q[0]);
-      assign merge_pick_p[b][1] = merge_any_p[b][1] && !merge_pick_p[b][0];
+      assign alloc_yield_p[b][0] = !alloc_any_p[b][1] || !alloc_rr_q[0];
+      assign alloc_yield_p[b][1] = !alloc_any_p[b][0] ||  alloc_rr_q[0];
+      assign merge_yield_p[b][0] = !merge_any_p[b][1] || !alloc_rr_q[0];
+      assign merge_yield_p[b][1] = !merge_any_p[b][0] ||  alloc_rr_q[0];
       for (genvar tt = 0; tt < NumPortSlots; tt++) begin : gen_arb_combine_slot
         for (genvar pp = 0; pp < NumReqPortsActive; pp++) begin : gen_arb_combine_slot_p
           assign bank_win_oh      [b][tt * NumReqPortsActive + pp] =
-              win_oh_p      [pp][b][tt] && alloc_pick_p[b][pp];
+              win_oh_p      [pp][b][tt] && alloc_yield_p[b][pp];
           assign bank_merge_win_oh[b][tt * NumReqPortsActive + pp] =
-              merge_win_oh_p[pp][b][tt] && merge_pick_p[b][pp];
+              merge_win_oh_p[pp][b][tt] && merge_yield_p[b][pp];
         end
       end
     end
