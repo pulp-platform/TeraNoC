@@ -799,6 +799,9 @@ module mempool_group_mshr
   /// compare against a register -- no variable index, nothing from the request path.
   logic [MshrNum-1:0] alloc_inflight;
   logic [MshrNum-1:0] merge_inflight;
+  /// A replay issued LAST cycle. Carries the issue across the cycle boundary so .issued is written
+  /// from a register instead of from this cycle's port arbitration -- see the write below.
+  logic [MshrNum-1:0] replay_pending_q;
   /// mshr_q_valid as the free-way lookup must see it: an in-flight allocation already owns its way.
   logic [MshrNum-1:0] free_way_valid;
 
@@ -1949,6 +1952,7 @@ module mempool_group_mshr
   assign subreq_rr_d     = (subreq_rr_q     == SubIdxW'(MshrMergeReqs - 1)) ?
                            '0 : subreq_rr_q     + SubIdxW'(1);
   `FF(alloc_rr_q,      alloc_rr_d,      '0)
+  `FF(replay_pending_q, replay_issued_set, '0)
   `FF(drain_mshr_rr_q, drain_mshr_rr_d, '0)
   `FF(subreq_rr_q,     subreq_rr_d,     '0)
   `FF(bank_rr_q,       bank_rr_d,       '0)
@@ -2768,6 +2772,11 @@ module mempool_group_mshr
     gate_extra     = '0;
 `endif
     mshr_alloc_set = '0;
+    // A replay issued last cycle marks its entry now. Applied here, before the allocation apply,
+    // so an entry reallocated in the meantime takes allocation's own value instead.
+    for (int e = 0; e < MshrNum; e++) begin
+      if (replay_pending_q[e]) mshr_d[e].issued = 1'b1;
+    end
     victim_rr_d = victim_rr_q;
 
     // Hold-the-fetch: count down every held (allocated, fetch not yet sent) entry.
@@ -3056,7 +3065,7 @@ module mempool_group_mshr
         replay_scan_valid[e] = ReplayFromQ ? mshr_q_valid[e] : mshr_d_valid[e];
         replay_scan_ent[e]   = ReplayFromQ ? mshr_q[e]       : mshr_d[e];
         replay_ready[e] = replay_scan_valid[e] && (replay_scan_ent[e].state == MSHR_WAIT_RESP) &&
-                          !replay_scan_ent[e].issued &&
+                          !replay_scan_ent[e].issued && !replay_pending_q[e] &&
                           ((replay_scan_ent[e].hold_cnt == '0) ||
                            (replay_scan_ent[e].sub_reqs_num >=
                             SubReqCountW'((replay_scan_ent[e].burst_len == BurstLenWidth'(1)) ?
@@ -3094,9 +3103,6 @@ module mempool_group_mshr
             replay_issued_set                 = replay_issued_set | replay_win_l[t][p];
           end
         end
-      end
-      for (int e = 0; e < MshrNum; e++) begin
-        if (replay_issued_set[e]) mshr_d[e].issued = 1'b1;
       end
     end
 
