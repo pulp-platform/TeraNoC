@@ -2713,7 +2713,10 @@ module mempool_group_mshr
         assign arb_port  [Sl] = RespPortIdW'(p);
         assign arb_core  [Sl] = req_in[t][p].wdata.core_id;
         assign arb_meta  [Sl] = req_in[t][p].wdata.meta_id;
-        assign arb_awy   [Sl] = req_alloc_found_mshr_id[t][p][VictimPtrW-1:0];
+        // The way of an absolute entry id: a bit slice only when ways is a power of two.
+        assign arb_awy   [Sl] = WaysPow2
+                              ? req_alloc_found_mshr_id[t][p][VictimPtrW-1:0]
+                              : VictimPtrW'(int'(req_alloc_found_mshr_id[t][p]) % MshrWaysPerBank);
         // A free NoC port and at least one held entry owned by this lane: everything the replay
         // needs that does not depend on the allocation grant.
         assign replay_arm[t][p] = req_out_ready[t][p] && (|replay_cand_l[t][p]);
@@ -2737,7 +2740,9 @@ module mempool_group_mshr
               (req_can_merge[t][p] &&
                (req_alloc_found[t][p] ? arb_hold_nz[Sl]
                                       : (bank_has_free[req_bank[t][p]] || cfg_bankfull_bp))));
-        assign arb_mwy   [Sl] = req_merge_mshr_id[t][p][VictimPtrW-1:0];
+        assign arb_mwy   [Sl] = WaysPow2
+                              ? req_merge_mshr_id[t][p][VictimPtrW-1:0]
+                              : VictimPtrW'(int'(req_merge_mshr_id[t][p]) % MshrWaysPerBank);
       end
     end
 
