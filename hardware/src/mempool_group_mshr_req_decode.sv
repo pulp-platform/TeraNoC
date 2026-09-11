@@ -57,6 +57,19 @@ module mempool_group_mshr_req_decode
   logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] req_burst_misaligned;
   logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] req_len_is_burst;
   logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] req_can_merge_class;
+  /// burst_len >= 2 and the burst-alignment test, read straight off the request. len_o is derived
+  /// from these, so taking them directly keeps is_single two levels from burst_len instead of six
+  /// through len_raw -> misaligned -> len_o -> compare.
+  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] req_len_ge2;
+  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] req_addr_unaligned;
+
+  // is_full_burst_o is derived from burst_len directly, which is only disjoint from the single
+  // class while a full burst is at least two words.
+  initial begin
+    if (MshrFullBurstWords < 2)
+      $error("[mempool_group_mshr_req_decode] MshrFullBurstWords (%0d) must be >= 2.",
+             MshrFullBurstWords);
+  end
 
   genvar t, p;
 
@@ -78,11 +91,16 @@ module mempool_group_mshr_req_decode
                                ? BurstLenWidth'(1) : req_i[t][p].burst_len;
 
         // A burst whose tile address is not BurstAlignBits-aligned is clamped to a single word.
-        assign req_burst_misaligned[t][p] = (len_raw_o[t][p] > 1) &&
-                                            (tile_addr_o[t][p][BurstAlignBits-1:0] != '0);
+        // len_raw_o is 1 exactly when the request is invalid or burst_len is 0, so len_raw_o > 1
+        // is valid && burst_len >= 2 -- no zero-compare and no mux in front of it.
+        assign req_len_ge2[t][p]        = |req_i[t][p].burst_len[BurstLenWidth-1:1];
+        assign req_addr_unaligned[t][p] = (tile_addr_o[t][p][BurstAlignBits-1:0] != '0);
+        assign req_burst_misaligned[t][p] = req_valid_i[t][p] && req_len_ge2[t][p] &&
+                                            req_addr_unaligned[t][p];
         assign len_o[t][p] = (!req_valid_i[t][p] || !is_load_o[t][p] ||
                               req_burst_misaligned[t][p]) ? BurstLenWidth'(1) : len_raw_o[t][p];
-        assign req_len_is_burst[t][p] = req_valid_i[t][p] && (len_o[t][p] > 1);
+        // len_o >= 1 by construction, so len_o > 1 is len_o != 1.
+        assign req_len_is_burst[t][p] = req_valid_i[t][p] && !is_single_o[t][p];
 
         assign tile_addr_key_o[t][p] = req_len_is_burst[t][p]
             ? {tile_addr_o[t][p][$bits(tcdm_addr_t)-TileIdBits-1:BurstAlignBits],
@@ -97,10 +115,15 @@ module mempool_group_mshr_req_decode
                                     ? addr_key_burst_o[t][p]
                                     : addr_key_single_o[t][p];
 
+        // len_o == 1 <=> !is_load || misaligned || len_raw == 1. Substituting misaligned and
+        // absorbing (!len_ge2 | (len_ge2 & unaligned)) = (!len_ge2 | unaligned).
         assign is_single_o    [t][p] = req_valid_i[t][p] &&
-                                       (len_o[t][p] == BurstLenWidth'(1));
-        assign is_full_burst_o[t][p] = req_valid_i[t][p] &&
-                                       (len_o[t][p] == BurstLenWidth'(MshrFullBurstWords));
+                                       (!is_load_o[t][p] || !req_len_ge2[t][p] ||
+                                        req_addr_unaligned[t][p]);
+        // len_o == MshrFullBurstWords needs the un-clamped length, so is_load, alignment and a
+        // direct burst_len compare are the whole test (is_load_o implies req_valid_i).
+        assign is_full_burst_o[t][p] = is_load_o[t][p] && !req_addr_unaligned[t][p] &&
+                                       (req_i[t][p].burst_len == BurstLenWidth'(MshrFullBurstWords));
         assign is_non_full_burst_o[t][p] = req_valid_i[t][p] && !is_single_o[t][p] &&
                                            !is_full_burst_o[t][p];
 
