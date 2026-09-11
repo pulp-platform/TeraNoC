@@ -56,7 +56,8 @@ module mempool_group_mshr_req_decode
   logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] req_no_amo;
   logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] req_burst_misaligned;
   logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] req_len_is_burst;
-  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] req_can_merge_class;
+  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] req_can_merge_single;
+  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] req_can_merge_burst;
   /// burst_len >= 2 and the burst-alignment test, read straight off the request. len_o is derived
   /// from these, so taking them directly keeps is_single two levels from burst_len instead of six
   /// through len_raw -> misaligned -> len_o -> compare.
@@ -127,14 +128,18 @@ module mempool_group_mshr_req_decode
         assign is_non_full_burst_o[t][p] = req_valid_i[t][p] && !is_single_o[t][p] &&
                                            !is_full_burst_o[t][p];
 
-        // A misaligned burst has is_single set but len_raw > 1; it must not take the single arm.
-        assign req_can_merge_class[t][p] =
-            (EnableMshrSingleReq       && is_single_o[t][p] &&
-             (len_raw_o[t][p] == BurstLenWidth'(1)))                 ||
-            (EnableMshrNonFullBurstReq && is_non_full_burst_o[t][p]) ||
-            (EnableMshrFullBurstReq    && is_full_burst_o[t][p]);
-        assign can_merge_o[t][p] = is_load_o[t][p] && req_can_merge_class[t][p] &&
-                                   !(is_single_o[t][p] ? cfg_bypass_single_i : cfg_bypass_burst_i);
+        // The class test and the bypass test both branch on is_single, so branch once. is_load_o
+        // implies req_valid_i, and the three classes are disjoint and cover a valid request, so the
+        // non-single arm is just which burst class is enabled. A misaligned burst has is_single set
+        // but len_raw > 1, which the single arm still excludes.
+        assign req_can_merge_single[t][p] = EnableMshrSingleReq && !cfg_bypass_single_i &&
+                                            (len_raw_o[t][p] == BurstLenWidth'(1));
+        assign req_can_merge_burst [t][p] = !cfg_bypass_burst_i &&
+                                            (is_full_burst_o[t][p] ? EnableMshrFullBurstReq
+                                                                   : EnableMshrNonFullBurstReq);
+        assign can_merge_o[t][p] = is_load_o[t][p] &&
+                                   (is_single_o[t][p] ? req_can_merge_single[t][p]
+                                                      : req_can_merge_burst[t][p]);
 
       end
     end
