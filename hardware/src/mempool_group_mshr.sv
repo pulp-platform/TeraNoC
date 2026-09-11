@@ -2483,6 +2483,10 @@ module mempool_group_mshr
   // selected rather than re-derived at the winning entry id.
   logic [MshrBankNum-1:0][MshrMergeReqs-1:0] bank_sub_cand;
   logic [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1][BankIdW-1:0] resp_sel_bank;
+  /// The winning bank as the arbiter emitted it. bank_first is already one-hot, so the row select
+  /// and the per-lane drive operands read it directly instead of through bank_win's encoder and a
+  /// MshrBankNum:1 re-mux.
+  logic [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1][MshrBankNum-1:0] resp_sel_bank_oh;
   logic [BankIdW-1:0]       bank_base, bank_idx, bank_win_d, bank_win;
   logic [VictimPtrW-1:0]    base_way;
   logic                     bank_demote;
@@ -3720,6 +3724,7 @@ module mempool_group_mshr
           resp_sel_mshr_id[tile_i][port_i] = '0;
           resp_sel_subreq_idx[tile_i][port_i] = '0;
           resp_sel_bank[tile_i][port_i] = '0;
+          resp_sel_bank_oh[tile_i][port_i] = '0;
         end
       end
       // One entry published per bank, round-robin and port-independent: computed once here,
@@ -3875,7 +3880,12 @@ module mempool_group_mshr
               // fallback picks bank_base, which is in bank_cand whenever bank_cand_eff is empty.
               drain_sub_cand = '0;
               if (BankPublish) begin
-                drain_sub_cand = bank_sub_cand[bank_win];
+                // bank_first is exactly one-hot in every branch, so OR-ing the masked rows is
+                // bank_sub_cand[bank_win] without the encoder or the MshrBankNum:1 re-mux.
+                for (int b = 0; b < MshrBankNum; b++) begin
+                  drain_sub_cand = drain_sub_cand |
+                                   ({MshrMergeReqs{bank_first[b]}} & bank_sub_cand[b]);
+                end
               end else begin
                 for (int s = 0; s < MshrMergeReqs; s++) begin
                   if (drain_sub_ready[drain_win_e][s] &&
@@ -3904,6 +3914,7 @@ module mempool_group_mshr
                 resp_sel_mshr_id[tile_i][port_i]    = mshr_id_t'(drain_win_e);
                 resp_sel_subreq_idx[tile_i][port_i] = drain_win_s;   // already SubIdxW wide
                 resp_sel_bank[tile_i][port_i]       = bank_win;
+                resp_sel_bank_oh[tile_i][port_i]    = bank_first;
               end
             end
           end
@@ -3923,10 +3934,19 @@ module mempool_group_mshr
             // entry IS its bank's published entry, so these are the same values the MshrNum-wide
             // reads returned.
             if (BankPublish) begin
-              drv_sel_data      = pub_drv_data     [resp_sel_bank[tile_i][port_i]];
-              drv_sel_beat_off  = pub_drv_beat_off [resp_sel_bank[tile_i][port_i]];
-              drv_sel_burst_one = pub_drv_burst_one[resp_sel_bank[tile_i][port_i]];
-              drv_sel_sub_core  = pub_drv_sub_core [resp_sel_bank[tile_i][port_i]];
+              // Selected with the bank one-hot, not its encoding: same values, no encoder in front.
+              drv_sel_data      = '0;
+              drv_sel_beat_off  = '0;
+              drv_sel_burst_one = 1'b0;
+              drv_sel_sub_core  = '0;
+              for (int b = 0; b < MshrBankNum; b++) begin
+                if (resp_sel_bank_oh[tile_i][port_i][b]) begin
+                  drv_sel_data      = pub_drv_data     [b];
+                  drv_sel_beat_off  = pub_drv_beat_off [b];
+                  drv_sel_burst_one = pub_drv_burst_one[b];
+                  drv_sel_sub_core  = pub_drv_sub_core [b];
+                end
+              end
               drv_sel_sub_meta  = pub_drv_sub_meta [resp_sel_bank[tile_i][port_i]];
             end else begin
               drv_sel_data      = drv_data     [resp_sel_mshr_id[tile_i][port_i]];
