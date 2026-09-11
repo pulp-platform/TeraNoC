@@ -2640,6 +2640,10 @@ module mempool_group_mshr
   /// expresses directly, and the winner is then applied as a one-hot instead of being encoded and
   /// indexed back.
   logic [MshrBankNum-1:0] bank_rr_mask;
+  /// Lane-invariant half of the bank arbitration, with the demoted-base correction folded into
+  /// the masks so the per-lane candidate vector meets one AND instead of a demote AND then a mask
+  /// AND. drain_sel_base is a register and bank_pub_* are computed above the lane loop.
+  logic [MshrBankNum-1:0] bank_hi_mask, bank_lo_mask;
   logic [MshrBankNum-1:0] bank_hi, bank_lo;
   logic [MshrBankNum-1:0] bank_pfx_hi, bank_pfx_lo, bank_first_hi, bank_first_lo;
   logic [MshrNum-1:0]       drain_cand_rot;                        // A: candidates rotated to base
@@ -3803,6 +3807,16 @@ module mempool_group_mshr
             // visit by subreq_rr (separate bases) so high-index entries/sub_reqs are not starved.
             drain_sel_base     = EnableRrFairness ? MshrIdxW'(drain_mshr_rr_q) : '0;
             drain_sel_sub_base = EnableRrFairness ? SubIdxW'(subreq_rr_q) : '0;
+            bank_base = WaysPow2 ? drain_sel_base[MshrIdxW-1 -: BankIdW]
+                                 : BankIdW'(int'(drain_sel_base) / MshrWaysPerBank);
+            base_way  = WaysPow2 ? drain_sel_base[VictimPtrW-1:0]
+                                 : VictimPtrW'(int'(drain_sel_base) % MshrWaysPerBank);
+            bank_demote = bank_pub_v[bank_base] && (bank_pub_w[bank_base] < base_way);
+            for (int b = 0; b < MshrBankNum; b++) begin
+              bank_rr_mask[b] = (BankIdW'(b) >= bank_base);
+              bank_hi_mask[b] =  bank_rr_mask[b] & ~(bank_demote && (BankIdW'(b) == bank_base));
+              bank_lo_mask[b] = ~bank_rr_mask[b] & ~(bank_demote && (BankIdW'(b) == bank_base));
+            end
             // Per-entry: does this entry offer any sub-request eligible for THIS port?
             drain_ent_cand = '0;
             bank_cand      = '0;
@@ -3847,18 +3861,10 @@ module mempool_group_mshr
             // First candidate entry in rotated order (>= base first, then wrap).
             if (BankPublish) begin
               // MshrBankNum-wide arbitration, exactly equivalent to the MshrNum-wide one.
-              bank_base = WaysPow2 ? drain_sel_base[MshrIdxW-1 -: BankIdW]
-                                   : BankIdW'(int'(drain_sel_base) / MshrWaysPerBank);
-              base_way  = WaysPow2 ? drain_sel_base[VictimPtrW-1:0]
-                                   : VictimPtrW'(int'(drain_sel_base) % MshrWaysPerBank);
-              bank_demote = bank_pub_v[bank_base] && (bank_pub_w[bank_base] < base_way);
-              for (int b = 0; b < MshrBankNum; b++) begin
-                bank_rr_mask[b]  = (BankIdW'(b) >= bank_base);
-                bank_cand_eff[b] = bank_cand[b] &&
-                                   !(bank_demote && (BankIdW'(b) == bank_base));
-              end
-              bank_hi = bank_cand_eff &  bank_rr_mask;
-              bank_lo = bank_cand_eff & ~bank_rr_mask;
+              // AND of AND: bank_cand & ~demote_oh & rr_mask == bank_cand & (rr_mask & ~demote_oh).
+              bank_hi = bank_cand & bank_hi_mask;
+              bank_lo = bank_cand & bank_lo_mask;
+              bank_cand_eff = bank_hi | bank_lo;
               bank_pfx_hi = bank_hi;
               bank_pfx_lo = bank_lo;
               for (int st = 1; st < MshrBankNum; st = st << 1) begin
