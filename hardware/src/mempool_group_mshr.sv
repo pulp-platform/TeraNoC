@@ -872,6 +872,11 @@ module mempool_group_mshr
   mshr_resp_slot_t [MshrNum-1:0]                                               cap_d0, cap_d1;
   logic [RespBufPtrW-1:0]                                                      cap_s0, cap_s1, cap_n0, cap_n1;
   logic      [RespBufCountW-1:0]                                               cap_cnt_sum;
+  /// "resp_buf_cnt after the capture" as predicates rather than as a value, so a guard that only
+  /// needs != 0 or >= 2 does not wait for the 3-bit add and the saturate. The count's only earlier
+  /// writers are the allocation's whole-entry blank and that sum.
+  logic      [MshrNum-1:0]                                                     cap_cnt_nz;
+  logic      [MshrNum-1:0]                                                     cap_cnt_ge2;
   logic [RespLaneW-1:0]                                                        cap_lane;
   // The grant takes at most TWO lanes per entry per cycle (cap_first/cap_second are one-hot). With
   // RespBufWords > 2 that is no longer "one grant per free slot", and that is INTENTIONAL: the
@@ -1306,6 +1311,20 @@ module mempool_group_mshr
                       tile_i, port_i, req_bank[tile_i][port_i], req_bank_ref[tile_i][port_i]);
 `endif
       end
+    end
+  endgenerate
+
+  // q + g1 + g2 <= 6 < 2**RespBufCountW, so the sum never wraps, and sat(x)=min(x,RespBufWords)
+  // is order-preserving for both tests: sat(x)!=0 == x!=0 and sat(x)>=2 == x>=2.
+  generate
+    for (genvar e = 0; e < MshrNum; e++) begin : gen_cap_cnt_pred
+      assign cap_cnt_nz[e]  = !alloc_inflight[e] &&
+                              ((mshr_q[e].resp_buf_cnt != '0) || cap_g1[e] || cap_g2[e]);
+      assign cap_cnt_ge2[e] = !alloc_inflight[e] &&
+                              ((mshr_q[e].resp_buf_cnt >= RespBufCountW'(2)) ||
+                               ((mshr_q[e].resp_buf_cnt == RespBufCountW'(1)) &&
+                                (cap_g1[e] || cap_g2[e])) ||
+                               (cap_g1[e] && cap_g2[e]));
     end
   endgenerate
 
@@ -4204,8 +4223,7 @@ module mempool_group_mshr
       // dropping that qualifier cannot change a selected value.
       fin_second_en = PD2 && (mshr_d[mshr_i].burst_len != BurstLenWidth'(1)) &&
                       mshr_d[mshr_i].beat2_armed && (fin_bl_in != BurstLenWidth'(1));
-      fin_second    = fin_second_en && (fin_bp2_in == '0) &&
-                      (fin_cnt_in >= RespBufCountW'(2));
+      fin_second    = fin_second_en && (fin_bp2_in == '0) && cap_cnt_ge2[mshr_i];
       fin_pop       = fin_second ? 2'd2 : 2'd1;
       fin_retire    = (fin_bl_in == BurstLenWidth'(1)) ||
                       (fin_second && (fin_bl_in == BurstLenWidth'(2)));
@@ -4224,7 +4242,7 @@ module mempool_group_mshr
       fin_cnt_next_nz = fin_second ? (fin_cnt_in > RespBufCountW'(2))
                                    : (fin_cnt_in > RespBufCountW'(1));
 
-      fin_arm       = mshr_q_valid[mshr_i] && (fin_cnt_in != '0) &&
+      fin_arm       = mshr_q_valid[mshr_i] && cap_cnt_nz[mshr_i] &&
                       (mshr_d[mshr_i].state == MSHR_DRAIN_RESP);
       fin_cache_sel = (fin_bl_in == BurstLenWidth'(1)) && EnableRespCache && !amo_inval_guard &&
                       mshr_d[mshr_i].cacheable &&
