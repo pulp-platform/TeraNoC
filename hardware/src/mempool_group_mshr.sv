@@ -709,6 +709,11 @@ module mempool_group_mshr
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                                 req_merge_ready;
   // Prefix rank of same-target merging ports.
   logic                                                                                           amo_invalidate;
+  /// AMO invalidation is a CacheAmoInval behaviour, so every guard that exists to keep a line out
+  /// of the cache while an AMO is in flight belongs under that knob. With it off, cache_amo_never_hits
+  /// is the standing proof that an AMO and a CACHED entry never coincide, and this folds to 0 --
+  /// which takes |req_is_amo, and with it the request path, off the finalize.
+  logic                                                                                           amo_inval_guard;
 
   // Request allocation (banked allocator bookkeeping).
   logic    [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                req_alloc_found;
@@ -1168,6 +1173,8 @@ module mempool_group_mshr
     .amo_invalidate_o    (amo_invalidate)
   );
 
+  assign amo_inval_guard = CacheAmoInval && amo_invalidate;
+
   // Detect whether any response beat on input already targets each MSHR entry.
   // O(1) by tag: the response carries the entry id, so index it and re-validate. The legacy form
   // scanned all MshrNum entries per lane; it sat behind a localparam that nothing could set, so it
@@ -1320,11 +1327,11 @@ module mempool_group_mshr
               (mshr_q[e_abs].burst_len == req_len[tile_i][port_i]) &&
               (((mshr_q[e_abs].state == MSHR_WAIT_RESP) &&
                 (mshr_q[e_abs].beats_left == mshr_q[e_abs].burst_len)) ||
-               (RespWaitSubsSingle && !amo_invalidate &&
+               (RespWaitSubsSingle && !amo_inval_guard &&
                 (mshr_q[e_abs].state == MSHR_RESP_HOLD) &&
                 (mshr_q[e_abs].resp_buf_cnt != '0) &&
                 (req_len[tile_i][port_i] == BurstLenWidth'(1))) ||
-               (EnableRespCache && !amo_invalidate &&
+               (EnableRespCache && !amo_inval_guard &&
                 (mshr_q[e_abs].state == MSHR_CACHED) &&
                 (mshr_q[e_abs].resp_buf_cnt != '0) &&
                 (req_len[tile_i][port_i] == BurstLenWidth'(1)))) &&
@@ -3335,7 +3342,7 @@ module mempool_group_mshr
         // burst_len from mshr_q: written only by the allocation, which cannot reach an entry the
         // capture is writing. sub_reqs_num from mshr_d: the cut applies a merge one cycle after it
         // is decided, so a beat can land on top of that merge.
-        if (RespWaitSubsSingle && !amo_invalidate &&
+        if (RespWaitSubsSingle && !amo_inval_guard &&
             (mshr_q[e].burst_len == BurstLenWidth'(1)) &&
             (mshr_d[e].sub_reqs_num < SubReqCountW'(cfg_hold_subs_single))) begin
           mshr_d[e].state    = MSHR_RESP_HOLD;
@@ -3364,7 +3371,7 @@ module mempool_group_mshr
       st_cap_fire[e] = cap_g1[e] | cap_g2[e];
       // mshr_d: the merge apply above may have raised sub_reqs_num this cycle (see the capture
       // pass). Register-fed, so no request-path depth is added.
-      st_cap_hold[e] = st_cap_fire[e] && RespWaitSubsSingle && !amo_invalidate &&
+      st_cap_hold[e] = st_cap_fire[e] && RespWaitSubsSingle && !amo_inval_guard &&
                        (mshr_q[e].burst_len == BurstLenWidth'(1)) &&
                        (mshr_d[e].sub_reqs_num < SubReqCountW'(cfg_hold_subs_single));
       st_post_cap[e] = st_cap_fire[e]
@@ -3452,9 +3459,10 @@ module mempool_group_mshr
       for (int e = 0; e < MshrNum; e++) begin
         // Parallel form. MSHR_RESP_HOLD here comes from the capture (st_cap_hold) or from mshr_q,
         // and only the store force-drain and the AMO block can have cleared it -- both run above.
-        // !amo_invalidate covers the latter because that block converts EVERY RESP_HOLD entry.
+        // !amo_inval_guard covers the latter because that block converts EVERY RESP_HOLD entry --
+        // and with CacheAmoInval off it converts none, so there is nothing to cover.
         st_hold_live = mshr_q_valid[e] && (st_post_cap[e] == MSHR_RESP_HOLD) &&
-                       !st_force_drain[e] && !amo_invalidate;
+                       !st_force_drain[e] && !amo_inval_guard;
         // The capture loads the window as a constant, so this is a 2:1 mux off registered state
         // rather than a read of what the capture wrote. hold_ticks(cfg_serve_timeout) != 0 under
         // this pass's own guard, so a just-captured entry can never expire on the same cycle.
@@ -4005,7 +4013,7 @@ module mempool_group_mshr
         resp_head_beat_pending[mshr_i] = |mshr_d[mshr_i].beat_pending;
         if (!resp_head_beat_pending[mshr_i]) begin
           fin_cache = (mshr_d[mshr_i].beats_left == BurstLenWidth'(1)) &&
-                      EnableRespCache && !amo_invalidate &&
+                      EnableRespCache && !amo_inval_guard &&
                       mshr_d[mshr_i].cacheable &&
                       (mshr_d[mshr_i].burst_len == BurstLenWidth'(1));
           fin_head  = !fin_cache;
