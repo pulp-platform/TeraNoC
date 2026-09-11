@@ -2632,6 +2632,9 @@ module mempool_group_mshr
   logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] replay_lane_stall;
   logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] replay_fire_a0, replay_fire_a1;
   logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] replay_fire;
+  /// req_out_valid, re-associated the same way: the allocation grant selects between two
+  /// early arms rather than sitting at the end of the stall chain.
+  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] req_out_use;
   tcdm_addr_t [NumAllocSlots-1:0]               arb_addr;
   group_id_t [NumAllocSlots-1:0]                arb_grp;
   logic [NumAllocSlots-1:0][BurstLenWidth-1:0]  arb_len;
@@ -2685,6 +2688,11 @@ module mempool_group_mshr
             (replay_lane_stall[t][p] || (req_can_merge[t][p] && arb_hold_nz[Sl]));
         assign replay_fire[t][p] = req_alloc_found[t][p] ? replay_fire_a1[t][p]
                                                          : replay_fire_a0[t][p];
+        assign req_out_use[t][p] =
+            !(replay_lane_stall[t][p] ||
+              (req_can_merge[t][p] &&
+               (req_alloc_found[t][p] ? arb_hold_nz[Sl]
+                                      : (bank_has_free[req_bank[t][p]] || cfg_bankfull_bp))));
         assign arb_mwy   [Sl] = req_merge_mshr_id[t][p][VictimPtrW-1:0];
       end
     end
@@ -2869,6 +2877,9 @@ module mempool_group_mshr
         if (req_in_valid[tile_i][port_i]) begin
           // default tag 0 (= no MSHR entry / bypass); overwritten with (entry id + 1) on alloc.
           req_out[tile_i][port_i].mshr_tag = '0;
+          // One write, from the re-associated form; the branches below decide req_in_ready and the
+          // payload only.
+          req_out_valid[tile_i][port_i] = req_out_use[tile_i][port_i];
           if (req_in[tile_i][port_i].wdata.amo != '0) begin
             req_out[tile_i][port_i].burst_len = BurstLenWidth'(1);
           end
@@ -2886,20 +2897,17 @@ module mempool_group_mshr
                 (req_addr_hit_drain[tile_i][port_i] || req_meta_conflict[tile_i][port_i])) begin
               // A same-address entry is draining, or a meta-id range conflict exists: wait for it.
               req_in_ready[tile_i][port_i]  = 1'b0;
-              req_out_valid[tile_i][port_i] = 1'b0;
             end else if (req_owner_inflight[tile_i][port_i]) begin
               // The one conflict with an in-flight allocation that cannot be forwarded:
               // req_meta_ovlp_map scans mshr_q, so it cannot see an in-flight allocation whose meta
               // range overlaps this request's. Same-line requests do not come here -- they forward
               // into the in-flight entry (req_fwd_hit) and merge in the same cycle.
               req_in_ready[tile_i][port_i]  = 1'b0;
-              req_out_valid[tile_i][port_i] = 1'b0;
             end else if (req_can_merge[tile_i][port_i] && !req_alloc_found[tile_i][port_i] &&
                          (bank_has_free[req_bank[tile_i][port_i]] || cfg_bankfull_bp)) begin
               // Mergeable miss that lost this bank's single allocation slot this cycle, but a free
               // way exists: STALL and retry.
               req_in_ready[tile_i][port_i]  = 1'b0;
-              req_out_valid[tile_i][port_i] = 1'b0;
             end else begin
               // ALLOCATE (won the per-bank slot) or BYPASS (non-mergeable store/AMO, or a
               // mergeable miss whose bank is full): forward this request to the NoC.
@@ -2911,10 +2919,8 @@ module mempool_group_mshr
                 // below issues it once hold_done). Consume the request locally so the door never
                 // couples to NoC readiness and never head-of-line-blocks the tile port.
                 req_in_ready[tile_i][port_i]  = 1'b1;
-                req_out_valid[tile_i][port_i] = 1'b0;
               end else begin
                 req_in_ready[tile_i][port_i]  = req_out_ready[tile_i][port_i];
-                req_out_valid[tile_i][port_i] = 1'b1;
               end
               if (req_can_merge[tile_i][port_i]) begin
                 // Allocate a new MSHR entry (only the bank's slot winner has req_alloc_found set;
