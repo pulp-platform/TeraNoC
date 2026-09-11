@@ -2398,6 +2398,12 @@ module mempool_group_mshr
   data_t         [MshrBankNum-1:0]                     pub_drv_data;
   logic          [MshrBankNum-1:0][BurstLenWidth-1:0]  pub_drv_beat_off;
   logic          [MshrBankNum-1:0]                     pub_drv_burst_one;
+  // Drain eligibility of each bank's published row, read at the loop constant like the drive
+  // operands above it. At bank_pub_e[b] each of these was an MshrNum:1 select, evaluated in all 32
+  // lanes; here they are MshrWaysPerBank:1 and evaluated once.
+  logic           [MshrBankNum-1:0][MshrMergeReqs-1:0]                  pub_sub_ready;
+  tile_group_id_t [MshrBankNum-1:0][MshrMergeReqs-1:0]                  pub_sub_tile;
+  logic           [MshrBankNum-1:0][MshrMergeReqs-1:0][RespPortIdW-1:0] pub_sub_port;
   tile_core_id_t [MshrBankNum-1:0][MshrMergeReqs-1:0]  pub_drv_sub_core;
   meta_id_t      [MshrBankNum-1:0][MshrMergeReqs-1:0]  pub_drv_sub_meta;
   // This lane's operands after the bank select.
@@ -3646,6 +3652,9 @@ module mempool_group_mshr
         pub_drv_burst_one[b] = drv_burst_one[b * MshrWaysPerBank + int'(bank_pub_w[b])];
         pub_drv_sub_core [b] = drv_sub_core [b * MshrWaysPerBank + int'(bank_pub_w[b])];
         pub_drv_sub_meta [b] = drv_sub_meta [b * MshrWaysPerBank + int'(bank_pub_w[b])];
+        pub_sub_ready    [b] = drain_sub_ready[b * MshrWaysPerBank + int'(bank_pub_w[b])];
+        pub_sub_tile     [b] = drain_sub_tile [b * MshrWaysPerBank + int'(bank_pub_w[b])];
+        pub_sub_port     [b] = drain_sub_port [b * MshrWaysPerBank + int'(bank_pub_w[b])];
       end
 
       // Select one sub-request per response port.
@@ -3666,9 +3675,9 @@ module mempool_group_mshr
               for (int b = 0; b < MshrBankNum; b++) begin
                 for (int s = 0; s < MshrMergeReqs; s++) begin
                   if (bank_pub_v[b] &&
-                      drain_sub_ready[bank_pub_e[b]][s] &&
-                      (drain_sub_tile[bank_pub_e[b]][s] == tile_group_id_t'(tile_i)) &&
-                      (drain_sub_port[bank_pub_e[b]][s] == port_i[RespPortIdW-1:0])) begin
+                      pub_sub_ready[b][s] &&
+                      (pub_sub_tile[b][s] == tile_group_id_t'(tile_i)) &&
+                      (pub_sub_port[b][s] == port_i[RespPortIdW-1:0])) begin
                     bank_sub_cand[b][s] = 1'b1;
                     bank_cand[b]        = 1'b1;
                   end
