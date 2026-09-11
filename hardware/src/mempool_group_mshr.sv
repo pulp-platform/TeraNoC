@@ -799,9 +799,6 @@ module mempool_group_mshr
   /// compare against a register -- no variable index, nothing from the request path.
   logic [MshrNum-1:0] alloc_inflight;
   logic [MshrNum-1:0] merge_inflight;
-  /// A replay issued LAST cycle. Carries the issue across the cycle boundary so .issued is written
-  /// from a register instead of from this cycle's port arbitration -- see the write below.
-  logic [MshrNum-1:0] replay_pending_q;
   /// mshr_q_valid as the free-way lookup must see it: an in-flight allocation already owns its way.
   logic [MshrNum-1:0] free_way_valid;
 
@@ -954,13 +951,30 @@ module mempool_group_mshr
   // 64-way payload select AFTER the ready chain, for no reason -- the gate only has to pick.
   logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrNum-1:0] replay_cand_l, replay_win_l;
   logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrNum-1:0] replay_hi_l, replay_lo_l;
+  /// A replay issued LAST cycle, carried as (fired, winner index) per lane rather than as the
+  /// 64-bit union. replay_win_l is one-hot under replay_fire, so the pair is lossless -- and it puts
+  /// the 32-lane OR on the register side of the flop, leaving the allocation grant one gate from
+  /// the D pin. replay_pending is the union rebuilt from those registers.
+  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                replay_fire_q;
+  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrIdxW-1:0]  replay_widx_q;
+  logic [MshrNum-1:0][NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]   replay_pend_lane;
+  logic [MshrNum-1:0]                                                       replay_pending;
   replay_payload_t [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]   replay_sel_l;
+  /// The replay gate, split at req_alloc_found. Every other term of req_out_valid is a decode or
+  /// hit result, so the allocation grant -- the last thing to arrive -- meets a single 2:1 select
+  /// instead of the four-deep stall chain that produced req_out_valid.
+  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] replay_arm;
+  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] replay_lane_stall;
+  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] replay_fire_a0, replay_fire_a1;
+  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] replay_fire;
+  /// req_out_valid, re-associated the same way: the allocation grant selects between two
+  /// early arms rather than sitting at the end of the stall chain.
+  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] req_out_use;
   // Replay winners accumulated across the lane loop, applied once per entry afterwards. Writing
   // mshr_d[replay_win_e].issued inside the loop made lane k+1 depend on lane k -- a 32-deep
   // last-writer chain on a bit that is only ever set. An OR is associative, so the tool balances
   // it; the scatter it replaces could not be. Lanes are disjoint by construction (one owner lane
   // per entry), which is what makes the OR equivalent to the priority form.
-  logic [MshrNum-1:0]                                        replay_issued_set;
   // BankPublish splits the entry-space rotation base into {bank, way} by bit position. idx_width()
   // floors at 1 for a single-element axis, so with MshrBankNum==1 or MshrWaysPerBank==1 the two
   // halves no longer tile the entry index and the split would silently select the wrong bank.
@@ -1958,7 +1972,28 @@ module mempool_group_mshr
   assign subreq_rr_d     = (subreq_rr_q     == SubIdxW'(MshrMergeReqs - 1)) ?
                            '0 : subreq_rr_q     + SubIdxW'(1);
   `FF(alloc_rr_q,      alloc_rr_d,      '0)
-  `FF(replay_pending_q, replay_issued_set, '0)
+  generate
+    for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_replay_pend_t
+      for (genvar p = 1; p < NumRemoteReqPortsPerTile; p++) begin : gen_replay_pend_p
+        `FF(replay_fire_q[t][p], replay_fire[t][p], '0)
+        // replay_arm is a register-fed superset of replay_fire, and the index is only read under
+        // replay_fire_q, so over-asserting the enable can neither lose nor invent a write.
+        `FFL(replay_widx_q[t][p], replay_sel_l[t][p].idx, replay_arm[t][p], '0)
+      end
+    end
+  endgenerate
+
+  generate
+    for (genvar e = 0; e < MshrNum; e++) begin : gen_replay_pending_e
+      for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_replay_pending_t
+        for (genvar p = 1; p < NumRemoteReqPortsPerTile; p++) begin : gen_replay_pending_p
+          assign replay_pend_lane[e][t][p] =
+              replay_fire_q[t][p] && (replay_widx_q[t][p] == MshrIdxW'(e));
+        end
+      end
+      assign replay_pending[e] = |replay_pend_lane[e];
+    end
+  endgenerate
   `FF(drain_mshr_rr_q, drain_mshr_rr_d, '0)
   `FF(subreq_rr_q,     subreq_rr_d,     '0)
   `FF(bank_rr_q,       bank_rr_d,       '0)
@@ -2629,16 +2664,6 @@ module mempool_group_mshr
   // branch is dead; branch 1 needs drain or conflict; branch 3 needs !req_alloc_found, which the
   // grant contradicts. Only the owner-inflight stall and the hold/NoC arm survive.
   logic [NumAllocSlots-1:0]                     alloc_accept, arb_hold_nz;
-  /// The replay gate, split at req_alloc_found. Every other term of req_out_valid is a decode or
-  /// hit result, so the allocation grant -- the last thing to arrive -- meets a single 2:1 select
-  /// instead of the four-deep stall chain that produced req_out_valid.
-  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] replay_arm;
-  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] replay_lane_stall;
-  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] replay_fire_a0, replay_fire_a1;
-  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] replay_fire;
-  /// req_out_valid, re-associated the same way: the allocation grant selects between two
-  /// early arms rather than sitting at the end of the stall chain.
-  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] req_out_use;
   tcdm_addr_t [NumAllocSlots-1:0]               arb_addr;
   group_id_t [NumAllocSlots-1:0]                arb_grp;
   logic [NumAllocSlots-1:0][BurstLenWidth-1:0]  arb_len;
@@ -2833,7 +2858,7 @@ module mempool_group_mshr
     // A replay issued last cycle marks its entry now. Applied here, before the allocation apply,
     // so an entry reallocated in the meantime takes allocation's own value instead.
     for (int e = 0; e < MshrNum; e++) begin
-      if (replay_pending_q[e]) mshr_d[e].issued = 1'b1;
+      if (replay_pending[e]) mshr_d[e].issued = 1'b1;
     end
     victim_rr_d = victim_rr_q;
 
@@ -3121,7 +3146,7 @@ module mempool_group_mshr
         replay_scan_valid[e] = ReplayFromQ ? mshr_q_valid[e] : mshr_d_valid[e];
         replay_scan_ent[e]   = ReplayFromQ ? mshr_q[e]       : mshr_d[e];
         replay_ready[e] = replay_scan_valid[e] && (replay_scan_ent[e].state == MSHR_WAIT_RESP) &&
-                          !replay_scan_ent[e].issued && !replay_pending_q[e] &&
+                          !replay_scan_ent[e].issued && !replay_pending[e] &&
                           ((replay_scan_ent[e].hold_cnt == '0) ||
                            (replay_scan_ent[e].sub_reqs_num >=
                             SubReqCountW'((replay_scan_ent[e].burst_len == BurstLenWidth'(1)) ?
@@ -3138,7 +3163,6 @@ module mempool_group_mshr
       end
       // Step 2: each lane picks its own winner, in parallel. Lanes are disjoint by construction
       // (one owner lane per entry), so no lane can steal another's candidate.
-      replay_issued_set = '0;
       for (int t = 0; t < NumTilesPerGroup; t++) begin
         for (int p = 1; p < NumRemoteReqPortsPerTile; p++) begin
           // Everything the replay needs is precomputed in gen_replay_lane; the ready chain only
@@ -3155,8 +3179,6 @@ module mempool_group_mshr
             req_out[t][p].tgt_addr            = replay_sel_l[t][p].addr;
             req_out[t][p].burst_len           = replay_sel_l[t][p].len;
             req_out[t][p].mshr_tag            = MshrTagWidth'(replay_sel_l[t][p].idx) + MshrTagWidth'(1);
-            // RECORD, do not write: the apply runs once per entry below.
-            replay_issued_set                 = replay_issued_set | replay_win_l[t][p];
           end
         end
       end
