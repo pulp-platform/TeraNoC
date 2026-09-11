@@ -2404,6 +2404,11 @@ module mempool_group_mshr
   logic           [MshrBankNum-1:0][MshrMergeReqs-1:0]                  pub_sub_ready;
   tile_group_id_t [MshrBankNum-1:0][MshrMergeReqs-1:0]                  pub_sub_tile;
   logic           [MshrBankNum-1:0][MshrMergeReqs-1:0][RespPortIdW-1:0] pub_sub_port;
+  logic           [MshrBankNum-1:0][MshrMergeReqs-1:0][RespPortIdW-1:0] pub_sub_map;
+  /// Per-bank scan temporaries: the sub-request terms that do not involve the response port, and
+  /// the port test for the ParityDrain arm, where the port is the same for every sub-request.
+  logic           [MshrMergeReqs-1:0]                                   pub_sub_ok;
+  logic                                                                 pub_parity_ok;
   tile_core_id_t [MshrBankNum-1:0][MshrMergeReqs-1:0]  pub_drv_sub_core;
   meta_id_t      [MshrBankNum-1:0][MshrMergeReqs-1:0]  pub_drv_sub_meta;
   // This lane's operands after the bank select.
@@ -2431,6 +2436,9 @@ module mempool_group_mshr
   logic [MshrNum-1:0][MshrMergeReqs-1:0]                      drain_sub_ready;
   tile_group_id_t [MshrNum-1:0][MshrMergeReqs-1:0]            drain_sub_tile;
   logic [MshrNum-1:0][MshrMergeReqs-1:0][RespPortIdW-1:0]     drain_sub_port;
+  // The requester's own mapped port, without the ParityDrain override. The published-row scan
+  // tests the two arms separately, so it needs the un-muxed form.
+  logic [MshrNum-1:0][MshrMergeReqs-1:0][RespPortIdW-1:0]     drain_sub_map;
   // Head-beat DRIVE operands, hoisted per entry (applied to the head beat).
   // The drive read mshr_d[resp_sel_mshr_id[t][p]] directly -- a full-entry MshrNum:1 STRUCT mux per
   // lane, 32 of them, plus a second MshrNum:1 for the nested resp_buf_rd_ptr and a burst_len
@@ -2483,9 +2491,10 @@ module mempool_group_mshr
         // Effective destination port: the ParityDrain pin for multi-beat entries, otherwise the
         // requester's own mapped port. Independent of s in the PD2 arm, but kept per-s so the
         // consumer is a single uniform compare.
+        drain_sub_map[e][s]   = map_resp_port_id(mshr_q[e].sub_reqs[s].port_id);
         drain_sub_port[e][s]  = (PD2 && (mshr_q[e].burst_len != BurstLenWidth'(1)))
                               ? (RespPortIdW'(1) + RespPortIdW'(drv_beat_off[e][0]))
-                              : map_resp_port_id(mshr_q[e].sub_reqs[s].port_id);
+                              : drain_sub_map[e][s];
         // Second-slot (ParityDrain) eligibility, hoisted for the drain2 scan further down.
       end
     end
@@ -3655,6 +3664,7 @@ module mempool_group_mshr
         pub_sub_ready    [b] = drain_sub_ready[b * MshrWaysPerBank + int'(bank_pub_w[b])];
         pub_sub_tile     [b] = drain_sub_tile [b * MshrWaysPerBank + int'(bank_pub_w[b])];
         pub_sub_port     [b] = drain_sub_port [b * MshrWaysPerBank + int'(bank_pub_w[b])];
+        pub_sub_map      [b] = drain_sub_map  [b * MshrWaysPerBank + int'(bank_pub_w[b])];
       end
 
       // Select one sub-request per response port.
@@ -3673,14 +3683,26 @@ module mempool_group_mshr
               // Evaluate only the MshrBankNum published entries, not all MshrNum -- the
               // per-(tile,port) predicate work drops by MshrWaysPerBank.
               for (int b = 0; b < MshrBankNum; b++) begin
+                // A burst entry drains on the parity pin of its head beat, the same port for every
+                // sub-request, so the port term leaves the reduce and meets it as one AND. It is
+                // also a single bit of beat_off against a constant port, not an add and a compare.
+                pub_parity_ok = (RespPortIdW'(1) + RespPortIdW'(pub_drv_beat_off[b][0])) ==
+                                port_i[RespPortIdW-1:0];
                 for (int s = 0; s < MshrMergeReqs; s++) begin
-                  if (bank_pub_v[b] &&
-                      pub_sub_ready[b][s] &&
-                      (pub_sub_tile[b][s] == tile_group_id_t'(tile_i)) &&
-                      (pub_sub_port[b][s] == port_i[RespPortIdW-1:0])) begin
-                    bank_sub_cand[b][s] = 1'b1;
-                    bank_cand[b]        = 1'b1;
+                  pub_sub_ok[s] = bank_pub_v[b] && pub_sub_ready[b][s] &&
+                                  (pub_sub_tile[b][s] == tile_group_id_t'(tile_i));
+                end
+                if (PD2 && !pub_drv_burst_one[b]) begin
+                  for (int s = 0; s < MshrMergeReqs; s++) begin
+                    bank_sub_cand[b][s] = pub_sub_ok[s] && pub_parity_ok;
                   end
+                  bank_cand[b] = (|pub_sub_ok) && pub_parity_ok;
+                end else begin
+                  for (int s = 0; s < MshrMergeReqs; s++) begin
+                    bank_sub_cand[b][s] = pub_sub_ok[s] &&
+                                          (pub_sub_map[b][s] == port_i[RespPortIdW-1:0]);
+                  end
+                  bank_cand[b] = |bank_sub_cand[b];
                 end
               end
             end else begin
