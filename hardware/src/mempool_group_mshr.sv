@@ -839,6 +839,12 @@ module mempool_group_mshr
   // clear BITS, and bit clears commute -- so ORing the requests and applying one AND-NOT per entry
   // is identical to letting 32 lanes each read-modify-write the entry in turn.
   logic [MshrNum-1:0][MshrMergeReqs-1:0]                                       bp_clr, bp2_clr, sv_clr;
+  /// Per-lane drain handshake, recorded on the axes the decision was made on. The entry a lane
+  /// serves is its bank's published row, so membership is drain_published and a compare against the
+  /// entry's constant bank -- neither waits for that row's id to be recovered from the winning bank.
+  logic [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]                    drain_fire;
+  logic [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]                    drain_fire_sv;
+  logic [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1][MshrMergeReqs-1:0] drain_fire_sub_oh;
   // Store byte-merge into CACHED lines, decided per entry instead of chained across lanes.
   localparam int unsigned NumReqPortsActiveF3 = (NumRemoteReqPortsPerTile > 1) ?
                                                 (NumRemoteReqPortsPerTile - 1) : 1;
@@ -3611,6 +3617,7 @@ module mempool_group_mshr
     // drain captured responses to all recorded sub-requests
     // ------------------------------------------------------------
     bp_clr = '0; bp2_clr = '0; sv_clr = '0;
+    drain_fire = '0; drain_fire_sv = '0; drain_fire_sub_oh = '0;
     if (DrainMultiPort) begin
       // Use all available response ports per cycle.
       for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
@@ -3830,15 +3837,33 @@ module mempool_group_mshr
 `endif
 
             if (resp_out_ready[tile_i][port_i]) begin
-              // Record, do not write. Writing here made lane k+1 read the entry that
-              // lane k had just modified -- a 32-deep chain for what is only ever a bit clear.
-              bp_clr[resp_sel_mshr_id[tile_i][port_i]][
-                  resp_sel_subreq_idx[tile_i][port_i]] = 1'b1;
-              // Clear sub_req.valid on the drain handshake so the next cycle's beat_pending
-              // seed cannot re-include it and re-deliver the same response.
-              if (drv_sel_burst_one) begin
-                sv_clr[resp_sel_mshr_id[tile_i][port_i]][
-                    resp_sel_subreq_idx[tile_i][port_i]] = 1'b1;
+              // Record on the bank axis; the scatter to entries runs once after the loop. sv_clr
+              // clears sub_req.valid on the handshake so the next cycle's beat_pending seed cannot
+              // re-include it and re-deliver the same response.
+              drain_fire   [tile_i][port_i] = 1'b1;
+              drain_fire_sv[tile_i][port_i] = drv_sel_burst_one;
+              for (int s = 0; s < MshrMergeReqs; s++) begin
+                drain_fire_sub_oh[tile_i][port_i][s] =
+                    (resp_sel_subreq_idx[tile_i][port_i] == SubIdxW'(s));
+              end
+            end
+          end
+        end
+      end
+
+      // Scatter the recorded drain handshakes to entries. A lane served bank b's published row, so
+      // the entry it served is the one drain_published marks in that bank -- bank_pub_e[bank_win]
+      // said the same thing but had to recover the id through an MshrNum:1 select first.
+      for (int e = 0; e < MshrNum; e++) begin
+        for (int t = 0; t < NumTilesPerGroup; t++) begin
+          for (int p = 1; p < NumRemoteRespPortsPerTile; p++) begin
+            if (drain_published[e] && drain_fire[t][p] &&
+                (resp_sel_bank[t][p] == BankIdW'(e / MshrWaysPerBank))) begin
+              for (int s = 0; s < MshrMergeReqs; s++) begin
+                if (drain_fire_sub_oh[t][p][s]) begin
+                  bp_clr[e][s] = 1'b1;
+                  if (drain_fire_sv[t][p]) sv_clr[e][s] = 1'b1;
+                end
               end
             end
           end
