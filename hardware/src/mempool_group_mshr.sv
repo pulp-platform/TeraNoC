@@ -654,6 +654,7 @@ module mempool_group_mshr
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrWaysPerBank-1:0] req_hit_way;
   // Merge capacity for this way, evaluated where the entry index is still the EARLY req_bank.
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrWaysPerBank-1:0] req_hit_cap_way;
+  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrWaysPerBank-1:0] req_hit_retire_way;
   // Same-address exclusion for the meta-overlap test, evaluated where the tile is a loop constant.
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrNum-1:0] req_same_addr_ent;
   // Meta-overlap is a CROSS-address check (same tile+core, different address, overlapping meta_id
@@ -695,6 +696,10 @@ module mempool_group_mshr
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_hit_mshr_sel_valid;
   mshr_id_t  [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_hit_mshr_sel_id;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_hit_cap_sel;
+  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_hit_retire_sel;
+  /// Entries whose retire conditions already hold on registers alone. Register-only by
+  /// construction: it is what lets the retire sites drop the combinational merge veto.
+  logic      [MshrNum-1:0]                                                     retire_eligible;
   logic      [MshrNum-1:0]                                                     mshr_hit_req;
   /// Per-entry, per-lane hit terms feeding mshr_hit_req. Only generated at CacheReclaimable=1.
   logic [MshrNum-1:0][NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]      mshr_hit_req_lane;
@@ -789,7 +794,6 @@ module mempool_group_mshr
   /// compare against a register -- no variable index, nothing from the request path.
   logic [MshrNum-1:0] alloc_inflight;
   logic [MshrNum-1:0] merge_inflight;
-  logic [MshrNum-1:0] merge_decided;
   /// mshr_q_valid as the free-way lookup must see it: an in-flight allocation already owns its way.
   logic [MshrNum-1:0] free_way_valid;
 
@@ -1334,6 +1338,9 @@ module mempool_group_mshr
           assign req_hit_cap_way[tile_i][port_i][way_i] =
               ((MergeRankW'(mshr_q[e_abs].sub_reqs_num + SubReqCountW'(merge_inflight[e_abs])) +
                 MergeRankW'(1)) <= MergeRankW'(MshrMergeReqs));
+          // Same shape as the capacity term: indexed on req_bank, which is ready early, and read
+          // from a register-only vector.
+          assign req_hit_retire_way[tile_i][port_i][way_i] = retire_eligible[e_abs];
         end
         // Full-table meta-overlap (cross-bank): same tile+core, overlapping meta_id, different
         // address.
@@ -1544,6 +1551,8 @@ module mempool_group_mshr
         // A forwarded merge is the leader's sub_reqs[1], so its capacity term const-folds.
         req_hit_cap_sel[tile_i][port_i]        =
             (MergeRankW'(1) + MergeRankW'(1)) <= MergeRankW'(MshrMergeReqs);
+        // A forwarded merge joins a leader allocated this cycle, which can never be retiring.
+        req_hit_retire_sel[tile_i][port_i]     = 1'b0;
         for (int way_i = 0; way_i < MshrWaysPerBank; way_i++) begin
           if (!req_hit_mshr_sel_valid[tile_i][port_i] &&
               req_hit_way[tile_i][port_i][way_i]) begin
@@ -1551,6 +1560,7 @@ module mempool_group_mshr
             req_hit_mshr_sel_id[tile_i][port_i] =
                 mshr_id_t'(int'(req_bank[tile_i][port_i]) * MshrWaysPerBank + way_i);
             req_hit_cap_sel[tile_i][port_i] = req_hit_cap_way[tile_i][port_i][way_i];
+            req_hit_retire_sel[tile_i][port_i] = req_hit_retire_way[tile_i][port_i][way_i];
           end
         end
       end
@@ -1663,6 +1673,24 @@ module mempool_group_mshr
     end
   end
 
+  // A superset of what the two retire sites below can fire on, built from registers alone: the
+  // reuse-target retire and the self-invalidate age-out. A superset is the safe direction -- it
+  // only refuses a merge that the retire would otherwise have had to veto in-cycle.
+  generate
+    for (genvar e = 0; e < MshrNum; e++) begin : gen_retire_eligible
+      assign retire_eligible[e] =
+          EnableRespCache && mshr_q_valid[e] &&
+          (mshr_q[e].state == MSHR_CACHED) &&
+          (mshr_q[e].sub_reqs_num == '0) &&
+          ((mshr_q[e].served_cnt >=
+              ((cfg_cache_reuse_target != '0)
+                 ? ServedCntW'(cfg_cache_reuse_target)
+                 : ServedCntW'((mshr_q[e].burst_len == BurstLenWidth'(1))
+                                 ? cfg_hold_subs_single : cfg_hold_subs_burst))) ||
+           (CacheSelfInval && (mshr_q[e].hold_cnt == '0)));
+    end
+  endgenerate
+
   // A bank with no free way grants nobody; its candidates fall through to stall/bypass unchanged.
   // Slot Sl = t * NumReqPortsActive + (p-1), so port p owns the slots with (Sl % ports) == p-1.
   generate
@@ -1772,9 +1800,14 @@ module mempool_group_mshr
         // a different lane in the bank wins instead. NOT bit-exact -- it changes which lane merges
         // -- but nothing is lost (a capless lane still stalls and retries) and no merge can
         // overflow, since the same test decides. Judge it on merge_arb_stall/grant, not on cycles.
+        // An entry whose retire conditions already hold is not a merge candidate. That is what
+        // removes the combinational merge veto from the two retire sites, and with it the only
+        // request-fed term that reached mshr_d: no merge can be decided into an entry that is
+        // retiring, so the retire needs no in-cycle knowledge of the arbiter.
         merge_arb_cand_flat[merge_arb_slot_idx] = req_in_valid[tile_i][port_i] &&
                                                   req_merge_valid[tile_i][port_i] &&
-                                                  req_hit_cap_sel[tile_i][port_i];
+                                                  req_hit_cap_sel[tile_i][port_i] &&
+                                                  !req_hit_retire_sel[tile_i][port_i];
       end
     end
   end
@@ -1954,6 +1987,48 @@ module mempool_group_mshr
     mshr_cached_cnt_dbg = MshrCntW'($countones(mshr_cached_dbg));
     mshr_held_cnt_dbg   = MshrCntW'($countones(mshr_held_dbg));
     mshr_valid_cnt_dbg  = MshrCntW'($countones(mshr_q_valid));
+  end
+
+  // Per-window occupancy report for MshrNum sizing (simulation-only, group_mshr_stats_period).
+  // Each line is one window, not a running total: mean occupancy x100, the high-water marks, and
+  // how many cycles the array sat completely full.
+  logic [63:0]         occ_cyc;
+  logic [31:0]         occ_win_cyc;
+  logic [63:0]         occ_valid_sum;
+  logic [MshrCntW-1:0] occ_valid_max;
+  logic [MshrCntW-1:0] occ_inuse_max;
+  logic [MshrCntW-1:0] occ_cached_max;
+  logic [31:0]         occ_full_cyc;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      occ_cyc        <= '0;
+      occ_win_cyc    <= '0;
+      occ_valid_sum  <= '0;
+      occ_valid_max  <= '0;
+      occ_inuse_max  <= '0;
+      occ_cached_max <= '0;
+      occ_full_cyc   <= '0;
+    end else if (StatsPeriod != 0) begin
+      occ_cyc        <= occ_cyc + 64'd1;
+      occ_win_cyc    <= occ_win_cyc + 32'd1;
+      occ_valid_sum  <= occ_valid_sum + 64'(mshr_valid_cnt_dbg);
+      if (mshr_valid_cnt_dbg  > occ_valid_max)  occ_valid_max  <= mshr_valid_cnt_dbg;
+      if (mshr_inuse_cnt_dbg  > occ_inuse_max)  occ_inuse_max  <= mshr_inuse_cnt_dbg;
+      if (mshr_cached_cnt_dbg > occ_cached_max) occ_cached_max <= mshr_cached_cnt_dbg;
+      if (mshr_valid_cnt_dbg == MshrCntW'(MshrNum)) occ_full_cyc <= occ_full_cyc + 32'd1;
+      if ((occ_win_cyc != 32'd0) && ((occ_win_cyc % StatsPeriod) == 0)) begin
+        $display("[MSHRU] cyc=%0d g=%0d win=%0d valid_avg_x100=%0d valid_max=%0d inuse_max=%0d cached_max=%0d full_cyc=%0d entries=%0d",
+                 occ_cyc, group_id_i, occ_win_cyc,
+                 (occ_valid_sum * 64'd100) / 64'(occ_win_cyc),
+                 occ_valid_max, occ_inuse_max, occ_cached_max, occ_full_cyc, MshrNum);
+        occ_win_cyc    <= '0;
+        occ_valid_sum  <= '0;
+        occ_valid_max  <= '0;
+        occ_inuse_max  <= '0;
+        occ_cached_max <= '0;
+        occ_full_cyc   <= '0;
+      end
+    end
   end
 
   // Hold-the-fetch RELEASE-REASON view (simulation-only).
@@ -2476,9 +2551,6 @@ module mempool_group_mshr
 
       assign alloc_inflight[e] = agb_q_v[StBank] && (agb_q_way[StBank] == VictimPtrW'(StWay));
       assign merge_inflight[e] = mgb_q_v[StBank] && (mgb_q_way[StBank] == VictimPtrW'(StWay));
-      // Combinational twin: a retire in THIS cycle must also stand off a merge that is only being
-      // decided now, or the merge applies next cycle into an entry that has already been dropped.
-      assign merge_decided[e]  = mgb_v  [StBank] && (mgb_way  [StBank] == VictimPtrW'(StWay));
       assign free_way_valid[e] = mshr_q_valid[e] | alloc_inflight[e];
 
       assign st_alloc_fire[e]  = alloc_inflight[e];
@@ -3046,7 +3118,7 @@ module mempool_group_mshr
         // !st_merge_drain[e] restores exactly that veto; without it the entry would be retired and
         // the merging subscriber's response lost.
         if (mshr_q_valid[e] && (mshr_q[e].state == MSHR_CACHED) &&
-            !st_merge_drain[e] && !merge_decided[e] &&
+            !st_merge_drain[e] &&
             (mshr_q[e].sub_reqs_num == '0) &&
             (mshr_q[e].served_cnt >=
              ((cfg_cache_reuse_target != '0)
@@ -3416,7 +3488,7 @@ module mempool_group_mshr
         // the entry (a merge into a CACHED entry sets st_merge_drain), so sub_reqs_num and hold_cnt
         // are still their registered values.
         end else if (CacheSelfInval && EnableRespCache && mshr_d_valid[e] &&
-                     (st_post_cap[e] == MSHR_CACHED) && !merge_decided[e] &&
+                     (st_post_cap[e] == MSHR_CACHED) &&
                      (mshr_q[e].sub_reqs_num == '0)) begin
           // A cache line that never reaches its sharing target ages out instead of pinning its way
           // forever. Entries that DO reach the target are freed earlier by the self-invalidate
@@ -3469,8 +3541,8 @@ module mempool_group_mshr
 `ifndef TARGET_SYNTHESIS
       gate_extra[mshr_i] = gate_extra[mshr_i] | (mshr_q_valid[mshr_i] & ~mshr_d_valid[mshr_i]);
 `endif
-      // mshr_q_valid, not mshr_d_valid: it is registered, so it does not drag merge_decided and
-      // the merge arbiter onto this cone, and it is an exact superset here -- the only writer that
+      // mshr_q_valid, not mshr_d_valid: it is registered, so it keeps the request path off this
+      // cone, and it is an exact superset here -- the only writer that
       // sets mshr_d_valid runs after this loop, so mshr_d_valid can only be mshr_q_valid minus the
       // retires above. The entries it adds are retiring this cycle; every write below is
       // entry-local and the entry goes invalid, which gate_extra_dead_next_cycle checks.
@@ -4407,6 +4479,15 @@ module mempool_group_mshr
     // mshr_d_valid excludes. Every write they make is entry-local, so this is safe exactly while
     // such an entry is dead next cycle -- if one were instead allocated (mshr_alloc_set applies
     // after both gates), the extra writes would land in the fresh entry.
+    // What the merge-candidate exclusion buys: a merge can only ever apply to a live entry. If a
+    // retire and a merge could still pick the same entry, the subscriber would be lost silently.
+    for (genvar me = 0; me < MshrNum; me++) begin : gen_merge_live
+      merge_applies_to_live_entry: assert property(
+        @(posedge clk_i) disable iff (!rst_ni)
+          merge_inflight[me] |-> mshr_q_valid[me])
+        else $fatal(1, "entry %0d absorbed a merge while not valid", me);
+    end
+
     for (genvar ce = 0; ce < MshrNum; ce++) begin : gen_gate_extra
       gate_extra_dead_next_cycle: assert property(
         @(posedge clk_i) disable iff (!rst_ni)
