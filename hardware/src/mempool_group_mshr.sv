@@ -643,6 +643,9 @@ module mempool_group_mshr
              [BurstLenWidth-1:0]                                              req_len_raw;
   tcdm_addr_t[NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_addr_key;
   tcdm_addr_t[NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_addr_key_burst;
+  /// The bank hash of each class, so the decode runs before req_is_single selects rather than
+  /// after it.
+  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][BankIdW-1:0] req_bank_s, req_bank_b;
 `ifndef TARGET_SYNTHESIS
   logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][BankIdW-1:0]      req_bank_ref;
 `endif
@@ -1288,13 +1291,23 @@ module mempool_group_mshr
       for (genvar port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin : gen_req_bank_port
         // Type comes from the CLAMPED req_is_single, not req_len_raw: a store or a
         // misaligned burst is forced to req_len=1 and must bank like a single (see BankSelShift*).
-        assign req_bank[tile_i][port_i] =
+        // Compare-then-mux: the hash runs for both classes in parallel and req_is_single picks the
+        // result, instead of picking the class first and hashing after it. mshr_bank_of is pure, so
+        // calling it with is_single forced to a constant and selecting afterwards is exact.
+        assign req_bank_s[tile_i][port_i] =
             mshr_bank_of(req_addr_key[tile_i][port_i],
                          req_addr_key_burst[tile_i][port_i],
                          req_addr_key_single[tile_i][port_i],
-                         req_in[tile_i][port_i].tgt_group_id,
-                         req_is_single[tile_i][port_i],
+                         req_in[tile_i][port_i].tgt_group_id, 1'b1,
                          cfg_bank_shift_single, cfg_bank_shift_burst, cfg_bank_burst_bits);
+        assign req_bank_b[tile_i][port_i] =
+            mshr_bank_of(req_addr_key[tile_i][port_i],
+                         req_addr_key_burst[tile_i][port_i],
+                         req_addr_key_single[tile_i][port_i],
+                         req_in[tile_i][port_i].tgt_group_id, 1'b0,
+                         cfg_bank_shift_single, cfg_bank_shift_burst, cfg_bank_burst_bits);
+        assign req_bank[tile_i][port_i] = req_is_single[tile_i][port_i]
+                                        ? req_bank_s[tile_i][port_i] : req_bank_b[tile_i][port_i];
 `ifndef TARGET_SYNTHESIS
         // The split keys are not zeroed on an invalid request the way addr_key is, so equivalence
         // is claimed only where req_bank is consumed.
@@ -1477,8 +1490,11 @@ module mempool_group_mshr
         // selected ~20 bits of record with req_bank and only then compared, putting a wide mux
         // and a comparator in series after the latest signal in this cone.
         for (genvar bank_i = 0; bank_i < MshrBankNum; bank_i++) begin : gen_req_fwd_eq
-          assign req_bank_oh[tile_i][port_i][bank_i] =
-              (req_bank[tile_i][port_i] == BankIdW'(bank_i));
+          // decode(mux(a,b)) == mux(decode(a),decode(b)): the 16-way decode moves ahead of the
+          // class select so req_is_single picks one BIT rather than an index to compare.
+          assign req_bank_oh[tile_i][port_i][bank_i] = req_is_single[tile_i][port_i]
+              ? (req_bank_s[tile_i][port_i] == BankIdW'(bank_i))
+              : (req_bank_b[tile_i][port_i] == BankIdW'(bank_i));
           assign req_fwd_eq[tile_i][port_i][bank_i] =
               agb_q_v[bank_i] &&
               (agb_q_addr[bank_i] == req_addr_key[tile_i][port_i]) &&
@@ -2739,7 +2755,8 @@ module mempool_group_mshr
         assign arb_accept[Sl]   = req_in_valid[t][p] && req_in_ready[t][p];
         // The grant now implies capacity, so only validity is left to check here.
         for (genvar ab = 0; ab < MshrBankNum; ab++) begin : gen_arb_bank_oh
-          assign arb_bank_oh[Sl][ab] = (req_bank[t][p] == BankIdW'(ab));
+          // Identical function to req_bank_oh, so share it rather than rebuild the comparators.
+          assign arb_bank_oh[Sl][ab] = req_bank_oh[t][p][ab];
         end
         assign arb_hold_nz[Sl]  = ((((req_len[t][p] == BurstLenWidth'(1)) ? cfg_hold_window_single
                                                                          : cfg_hold_window_burst)
