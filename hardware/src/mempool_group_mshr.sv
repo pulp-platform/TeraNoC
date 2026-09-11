@@ -2625,6 +2625,13 @@ module mempool_group_mshr
   // branch is dead; branch 1 needs drain or conflict; branch 3 needs !req_alloc_found, which the
   // grant contradicts. Only the owner-inflight stall and the hold/NoC arm survive.
   logic [NumAllocSlots-1:0]                     alloc_accept, arb_hold_nz;
+  /// The replay gate, split at req_alloc_found. Every other term of req_out_valid is a decode or
+  /// hit result, so the allocation grant -- the last thing to arrive -- meets a single 2:1 select
+  /// instead of the four-deep stall chain that produced req_out_valid.
+  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] replay_arm;
+  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] replay_lane_stall;
+  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] replay_fire_a0, replay_fire_a1;
+  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] replay_fire;
   tcdm_addr_t [NumAllocSlots-1:0]               arb_addr;
   group_id_t [NumAllocSlots-1:0]                arb_grp;
   logic [NumAllocSlots-1:0][BurstLenWidth-1:0]  arb_len;
@@ -2660,6 +2667,24 @@ module mempool_group_mshr
         assign arb_core  [Sl] = req_in[t][p].wdata.core_id;
         assign arb_meta  [Sl] = req_in[t][p].wdata.meta_id;
         assign arb_awy   [Sl] = req_alloc_found_mshr_id[t][p][VictimPtrW-1:0];
+        // A free NoC port and at least one held entry owned by this lane: everything the replay
+        // needs that does not depend on the allocation grant.
+        assign replay_arm[t][p] = req_out_ready[t][p] && (|replay_cand_l[t][p]);
+        // The request leaves this port free whatever the grant says.
+        assign replay_lane_stall[t][p] =
+            !req_in_valid[t][p] || req_merge_valid[t][p] || req_owner_inflight[t][p] ||
+            (req_can_merge[t][p] &&
+             (req_addr_hit_drain[t][p] || req_meta_conflict[t][p]));
+        // The two grant arms: bank-full stall when the lane did not win a slot, hold-the-fetch when
+        // it did. Both are decode and hit terms only.
+        assign replay_fire_a0[t][p] = replay_arm[t][p] &&
+            (replay_lane_stall[t][p] ||
+             (req_can_merge[t][p] &&
+              (bank_has_free[req_bank[t][p]] || cfg_bankfull_bp)));
+        assign replay_fire_a1[t][p] = replay_arm[t][p] &&
+            (replay_lane_stall[t][p] || (req_can_merge[t][p] && arb_hold_nz[Sl]));
+        assign replay_fire[t][p] = req_alloc_found[t][p] ? replay_fire_a1[t][p]
+                                                         : replay_fire_a0[t][p];
         assign arb_mwy   [Sl] = req_merge_mshr_id[t][p][VictimPtrW-1:0];
       end
     end
@@ -3109,7 +3134,7 @@ module mempool_group_mshr
           // Everything the replay needs is precomputed in gen_replay_lane; the ready chain only
           // reaches this final select, instead of the candidate scan, the isolate and the payload
           // OR that used to sit behind it.
-          if (!req_out_valid[t][p] && req_out_ready[t][p] && (|replay_cand_l[t][p])) begin
+          if (replay_fire[t][p]) begin
             req_out_valid[t][p]               = 1'b1;
             req_out[t][p]                     = '0;
             req_out[t][p].wdata.meta_id       = replay_sel_l[t][p].meta;
