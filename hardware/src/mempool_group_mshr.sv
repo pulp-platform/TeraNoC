@@ -2487,6 +2487,10 @@ module mempool_group_mshr
   /// and the per-lane drive operands read it directly instead of through bank_win's encoder and a
   /// MshrBankNum:1 re-mux.
   logic [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1][MshrBankNum-1:0] resp_sel_bank_oh;
+  /// The selected sub-request as a one-hot. sub_first is already one-hot under drain_have_s, so
+  /// the handshake scatter takes it directly instead of through drain_win_s's encoder and a
+  /// per-slot equality compare.
+  logic [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1][MshrMergeReqs-1:0] resp_sel_sub_oh;
   logic [BankIdW-1:0]       bank_base, bank_idx, bank_win_d, bank_win;
   logic [VictimPtrW-1:0]    base_way;
   logic                     bank_demote;
@@ -3723,6 +3727,7 @@ module mempool_group_mshr
           resp_sel_valid[tile_i][port_i] = 1'b0;
           resp_sel_mshr_id[tile_i][port_i] = '0;
           resp_sel_subreq_idx[tile_i][port_i] = '0;
+          resp_sel_sub_oh[tile_i][port_i]     = '0;
           resp_sel_bank[tile_i][port_i] = '0;
           resp_sel_bank_oh[tile_i][port_i] = '0;
         end
@@ -3913,6 +3918,7 @@ module mempool_group_mshr
                 resp_sel_valid[tile_i][port_i]      = 1'b1;
                 resp_sel_mshr_id[tile_i][port_i]    = mshr_id_t'(drain_win_e);
                 resp_sel_subreq_idx[tile_i][port_i] = drain_win_s;   // already SubIdxW wide
+                resp_sel_sub_oh[tile_i][port_i]     = sub_first;
                 resp_sel_bank[tile_i][port_i]       = bank_win;
                 resp_sel_bank_oh[tile_i][port_i]    = bank_first;
               end
@@ -3976,10 +3982,7 @@ module mempool_group_mshr
               // re-include it and re-deliver the same response.
               drain_fire   [tile_i][port_i] = 1'b1;
               drain_fire_sv[tile_i][port_i] = drv_sel_burst_one;
-              for (int s = 0; s < MshrMergeReqs; s++) begin
-                drain_fire_sub_oh[tile_i][port_i][s] =
-                    (resp_sel_subreq_idx[tile_i][port_i] == SubIdxW'(s));
-              end
+              drain_fire_sub_oh[tile_i][port_i] = resp_sel_sub_oh[tile_i][port_i];
             end
           end
         end
