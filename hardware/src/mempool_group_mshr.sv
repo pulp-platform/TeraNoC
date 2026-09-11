@@ -1010,6 +1010,11 @@ module mempool_group_mshr
   logic [MshrBankNum-1:0][VictimPtrW-1:0]                     bank_pub_w;
   logic [MshrBankNum-1:0]                                     bank_pub_v;
   logic [VictimPtrW-1:0]                                      bank_scan_w;
+  /// Published way as a one-hot, in the thermometer-mask form the bank arbitration already uses.
+  /// The descending (rr + k) scan takes the first hit in the order rr, rr+1, ... , W-1, 0, ... ,
+  /// rr-1, which is the lowest set way at or above the base, else the lowest below it.
+  logic [MshrBankNum-1:0][MshrWaysPerBank-1:0] bank_pub_oh;
+  logic [MshrBankNum-1:0][MshrWaysPerBank-1:0] way_any, way_rr_mask, way_hi, way_lo;
   logic [MshrIdxW-1:0]  drain_mshr_rr_q, drain_mshr_rr_d;
   // (C) drain: rotate the sub_req scan axis (MshrMergeReqs sub-requests), a separate base from
   // (B) so the two axes do not rotate in lockstep. Width is SubIdxW above.
@@ -3779,25 +3784,29 @@ module mempool_group_mshr
         drain_published[e] = 1'b0;          // cleared per ENTRY, never per bank
       end
       for (int b = 0; b < MshrBankNum; b++) begin
-        bank_rr_d[b]  = bank_rr_q[b];
-        bank_pub_w[b] = '0;
-        bank_pub_v[b] = 1'b0;
-        bank_pub_e[b] = '0;
-        for (int k = MshrWaysPerBank - 1; k >= 0; k--) begin
-          // NOT `automatic int w = ...`: an initialiser at declaration inside a procedural block
-          // is ignored by synthesis (Spyglass SYNTH_89). bank_scan_w is module scope.
-          bank_scan_w = WaysPow2 ? VictimPtrW'(bank_rr_q[b] + VictimPtrW'(k))
-                                 : VictimPtrW'((int'(bank_rr_q[b]) + k) % MshrWaysPerBank);
-          if (drain_ent_any[b * MshrWaysPerBank + bank_scan_w]) begin
-            bank_pub_w[b] = VictimPtrW'(bank_scan_w);
-            bank_pub_v[b] = 1'b1;
-          end
+        for (int w = 0; w < MshrWaysPerBank; w++) begin
+          way_any    [b][w] = drain_ent_any[b * MshrWaysPerBank + w];
+          way_rr_mask[b][w] = (VictimPtrW'(w) >= bank_rr_q[b]);
         end
-        if (BankPublish && bank_pub_v[b]) begin
-          drain_published[b * MshrWaysPerBank + int'(bank_pub_w[b])] = 1'b1;
-          bank_pub_e[b] = MshrIdxW'(b * MshrWaysPerBank + int'(bank_pub_w[b]));
-          bank_rr_d[b] = (WaysPow2 || (int'(bank_pub_w[b]) + 1 < MshrWaysPerBank))
-                       ? VictimPtrW'(bank_pub_w[b] + VictimPtrW'(1)) : '0;
+        way_hi[b] = way_any[b] &  way_rr_mask[b];
+        way_lo[b] = way_any[b] & ~way_rr_mask[b];
+        bank_pub_oh[b] = (|way_hi[b]) ? (way_hi[b] & (~way_hi[b] + MshrWaysPerBank'(1)))
+                                      : (way_lo[b] & (~way_lo[b] + MshrWaysPerBank'(1)));
+        bank_pub_v[b] = |way_any[b];
+        bank_pub_w[b] = '0;
+        bank_pub_e[b] = '0;
+        bank_rr_d [b] = bank_rr_q[b];
+        for (int w = 0; w < MshrWaysPerBank; w++) begin
+          bank_pub_w[b] = bank_pub_w[b] | ({VictimPtrW{bank_pub_oh[b][w]}} & VictimPtrW'(w));
+          if (bank_pub_oh[b][w]) begin
+            // (w + 1) % MshrWaysPerBank is a loop constant: no adder, no wrap compare.
+            bank_rr_d[b] = VictimPtrW'((w + 1) % MshrWaysPerBank);
+            if (BankPublish) begin
+              // The one-hot IS the published-entry mask, so no decode of an index.
+              drain_published[b * MshrWaysPerBank + w] = 1'b1;
+              bank_pub_e[b] = MshrIdxW'(b * MshrWaysPerBank + w);
+            end
+          end
         end
       end
 
