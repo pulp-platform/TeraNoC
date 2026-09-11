@@ -165,13 +165,17 @@ module mempool_group_mshr
   // The rotated scan indices wrap by TRUNCATION to idx_width() bits rather than by `%`. Since
   // idx_width() is $clog2(), truncation equals mod-N only when N is a power of two -- for any other
   // N it silently wraps at the next power of two instead, corrupting the scan order. Fail loudly.
-  if (MshrNum & (MshrNum - 1))
-    $error("[mempool_group_mshr] group_mshr_num (%0d) must be a power of two.", MshrNum);
   if (MshrMergeReqs & (MshrMergeReqs - 1))
     $error("[mempool_group_mshr] group_mshr_merge_reqs (%0d) must be a power of two.", MshrMergeReqs);
-  if (MshrWaysPerBank & (MshrWaysPerBank - 1))
-    $error("[mempool_group_mshr] group_mshr_ways_per_bank (%0d) must be a power of two.",
-           MshrWaysPerBank);
+  // Ways need not be a power of two: every bank/way split and every ways-axis wrap is guarded by
+  // WaysPow2. The BANK count must be, because the bank hash selects a BankIdW-wide field and every
+  // code that field can produce has to name a real bank.
+  if ((MshrNum / MshrWaysPerBank) & ((MshrNum / MshrWaysPerBank) - 1))
+    $error("[mempool_group_mshr] banks (%0d = group_mshr_num %0d / ways %0d) must be a power of two.",
+           MshrNum / MshrWaysPerBank, MshrNum, MshrWaysPerBank);
+  if (MshrNum % MshrWaysPerBank)
+    $error("[mempool_group_mshr] group_mshr_num (%0d) must be a multiple of ways (%0d).",
+           MshrNum, MshrWaysPerBank);
   // Hold-the-fetch (request-hold merge window, docs/mshr_request_hold_design.md): a mergeable
   // allocation is consumed locally and its NoC fetch is withheld for up to HoldWindow cycles, so
   // later requests to the same line can still merge into it. 0 releases the fetch immediately.
@@ -232,6 +236,10 @@ module mempool_group_mshr
   // response this very cycle -- see req_addr_hit_drain_way.
   localparam bit StallOnResp = `ifdef GROUP_MSHR_STALL_ON_RESP `GROUP_MSHR_STALL_ON_RESP `else 1'b1 `endif;
   localparam int unsigned VictimPtrW = (MshrWaysPerBank > 1) ? $clog2(MshrWaysPerBank) : 1;
+  // Entry id e = bank * MshrWaysPerBank + way. When ways is a power of two that split is a bit
+  // slice and a truncating add is already mod-ways; when it is not, both need real arithmetic.
+  // The flag is elaboration-constant, so a power-of-two ways elaborates exactly the old logic.
+  localparam bit WaysPow2 = ((MshrWaysPerBank & (MshrWaysPerBank - 1)) == 0);
   // hold_cnt is sized from the window itself, so ANY window value is supported -- there is no
   localparam int unsigned ServeTimeout = `ifdef GROUP_MSHR_SERVE_TIMEOUT `GROUP_MSHR_SERVE_TIMEOUT `else 0 `endif;
   // The counter must be sized for the LARGEST value that can ever be loaded, and at
@@ -2973,7 +2981,8 @@ module mempool_group_mshr
                 // bank's scan start just past the evicted way.
                 if (CacheVictimRR && CacheReclaimable) begin
                   evict_vid = int'(req_alloc_found_mshr_id[tile_i][port_i]);
-                  evict_vw  = evict_vid & unsigned'(MshrWaysPerBank - 1);
+                  evict_vw  = WaysPow2 ? VictimPtrW'(evict_vid & unsigned'(MshrWaysPerBank - 1))
+                                       : VictimPtrW'(evict_vid % MshrWaysPerBank);
                   if (mshr_q_valid[evict_vid] && (mshr_q[evict_vid].state == MSHR_CACHED)) begin
                     victim_rr_d[evict_vid / MshrWaysPerBank] =
                         (evict_vw + 1 >= MshrWaysPerBank) ? '0 : VictimPtrW'(evict_vw + 1);
@@ -3710,7 +3719,8 @@ module mempool_group_mshr
         for (int k = MshrWaysPerBank - 1; k >= 0; k--) begin
           // NOT `automatic int w = ...`: an initialiser at declaration inside a procedural block
           // is ignored by synthesis (Spyglass SYNTH_89). bank_scan_w is module scope.
-          bank_scan_w = VictimPtrW'(bank_rr_q[b] + VictimPtrW'(k));
+          bank_scan_w = WaysPow2 ? VictimPtrW'(bank_rr_q[b] + VictimPtrW'(k))
+                                 : VictimPtrW'((int'(bank_rr_q[b]) + k) % MshrWaysPerBank);
           if (drain_ent_any[b * MshrWaysPerBank + bank_scan_w]) begin
             bank_pub_w[b] = VictimPtrW'(bank_scan_w);
             bank_pub_v[b] = 1'b1;
@@ -3719,7 +3729,8 @@ module mempool_group_mshr
         if (BankPublish && bank_pub_v[b]) begin
           drain_published[b * MshrWaysPerBank + int'(bank_pub_w[b])] = 1'b1;
           bank_pub_e[b] = MshrIdxW'(b * MshrWaysPerBank + int'(bank_pub_w[b]));
-          bank_rr_d[b] = VictimPtrW'(bank_pub_w[b] + VictimPtrW'(1));
+          bank_rr_d[b] = (WaysPow2 || (int'(bank_pub_w[b]) + 1 < MshrWaysPerBank))
+                       ? VictimPtrW'(bank_pub_w[b] + VictimPtrW'(1)) : '0;
         end
       end
 
@@ -3790,8 +3801,10 @@ module mempool_group_mshr
             // First candidate entry in rotated order (>= base first, then wrap).
             if (BankPublish) begin
               // MshrBankNum-wide arbitration, exactly equivalent to the MshrNum-wide one.
-              bank_base = drain_sel_base[MshrIdxW-1 -: BankIdW];
-              base_way  = drain_sel_base[VictimPtrW-1:0];
+              bank_base = WaysPow2 ? drain_sel_base[MshrIdxW-1 -: BankIdW]
+                                   : BankIdW'(int'(drain_sel_base) / MshrWaysPerBank);
+              base_way  = WaysPow2 ? drain_sel_base[VictimPtrW-1:0]
+                                   : VictimPtrW'(int'(drain_sel_base) % MshrWaysPerBank);
               bank_demote = bank_pub_v[bank_base] && (bank_pub_w[bank_base] < base_way);
               for (int b = 0; b < MshrBankNum; b++) begin
                 bank_rr_mask[b]  = (BankIdW'(b) >= bank_base);
