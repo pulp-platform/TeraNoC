@@ -2588,6 +2588,13 @@ module mempool_group_mshr
   /// same order, but one AND and a width-4 isolate instead of a four-deep sequential chain.
   logic [MshrMergeReqs-1:0] sub_rr_mask;
   logic [MshrMergeReqs-1:0] sub_hi, sub_lo, sub_first;
+  /// Hi/lo split about the bank rotation base, in place of the barrel rotate. The rotate put four
+  /// mux levels on the candidate vector -- the latest signal here -- for a priority order the mask
+  /// expresses directly, and the winner is then applied as a one-hot instead of being encoded and
+  /// indexed back.
+  logic [MshrBankNum-1:0] bank_rr_mask;
+  logic [MshrBankNum-1:0] bank_hi, bank_lo;
+  logic [MshrBankNum-1:0] bank_pfx_hi, bank_pfx_lo, bank_first_hi, bank_first_lo;
   logic [MshrNum-1:0]       drain_cand_rot;                        // A: candidates rotated to base
   logic [MshrNum-1:0]       drain_pfx, drain_first;                // A: prefix-OR, isolated LSB
   logic [MshrIdxW-1:0]      drain_idx;                             // A: index within the rotation
@@ -3785,24 +3792,37 @@ module mempool_group_mshr
               // MshrBankNum-wide arbitration, exactly equivalent to the MshrNum-wide one.
               bank_base = drain_sel_base[MshrIdxW-1 -: BankIdW];
               base_way  = drain_sel_base[VictimPtrW-1:0];
-              bank_cand_rot = MshrBankNum'({bank_cand, bank_cand} >> bank_base);
-              bank_demote   = bank_pub_v[bank_base] && (bank_pub_w[bank_base] < base_way);
-              bank_cand_eff = bank_demote ? (bank_cand_rot & ~{{(MshrBankNum-1){1'b0}}, 1'b1})
-                                          : bank_cand_rot;
-              bank_pfx = bank_cand_eff;
-              for (int st = 1; st < MshrBankNum; st = st << 1) begin
-                bank_pfx = bank_pfx | (bank_pfx << st);
-              end
-              bank_first = bank_pfx & ~(bank_pfx << 1);
-              bank_idx   = '0;
+              bank_demote = bank_pub_v[bank_base] && (bank_pub_w[bank_base] < base_way);
               for (int b = 0; b < MshrBankNum; b++) begin
-                if (bank_first[b]) bank_idx |= BankIdW'(b);
+                bank_rr_mask[b]  = (BankIdW'(b) >= bank_base);
+                bank_cand_eff[b] = bank_cand[b] &&
+                                   !(bank_demote && (BankIdW'(b) == bank_base));
               end
-              // Winner: first non-demoted bank, else the demoted starting bank, else nothing.
-              bank_win_d   = (|bank_cand_eff) ? bank_idx : '0;
-              bank_win     = BankIdW'(bank_base + bank_win_d);
+              bank_hi = bank_cand_eff &  bank_rr_mask;
+              bank_lo = bank_cand_eff & ~bank_rr_mask;
+              bank_pfx_hi = bank_hi;
+              bank_pfx_lo = bank_lo;
+              for (int st = 1; st < MshrBankNum; st = st << 1) begin
+                bank_pfx_hi = bank_pfx_hi | (bank_pfx_hi << st);
+                bank_pfx_lo = bank_pfx_lo | (bank_pfx_lo << st);
+              end
+              bank_first_hi = bank_pfx_hi & ~(bank_pfx_hi << 1);
+              bank_first_lo = bank_pfx_lo & ~(bank_pfx_lo << 1);
+              // Winner: first candidate at or above the base, else the first below it, else the
+              // base bank itself -- the demoted fallback the rotated form reached with bank_win_d 0.
+              for (int b = 0; b < MshrBankNum; b++) begin
+                bank_first[b] = (|bank_cand_eff)
+                              ? ((|bank_hi) ? bank_first_hi[b] : bank_first_lo[b])
+                              : (BankIdW'(b) == bank_base);
+              end
+              bank_win     = '0;
               drain_have_e = |bank_cand;
-              drain_win_e  = drain_have_e ? bank_pub_e[bank_win] : '0;
+              drain_win_e  = '0;
+              for (int b = 0; b < MshrBankNum; b++) begin
+                bank_win    = bank_win    | ({BankIdW {bank_first[b]}} & BankIdW'(b));
+                drain_win_e = drain_win_e |
+                              ({MshrIdxW{bank_first[b] && drain_have_e}} & bank_pub_e[b]);
+              end
             end else begin
               drain_cand_rot = MshrNum'({drain_ent_cand, drain_ent_cand} >> drain_sel_base);
               drain_pfx = drain_cand_rot;
