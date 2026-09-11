@@ -2549,6 +2549,10 @@ module mempool_group_mshr
   logic [SubIdxW-1:0]       drain_win_s;
   logic                     drain_have_e,    drain_have_s;
   logic [SubIdxW-1:0]       drain_scan_s;                          // A: rotated scan index
+  /// Hi/lo split about the sub-request rotation base, in place of the rotated priority scan: the
+  /// same order, but one AND and a width-4 isolate instead of a four-deep sequential chain.
+  logic [MshrMergeReqs-1:0] sub_rr_mask;
+  logic [MshrMergeReqs-1:0] sub_hi, sub_lo, sub_first;
   logic [MshrNum-1:0]       drain_cand_rot;                        // A: candidates rotated to base
   logic [MshrNum-1:0]       drain_pfx, drain_first;                // A: prefix-OR, isolated LSB
   logic [MshrIdxW-1:0]      drain_idx;                             // A: index within the rotation
@@ -3809,12 +3813,19 @@ module mempool_group_mshr
                   end
                 end
               end
-              drain_have_s = 1'b0; drain_win_s = '0;
-              for (int k = 0; k < MshrMergeReqs; k++) begin
-                drain_scan_s = SubIdxW'(drain_sel_sub_base + SubIdxW'(k));
-                if (!drain_have_s && drain_sub_cand[drain_scan_s]) begin
-                  drain_have_s = 1'b1; drain_win_s = drain_scan_s;
-                end
+              for (int s = 0; s < MshrMergeReqs; s++) begin
+                sub_rr_mask[s] = (SubIdxW'(s) >= drain_sel_sub_base);
+              end
+              sub_hi    = drain_sub_cand &  sub_rr_mask;
+              sub_lo    = drain_sub_cand & ~sub_rr_mask;
+              // First candidate at or above the base, else the first below it -- the wrap point the
+              // rotated scan crossed.
+              sub_first = (|sub_hi) ? (sub_hi & (~sub_hi + MshrMergeReqs'(1)))
+                                    : (sub_lo & (~sub_lo + MshrMergeReqs'(1)));
+              drain_have_s = |drain_sub_cand;
+              drain_win_s  = '0;
+              for (int s = 0; s < MshrMergeReqs; s++) begin
+                drain_win_s = drain_win_s | ({SubIdxW{sub_first[s]}} & SubIdxW'(s));
               end
               if (drain_have_s) begin
                 resp_sel_valid[tile_i][port_i]      = 1'b1;
