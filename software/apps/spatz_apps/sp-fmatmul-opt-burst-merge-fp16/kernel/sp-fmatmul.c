@@ -546,7 +546,9 @@ void matmul_4xVL(elem_t *c, const elem_t *a, const elem_t *b,
 // Per-core column slice, from the SAME work split main.c hands the kernel (decode: main.c:415-418
 // via n_p_blocks; prefill: main.c:440-441 via split_p_count). MATMUL_DECODE_SPLIT is hoisted above
 // the kernel include so this sees the same branch the run takes.
-#  if MATMUL_DECODE_SPLIT
+#  ifdef GEMM_CONFIG_H
+#    define SPATZ_1XVL_PSPAN GEMM_PSPAN(KERNEL_SIZE)
+#  elif MATMUL_DECODE_SPLIT
 #    define SPATZ_1XVL_PSPAN  ((GEMM_P) / ((NUM_CORES) / ((GEMM_M) / (KERNEL_SIZE))))
 #  else
 #    define SPATZ_1XVL_CPG_   ((NUM_CORES) / (NUM_GROUPS))

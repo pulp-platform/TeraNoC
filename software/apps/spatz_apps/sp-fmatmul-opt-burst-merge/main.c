@@ -93,29 +93,8 @@
 #define MATMUL_VERIFY 0
 #endif
 // ---------------------------------------------------------------------------------------------
-// SPLIT PREDICATE, HOISTED. The kernel included below derives SPATZ_1XVL_LOAD_LMUL from the
-// per-core column slice, which needs the same work-split predicate this file derives further
-// down. Hoist it here so the kernel can see it. Every definition is #ifndef-guarded, so the
-// later copy finds them already defined and is a no-op -- the two cannot disagree. (Same pattern
-// as the KERNEL_SIZE hoist that already sits next to the predicate below.)
-#ifndef ACTIVE_GROUP_DIV
-#define ACTIVE_GROUP_DIV 1
-#endif
-#ifndef KERNEL_SIZE
-#define KERNEL_SIZE 8
-#endif
-#ifndef MATMUL_DECODE_SPLIT
-#  define MATMUL_ACTIVE_GROUPS ((NUM_GROUPS) / (ACTIVE_GROUP_DIV))
-#  if ((GEMM_M) % (MATMUL_ACTIVE_GROUPS)) != 0
-#    define MATMUL_DECODE_SPLIT 1
-#  elif ((GEMM_M) / (MATMUL_ACTIVE_GROUPS)) < (KERNEL_SIZE)
-#    define MATMUL_DECODE_SPLIT 1
-#  elif ((((GEMM_M) / (MATMUL_ACTIVE_GROUPS)) % (KERNEL_SIZE)) != 0)
-#    define MATMUL_DECODE_SPLIT 1
-#  else
-#    define MATMUL_DECODE_SPLIT 0
-#  endif
-#endif
+// Select KS and the matching work split before the vector kernel is included.
+#include "gemm_config.h"
 
 #include "kernel/sp-fmatmul.c"
 #include "printf.h"
@@ -405,44 +384,6 @@ int main() {
   // Build with EXTRA_DEFINES=-DACTIVE_GROUP_DIV=4 for the quarter-load run; that
   // needs a matching M (M/active_groups must keep dim_group unchanged) or each
   // core silently gets DIV x the columns.
-#ifndef ACTIVE_GROUP_DIV
-#define ACTIVE_GROUP_DIV 1
-#endif
-
-// KERNEL_SIZE's own default lives further down, next to where it is used; hoist it here so the
-// split predicate below can see it. The later #ifndef then finds it already defined and is a
-// no-op, so the two cannot disagree.
-#ifndef KERNEL_SIZE
-#define KERNEL_SIZE 8
-#endif
-
-// WHICH WORK SPLIT: derived from the SHAPE, not chosen by hand.
-//
-// The prefill split hands each active group M/active_groups rows and each core KERNEL_SIZE of
-// them, so it can only cover M when all three hold: M divides across the groups, the per-group
-// row count is a whole number of kernel tiles, and there is at least one tile per core. When any
-// fails, the prefill path cannot express the shape -- it returns -4 or -6 at RUNTIME, which is a
-// binary that rejects its own workload. Decode shapes (M = batch, e.g. 32) fail all three.
-//
-// Deriving it here makes that unrepresentable: the shape selects the split at compile time, the
-// same way mshr_cfg.h derives the MSHR targets from GEMM_M/N/P rather than from a per-shape .mk.
-// Checked against the 8x8 campaign manifest: 0 of 248 shapes change branch (all have
-// M >= 512 = 64 groups x 8), and both decode meshes select the decode branch at M = 32.
-// The boundary is M >= NUM_GROUPS * KERNEL_SIZE: 128 at 4x4, 512 at 8x8.
-//
-// An explicit -DMATMUL_DECODE_SPLIT=0/1 still wins, for forcing a branch in an experiment.
-#ifndef MATMUL_DECODE_SPLIT
-#  define MATMUL_ACTIVE_GROUPS ((NUM_GROUPS) / (ACTIVE_GROUP_DIV))
-#  if ((GEMM_M) % (MATMUL_ACTIVE_GROUPS)) != 0
-#    define MATMUL_DECODE_SPLIT 1
-#  elif ((GEMM_M) / (MATMUL_ACTIVE_GROUPS)) < (KERNEL_SIZE)
-#    define MATMUL_DECODE_SPLIT 1
-#  elif ((((GEMM_M) / (MATMUL_ACTIVE_GROUPS)) % (KERNEL_SIZE)) != 0)
-#    define MATMUL_DECODE_SPLIT 1
-#  else
-#    define MATMUL_DECODE_SPLIT 0
-#  endif
-#endif
   const uint32_t active_groups = NUM_GROUPS / ACTIVE_GROUP_DIV;
   const uint32_t active_cores = cores_per_group * active_groups;
   const uint32_t is_core_active = cid < active_cores;
@@ -479,20 +420,18 @@ int main() {
   // Initialize timer to maximum value (will be updated with actual time)
   timer = (uint32_t)-1;
 
-  // Set kernel size - this determines how many rows of C are computed per iteration
-  // kernel_size = 8 means we compute 8 rows at a time (using 8 vector registers)
-  // S1 experiment (docs/spatz_bottleneck_analysis_and_plan.md): kernel_size also selects LMUL --
-  //   8 -> matmul_8xVL (e32,m2 -> vl=32, 8 accumulators)
-  //   4 -> matmul_4xVL (e32,m4 -> vl=64, 4 accumulators)
-  //   2 -> matmul_2xVL (e32,m8 -> vl=128, 2 accumulators)
-  // Higher LMUL = fewer, longer vector ops = more FPU work per load => the 109-cycle load latency
-  // needs less memory-level parallelism to hide. Override with
-  // EXTRA_DEFINES=-DKERNEL_SIZE=4 (NOT DEFINES=..., which overrides the build's own
-  // -DNUM_CORES/-DVLEN/... and fails to compile).
-#ifndef KERNEL_SIZE
-#define KERNEL_SIZE 8
-#endif
+  // KS is the number of output rows per microkernel. gemm_config.h selects
+  // the legal KS with the most balanced within-group A/B sharing. Override
+  // with EXTRA_DEFINES=-DKERNEL_SIZE=... for a controlled performance sweep.
   kernel_size = KERNEL_SIZE;
+  if (cid == 0) {
+    printf("[DASHBOARD_META] {\"kernel_size\":%u}\n",
+           (unsigned)kernel_size);
+    printf("[GEMM_CONFIG] ks=%u decode=%u share_a=%u share_b=%u\n",
+           (unsigned)kernel_size, (unsigned)MATMUL_DECODE_SPLIT,
+           (unsigned)GEMM_SHARE_A(KERNEL_SIZE),
+           (unsigned)GEMM_SHARE_B(KERNEL_SIZE));
+  }
 
   //========================================================--
   // STEP 2: DISTRIBUTE WORK ACROSS CORES
@@ -753,6 +692,14 @@ int main() {
   mempool_barrier(num_cores);
 #endif
 
+#if MSHR_RUNTIME_CFG
+  mshr_cfg_t mshr_cfg = MSHR_CFG_DERIVED_INIT;
+  if (mshr_cfg_is_group_writer()) {
+    mshr_cfg_tune_gemm(&mshr_cfg, a_use, b, gid);
+  }
+  mempool_barrier(num_cores);
+#endif
+
 #if ICACHE_WARMUP
   // Instruction-cache warm-up: one short reduced-N pass of the kernel so the matmul
   // (+ gbar_sync) code is resident in each core's I$ before the timed run. Same m/p
@@ -788,12 +735,20 @@ int main() {
   // core before the first timed access.
   {
     // Shape-derived at COMPILE TIME from GEMM_M/N/P (data_gemm.h): one source per
-    // precision, no per-shape config/*.mk and no runtime division. The timeout and
+    // precision, with a bounded address-based hash search before warm-up. The timeout and
     // cache knobs stay macro-fed; MSHR_CFG_DERIVED_INIT gates the cache fields on
     // GEMM_ELEM_BYTES so fp32 keeps the legacy path automatically.
-    static const mshr_cfg_t mshr_cfg = MSHR_CFG_DERIVED_INIT;
     uint32_t mshr_st = 0;
-    if (mshr_cfg_is_group_writer()) mshr_st = mshr_cfg_apply_group(&mshr_cfg);
+    if (mshr_cfg_is_group_writer()) {
+      mshr_st = mshr_cfg_apply_group(&mshr_cfg);
+      if (gid == 0) {
+        printf("[GEMM_HASH] group=0 single=%u burst=%u bits=%u search=%u\n",
+               (unsigned)mshr_cfg.bank_shift_single,
+               (unsigned)mshr_cfg.bank_shift_burst,
+               (unsigned)mshr_cfg.bank_burst_bits,
+               (unsigned)(MSHR_HASH_SEARCH && MSHR_CFG_HASH_MODE == 3));
+      }
+    }
     mempool_barrier(num_cores);
     // Non-zero status means the configuration IN EFFECT is not the one requested -- a refused
     // bank-hash write, an out-of-range value, a rejected serve_timeout. Fail loudly: a silent
@@ -808,7 +763,7 @@ int main() {
     // hash while the MSHR is busy" test, which cannot guarantee entries are resident at the instant
     // of the write. Here the value is out of range by construction, so the refusal is not racy.
     //
-    // bank_shift_single is legal only in [5,10] (mempool_group_mshr_cfg.sv:95). Writing 99 must:
+    // bank_shift_single is legal only in [4,10] (mempool_group_mshr_cfg.sv:95). Writing 99 must:
     //   * be DROPPED  -- the old hash stays in effect, and
     //   * set MSHR_STATUS_RANGE in the sticky status.
     // A silently ACCEPTED out-of-range write is the failure this whole status mechanism exists to

@@ -154,6 +154,10 @@ DEFINES += -DMSHR_CFG_CACHE_TIMEOUT=$(if $(group_mshr_cache_timeout),$(group_msh
 DEFINES += -DMSHR_CFG_BANKFULL_BP=$(if $(group_mshr_bankfull_backpressure),$(group_mshr_bankfull_backpressure),0)
 # The HARDWARE merge capacity. Elaboration-only in RTL, but software needs it: the CSR range
 # check refuses a cache_reuse_target above it, and served_cnt saturates at it.
+# Geometry for the optional per-group software hash search.
+DEFINES += -DMSHR_CFG_ENTRIES=$(if $(group_mshr_num),$(group_mshr_num),NUM_TILES_PER_GROUP)
+DEFINES += -DMSHR_CFG_WAYS=$(if $(group_mshr_ways_per_bank),$(group_mshr_ways_per_bank),4)
+DEFINES += -DMSHR_CFG_HASH_MODE=$(if $(group_mshr_bank_hash),$(group_mshr_bank_hash),0)
 DEFINES += -DMSHR_MERGE_REQS=$(if $(group_mshr_merge_reqs),$(group_mshr_merge_reqs),4)
 DEFINES += -DNUM_GROUP_BARRIERS=$(shell awk 'BEGIN{print $(num_cores)/$(num_groups)}')
 # Per-build extra defines (app/kernel A/B knobs), e.g.

@@ -179,21 +179,9 @@ static inline uint32_t mshr_clog2(uint32_t x) {
 #ifndef MSHR_ELEN
 #define MSHR_ELEN 32u              // memory word width in bits (NOT the element width)
 #endif
-// CSR-accepted bank-shift window (mempool_group_mshr_cfg.sv BankShiftMin/Max). Writing outside
-// it is REFUSED and the RESET value stays in force, silently -- so clamp here rather than let
-// the hardware quietly run a tuning nobody asked for.
-// The CSR field for bank_burst_bits is ONE BIT WIDE (mempool_group_mshr_cfg.sv:179 stores
-// wr_data_i[0]). Anything larger is silently truncated to its LSB, so software must clamp.
-// Must MATCH mempool_pkg::MshrCfgBurstBitsW / the cfg module's BankBurstBitsMax. The CSR was a
-// single bit until 2026-09-01, which silently truncated a derived 2/3/4 to its LSB; it is now
-// 3 bits wide and range-checked, so the full value up to BankIdW is expressible.
-// MUST equal (1 << mempool_pkg::MshrCfgBurstBitsW) - 1. The CSR is one bit and the hash
-// implements one intra-load bit; a larger write is now REFUSED with MSHR_STATUS_RANGE rather
-// than silently truncated to its LSB (which is what left KS=4/1 at 4 of 16 banks). Capping
-// here also drops MSHR_D_BURST_FLOOR back to BurstAlign+1, which is what lets the shift sit
-// on the p-slice gap where it belongs -- the same clamp fixes both halves.
+// Match mempool_group_mshr_cfg.sv: shifts 4..10, one burst-select bit.
 #define MSHR_BANK_BURST_BITS_MAX 1u
-#define MSHR_SHIFT_MIN 5u
+#define MSHR_SHIFT_MIN 4u
 #define MSHR_SHIFT_MAX 10u
 // Hold-window MAGNITUDE is not derivable from M/N/P: the two classes carry OPPOSITE policies
 // (hold_window_single is 0 -- sp-fmatmul's requesters are >60 cycles apart, so 70-85% of held
@@ -211,32 +199,50 @@ static inline uint32_t mshr_clog2(uint32_t x) {
 /// Fill the shape-derived fields of *c. Timeout/cache fields are left untouched -- set them
 /// from the MSHR_CFG_* macros before calling, or after.
 /// elem_bytes: 4 for fp32, 2 for fp16.  kernel_size: the kernel's KERNEL_SIZE (selects LMUL).
+/// Uses the selected split (or derives prefill/decode if no split was selected).
 /// Returns 0 on success, negative if the shape is illegal for this core count.
 static inline int mshr_cfg_derive(uint32_t M, uint32_t N, uint32_t P,
                                   uint32_t elem_bytes, uint32_t kernel_size,
                                   mshr_cfg_t *c) {
-  const uint32_t num_groups     = NUM_GROUPS;
-  const uint32_t cores_per_group = (uint32_t)NUM_CORES / num_groups;
-  if (kernel_size == 0u || num_groups == 0u) return -1;
-
-  const uint32_t dim_group = M / num_groups;
-  if (dim_group == 0u || (dim_group % kernel_size) != 0u) return -2;
-  const uint32_t split_m_count = dim_group / kernel_size;
-  if (split_m_count == 0u) return -3;
-
-  uint32_t split_p_count;
-  if (split_m_count < cores_per_group) {
-    if ((cores_per_group % split_m_count) != 0u) return -4;
-    split_p_count = cores_per_group / split_m_count;
-    if (split_p_count == 0u) split_p_count = 1u;
-    if ((P % split_p_count) != 0u) return -5;
+#ifdef GEMM_CONFIG_H
+  const uint32_t num_groups = GEMM_ACTIVE_GROUPS;
+  const uint32_t active_cores = GEMM_ACTIVE_CORES;
+#else
+  const uint32_t num_groups = NUM_GROUPS;
+  const uint32_t active_cores = NUM_CORES;
+#endif
+  const uint32_t cores_per_group = NUM_CORES / NUM_GROUPS;
+  if ((kernel_size != 1 && kernel_size != 2 && kernel_size != 4 &&
+       kernel_size != 8) || !M || !N || N % 2 || !P ||
+      (elem_bytes != 2 && elem_bytes != 4)) return -1;
+  const uint32_t rows = M / num_groups;
+  const uint32_t tiles = rows / kernel_size;
+  const uint32_t prefill = M % num_groups == 0 && tiles &&
+    rows % kernel_size == 0 && (tiles < cores_per_group
+      ? cores_per_group % tiles == 0 && P % (cores_per_group / tiles) == 0
+      : rows % (cores_per_group * kernel_size) == 0);
+#ifdef MATMUL_DECODE_SPLIT
+  const uint32_t decode = MATMUL_DECODE_SPLIT;
+#else
+  const uint32_t decode = !prefill;
+#endif
+  uint32_t share_a, share_b, p_blocks;
+  if (decode) {
+    const uint32_t nrow = M / kernel_size;
+    if (M % kernel_size || !nrow || active_cores % nrow ||
+        (nrow < cores_per_group ? cores_per_group % nrow
+                               : nrow % cores_per_group)) return -2;
+    p_blocks = active_cores / nrow;
+    share_b = nrow < cores_per_group ? nrow : cores_per_group;
+    share_a = cores_per_group / share_b;
   } else {
-    split_p_count = 1u;               // no P split: every core owns full P
+    if (!prefill) return -3;
+    share_b = tiles < cores_per_group ? tiles : cores_per_group;
+    share_a = cores_per_group / share_b;
+    p_blocks = share_a;
   }
-
-  // A is shared by split_p_count cores, B by split_m_count. One entry pool serves both.
-  const uint32_t share_a = split_p_count;
-  const uint32_t share_b = split_m_count;
+  if (!p_blocks || P % p_blocks) return -4;
+  const uint32_t split_p_count = share_a;
   const uint32_t merge   = (share_a > share_b) ? share_a : share_b;
 
   // hold_subs == 1 is the RTL's "bypass this class" encoding. share_a<=2 MUST bypass: at a
@@ -249,14 +255,14 @@ static inline int mshr_cfg_derive(uint32_t M, uint32_t N, uint32_t P,
 
   // LMUL follows kernel_size: 8 -> m2, 4 -> m4, 2 -> m8.  vl_words counts 32-bit MEMORY words,
   // so it is elem-size INVARIANT -- e32,m2 and e16,m2 both move 128 B and split identically.
-  const uint32_t lmul     = 16u / kernel_size;
+  const uint32_t lmul     = (kernel_size == 1u) ? 8u : 16u / kernel_size;
   const uint32_t vl_words = ((uint32_t)VLEN * lmul) / MSHR_ELEN;
 
   // Both shifts select bits of the WORD address, but N and gap count ELEMENTS. At fp16 an
   // element is 2 B, so a stride of N elements is N/2 words and BOTH shifts drop by one.
   // Getting this wrong does not error -- the hash just picks the wrong bits and the run is
   // quietly slow (docs/mshr_bank_hash_design.md 7).
-  const uint32_t gap       = P / split_p_count;
+  const uint32_t gap       = P / p_blocks;
   const uint32_t n_words   = (N * elem_bytes) / 4u;
   const uint32_t gap_words = (gap * elem_bytes) / 4u;
 
@@ -271,7 +277,7 @@ static inline int mshr_cfg_derive(uint32_t M, uint32_t N, uint32_t P,
     const uint32_t load_words = (vl_words < gap_words) ? vl_words : gap_words;
     const uint32_t nbursts    = ((load_words / MSHR_MAX_BURST_WORDS) < 1u)
                                   ? 1u : (load_words / MSHR_MAX_BURST_WORDS);
-    const uint32_t contiguous = (load_words >= gap_words);
+    const uint32_t contiguous = (load_words >= gap_words) || (split_p_count == 1u);
     uint32_t burst_bits = contiguous ? 0u : mshr_clog2(nbursts);
     if (burst_bits > MSHR_BANK_BURST_BITS_MAX) burst_bits = MSHR_BANK_BURST_BITS_MAX;
     // The RTL's real rule: bank_shift_burst >= BurstAlignBits + burst_bits. NOT clamped up to
@@ -287,8 +293,13 @@ static inline int mshr_cfg_derive(uint32_t M, uint32_t N, uint32_t P,
     if (sh_b < burst_floor)    sh_b = burst_floor;
     if (sh_b > MSHR_SHIFT_MAX) sh_b = MSHR_SHIFT_MAX;
 
-  c->hold_subs_single  = subs_a;
-  c->hold_subs_burst   = subs_b;
+#ifdef MSHR_MERGE_REQS
+  c->hold_subs_single = subs_a < MSHR_MERGE_REQS ? subs_a : MSHR_MERGE_REQS;
+  c->hold_subs_burst = subs_b < MSHR_MERGE_REQS ? subs_b : MSHR_MERGE_REQS;
+#else
+  c->hold_subs_single = subs_a;
+  c->hold_subs_burst = subs_b;
+#endif
   c->bank_shift_single = sh_s;
   c->bank_shift_burst  = sh_b;
   c->bank_burst_bits   = burst_bits;
@@ -352,10 +363,17 @@ static inline int mshr_cfg_derive(uint32_t M, uint32_t N, uint32_t P,
 // p-slices is P/split_p_count. In decode P is partitioned across the WHOLE machine into
 // n_p_blocks, so the gap is P/n_p_blocks -- a factor of 64 apart at 32x256x16384. Using the
 // prefill gap there does not error; it just picks the wrong bank-hash bits and runs quietly slow.
+#ifdef GEMM_CONFIG_H
+# define MSHR_D_ACTIVE_GROUPS GEMM_ACTIVE_GROUPS
+# define MSHR_D_ACTIVE_CORES GEMM_ACTIVE_CORES
+#else
+# define MSHR_D_ACTIVE_GROUPS NUM_GROUPS
+# define MSHR_D_ACTIVE_CORES NUM_CORES
+#endif
 #if defined(MATMUL_DECODE_SPLIT) && (MATMUL_DECODE_SPLIT)
 #  define MSHR_D_CPG_   ((int)NUM_CORES / (int)NUM_GROUPS)
 #  define MSHR_D_NROW   ((int)GEMM_M / (int)MSHR_KERNEL_SIZE)          /* row chunks */
-#  define MSHR_D_NPB    ((int)NUM_CORES / MSHR_D_NROW)                 /* p blocks, machine-wide */
+#  define MSHR_D_NPB    (MSHR_D_ACTIVE_CORES / MSHR_D_NROW)                 /* p blocks, machine-wide */
    /* W sharers per group = the n_row_chunks consecutive cids that hold one p_block, capped by
       the group; A sharers per group = however many groups-of-those fit in the group. */
 #  define MSHR_D_SHR_B  (MSHR_D_NROW < MSHR_D_CPG_ ? MSHR_D_NROW : MSHR_D_CPG_)
@@ -363,7 +381,8 @@ static inline int mshr_cfg_derive(uint32_t M, uint32_t N, uint32_t P,
 #  define MSHR_D_PGAP   MSHR_D_NPB
 #else
 #  define MSHR_D_CPG_   ((int)NUM_CORES / (int)NUM_GROUPS)
-#  define MSHR_D_SHR_B  (((int)GEMM_M / (int)NUM_GROUPS) / (int)MSHR_KERNEL_SIZE)
+#  define MSHR_D_ROWS   (((int)GEMM_M / MSHR_D_ACTIVE_GROUPS) / (int)MSHR_KERNEL_SIZE)
+#  define MSHR_D_SHR_B  ((MSHR_D_ROWS < MSHR_D_CPG_) ? MSHR_D_ROWS : MSHR_D_CPG_)
 #  define MSHR_D_SHR_A  ((MSHR_D_SHR_B > 0 && MSHR_D_SHR_B < MSHR_D_CPG_) \
                            ? (MSHR_D_CPG_ / MSHR_D_SHR_B) : 1)
 #  define MSHR_D_PGAP   MSHR_D_SHR_A
@@ -436,7 +455,7 @@ enum {
   MSHR_D_HOLD_WINDOW_SINGLE = (MSHR_D_SPLIT_P < 2) ? 0 : MSHR_CFG_HOLD_WINDOW_SINGLE,
   MSHR_D_HOLD_WINDOW_BURST  = (MSHR_D_SPLIT_M < 2) ? 0 : MSHR_CFG_HOLD_WINDOW_BURST,
 
-  MSHR_D_LMUL     = 16 / MSHR_KERNEL_SIZE,          // KERNEL_SIZE 8/4/2 -> m2/m4/m8
+  MSHR_D_LMUL     = (MSHR_KERNEL_SIZE == 1) ? 8 : 16 / MSHR_KERNEL_SIZE,          // KERNEL_SIZE 8/4/2 -> m2/m4/m8
   MSHR_D_VL_WORDS = ((int)VLEN * MSHR_D_LMUL) / (int)MSHR_ELEN,
 
   // N and P count ELEMENTS; the hash selects WORD-address bits, so at fp16 both shifts drop one.
@@ -466,7 +485,8 @@ enum {
   MSHR_D_LOAD_WORDS = (MSHR_D_VL_WORDS < MSHR_D_GAP_WORDS) ? MSHR_D_VL_WORDS : MSHR_D_GAP_WORDS,
   MSHR_D_NBURSTS    = ((MSHR_D_LOAD_WORDS / (int)MSHR_MAX_BURST_WORDS) < 1)
                         ? 1 : (MSHR_D_LOAD_WORDS / (int)MSHR_MAX_BURST_WORDS),
-  MSHR_D_CONTIGUOUS = (MSHR_D_LOAD_WORDS >= MSHR_D_GAP_WORDS),
+  MSHR_D_CONTIGUOUS = (MSHR_D_LOAD_WORDS >= MSHR_D_GAP_WORDS) ||
+                       (MSHR_D_SPLIT_P == 1),
   MSHR_D_BANK_BURST_BITS_RAW = MSHR_D_CONTIGUOUS ? 0 : MSHR_CLOG2(MSHR_D_NBURSTS),
   MSHR_D_BANK_BURST_BITS = (MSHR_D_BANK_BURST_BITS_RAW > (int)MSHR_BANK_BURST_BITS_MAX)
                              ? (int)MSHR_BANK_BURST_BITS_MAX : MSHR_D_BANK_BURST_BITS_RAW,
@@ -571,5 +591,31 @@ static inline int mshr_cfg_check_splits(uint32_t share_w, uint32_t share_a, uint
     .bankfull_backpressure = MSHR_CFG_BANKFULL_BP,             \
   }
 #endif // GEMM_M
+
+// The GEMM applications select a legal, balanced work partition first. Tune
+// only hash mode 3, whose independent word-address selectors match this model.
+#ifdef GEMM_CONFIG_H
+#include "gemm_hash.h"
+static inline void mshr_cfg_tune_gemm(mshr_cfg_t *c, const void *a,
+                                      const void *b, uint32_t group) {
+#if MSHR_HASH_SEARCH && MSHR_CFG_HASH_MODE == 3
+  _Static_assert(MSHR_CFG_WAYS > 0 &&
+                 MSHR_CFG_ENTRIES % MSHR_CFG_WAYS == 0,
+                 "Invalid MSHR banking geometry");
+  _Static_assert(MSHR_CFG_ENTRIES / MSHR_CFG_WAYS > 0 &&
+                 !((MSHR_CFG_ENTRIES / MSHR_CFG_WAYS) &
+                   (MSHR_CFG_ENTRIES / MSHR_CFG_WAYS - 1)),
+                 "MSHR bank count must be a power of two");
+  _Static_assert(MSHR_CFG_ENTRIES / MSHR_CFG_WAYS <= 64,
+                 "GEMM hash search supports at most 64 banks");
+  (void)gemm_hash_select((uint32_t)(uintptr_t)a, (uint32_t)(uintptr_t)b,
+                        group, MSHR_CFG_ENTRIES / MSHR_CFG_WAYS,
+                        &c->bank_shift_single, &c->bank_shift_burst,
+                        &c->bank_burst_bits);
+#else
+  (void)c; (void)a; (void)b; (void)group;
+#endif
+}
+#endif
 
 #endif // MSHR_CFG_H

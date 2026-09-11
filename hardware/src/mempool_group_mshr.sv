@@ -911,6 +911,15 @@ module mempool_group_mshr
   logic                                                                        fin_second;
   logic                                                                        fin_retire;
   logic      [1:0]                                                             fin_pop;
+  /// Finalize operands snapshotted before the pass writes anything, and the values it can write.
+  /// Decided without the head-beat term so that term meets only the final select, instead of
+  /// entering ahead of the pointer adder, the count subtract and the beats_left subtract.
+  logic [RespBufCountW-1:0] fin_cnt_in,  fin_cnt_next;
+  logic [RespBufPtrW-1:0]   fin_rdp_in,  fin_rdp_next;
+  logic [BurstLenWidth-1:0] fin_bl_in,   fin_bl_next;
+  logic [MshrMergeReqs-1:0] fin_bp2_in;
+  logic                     fin_arm, fin_cache_sel, fin_cnt_next_nz;
+  logic                     fin_bp_promote, fin_b2_clr;
   // Response drain scheduling (single-response per MSHR).
 
   // Round-robin fairness bases.
@@ -4162,100 +4171,78 @@ module mempool_group_mshr
     // "beats_left after the head decrement == 1" ==  beats_left == 2
     // NOT a bandwidth change: pop == 2 is the same two beats, decided in parallel not in series.
     for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
-      resp_head_beat_pending[mshr_i] = 1'b0;
-      resp_cnt_after_pop[mshr_i]     = mshr_d[mshr_i].resp_buf_cnt;
-      fin_cache     = 1'b0;
-      fin_head      = 1'b0;
-      fin_second_en = 1'b0;
-      fin_second    = 1'b0;
-      fin_retire    = 1'b0;
-      fin_pop       = 2'd0;
+      // Entering values, read before any write below, so each is what the sequential form saw.
+      fin_cnt_in = mshr_d[mshr_i].resp_buf_cnt;
+      fin_rdp_in = mshr_d[mshr_i].resp_buf_rd_ptr;
+      fin_bl_in  = mshr_d[mshr_i].beats_left;
+      fin_bp2_in = mshr_d[mshr_i].beat_pending2;
+
+      // Decided WITHOUT the head-beat term: these are only ever consumed under fin_head, so
+      // dropping that qualifier cannot change a selected value.
+      fin_second_en = PD2 && (mshr_d[mshr_i].burst_len != BurstLenWidth'(1)) &&
+                      mshr_d[mshr_i].beat2_armed && (fin_bl_in != BurstLenWidth'(1));
+      fin_second    = fin_second_en && (fin_bp2_in == '0) &&
+                      (fin_cnt_in >= RespBufCountW'(2));
+      fin_pop       = fin_second ? 2'd2 : 2'd1;
+      fin_retire    = (fin_bl_in == BurstLenWidth'(1)) ||
+                      (fin_second && (fin_bl_in == BurstLenWidth'(2)));
+
+      // Both pop distances off the ENTERING pointer and count, so the late term drives only the
+      // select. pop <= 2 and rd_ptr <= RespBufWords-1, so one conditional subtract covers the wrap.
+      fin_rdp_next = (RespBufWords > 1)
+                   ? (((int'(fin_rdp_in) + int'(fin_pop)) >= int'(RespBufWords))
+                        ? RespBufPtrW'(int'(fin_rdp_in) + int'(fin_pop) - int'(RespBufWords))
+                        : RespBufPtrW'(int'(fin_rdp_in) + int'(fin_pop)))
+                   : fin_rdp_in;
+      fin_cnt_next = fin_cnt_in - RespBufCountW'(fin_pop);
+      fin_bl_next  = (fin_bl_in != '0) ? (fin_bl_in - BurstLenWidth'(fin_pop)) : fin_bl_in;
+      // "count after the pop != 0" is "count > pop": the guard gives cnt != 0 and fin_second needs
+      // cnt >= 2, so the subtraction never borrows.
+      fin_cnt_next_nz = fin_second ? (fin_cnt_in > RespBufCountW'(2))
+                                   : (fin_cnt_in > RespBufCountW'(1));
+
+      fin_arm       = mshr_q_valid[mshr_i] && (fin_cnt_in != '0) &&
+                      (mshr_d[mshr_i].state == MSHR_DRAIN_RESP);
+      fin_cache_sel = (fin_bl_in == BurstLenWidth'(1)) && EnableRespCache && !amo_inval_guard &&
+                      mshr_d[mshr_i].cacheable &&
+                      (mshr_d[mshr_i].burst_len == BurstLenWidth'(1));
 
 `ifndef TARGET_SYNTHESIS
       gate_extra[mshr_i] = gate_extra[mshr_i] | (mshr_q_valid[mshr_i] & ~mshr_d_valid[mshr_i]);
 `endif
-      // Same substitution as the head-beat seed, and safe for the same reason.
-      if (mshr_q_valid[mshr_i] && (mshr_d[mshr_i].resp_buf_cnt != '0) &&
-          (mshr_d[mshr_i].state == MSHR_DRAIN_RESP)) begin
-        resp_head_beat_pending[mshr_i] = |mshr_d[mshr_i].beat_pending;
-        if (!resp_head_beat_pending[mshr_i]) begin
-          fin_cache = (mshr_d[mshr_i].beats_left == BurstLenWidth'(1)) &&
-                      EnableRespCache && !amo_inval_guard &&
-                      mshr_d[mshr_i].cacheable &&
-                      (mshr_d[mshr_i].burst_len == BurstLenWidth'(1));
-          fin_head  = !fin_cache;
-        end
+      resp_head_beat_pending[mshr_i] = fin_arm && (|mshr_d[mshr_i].beat_pending);
+      fin_cache = fin_arm && !resp_head_beat_pending[mshr_i] &&  fin_cache_sel;
+      fin_head  = fin_arm && !resp_head_beat_pending[mshr_i] && !fin_cache_sel;
+      resp_cnt_after_pop[mshr_i] = fin_head ? fin_cnt_next : fin_cnt_in;
+
+      fin_bp_promote = fin_head && fin_second_en && !fin_second;
+      fin_b2_clr     = fin_head && !fin_retire && fin_second_en;
+
+      mshr_d[mshr_i].resp_buf_rd_ptr = fin_head ? fin_rdp_next : fin_rdp_in;
+      mshr_d[mshr_i].resp_buf_cnt    = fin_head ? fin_cnt_next : fin_cnt_in;
+      mshr_d[mshr_i].beats_left      = fin_cache                 ? '0
+                                     : (fin_head && !fin_retire) ? fin_bl_next : fin_bl_in;
+      mshr_d[mshr_i].state           = fin_cache                 ? MSHR_CACHED
+                                     : (fin_head && !fin_retire)
+                                         ? (fin_cnt_next_nz ? MSHR_DRAIN_RESP : MSHR_WAIT_RESP)
+                                         : mshr_d[mshr_i].state;
+      mshr_d[mshr_i].beat_pending    = fin_bp_promote           ? fin_bp2_in
+                                     : (fin_cache || fin_head)  ? '0
+                                                                : mshr_d[mshr_i].beat_pending;
+      mshr_d[mshr_i].beat_pending2   = fin_b2_clr ? '0   : fin_bp2_in;
+      mshr_d[mshr_i].beat2_armed     = fin_b2_clr ? 1'b0 : mshr_d[mshr_i].beat2_armed;
+      mshr_d[mshr_i].sub_reqs_num    = fin_cache  ? '0   : mshr_d[mshr_i].sub_reqs_num;
+      // Re-arm the serve-target timeout for the cache-resident phase.
+      mshr_d[mshr_i].hold_cnt        = fin_cache  ? hold_ticks(cfg_cache_hold_ticks_src)
+                                                  : mshr_d[mshr_i].hold_cnt;
+      for (int s = 0; s < MshrMergeReqs; s++) begin
+        if (fin_cache) mshr_d[mshr_i].sub_reqs[s].valid = 1'b0;
       end
-
-      if (fin_cache) begin
-        // Keep final drained head response as cache data (do not pop).
-        for (int s = 0; s < MshrMergeReqs; s++) begin
-          mshr_d[mshr_i].sub_reqs[s].valid = 1'b0;
-        end
-        mshr_d[mshr_i].sub_reqs_num = '0;
-        mshr_d[mshr_i].beat_pending = '0;
+      if (fin_head && fin_retire) mshr_d_valid[mshr_i] = 1'b0;
 `ifndef TARGET_SYNTHESIS
-        mshr_d[mshr_i].beat_done[resp_beat_offset[mshr_i]] = 1'b1;
+      if (fin_cache || fin_head) mshr_d[mshr_i].beat_done[resp_beat_offset[mshr_i]] = 1'b1;
+      if (fin_head && fin_second) mshr_d[mshr_i].beat_done[drain2_beat_off[mshr_i]] = 1'b1;
 `endif
-        mshr_d[mshr_i].beats_left = '0;
-        mshr_d[mshr_i].state = MSHR_CACHED;
-        // Re-arm the serve-target timeout for the cache-resident phase: a line whose target is
-        // never reached would otherwise never self-invalidate, and with CacheReclaimable=0 it
-        mshr_d[mshr_i].hold_cnt = hold_ticks(cfg_cache_hold_ticks_src);
-      end else if (fin_head) begin
-        // beats_left != 1 is exactly "the head pop does not retire the entry", which is what
-        // gated the whole PD2 block on mshr_d_valid after the head write.
-        fin_second_en = PD2 && (mshr_d[mshr_i].burst_len != BurstLenWidth'(1)) &&
-                        mshr_d[mshr_i].beat2_armed &&
-                        (mshr_d[mshr_i].beats_left != BurstLenWidth'(1));
-        fin_second    = fin_second_en && (mshr_d[mshr_i].beat_pending2 == '0) &&
-                        (mshr_d[mshr_i].resp_buf_cnt >= RespBufCountW'(2));
-        fin_pop       = fin_second ? 2'd2 : 2'd1;
-        fin_retire    = (mshr_d[mshr_i].beats_left == BurstLenWidth'(1)) ||
-                        (fin_second && (mshr_d[mshr_i].beats_left == BurstLenWidth'(2)));
-
-        // rd_ptr advances by the pop count. pop <= 2 and rd_ptr <= RespBufWords-1, so a single
-        // conditional subtraction covers the wrap (RespBufWords >= 2 is asserted above).
-        if (RespBufWords > 1) begin
-          if ((int'(mshr_d[mshr_i].resp_buf_rd_ptr) + int'(fin_pop)) >= int'(RespBufWords)) begin
-            mshr_d[mshr_i].resp_buf_rd_ptr = RespBufPtrW'(
-                int'(mshr_d[mshr_i].resp_buf_rd_ptr) + int'(fin_pop) - int'(RespBufWords));
-          end else begin
-            mshr_d[mshr_i].resp_buf_rd_ptr = RespBufPtrW'(
-                int'(mshr_d[mshr_i].resp_buf_rd_ptr) + int'(fin_pop));
-          end
-        end
-        resp_cnt_after_pop[mshr_i]  = mshr_d[mshr_i].resp_buf_cnt - RespBufCountW'(fin_pop);
-        mshr_d[mshr_i].resp_buf_cnt = resp_cnt_after_pop[mshr_i];
-`ifndef TARGET_SYNTHESIS
-        mshr_d[mshr_i].beat_done[resp_beat_offset[mshr_i]] = 1'b1;
-        if (fin_second) begin
-          mshr_d[mshr_i].beat_done[drain2_beat_off[mshr_i]] = 1'b1;
-        end
-`endif
-        // An armed second beat that could not pop is promoted into the head slot.
-        mshr_d[mshr_i].beat_pending =
-            (fin_second_en && !fin_second) ? mshr_d[mshr_i].beat_pending2 : '0;
-
-        if (fin_retire) begin
-          mshr_d_valid[mshr_i] = 1'b0;
-          // Retire by dropping valid only (see the first retire site for why). beat_pending2 and
-          // `if (mshr_d_valid)`, i.e. never on the retiring path.
-        end else begin
-          if (mshr_d[mshr_i].beats_left != '0) begin
-            mshr_d[mshr_i].beats_left = mshr_d[mshr_i].beats_left - BurstLenWidth'(fin_pop);
-          end
-          if (resp_cnt_after_pop[mshr_i] != '0) begin
-            mshr_d[mshr_i].state = MSHR_DRAIN_RESP;
-          end else begin
-            mshr_d[mshr_i].state = MSHR_WAIT_RESP;
-          end
-          if (fin_second_en) begin
-            mshr_d[mshr_i].beat_pending2 = '0;
-            mshr_d[mshr_i].beat2_armed   = 1'b0;
-          end
-        end
-      end
     end
 
     // Apply the deferred allocation valid-set. Placed last so the allocation arbiter never enters
