@@ -601,6 +601,26 @@ module mempool_group_mshr
   mempool_group_mshr_t [MshrNum-1:0]                                           mshr_q;
   logic                [MshrNum-1:0]                                           mshr_d_valid;
 `ifndef TARGET_SYNTHESIS
+  /// An accepted AMO whose merge key and target group match entry e. The address test is the one
+  /// req_addr_hit_way uses (base_addr is the entry's key), and acceptance matters because a
+  /// stalled request never reaches the cache.
+  logic [MshrNum-1:0] amo_hits_entry;
+  always_comb begin
+    amo_hits_entry = '0;
+    for (int ah = 0; ah < MshrNum; ah++) begin
+      for (int at = 0; at < NumTilesPerGroup; at++) begin
+        for (int ap = 1; ap < NumRemoteReqPortsPerTile; ap++) begin
+          if (req_in_valid[at][ap] && req_in_ready[at][ap] &&
+              (req_in[at][ap].wdata.amo != '0) &&
+              (req_in[at][ap].tgt_group_id == mshr_q[ah].tgt_group_id) &&
+              (req_addr_key[at][ap] == mshr_q[ah].base_addr)) begin
+            amo_hits_entry[ah] = 1'b1;
+          end
+        end
+      end
+    end
+  end
+
   // Entries the two gates above admit but mshr_d_valid does not; checked below.
   logic                [MshrNum-1:0]                                           gate_extra;
 `endif
@@ -721,9 +741,10 @@ module mempool_group_mshr
   // Prefix rank of same-target merging ports.
   logic                                                                                           amo_invalidate;
   /// AMO invalidation is a CacheAmoInval behaviour, so every guard that exists to keep a line out
-  /// of the cache while an AMO is in flight belongs under that knob. With it off, cache_amo_never_hits
-  /// is the standing proof that an AMO and a CACHED entry never coincide, and this folds to 0 --
-  /// which takes |req_is_amo, and with it the request path, off the finalize.
+  /// of the cache while an AMO is in flight belongs under that knob. With it off this folds to 0,
+  /// which takes |req_is_amo -- and with it the request path -- off the finalize;
+  /// cache_amo_never_hits then checks the property that actually matters, that no ACCEPTED AMO
+  /// reaches the address of a cached line.
   logic                                                                                           amo_inval_guard;
 
   // Request allocation (banked allocator bookkeeping).
@@ -4687,12 +4708,17 @@ module mempool_group_mshr
       end
     end
     if (!CacheAmoInval && EnableRespCache) begin : gen_no_amo_hit_assert
+      // Scoped like the store twin above: an ACCEPTED amo whose key and target group match the
+      // cached line. amo_invalidate alone is |req_is_amo over every lane, so pairing it with "some
+      // entry is CACHED" fires on an unrelated AMO -- a barrier on another address, which is the
+      // common case -- and says nothing about whether the cache was actually reached.
       for (genvar ae = 0; ae < MshrNum; ae++) begin : gen_nah_entry
         cache_amo_never_hits: assert property(
           @(posedge clk_i) disable iff (!rst_ni)
-            !(amo_invalidate && mshr_q_valid[ae] && (mshr_q[ae].state == MSHR_CACHED)))
+            !(mshr_q_valid[ae] && (mshr_q[ae].state == MSHR_CACHED) && amo_hits_entry[ae]))
           else $fatal(1,
-              "AMO seen while entry %0d is CACHED with group_mshr_cache_amo_inval off", ae);
+              "accepted AMO to the address of CACHED entry %0d with group_mshr_cache_amo_inval off",
+              ae);
       end
     end
 
