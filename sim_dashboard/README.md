@@ -1,7 +1,9 @@
 # Simulation trace dashboard
 
-Generate one **offline HTML file** from RTL transcripts and optional structured
-telemetry. All new source, tests, generated copies and outputs live in this folder.
+Use **`python3 sim_dashboard/generate.py`** for all inputs. It generates one
+**offline HTML file** with a full-run overview and selectable detail from RTL
+transcripts and optional structured telemetry. All new source, tests, generated
+copies and outputs live in this folder.
 Instrumentation uses a private testbench copy; the probe does not change RTL behavior.
 VCS is the preferred RTL simulator. The campaign scripts build private images
 and preload private ELFs to keep concurrent runs isolated.
@@ -305,3 +307,94 @@ The controller uses the development virtual environment (`pyelftools`, `pytest`,
 and `playwright`); standalone HTML generation needs only standard-library Python.
 Generated ELFs, simulator images, RTL snapshots, telemetry, logs and dashboards
 are excluded from version control.
+
+## Full telemetry without dropped intervals
+
+The unified `generate.py` streams telemetry into compressed, lossless detail
+blocks, including for multi-gigabyte traces. Transcript-only runs use the same
+overview and detail interface. Every selected telemetry record is retained,
+including all entry, bank and link records. The opening overview shows whole-system FPU busy-lane
+utilization, MSHR occupancy, and remote response handshakes per cycle across
+all captured phases. For older transcripts with only a printed overall FPU
+percentage, that series is explicitly labeled and duration-weighted; it is not
+converted into measured lane counters. Rates use summed numerators and
+denominators; missing measurements remain unavailable and gaps are not joined.
+
+Drag on an overview chart, click to center a detail interval, or enter start/end
+cycles and choose **Inspect range**. The full-run overview stays visible while
+the detailed charts load only the selected region, even across storage-block
+boundaries. Detail ranges are limited to three blocks (60,000 cycles by default)
+to bound browser memory. With a custom `--window`, the default block width rounds
+up from 20,000 cycles to a multiple of that window. Wider selections are explicitly rejected rather than
+silently truncated. Original measurement windows overlapping the selection are
+retained whole; their counters are never proportionally split. The Phase selector
+filters detail only. Work-progress totals carry forward from earlier records.
+Benchmark roofline accounting and diagnosis retain their full-benchmark scope.
+
+```sh
+python3 sim_dashboard/generate.py \
+  --transcript /absolute/path/to/transcript \
+  --telemetry /absolute/path/to/telemetry.jsonl \
+  --manifest /absolute/path/to/manifest.json \
+  --peaks /absolute/path/to/matching-peaks.json \
+  --cutoff 860000 --page-cycles 20000 \
+  --out /absolute/path/to/dashboard_full.html
+```
+
+The cutoff is optional: by default, all recorded intervals are included and the
+last interval end determines the captured extent. For a partial snapshot, use
+`--cutoff` to retain only records ending at or before a known captured cycle.
+Use stable, fully written input files; changing telemetry files or a partially
+written JSON line produce an error. Copy an active run's trace before processing.
+
+Completion is unconfirmed by default. For a finished run, use `--complete`; this
+labels completion but does not perform numerical validation, and preserves the
+manifest's correctness assessment. Structured telemetry fields and source-line
+references are preserved. Transcript record types absent from telemetry (such as pipeline pressure) are retained too;
+matching legacy counter identities are superseded by their structured probes.
+Legacy counters for other groups or endpoints remain available.
+A `.coverage.json` companion records input/output counts, source SHA-256,
+page count, captured benchmark extent and FMAC totals. Packaging fails if any
+retained record is lost or duplicated. Missing final program completion must
+not be treated as successful numerical validation.
+
+An existing full dashboard can gain the overview without reparsing its raw trace:
+
+```sh
+python3 sim_dashboard/upgrade_full.py /absolute/path/to/dashboard_full.html \
+  --out /absolute/path/to/dashboard_overview.html
+```
+
+The upgrader derives overview counters from the embedded records and copies each
+compressed detail block byte-for-byte. Its `.overview_audit.json` verifies those
+blocks after writing. The original dashboard remains available for comparison.
+
+
+## One command, optional telemetry
+
+**Telemetry** is `telemetry.jsonl`, a structured counter file written by the RTL
+instrumentation. Each line is a JSON metadata header or a sampled measurement
+with a cycle interval, counter kind, and relevant group/bank/entry/link IDs.
+The transcript is the simulator's human-readable log. Supply both from the same
+simulation to combine software/timing prints with detailed hardware counters.
+Telemetry is optional; absent probes remain unavailable, never inferred.
+
+```sh
+python3 sim_dashboard/generate.py \
+  --transcript /absolute/path/to/transcript \
+  --telemetry /absolute/path/to/telemetry.jsonl \
+  --manifest /absolute/path/to/manifest.json \
+  --peaks roofline/peaks/terapool_spatz4_fpu_8x8.json \
+  --complete --out sim_dashboard/output/dashboard.html
+```
+
+Omit `--telemetry` for transcript-only input. A manifest is optional when the
+required metadata is captured or supplied via `--mesh`, `--shape`, and related
+options. Peak tables are optional; roofline ceilings need a matching peak table.
+Repeated `--telemetry` arguments accept separate probe files from the same run;
+conflicting metadata and duplicate counters are rejected. `--json-out` remains
+available but explicitly materializes the full parsed dataset in memory.
+
+`generate_full.py` is now only a compatibility wrapper around the same command;
+there is no second generator implementation. Existing campaign commands keep
+working. Shared HTML packaging lives in `trace_dashboard/packaging.py`.

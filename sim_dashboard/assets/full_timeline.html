@@ -1,0 +1,14 @@
+<article id="runTimeline" class="runTimeline">
+  <h2>Full-run overview</h2>
+  <p class="hint">Whole system, all captured cycles. Drag across a chart or enter a range to inspect the original records below. Shading marks the detailed range.</p>
+  <div id="runTimelineCharts"></div>
+  <div class="controls">
+    <label>Detail from cycle <input id="detailStart" type="number" min="0" step="1000"></label>
+    <label>To cycle <input id="detailEnd" type="number" min="1" step="1000"></label>
+    <button id="detailApply">Inspect range</button>
+    <button id="detailPrev">Earlier</button><button id="detailNext">Later</button>
+    <span id="pageStatus" role="status"></span>
+  </div>
+  <p id="overviewCoverage" class="hint"></p>
+  <details><summary>Jump to a recorded interval</summary><label>Interval <select id="timelinePage"></select></label><button id="pagePrev">Previous</button><button id="pageNext">Next</button></details>
+</article>

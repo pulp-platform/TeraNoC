@@ -1,14 +1,10 @@
 """CLI and single-file HTML packaging. Python standard library only."""
 import argparse
-import base64
-import gzip
 import json
-import math
 from pathlib import Path
 
-from .analysis import hash_explore, roofline
-from .diagnostics import benchmark_diagnostics
-from .model import assemble, read_telemetry
+from .packaging import render
+from .model import iter_telemetry, identity
 from .rtl import parse_transcript
 
 HERE = Path(__file__).resolve().parents[1]
@@ -45,7 +41,14 @@ def main():
   p.add_argument("--peaks", type=Path, help="roofline/peaks/*.json matching the run")
   p.add_argument("--out", type=Path, default=HERE/"output/dashboard.html")
   p.add_argument("--json-out", type=Path, help="optional reusable parsed dataset")
+  p.add_argument("--cutoff", type=positive, help="Keep records ending at or before this cycle; default: all recorded intervals")
+  p.add_argument("--complete", action="store_true", help="Declare simulation finished; does not validate correctness")
+  p.add_argument("--page-cycles", type=positive, help="Detail block width; default: 20000 rounded up to a multiple of --window")
   args = p.parse_args()
+  if args.page_cycles is None:
+    args.page_cycles = ((20000 + args.window - 1)//args.window)*args.window
+  if args.page_cycles % args.window:
+    p.error("--page-cycles must be a multiple of --window")
   if not args.transcript and not args.telemetry:
     p.error("supply --transcript and/or --telemetry")
   try:
@@ -60,20 +63,49 @@ def main():
       meta.update({k: v for k, v in info.items() if k not in ("warnings", "source")})
       warnings.extend(info["warnings"])
       sources.append(args.transcript)
+    def selected(row):
+      return ((args.cutoff is None or row['end'] <= args.cutoff) and
+              (bounds is None or row['end'] > bounds[0] and row['start'] < bounds[1]))
+
+    captured_fields = ("mesh", "tiles_per_group", "cores_per_tile", "n_fpu",
+                       "banks_per_tile", "mshr_entries", "mshr_ways", "kernel_size",
+                       "shape", "precision")
+    preferred = set()
+    source_details = {}
+    source_stamps = {}
+
+    def stamp(path):
+      stat = path.stat()
+      return stat.st_size, stat.st_mtime_ns
     for path in args.telemetry:
-      rows, header = read_telemetry(path, bounds)
-      records.extend(rows)
-      meta.update(header)
+      # Metadata and identity prepass uses bounded memory; the packaging pass
+      # streams full rows. This supports headers anywhere and multiple inputs.
+      source_stamps[path] = stamp(path)
+      source_details[path] = {}
+      for row in iter_telemetry(path, source_details[path]):
+        if row['kind'] == 'meta':
+          header = {k: v for k, v in row.items() if k != 'kind'}
+          for field in captured_fields:
+            if field in header and field in meta and header[field] != meta[field]:
+              raise ValueError(f"Captured {field} differs between input sources")
+          meta.update(header)
+        elif selected(row):
+          preferred.add(identity(row))
+      if stamp(path) != source_stamps[path]:
+        raise ValueError(f'{path} changed while reading; use a stable file snapshot')
       sources.append(path)
     if args.manifest:
       manifest = json.loads(args.manifest.read_text())
-      for field in ("mesh", "tiles_per_group", "cores_per_tile", "n_fpu", "banks_per_tile", "mshr_entries", "mshr_ways", "kernel_size"):
+      for field in captured_fields:
         if field in manifest and field in meta and manifest[field] != meta[field]:
           raise ValueError(f"Manifest {field} differs from captured telemetry")
       meta.update(manifest)
       sources.append(args.manifest)
     if args.mesh:
-      meta["mesh"] = [int(x) for x in args.mesh.lower().split("x")]
+      mesh = [int(x) for x in args.mesh.lower().split("x")]
+      if 'mesh' in meta and meta['mesh'] != mesh:
+        raise ValueError('--mesh differs from captured or manifest geometry')
+      meta['mesh'] = mesh
     if args.shape:
       meta["shape"] = [int(x) for x in args.shape.lower().split("x")]
     for key, value in (("precision", args.precision), ("cycles_per_pass", args.cycles), ("repetitions", args.repeat)):
@@ -105,37 +137,28 @@ def main():
     if bounds is not None:
       meta['display_cycle_range'] = bounds
       warnings.append(f'Display limited to cycles {bounds[0]}–{bounds[1]}; overlapping source windows are retained whole. Complete raw traces remain in the source files.')
-    frames, rows = assemble(records, meta, args.window, warnings)
-    for kind, counter in (("fpu", "busy"), ("mshr", "occupied"), ("bank", "hsk"), ("link", "hsk")):
-      active = [r for r in rows if r["kind"] == kind and r.get("phase") == "bench"]
-      if active and not any(r.get(counter, 0) for r in active):
-        warnings.append(f"All benchmark {kind} {counter} counters are zero; check probe enablement and workload activity.")
-    roof = roofline(rows, meta, args.peaks, warnings)
     if args.peaks:
       sources.append(args.peaks)
-    if any(r["end"]-r["start"] > args.window or r["start"] < (r["end"]-1)//args.window*args.window for r in rows):
-      warnings.append("Some source windows cross display boundaries. They are assigned by end cycle; tooltips retain their actual span. Counts are never interpolated.")
-    hash_result = hash_explore(meta)
-    diagnostics = benchmark_diagnostics(rows, meta, hash_result)
-    data = dict(diagnostics=diagnostics, schema_version=1, meta=meta, frames=frames, roofline=roof,
-                hash=hash_result, warnings=sorted(set(warnings)), window=args.window,
-                sources=[dict(path=str(path.resolve()), bytes=path.stat().st_size) for path in sources])
-    payload = json.dumps(data, separators=(",", ":"), allow_nan=False)
-    # Escape HTML parser terminators and JS-unfriendly Unicode. Never interpolate log text as HTML.
-    payload = payload.replace("<", "\\u003c").replace("&", "\\u0026").replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
-    html = (HERE/"assets/index.html").read_text()
-    html = html.replace("/* DASHBOARD_CSS */", (HERE/"assets/dashboard.css").read_text())
-    html = html.replace("/* DASHBOARD_JS */", (HERE/"assets/dashboard.js").read_text())
-    packed = base64.b64encode(gzip.compress(payload.encode(), mtime=0)).decode()
-    html = html.replace("__DASHBOARD_DATA__", json.dumps({"encoding": "gzip-base64", "data": packed}))
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(html)
-    if args.json_out:
-      args.json_out.parent.mkdir(parents=True, exist_ok=True)
-      args.json_out.write_text(json.dumps(data, allow_nan=False))
-    print(f"Wrote {args.out.resolve()} ({len(rows):,} records, {len(frames):,} windows)")
-    print("Available:", ", ".join(sorted({r['kind'] for r in rows})))
-    for warning in data["warnings"]:
-      print("Note:", warning)
+
+    def rows():
+      for path in args.telemetry:
+        if stamp(path) != source_stamps[path]:
+          raise ValueError(f'{path} changed while reading; use a stable file snapshot')
+        for row in iter_telemetry(path):
+          if row['kind'] != 'meta' and selected(row):
+            if len(args.telemetry) > 1:
+              row['source_path'] = str(path.resolve())
+            yield row
+        if stamp(path) != source_stamps[path]:
+          raise ValueError(f'{path} changed while reading; use a stable file snapshot')
+      for row in records:
+        if selected(row) and identity(row) not in preferred:
+          row.setdefault('origin', 'legacy')
+          yield row
+
+    render(rows(), meta,
+           [dict(path=str(path.resolve()), bytes=path.stat().st_size,
+                 **source_details.get(path, {})) for path in sources],
+           warnings, args)
   except (ValueError, KeyError, OSError) as error:
     p.error(str(error))

@@ -1,5 +1,6 @@
 """Simulator-independent telemetry validation and conservative aggregation."""
 import json
+import hashlib
 import math
 from collections import defaultdict
 
@@ -23,10 +24,13 @@ class RecordCollector(list):
       self.append(row)
 
 
-def read_telemetry(path, bounds=None):
-  records, meta = RecordCollector(bounds), {}
-  with open(path) as stream:
+def iter_telemetry(path, source_info=None):
+  """Yield validated headers and rows without retaining the trace in memory."""
+  digest = hashlib.sha256() if source_info is not None else None
+  with open(path, 'rb') as stream:
     for line_number, line in enumerate(stream, 1):
+      if digest is not None:
+        digest.update(line)
       if not line.strip():
         continue
       try:
@@ -34,17 +38,27 @@ def read_telemetry(path, bounds=None):
         if row.get("kind") == "meta":
           if row.get("schema_version", 1) != 1:
             raise ValueError("unsupported schema_version")
-          meta.update({k: v for k, v in row.items() if k != "kind"})
-          continue
-        if row.get('kind') == 'link' and isinstance(row.get('network'), str):
-          # SV packed-string ternaries can left-pad "req" to "resp" width.
-          row['network'] = row['network'].strip()
-        validate(row)
-        row["source_line"] = line_number
-        row["origin"] = "telemetry"
-        records.append(row)
+        else:
+          if row.get('kind') == 'link' and isinstance(row.get('network'), str):
+            row['network'] = row['network'].strip()
+          validate(row)
+          row["source_line"] = line_number
+          row["origin"] = "telemetry"
+        yield row
       except (ValueError, TypeError, KeyError) as error:
         raise ValueError(f"{path}:{line_number}: {error}") from error
+
+  if source_info is not None:
+    source_info['sha256'] = digest.hexdigest()
+
+
+def read_telemetry(path, bounds=None):
+  records, meta = RecordCollector(bounds), {}
+  for row in iter_telemetry(path):
+    if row['kind'] == 'meta':
+      meta.update({k: v for k, v in row.items() if k != 'kind'})
+    else:
+      records.append(row)
   return records, meta
 
 
@@ -74,7 +88,7 @@ def identity(row):
   return tuple(row.get(k) for k in ("kind", "g", "t", "bank", "entry", "network", "subnet", "direction", "label"))
 
 
-def assemble(records, meta, width, warnings):
+def assemble(records, meta, width, warnings, frame_bounds=None):
   """Keep original records; aggregate only wholly contained windows, never split counts."""
   nx, ny = meta["mesh"]
   groups = nx*ny
@@ -101,6 +115,10 @@ def assemble(records, meta, width, warnings):
   if not cleaned:
     raise ValueError("No usable telemetry found")
   start, end = min(r["start"] for r in cleaned), max(r["end"] for r in cleaned)
+  if frame_bounds is not None:
+    # Long records keep their original span but occupy only their end-cycle
+    # frame in this storage block. Do not allocate their full history again.
+    start, end = frame_bounds
   if (end-start)/width > 20000:
     raise ValueError("More than 20,000 display windows; increase --window")
   bins = defaultdict(list)
