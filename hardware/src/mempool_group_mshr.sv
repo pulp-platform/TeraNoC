@@ -1243,7 +1243,8 @@ module mempool_group_mshr
   // Per-lane request decode (stateless: reads no MSHR entry).
   mempool_group_mshr_req_decode #(
     .NumTilesPerGroup(NumTilesPerGroup), .NumRemoteReqPortsPerTile(NumRemoteReqPortsPerTile),
-    .BurstLenWidth(BurstLenWidth), .TileIdBits(TileIdBits), .BurstAlignBits(BurstAlignBits),
+    .BurstLenWidth(BurstLenWidth), .TileIdBits(TileIdBits),
+    .TileBankBits((NumBanksPerTile > 1) ? $clog2(NumBanksPerTile) : 1),
     .MergeWordOffset(MergeWordOffset), .MshrFullBurstWords(MshrFullBurstWords),
     .EnableMshrSingleReq(EnableMshrSingleReq),
     .EnableMshrNonFullBurstReq(EnableMshrNonFullBurstReq),
@@ -1339,7 +1340,7 @@ module mempool_group_mshr
     for (genvar tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin : gen_req_bank_tile
       for (genvar port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin : gen_req_bank_port
         // Type comes from the CLAMPED req_is_single, not req_len_raw: a store or a
-        // misaligned burst is forced to req_len=1 and must bank like a single (see BankSelShift*).
+        // invalid burst is forced to req_len=1 and must bank like a single (see BankSelShift*).
         // Compare-then-mux: the hash runs for both classes in parallel and req_is_single picks the
         // result, instead of picking the class first and hashing after it. mshr_bank_of is pure, so
         // calling it with is_single forced to a constant and selecting afterwards is exact.
@@ -4679,14 +4680,15 @@ module mempool_group_mshr
           else $fatal(1, "MSHR MshrFullBurstWords out of range: cfg=%0d valid=[1..%0d]",
                       MshrFullBurstWords, MaxBurstWords);
 
-        burst_aligned: assert property(
+        burst_within_tile: assert property(
           @(posedge clk_i) disable iff (!rst_ni)
             (!req_in_valid[tile_i][port_i] ||
              !req_is_load[tile_i][port_i] ||
              (req_len_raw[tile_i][port_i] <= 1)) ||
-            (req_tile_addr[tile_i][port_i][BurstAlignBits-1:0] == '0))
-          else $warning("MSHR req burst not aligned; clamping to single beat: tile=%0d port=%0d addr=0x%0x",
-                        tile_i, port_i, req_in[tile_i][port_i].tgt_addr);
+            (req_len[tile_i][port_i] == req_len_raw[tile_i][port_i]))
+          else $fatal(1, "MSHR burst crosses tile bank stripe or exceeds maximum: tile=%0d port=%0d addr=0x%0x len=%0d",
+                      tile_i, port_i, req_in[tile_i][port_i].tgt_addr,
+                      req_len_raw[tile_i][port_i]);
       end
     end
 
