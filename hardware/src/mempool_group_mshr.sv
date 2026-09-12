@@ -852,6 +852,27 @@ module mempool_group_mshr
   localparam int unsigned NumRespLanes       = NumTilesPerGroup * NumRespPortsActive;
   localparam int unsigned RespLaneW          = idx_width(NumRespLanes);
   logic [MshrNum-1:0][NumRespLanes-1:0]                                        cap_want;
+  /// Per-lane view of the capture target: the bank it wants and the way inside that bank. A lane
+  /// targets exactly one entry, so intersecting a granted lane with a way is a way compare -- the
+  /// 64x32 cap_want array was only ever reduced back to these two facts.
+  logic [MshrBankNum-1:0][NumRespLanes-1:0]                                    capb_want_l;
+  /// Lanes whose target way is w. capb_l* is already masked to the bank, so intersecting with a
+  /// way column names the same lane the row lookup did.
+  logic [MshrWaysPerBank-1:0][NumRespLanes-1:0]                                cap_way_col;
+  /// Two-lowest-lane reduction for the capture arbiter. The isolate named the winning lane and a
+  /// 32-wide AND-OR then recovered its way and credit; the tree carries way and credit WITH the
+  /// winner, so the recovery disappears. Node n of stage st merges nodes 2n and 2n+1; the left
+  /// half holds the lower lane indices, so it wins both slots it can fill.
+  localparam int unsigned CapStages = $clog2(NumRespLanes);
+`ifndef TARGET_SYNTHESIS
+  /// The isolate-and-recover form the tree replaces, kept only so the run proves them identical.
+  logic [MshrBankNum-1:0][MshrWaysPerBank-1:0] capb_l1_way_ref, capb_l2_way_ref;
+  logic [MshrBankNum-1:0]                      capb_g1_ref, capb_g2_ref, capb_same_ref;
+`endif
+  logic [NumRespLanes-1:0]                                                     cap_lane_ge1, cap_lane_ge2;
+  logic [NumRespLanes-1:0][VictimPtrW-1:0]                                     cap_lane_way;
+  logic [MshrBankNum-1:0][CapStages:0][NumRespLanes-1:0]                       capt_v1, capt_v2, capt_a1, capt_a2, capt_b1;
+  logic [MshrBankNum-1:0][CapStages:0][NumRespLanes-1:0][VictimPtrW-1:0]       capt_w1, capt_w2;
   logic [MshrNum-1:0][NumRespLanes-1:0]                                        cap_first, cap_second;
   logic [NumRespLanes-1:0]                                                     cap_rest;
   logic [MshrNum-1:0]                                                          cap_g1, cap_g2;
@@ -1366,6 +1387,49 @@ module mempool_group_mshr
                                ((mshr_q[e].resp_buf_cnt == RespBufCountW'(1)) &&
                                 (cap_g1[e] || cap_g2[e])) ||
                                (cap_g1[e] && cap_g2[e]));
+    end
+  endgenerate
+
+  // Per-lane capture credit and way, read at the lane's own returned tag. mshr_resp_slots is
+  // registered and rsn_id is the tag minus one, so both resolve long before capb_want does.
+  generate
+    for (genvar l = 0; l < NumRespLanes; l++) begin : gen_cap_lane
+      localparam int unsigned CapT = l / NumRespPortsActive;
+      localparam int unsigned CapP = (l % NumRespPortsActive) + 1;
+      assign cap_lane_ge1[l] = mshr_resp_slots[rsn_id[CapT][CapP]] >= RespBufCountW'(1);
+      assign cap_lane_ge2[l] = mshr_resp_slots[rsn_id[CapT][CapP]] >= RespBufCountW'(2);
+      assign cap_lane_way[l] = WaysPow2 ? VictimPtrW'(rsn_id[CapT][CapP])
+                                        : VictimPtrW'(int'(rsn_id[CapT][CapP]) % MshrWaysPerBank);
+    end
+    for (genvar b = 0; b < MshrBankNum; b++) begin : gen_cap_tree_bank
+      for (genvar l = 0; l < NumRespLanes; l++) begin : gen_cap_tree_leaf
+        assign capt_v1[b][0][l] = capb_want_l[b][l];
+        assign capt_a1[b][0][l] = cap_lane_ge1[l];
+        assign capt_a2[b][0][l] = cap_lane_ge2[l];
+        assign capt_w1[b][0][l] = cap_lane_way[l];
+        assign capt_v2[b][0][l] = 1'b0;
+        assign capt_b1[b][0][l] = 1'b0;
+        assign capt_w2[b][0][l] = '0;
+      end
+      for (genvar st = 1; st <= CapStages; st++) begin : gen_cap_tree_stage
+        for (genvar n = 0; n < (NumRespLanes >> st); n++) begin : gen_cap_tree_node
+          assign capt_v1[b][st][n] = capt_v1[b][st-1][2*n] | capt_v1[b][st-1][2*n+1];
+          assign capt_a1[b][st][n] = capt_v1[b][st-1][2*n] ? capt_a1[b][st-1][2*n]
+                                                           : capt_a1[b][st-1][2*n+1];
+          assign capt_a2[b][st][n] = capt_v1[b][st-1][2*n] ? capt_a2[b][st-1][2*n]
+                                                           : capt_a2[b][st-1][2*n+1];
+          assign capt_w1[b][st][n] = capt_v1[b][st-1][2*n] ? capt_w1[b][st-1][2*n]
+                                                           : capt_w1[b][st-1][2*n+1];
+          assign capt_v2[b][st][n] = capt_v2[b][st-1][2*n] | capt_v2[b][st-1][2*n+1] |
+                                     (capt_v1[b][st-1][2*n] & capt_v1[b][st-1][2*n+1]);
+          assign capt_b1[b][st][n] =
+              capt_v2[b][st-1][2*n] ? capt_b1[b][st-1][2*n]
+            : (capt_v1[b][st-1][2*n] ? capt_a1[b][st-1][2*n+1] : capt_b1[b][st-1][2*n+1]);
+          assign capt_w2[b][st][n] =
+              capt_v2[b][st-1][2*n] ? capt_w2[b][st-1][2*n]
+            : (capt_v1[b][st-1][2*n] ? capt_w1[b][st-1][2*n+1] : capt_w2[b][st-1][2*n+1]);
+        end
+      end
     end
   endgenerate
 
@@ -3385,7 +3449,9 @@ module mempool_group_mshr
     end
 
     // Grant response slots per ENTRY, then capture once per entry.
-    cap_want = '0;
+    cap_want    = '0;
+    capb_want_l = '0;
+    cap_way_col = '0;
     for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
       for (int port_i = 1; port_i < NumRemoteRespPortsPerTile; port_i++) begin
         // resp_is_mshr is only set inside `if (resp_in_valid ...)`, so it implies valid: no lane
@@ -3393,37 +3459,56 @@ module mempool_group_mshr
         if (resp_is_mshr[tile_i][port_i]) begin
           cap_lane = RespLaneW'(tile_i * NumRespPortsActive + (port_i - 1));
           cap_want[resp_mshr_id[tile_i][port_i]][cap_lane] = 1'b1;
+          // Same fact on the two axes the arbiter actually uses: a bank compare instead of an OR
+          // over that bank's rows, and a way compare instead of a row lookup.
+          capb_want_l[int'(resp_mshr_id[tile_i][port_i]) / MshrWaysPerBank][cap_lane] = 1'b1;
+          for (int w = 0; w < MshrWaysPerBank; w++) begin
+            if ((int'(resp_mshr_id[tile_i][port_i]) % MshrWaysPerBank) == w) begin
+              cap_way_col[w][cap_lane] = 1'b1;
+            end
+          end
         end
       end
     end
     if (CapPerBank) begin
       // One arbiter per bank over the union of its ways' wanters.
       for (int b = 0; b < MshrBankNum; b++) begin
-        capb_want[b] = '0;
-        for (int w = 0; w < MshrWaysPerBank; w++) begin
-          capb_want[b] = capb_want[b] | cap_want[b * MshrWaysPerBank + w];
-        end
+        capb_want[b] = capb_want_l[b];
         capb_l1[b] = capb_want[b] & (~capb_want[b] + NumRespLanes'(1));
         capb_rest  = capb_want[b] & ~capb_l1[b];
         capb_l2[b] = capb_rest    & (~capb_rest    + NumRespLanes'(1));
         // cap_want[e] is the set of lanes targeting entry e, so intersecting it with the granted
         // lane names the way directly -- one-hot, because a lane targets exactly one entry.
         for (int w = 0; w < MshrWaysPerBank; w++) begin
-          capb_l1_way  [b][w] = |(capb_l1[b] & cap_want[b * MshrWaysPerBank + w]);
-          capb_l2_way  [b][w] = |(capb_l2[b] & cap_want[b * MshrWaysPerBank + w]);
+          // From the tree: it named the winner's way with the winner, so no 32-wide recovery.
+          capb_l1_way  [b][w] = capt_v1[b][CapStages][0] &&
+                                (capt_w1[b][CapStages][0] == VictimPtrW'(w));
+          capb_l2_way  [b][w] = capt_v2[b][CapStages][0] &&
+                                (capt_w2[b][CapStages][0] == VictimPtrW'(w));
           capb_slot_ge1[b][w] =
               (mshr_resp_slots[b * MshrWaysPerBank + w] >= RespBufCountW'(1));
           capb_slot_ge2[b][w] =
               (mshr_resp_slots[b * MshrWaysPerBank + w] >= RespBufCountW'(2));
+`ifndef TARGET_SYNTHESIS
+          capb_l1_way_ref[b][w] = |(capb_l1[b] & cap_way_col[w]);
+          capb_l2_way_ref[b][w] = |(capb_l2[b] & cap_way_col[w]);
+`endif
         end
         // Both grants on the same way is the same entry. Only read under capb_l2 != 0, where both
         // one-hots are populated -- the old id compare needed the same guard, since the ids
         // defaulted to 0.
-        capb_same[b] = |(capb_l1_way[b] & capb_l2_way[b]);
-        capb_g1[b] = (capb_l1[b] != '0) && |(capb_l1_way[b] & capb_slot_ge1[b]);
-        capb_g2[b] = (capb_l2[b] != '0) &&
-                     (capb_same[b] ? |(capb_l1_way[b] & capb_slot_ge2[b])
-                                   : |(capb_l2_way[b] & capb_slot_ge1[b]));
+        // The credits travelled with the winners, so the grants are one AND each.
+        capb_same[b] = capt_w1[b][CapStages][0] == capt_w2[b][CapStages][0];
+        capb_g1[b]   = capt_v1[b][CapStages][0] && capt_a1[b][CapStages][0];
+        capb_g2[b]   = capt_v2[b][CapStages][0] &&
+                       (capb_same[b] ? capt_a2[b][CapStages][0] : capt_b1[b][CapStages][0]);
+`ifndef TARGET_SYNTHESIS
+        capb_same_ref[b] = |(capb_l1_way_ref[b] & capb_l2_way_ref[b]);
+        capb_g1_ref[b] = (capb_l1[b] != '0) && |(capb_l1_way_ref[b] & capb_slot_ge1[b]);
+        capb_g2_ref[b] = (capb_l2[b] != '0) &&
+                         (capb_same_ref[b] ? |(capb_l1_way_ref[b] & capb_slot_ge2[b])
+                                           : |(capb_l2_way_ref[b] & capb_slot_ge1[b]));
+`endif
       end
       // Map back onto the per-entry vectors the rest of the pass reads, so nothing downstream
       // changes. The guards matter: a bank with no wanter must not write entry 0 and clobber
@@ -4749,6 +4834,17 @@ module mempool_group_mshr
         @(posedge clk_i) disable iff (!rst_ni)
           merge_inflight[me] |-> mshr_q_valid[me])
         else $fatal(1, "entry %0d absorbed a merge while not valid", me);
+    end
+
+    // The capture tree must name the same winners, ways and credits as the isolate it replaces.
+    for (genvar cb = 0; cb < MshrBankNum; cb++) begin : gen_cap_tree_equiv
+      cap_tree_equiv: assert property(
+        @(posedge clk_i) disable iff (!rst_ni)
+          CapPerBank |-> ((capb_g1[cb] == capb_g1_ref[cb]) &&
+                          (capb_g2[cb] == capb_g2_ref[cb]) &&
+                          (capb_l1_way[cb] == capb_l1_way_ref[cb]) &&
+                          (capb_l2_way[cb] == capb_l2_way_ref[cb])))
+        else $fatal(1, "capture tree diverged from the isolate at bank %0d", cb);
     end
 
     for (genvar ce = 0; ce < MshrNum; ce++) begin : gen_gate_extra
