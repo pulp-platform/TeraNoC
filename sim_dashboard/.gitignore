@@ -1,0 +1,22 @@
+__pycache__/
+.pytest_cache/
+output/*
+!output/.gitkeep
+generated/
+.venv/
+
+# Campaign execution records and local audit products
+monitoring/**/*.json
+monitoring/**/*.pid
+monitoring/**/*.lock
+monitoring/**/*.log
+audits/**/work/
+audits/**/csrc/
+audits/**/simv*
+audits/**/modelsim.ini
+audits/**/transcript
+audits/**/test.log
+audits/**/audit.log
+audits/**/enum
+audits/**/fixed_*.log
+audits/**/ucli.key

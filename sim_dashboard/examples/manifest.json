@@ -1,0 +1,25 @@
+{
+  "name": "Example GEMM metadata — replace with run values",
+  "backend": "rtl",
+  "mesh": [4, 4],
+  "shape": [16, 128, 4096],
+  "precision": "fp16",
+  "tiles_per_group": 16,
+  "cores_per_tile": 1,
+  "n_fpu": 4,
+  "vlen": 512,
+  "correctness": "unknown",
+  "hash": {
+    "kernel": 2,
+    "split": "decode",
+    "banks": 16,
+    "entries": 64,
+    "current": [9, 7, 1],
+    "shift_min": 4,
+    "shift_max": 10,
+    "burst_bits_max": 1,
+    "min_burst": 16,
+    "max_burst": 16,
+    "max_steps": 128
+  }
+}
