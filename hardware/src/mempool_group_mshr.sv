@@ -601,25 +601,6 @@ module mempool_group_mshr
   mempool_group_mshr_t [MshrNum-1:0]                                           mshr_q;
   logic                [MshrNum-1:0]                                           mshr_d_valid;
 `ifndef TARGET_SYNTHESIS
-  /// An accepted AMO whose merge key and target group match entry e. The address test is the one
-  /// req_addr_hit_way uses (base_addr is the entry's key), and acceptance matters because a
-  /// stalled request never reaches the cache.
-  logic [MshrNum-1:0] amo_hits_entry;
-  always_comb begin
-    amo_hits_entry = '0;
-    for (int ah = 0; ah < MshrNum; ah++) begin
-      for (int at = 0; at < NumTilesPerGroup; at++) begin
-        for (int ap = 1; ap < NumRemoteReqPortsPerTile; ap++) begin
-          if (req_in_valid[at][ap] && req_in_ready[at][ap] &&
-              (req_in[at][ap].wdata.amo != '0) &&
-              (req_in[at][ap].tgt_group_id == mshr_q[ah].tgt_group_id) &&
-              (req_addr_key[at][ap] == mshr_q[ah].base_addr)) begin
-            amo_hits_entry[ah] = 1'b1;
-          end
-        end
-      end
-    end
-  end
 
   // Entries the two gates above admit but mshr_d_valid does not; checked below.
   logic                [MshrNum-1:0]                                           gate_extra;
@@ -662,6 +643,27 @@ module mempool_group_mshr
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]
              [BurstLenWidth-1:0]                                              req_len_raw;
   tcdm_addr_t[NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_addr_key;
+`ifndef TARGET_SYNTHESIS
+  /// An accepted AMO whose merge key and target group match entry e. The address test is the one
+  /// req_addr_hit_way uses (base_addr is the entry's key), and acceptance matters because a
+  /// stalled request never reaches the cache.
+  logic [MshrNum-1:0] amo_hits_entry;
+  always_comb begin
+    amo_hits_entry = '0;
+    for (int ah = 0; ah < MshrNum; ah++) begin
+      for (int at = 0; at < NumTilesPerGroup; at++) begin
+        for (int ap = 1; ap < NumRemoteReqPortsPerTile; ap++) begin
+          if (req_in_valid[at][ap] && req_in_ready[at][ap] &&
+              (req_in[at][ap].wdata.amo != '0) &&
+              (req_in[at][ap].tgt_group_id == mshr_q[ah].tgt_group_id) &&
+              (req_addr_key[at][ap] == mshr_q[ah].base_addr)) begin
+            amo_hits_entry[ah] = 1'b1;
+          end
+        end
+      end
+    end
+  end
+`endif
   tcdm_addr_t[NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_addr_key_burst;
   /// The bank hash of each class, so the decode runs before req_is_single selects rather than
   /// after it.
