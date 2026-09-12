@@ -17295,3 +17295,68 @@ flight: `cm3` (comment pass), `s1`, `s3`, `s4`; `s8` (all eight) is queued. Ever
 image; the `mempool_system` mesh assertion caught it and refused to elaborate rather than producing
 a wrong-mesh build. The arm runner now waits for 4x4 in both files (one is untracked, so they can
 disagree) instead of racing it.
+
+## 2026-09-12 17:35 — group MSHR: RTL FREEZE for the full-group backend run
+
+**Purpose.** Close the OOC optimisation round and fix an unambiguous RTL reference for the
+full-group (`mempool_group_floonoc_wrapper`) backend run. The OOC loop has reached its noise
+floor: run-to-run variance is +/-0.036 ns WNS, and the last ten-transform batch measured -0.035
+on the 64/4 arm and +0.009 on the 48/3 arm -- same RTL delta, opposite signs. Timing deltas of
+the size still being chased are no longer resolvable in this flow; area still is.
+
+**Implementation.** Final commit `fce8acd0` (capture arbiter two-lowest tree) on top of
+`57674009`. Freeze point tagged `mshr-freeze-20260912`.
+
+**Result.** Gate `qG` (VCS, `L_fp16_512x64x256`, 4x4): **6993 cycles, retval 0, 0 fatals,
+`cap_tree_equiv` silent.** The same gate also covers `bacf64bb`/`57674009` (the scoped
+`cache_amo_never_hits`), whose own gate was lost when the previous session ended.
+
+OOC at TCK 1.0, `initial_opto`, `func_ssgnp_0p675v_m40c`:
+
+| run | config | WNS | TNS | viol EPs | area |
+|---|---|---|---|---|---|
+| `tenfix`   | 64/4 | -0.227 | -41.04 | 1025 | 103,940 |
+| `tenfix48` | 48/3 | -0.205 | -19.73 |  881 |  89,163 |
+
+In both, total WNS *is* the in2out WNS and the holder is
+`group_mshr_req_valid_i/req_i -> group_mshr_req_ready_o`: 0.813 ns of logic against a 0.60 ns
+window (1.0 - 0.20 input - 0.20 output). reg->reg is only -0.111/-0.144, i.e. the registered
+logic closes at ~1.14 ns. Violation population by family and the tier ladder are recorded in the
+session notes; the short form is one wall (`req_ready_o`, 32 EPs, the only endpoints below
+-150 ps), a thin second tier (`mshr_q_valid` ICG, -0.111), then a flat tail -- 87% of 48/3's
+violating endpoints are within 50 ps.
+
+**Boundary budget, stated honestly.** `base_ooc.sdc` charges 0.20 ns in and 0.20 ns out. Both are
+reconstructions of *logic only* with **zero** interconnect allowance: the driver is
+`mempool_tile.sv:846 i_tcdm_master_req_register` (a non-bypassed `spill_register`) reaching the
+port through pure wire assigns (`mempool_group.sv:187-189` -> `216-217` -> `625-626`), launching
+at clk-to-Q 0.172 + output MUX2 ~0.031 = 0.203; the receiver is that same spill's `ready_i`,
+costing ~0.02 of `b_fill` logic plus an ICG-enable check (~0.091 tighter than a flop D) for
+~0.14. So 0.40 total is a floor, not the conservative figure the file's older comment claims --
+the OOC WNS is optimistic, not pessimistic. Measuring the real numbers from a placed group is
+one of the reasons to move to the full-group run.
+
+**Not done, deliberately.** (a) `cfg_i` is *already* registered outside
+(`mempool_group_mshr_cfg.sv:230 assign cfg_o = cfg_q`, one wire to the port), so registering it
+again inside would be a second flop in series: +81 flops, +1 cycle of config latency, ~28 ps at
+most. And it would not even buy that -- the `cfg_i` paths are *co-critical*, not worse:
+-0.204 vs -0.205 (48/3), -0.225 vs -0.227 (64/4). Two unrelated startpoints reach the same
+endpoint within 2 ps, which says the accept cone is tail-dominated (hash -> bank select ->
+arbitration -> accept), not startpoint-dominated. (b) `GROUP_MSHR_SPILL_REQ_IN=1` would delete
+the in2out path group outright (`ready_o = !a_full_q || !b_full_q`) for ~+4% area and one cycle
+of request latency, throughput-neutral; left unmeasured by decision, not oversight.
+
+**PnR define set for the full-group run** (lifted from `ooc_tenfix48/analyze.tcl`, so
+reproducible rather than reconstructed):
+`GROUP_MSHR_NUM=48 WAYS_PER_BANK=3 MERGE_REQS=4 BANK_HASH=3 BANK_SHIFT_SINGLE=9
+BANK_SHIFT_BURST=7 BANK_BURST_BITS=1 BANK_PUBLISH=1 DRAIN_BEATS=2 DRAIN_FROM_Q=1
+CACHE_RECLAIMABLE=0 CACHE_SELF_INVAL=1 CACHE_VICTIM_RR=1 RESP_WAIT_SUBS_SINGLE=1
+STALL_ON_RESP=1 ENABLE_SINGLE=1 CFG_RUNTIME=1 ENABLE_STATS=0 SPILL_REQ_IN=0
+HOLD_SUBS_SINGLE=4 HOLD_SUBS_BURST=4 HOLD_WINDOW_SINGLE=8191 HOLD_WINDOW_BURST=8191
+SERVE_TIMEOUT=8191 HOLD_PRESCALE_W=6 TARGET_SYNTHESIS`, with `NUM_GROUPS=16 NUM_X=4
+NOC_PORT_HASH=7 NOC_ROUTER_REMAPPING=2 NOC_REQ_RDWR_CHANNEL_NUM=2 NOC_RESP_CHANNEL_NUM=2
+NOC_VIRTUAL_CHANNEL_NUM=1 NOC_TOPOLOGY=0 NOC_ROUTING_ALGORITHM=0`.
+
+**Status: FROZEN.** No further RTL changes to `mempool_group_mshr.sv` until the full-group run
+reports. 64/4 vs 48/3 is a `-D` choice and does not reopen the freeze; it waits on the last 4
+arms of the perf campaign (4 of 8 in, both 8x8 pairs at parity or better for 48/3).
