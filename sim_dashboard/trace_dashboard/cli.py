@@ -1,6 +1,10 @@
 """CLI and single-file HTML packaging. Python standard library only."""
 import argparse
+import gc
 import json
+import pickle
+import tempfile
+import time
 from pathlib import Path
 
 from .packaging import render
@@ -44,6 +48,8 @@ def main():
   p.add_argument("--cutoff", type=positive, help="Keep records ending at or before this cycle; default: all recorded intervals")
   p.add_argument("--complete", action="store_true", help="Declare simulation finished; does not validate correctness")
   p.add_argument("--page-cycles", type=positive, help="Detail block width; default: 20000 rounded up to a multiple of --window")
+  p.add_argument("--compression-level", type=int, choices=range(1, 10), default=3,
+                 help="Lossless gzip level: 3 (default) favors speed; 9 favors file size")
   args = p.parse_args()
   if args.page_cycles is None:
     args.page_cycles = ((20000 + args.window - 1)//args.window)*args.window
@@ -51,6 +57,13 @@ def main():
     p.error("--page-cycles must be a multiple of --window")
   if not args.transcript and not args.telemetry:
     p.error("supply --transcript and/or --telemetry")
+  started = time.monotonic()
+  args.out.parent.mkdir(parents=True, exist_ok=True)
+  cache = tempfile.TemporaryDirectory(prefix='dashboard-input-', dir=args.out.parent)
+  # Trace records are acyclic JSON trees. Reference counting releases them;
+  # cyclic-GC scans otherwise revisit millions of long-lived rows repeatedly.
+  gc_enabled = gc.isenabled()
+  gc.disable()
   try:
     bounds = None
     if args.cycle_range:
@@ -77,20 +90,32 @@ def main():
     def stamp(path):
       stat = path.stat()
       return stat.st_size, stat.st_mtime_ns
+    caches = {}
     for path in args.telemetry:
       # Metadata and identity prepass uses bounded memory; the packaging pass
       # streams full rows. This supports headers anywhere and multiple inputs.
       source_stamps[path] = stamp(path)
       source_details[path] = {}
-      for row in iter_telemetry(path, source_details[path]):
-        if row['kind'] == 'meta':
-          header = {k: v for k, v in row.items() if k != 'kind'}
-          for field in captured_fields:
-            if field in header and field in meta and header[field] != meta[field]:
-              raise ValueError(f"Captured {field} differs between input sources")
-          meta.update(header)
-        elif selected(row):
-          preferred.add(identity(row))
+      cached = Path(cache.name)/f'{len(caches)}.pickle'
+      caches[path] = cached
+      with cached.open('wb') as stream:
+        batch = []
+        for row in iter_telemetry(path, source_details[path]):
+          if row['kind'] == 'meta':
+            header = {k: v for k, v in row.items() if k != 'kind'}
+            for field in captured_fields:
+              if field in header and field in meta and header[field] != meta[field]:
+                raise ValueError(f"Captured {field} differs between input sources")
+            meta.update(header)
+          elif selected(row):
+            preferred.add(identity(row))
+            batch.append(row)
+            if len(batch) >= 1024:
+              pickle.dump(batch, stream, protocol=pickle.HIGHEST_PROTOCOL)
+              batch.clear()
+        if batch:
+          pickle.dump(batch, stream, protocol=pickle.HIGHEST_PROTOCOL)
+      print(f'Validated and cached {path.name} ({time.monotonic()-started:.1f}s)', flush=True)
       if stamp(path) != source_stamps[path]:
         raise ValueError(f'{path} changed while reading; use a stable file snapshot')
       sources.append(path)
@@ -144,11 +169,17 @@ def main():
       for path in args.telemetry:
         if stamp(path) != source_stamps[path]:
           raise ValueError(f'{path} changed while reading; use a stable file snapshot')
-        for row in iter_telemetry(path):
-          if row['kind'] != 'meta' and selected(row):
-            if len(args.telemetry) > 1:
-              row['source_path'] = str(path.resolve())
-            yield row
+        # Only read our private cache, never deserialize user-supplied pickle.
+        with caches[path].open('rb') as stream:
+          while True:
+            try:
+              batch = pickle.load(stream)
+            except EOFError:
+              break
+            for row in batch:
+              if len(args.telemetry) > 1:
+                row['source_path'] = str(path.resolve())
+              yield row
         if stamp(path) != source_stamps[path]:
           raise ValueError(f'{path} changed while reading; use a stable file snapshot')
       for row in records:
@@ -162,3 +193,7 @@ def main():
            warnings, args)
   except (ValueError, KeyError, OSError) as error:
     p.error(str(error))
+  finally:
+    cache.cleanup()
+    if gc_enabled:
+      gc.enable()

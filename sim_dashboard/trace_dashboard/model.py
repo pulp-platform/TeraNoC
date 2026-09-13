@@ -85,7 +85,9 @@ def validate(row):
 
 
 def identity(row):
-  return tuple(row.get(k) for k in ("kind", "g", "t", "bank", "entry", "network", "subnet", "direction", "label"))
+  return (row.get("kind"), row.get("g"), row.get("t"), row.get("bank"),
+          row.get("entry"), row.get("network"), row.get("subnet"),
+          row.get("direction"), row.get("label"))
 
 
 def assemble(records, meta, width, warnings, frame_bounds=None):

@@ -418,3 +418,31 @@ histogram balance. Both maximize the same sampled occupied-bank score.
 
 `upgrade_full.py` refreshes hash analysis and diagnosis using embedded metadata
 while preserving original detail blocks. See [the model and migration notes](../docs/tile_contained_burst_hash.md).
+
+### Generation performance
+
+The generator parses and validates each telemetry source once, preserving its
+SHA-256 and checking that it has not changed during generation. Private temporary
+files cache selected records in batches and store detail blocks without repeated
+JSON conversion. They are created under the output directory and removed on
+normal completion or an exception; allow temporary disk space for the parsed
+input and detail blocks. No external pickle input is supported.
+
+Generation temporarily pauses cyclic garbage collection while working with the
+acyclic trace records; Python reference counting still releases unused records.
+The previous garbage-collector state is restored afterward. All original record
+intervals, counters, coverage checks, and dashboard features are retained.
+
+Lossless gzip compression defaults to level 3 for faster generation. Use
+`--compression-level 9` to favor a smaller HTML file, or level 1 to favor speed.
+The decoded dashboard data is identical at every level. Level 3 produced an
+approximately 33% larger HTML on a one-million-record 8×8 benchmark excerpt;
+size and runtime depend on trace activity. Logs now report input validation,
+partitioning, and completion of each compressed detail block with elapsed time.
+
+Validation on the CAL2-B 8×8 FP16 trace used a fixed one-million-record excerpt:
+`cProfile` runtime fell from 80.5 s to 59.4 s (26% less time). This is a sample
+measurement, not a promised speedup for a full campaign. The full CAL2-B 4×4
+rebuild completed with 7,297,142 records and passed the timeline browser checks;
+its wall time was 551.7 s during sharply increased shared-host load, so it did
+not establish a full-run wall-time improvement over the earlier build.

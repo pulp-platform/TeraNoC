@@ -5,6 +5,8 @@ from collections import Counter, defaultdict
 import gzip
 import html
 import json
+import pickle
+import time
 from pathlib import Path
 import tempfile
 
@@ -16,10 +18,10 @@ from .timeline import overview_points
 HERE = Path(__file__).resolve().parents[1]
 
 
-def packed(value):
+def packed(value, compression_level=3):
   raw = json.dumps(value, separators=(',', ':'), allow_nan=False).encode()
   return json.dumps(dict(encoding='gzip-base64',
-                        data=base64.b64encode(gzip.compress(raw, mtime=0)).decode()))
+                        data=base64.b64encode(gzip.compress(raw, compresslevel=compression_level, mtime=0)).decode()))
 
 
 def full_template(root):
@@ -60,6 +62,7 @@ let F = D.frames;
 
 def render(records, meta, sources, warnings, args):
   """Stream original rows into bounded detail blocks with a shared overview."""
+  started = time.monotonic()
   args.out.parent.mkdir(parents=True, exist_ok=True)
   with tempfile.TemporaryDirectory(prefix='dashboard-pages-', dir=args.out.parent) as temp:
     temp = Path(temp)
@@ -70,13 +73,24 @@ def render(records, meta, sources, warnings, args):
     crossing = False
     bench, extent = [None, None], [None, None]
     handles = {}
-    # Bound open descriptors even for long simulations or out-of-order groups.
+    # Private, bounded batches avoid JSON encoding and parsing a second time.
+    # These pickle files are created here, never accepted as external inputs.
+    def flush(handle, batch):
+      if batch:
+        pickle.dump(batch, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        batch.clear()
+
     def spool(page, row):
       if page not in handles:
         if len(handles) >= 32:
-          handles.pop(next(iter(handles))).close()
-        handles[page] = (temp/f'{page}.jsonl').open('a')
-      handles[page].write(json.dumps(row, separators=(',', ':'))+'\n')
+          handle, batch = handles.pop(next(iter(handles)))
+          flush(handle, batch)
+          handle.close()
+        handles[page] = ((temp/f'{page}.pickle').open('ab'), [])
+      handle, batch = handles[page]
+      batch.append(row)
+      if len(batch) >= 1024:
+        flush(handle, batch)
     page_ids = set()
     try:
       for row in records:
@@ -105,7 +119,8 @@ def render(records, meta, sources, warnings, args):
             for field in ('occupied', 'held', 'cached'):
               entry_totals[row['g']][field] += row.get(field, 0)
     finally:
-      for handle in handles.values():
+      for handle, batch in handles.values():
+        flush(handle, batch)
         handle.close()
     if not counts:
       raise ValueError('No usable records found in the selected capture')
@@ -134,6 +149,7 @@ def render(records, meta, sources, warnings, args):
     for kind, counter in (('fpu', 'busy'), ('mshr', 'occupied'), ('bank', 'hsk'), ('link', 'hsk')):
       if benchmark_activity[kind]['records'] and not benchmark_activity[kind][counter]:
         warnings.append(f'All benchmark {kind} {counter} counters are zero; check probe enablement and workload activity.')
+    print(f'Partitioned {sum(counts.values()):,} records ({time.monotonic()-started:.1f}s)', flush=True)
     hash_result = hash_explore(meta)
     roof = roofline(summary, meta, args.peaks, warnings)
     diag_rows = summary + [dict(kind='entry', g=g, start=bench[0], end=bench[1],
@@ -155,14 +171,20 @@ def render(records, meta, sources, warnings, args):
     # Validate and compress detail before serializing the root, so warnings
     # discovered during assembly are included in the exported dashboard.
     for n, i in enumerate(pages):
-      with (temp/f'{i}.jsonl').open() as page_file:
-        rows = [json.loads(line) for line in page_file]
+      rows = []
+      with (temp/f'{i}.pickle').open('rb') as page_file:
+        while True:
+          try:
+            rows.extend(pickle.load(page_file))
+          except EOFError:
+            break
       frames, clean = assemble(rows, meta, args.window, warnings,
                                frame_bounds=(i*args.page_cycles, (i+1)*args.page_cycles))
       counts_out.update(r['kind'] for r in clean)
       if exported_rows is not None:
         exported_rows.extend(clean)
-      (temp/f'{n}.packed').write_text(packed(dict(frames=frames, work_before=work_before.copy())))
+      (temp/f'{n}.packed').write_text(packed(dict(frames=frames, work_before=work_before.copy()), args.compression_level))
+      print(f'Packed detail block {n+1}/{len(pages)} ({time.monotonic()-started:.1f}s)', flush=True)
       for row in clean:
         if row['kind'] == 'work' and (row.get('phase') == 'bench' or row.get('workload_phase') == 'bench'):
           work_before[row['g']] += row['fmac']
@@ -176,7 +198,7 @@ def render(records, meta, sources, warnings, args):
     assert after.startswith(close)
     tmpout = args.out.with_suffix('.html.tmp')
     with tmpout.open('w') as stream:
-      stream.write(before); stream.write(packed(root)); stream.write(close)
+      stream.write(before); stream.write(packed(root, args.compression_level)); stream.write(close)
       for n in range(len(pages)):
         stream.write(f'<script type="application/json" id="page-data-{n}">')
         with (temp/f'{n}.packed').open() as blob:
