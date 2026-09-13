@@ -657,7 +657,9 @@ zfinx ?= 0
 #   block-alloc only (shipped default):  spatz_vlsu_block_alloc=1, everything else 0/unset
 #     -> 3589 cycles.
 #   + H1 dual load:                      spatz_vlsu_rob_depth=64 + spatz_vlsu_dual_load=2
-#     -> 3488 cycles (-2.8%; needs BOTH). dual_load without rob_depth=64 has no ROB room.
+#     -> 3488 cycles (-2.8%, measured with BOTH). At the shipped rob_depth=32 dual_load still
+#     works for loads below the admission ceiling; only a ceiling-sized load fills the ROB and
+#     leaves the runahead with nothing to overlap. See the dual_load block below.
 #   R1/R2 are AREA-only (no perf change): enable to shrink the netlist once timing allows.
 # Any knob can also be overridden on the command line: make ... spatz_vlsu_dual_load=2
 #
@@ -702,11 +704,29 @@ spatz_vlsu_block_alloc ?= 1
 # widening. Re-close PNR on this.
 spatz_vlsu_rob_depth ?= 32
 
-# --- H1 dual-load runahead (REQUIRES spatz_vlsu_rob_depth=64 to have ROB room) ---
+# --- H1 dual-load runahead ---
 # Unset/1 = legacy: the next load starts only when the previous one fully retires
 # (bit-identical). 2 = the next burst-safe load starts as soon as the previous one's requests
 # are all ISSUED, so its flight overlaps the elder's drain. Measured with rob_depth=64:
 # 3589 -> 3488 cycles (-2.8%), dual_adv on 32/40 instructions, all assertions silent.
+#
+# HOW IT INTERACTS WITH rob_depth, since this header used to read "REQUIRES rob_depth=64" and
+# that sent readers hunting a bug in the shipped build. It is a CEILING effect, not a hard
+# requirement. The admission ceiling is vl <= NrOutstandingLoads * MemDataWidthB * NrMemPorts,
+# so at rob_depth=32 that is 512 B: a ceiling-sized load is 128 words spread over the 4 ports,
+# i.e. all 32 ids in EVERY buffer, leaving the younger load nothing to allocate. A 256 B load
+# takes 16 ids and two of them overlap fine. So at 32 the runahead is live below the ceiling and
+# inert at it; 64 is what makes ceiling-sized loads overlap too.
+#
+# It is not a hazard at 32 either: dual_adv is gated on mem_req_all_issued, not on ROB room, so
+# the younger load simply stalls in its allocator until the elder retires (spatz_vlsu.sv:1038,
+# "inflight_q drops at A's retire, independent of the held instruction"). Every build on this
+# branch runs 32 + dual_load=2 with all assertions silent.
+#
+# COST of going to 64, before anyone does: MetaIdWidth = idx_width(RobDepth) goes 5 -> 6, and
+# meta_id_t reaches every TCDM struct and both FlooNoC flit metas -- so it widens every mesh
+# link by a bit and needs a PNR re-close. Moving to 32 was partly to undo exactly that.
+# The -2.8% above was measured at 64; the benefit AT 32 has never been A/B'd.
 spatz_vlsu_dual_load ?= 2
 
 # --- Element width and the burst path ---------------------------------------------
