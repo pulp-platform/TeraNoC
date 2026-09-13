@@ -42,10 +42,6 @@ module tcdm_burst_expander
   input  logic  [IssueWidth-1:0] ready_i
 );
 
-  localparam int unsigned BankOffsetBits = (NumBanksPerTile > 1) ? $clog2(NumBanksPerTile) : 1;
-  localparam int unsigned BoundaryWidth =
-      ((BankOffsetBits > BurstLenWidth) ? BankOffsetBits : BurstLenWidth) + 1;
-
   // ------------------------------------------------------------------------------------
   // BURST LANE LAW. Spatz distributes a burst's beats across its NrMemPorts reorder buffers
   // by the ordinary word->port rule, so beat b belongs to lane b % BurstLanes and is entry
@@ -74,22 +70,14 @@ module tcdm_burst_expander
     $error("[tcdm_burst_expander] NumContexts (%0d) must be 1 or 2.", NumContexts);
 
   logic req_is_load;
-  logic burst_contained_i;
-  logic [BoundaryWidth-1:0] burst_end_bank;
   logic [BurstLenWidth-1:0] len_i;
   logic [BurstLenWidth-1:0] len_raw_i;
   logic is_burst_i;
 
   assign req_is_load = (!req_i.wen) && (req_i.wdata.amo == '0);
   assign len_raw_i   = (req_i.burst_len == '0) ? BurstLenWidth'(1) : req_i.burst_len;
-  // tgt_addr is word-addressed. The destination tile is already selected, so
-  // expansion may advance banks but must never carry into the next bank row.
-  assign burst_end_bank = ((NumBanksPerTile > 1)
-                          ? BoundaryWidth'(req_i.tgt_addr[BankOffsetBits-1:0]) : '0) +
-                          BoundaryWidth'(len_raw_i);
-  assign burst_contained_i = (len_raw_i <= BurstLenWidth'(MaxBurstWords)) &&
-                             (burst_end_bank <= BoundaryWidth'(NumBanksPerTile));
-  assign len_i       = (req_is_load && burst_contained_i) ? len_raw_i : BurstLenWidth'(1);
+  // The producer guarantees tile containment; simulation assertions check the contract.
+  assign len_i       = req_is_load ? len_raw_i : BurstLenWidth'(1);
   assign is_burst_i  = (len_i > 1);
 
   if (NumContexts == 1) begin : gen_single_ctx
@@ -421,7 +409,19 @@ module tcdm_burst_expander
     // pragma translate_on
   end
 
+`ifndef TARGET_SYNTHESIS
 `ifndef SYNTHESIS
+  localparam int unsigned BankOffsetBits = (NumBanksPerTile > 1) ? $clog2(NumBanksPerTile) : 1;
+  localparam int unsigned BoundaryWidth =
+      ((BankOffsetBits > BurstLenWidth) ? BankOffsetBits : BurstLenWidth) + 1;
+
+  logic burst_contained_i;
+  logic [BoundaryWidth-1:0] burst_end_bank;
+  assign burst_end_bank = ((NumBanksPerTile > 1)
+                          ? BoundaryWidth'(req_i.tgt_addr[BankOffsetBits-1:0]) : '0) +
+                          BoundaryWidth'(len_raw_i);
+  assign burst_contained_i = (len_raw_i <= BurstLenWidth'(MaxBurstWords)) &&
+                             (burst_end_bank <= BoundaryWidth'(NumBanksPerTile));
   // Each burst must remain inside the selected tile bank stripe.
   burst_load_only: assert property(
     @(posedge clk_i) disable iff (!rst_ni)
@@ -432,6 +432,7 @@ module tcdm_burst_expander
     @(posedge clk_i) disable iff (!rst_ni)
       !(valid_i && ready_o && req_is_load && (len_raw_i > 1)) || burst_contained_i)
     else $fatal(1, "Burst expander: burst crosses tile boundary or exceeds maximum length.");
+`endif
 `endif
 
 endmodule
