@@ -1,8 +1,15 @@
 {
-  "name": "Example GEMM metadata — replace with run values",
+  "name": "Example GEMM metadata \u2014 replace with run values",
   "backend": "rtl",
-  "mesh": [4, 4],
-  "shape": [16, 128, 4096],
+  "mesh": [
+    4,
+    4
+  ],
+  "shape": [
+    16,
+    128,
+    4096
+  ],
   "precision": "fp16",
   "tiles_per_group": 16,
   "cores_per_tile": 1,
@@ -14,12 +21,24 @@
     "split": "decode",
     "banks": 16,
     "entries": 64,
-    "current": [9, 7, 1],
+    "current": [
+      9,
+      7,
+      1
+    ],
     "shift_min": 4,
     "shift_max": 10,
     "burst_bits_max": 1,
     "min_burst": 16,
     "max_burst": 16,
     "max_steps": 128
+  },
+  "burst_model": "tile-contained-v1",
+  "burst_geometry": {
+    "tile_words": 16,
+    "max_words": 16,
+    "lanes": 4,
+    "rob_depth": 32,
+    "enabled": true
   }
 }

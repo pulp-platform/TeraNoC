@@ -4,15 +4,17 @@
 Compressed detail blocks are copied byte-for-byte. The overview is derived from
 those same records; no transcript reread or telemetry downsampling is required.
 """
+from collections import Counter, defaultdict
 import argparse
 import base64
 import gzip
 import hashlib
 import json
 from pathlib import Path
-import re
 from trace_dashboard.packaging import full_template, packed
 from trace_dashboard.timeline import overview_points
+from trace_dashboard.analysis import hash_explore
+from trace_dashboard.diagnostics import benchmark_diagnostics
 
 
 def blocks(path):
@@ -47,6 +49,7 @@ def unpack(payload):
 
 def upgrade(source, out):
   records = []
+  entry_totals = defaultdict(Counter)
   long_intervals = []
   hashes = {}
   root = None
@@ -59,24 +62,29 @@ def upgrade(source, out):
       page = unpack(payload)
       for frame in page['frames']:
         long_intervals.extend(r for r in frame['rows'] if r['end'] - r['start'] > width)
-        records.extend(r for r in frame['rows'] if r['kind'] in ('fpu','mshr','traffic','overall'))
+        records.extend(r for r in frame['rows'] if r['kind'] not in ('entry','bank','link'))
+        for r in frame['rows']:
+          if r['kind'] == 'entry' and r.get('phase') == 'bench':
+            for field in ('occupied', 'held', 'cached'):
+              entry_totals[r['g']][field] += r.get(field, 0)
       hashes[name] = hashlib.sha256(raw).hexdigest()
       print('Read',name,flush=True)
   if root is None or len(hashes) != len(root['pages']):
     raise ValueError('Missing root or detail blocks')
+  root['hash'] = hash_explore(root['meta'])
+  bench = root['meta'].get('benchmark')
+  diagnostic_rows = records + ([dict(kind='entry', g=g, phase='bench',
+    start=bench[0], end=bench[1], **totals) for g, totals in entry_totals.items()] if bench else [])
+  root['diagnostics'] = benchmark_diagnostics(diagnostic_rows, root['meta'], root['hash'])
   root['overview'] = overview_points(records)
   root['long_intervals'] = long_intervals
   root['warnings'][0] = ('Full capture through cycle '+str(root['pages'][-1]['end'])+
     '. The overview shows the complete captured run; detail retains original measurement windows. '+
     ('Simulation complete.' if root['meta'].get('run_complete') else 'Simulation incomplete; final correctness is not established.'))
   del records
-  # Preserve the prior dashboard's explicit correction of its legacy hash model.
-  with source.open() as stream:
-    prefix = stream.read(100000)
-  correction = re.search(r'<p[^>]*>Hash-model correction:.*?</p>',prefix)
+  # Hash results are recomputed above; old manual hash-model correction banners
+  # describe superseded results and remain only in the untouched source HTML.
   template = full_template(root)
-  if correction:
-    template = template.replace('<body>','<body>'+correction[0],1)
   before, after = template.split('__DASHBOARD_DATA__')
   temporary = out.with_suffix('.html.tmp')
   with temporary.open('wb') as stream:

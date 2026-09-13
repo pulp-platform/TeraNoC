@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 from collections import Counter
+from .burst import requests, PROFILES
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -70,23 +71,37 @@ def hash_explore(meta):
   h = meta.get("hash")
   if not h or not meta.get("shape"):
     return {"available": False, "reason": "Add hash geometry, kernel size, split and current settings to the manifest (see examples)."}
+  profile = meta.get('burst_model', h.get('burst_model'))
+  if profile not in PROFILES:
+    return {"available": False, "reason": "Hash analysis needs the run's burst_model: aligned-v1 or tile-contained-v1. Old unversioned assumptions are not applied automatically."}
+  geometry = dict(meta.get('burst_geometry', h.get('burst_geometry', {})))
+  required = ('tile_words', 'max_words', 'lanes', 'rob_depth')
+  if any(key not in geometry for key in required):
+    return {"available": False, "reason": "Hash analysis needs burst_geometry: tile_words, max_words, lanes, rob_depth (and optional enabled)."}
+  geometry = {key: geometry[key] for key in (*required, 'enabled') if key in geometry}
+  if meta.get('banks_per_tile', geometry['tile_words']) != geometry['tile_words']:
+    raise ValueError('Burst tile_words differs from captured banks_per_tile')
   path = ROOT / "scripts/mshr_bank_hash_explore.py"
   spec = importlib.util.spec_from_file_location("hash_reference", path)
   module = importlib.util.module_from_spec(spec)
   spec.loader.exec_module(module)
   M, N, P = meta["shape"]
+  if min(M, N, P) <= 0 or h.get('max_steps', 16) < 1:
+    raise ValueError('Positive GEMM dimensions and sample count required')
+  if h['kernel'] not in (1, 2, 4, 8) or h['split'] not in ('decode', 'prefill'):
+    raise ValueError('Unsupported GEMM kernel size or work split')
   banks = h["banks"]
   if banks < 2 or banks & (banks-1) or h["entries"] % banks:
     raise ValueError("Hash model requires power-of-two banks >= 2 and divisible entries")
-  args = SimpleNamespace(M=M, N=min(N, h.get("max_steps", 1024)), P=P,
+  args = SimpleNamespace(M=M, N=min(N, h.get("max_steps", 16)), P=P,
       ks=h["kernel"], elem_bytes=2 if meta["precision"] == "fp16" else 4,
-      min_burst=h.get("min_burst", 16), max_burst=h.get("max_burst", 16),
+      min_burst=2, max_burst=geometry["max_words"],
       entries=h["entries"], banks=banks,
       cores=meta["mesh"][0]*meta["mesh"][1]*meta["tiles_per_group"]*meta["cores_per_tile"],
       groups=meta["mesh"][0]*meta["mesh"][1], vlen=meta.get("vlen", 512),
       elen=32, split=h["split"])
   g = module.build(args)
-  # Repository kernels cap LMUL at m8 (the explorer's ks=1 default is m16).
+  # Repository kernels cap LMUL at m8.
   g.lmul = min(8, max(1, 16//g.ks))
   g.load_words = min(g.vlen*g.lmul//32, g.pspan*g.elem_bytes//4)
   if g.load_words <= 0 or g.pspan <= 0:
@@ -98,10 +113,12 @@ def hash_explore(meta):
   if (len(a_bases) != args.groups or
       any(not isinstance(base, int) or base < 0 or base % 4 for base in a_bases)):
     raise ValueError("Hash A bases require one word-aligned byte address per group")
+  sample_steps = [s*(N-1)//max(1, args.N-1) for s in range(args.N)]
   results = []
+  any_burst = False
   for group in range(args.groups):
     # Generate only bounded reduction steps, preserving actual matrix strides.
-    A, W = [], []
+    A, W, B_single = [], [], []
     a_core_tiles, b_core_tiles = Counter(), Counter()
     a_base = a_bases[group]
     for c in range(g.cpg):
@@ -112,27 +129,34 @@ def hash_explore(meta):
         rc, pblk = divmod(c, g.npb)
       p0 = pblk*g.pspan
       m0 = rc*g.ks + (group*(M//args.groups) if g.split == "prefill" else 0)
+      if g.split == 'prefill' and (M//args.groups)//g.ks >= g.cpg:
+        m0 = group*(M//args.groups) + c*((M//args.groups)//g.cpg)
       a_core_tiles[m0] += 1
       b_core_tiles[p0] += 1
-      for step in range(args.N):
-        base = h.get("w_base", g.a_words*4)//4 + (step*P+p0)*g.elem_bytes//4
-        burst = g.load_words >= g.min_burst
-        offsets = range(0, g.load_words, g.max_burst if burst else 1)
-        for offset in offsets:
-          W.append((step, base+offset))
+      for step in sample_steps:
+        address = h.get("w_base", g.a_words*4) + (step*P+p0)*g.elem_bytes
+        size = min(g.vlen*g.lmul//8, g.pspan*g.elem_bytes)
+        for word, count in requests(address, size, profile=profile, **geometry):
+          target = W if count > 1 else B_single
+          target.append((step, word))
       for b in range(m0, min(m0+g.ks, M)):
-        for step in range(0, args.N, 8):
+        for step in sample_steps:
           A.append((step, a_base//4+(b*N+step)*g.elem_bytes//4))
+    # Subscribers share the same MSHR entry. Score distinct request starts,
+    # preserving the common reduction-step sampling for both request classes.
+    A, W, B_single = sorted(set(A)), sorted(set(W)), sorted(set(B_single))
+    singles_addresses = sorted(set(A + B_single))
+    b_request_counts = dict(single=len(B_single), burst=len(W))
+    any_burst = any_burst or bool(W)
     def score(addresses, shift, bb):
       reached, fraction, hist = module.spread(addresses, shift, bb, g)
+      fraction *= len({step for step, _ in addresses}) / args.N
       return dict(shift=shift, burst_bits=bb, concurrent_banks=fraction*banks,
                   fraction=fraction, histogram=[hist[i] for i in range(banks)])
-    lo, hi = h.get("shift_min", 4), min(h.get("shift_max", 10), 30-g.bankidw)
-    singles = [score(A, s, 0) for s in range(lo, hi+1)]
-    is_burst = g.load_words >= g.min_burst
-    weights = [score(W, s, bb) for bb in range(min(h.get("burst_bits_max", 1), g.bankidw-1)+1)
-               for s in range(max(lo, g.align+bb) if is_burst else lo, hi+1)
-               if is_burst or bb == 0]
+    lo, hi = max(4, h.get("shift_min", 4)), min(10, h.get("shift_max", 10), 30-g.bankidw)
+    singles = [score(singles_addresses, s, 0) for s in range(lo, hi+1)]
+    weights = [score(W, s, bb) for bb in range(min(1, h.get("burst_bits_max", 1), g.bankidw-1)+1)
+               for s in range(max(lo, g.align+bb), hi+1)]
     rank = lambda r: (-r["fraction"], max(r["histogram"], default=0), r["shift"], r["burst_bits"])
     singles.sort(key=rank)
     weights.sort(key=rank)
@@ -145,16 +169,20 @@ def hash_explore(meta):
     shared = dict(cores=g.cpg, kernel_rows=g.ks, columns_per_core=g.pspan,
                   a=sharing(a_core_tiles), b=sharing(b_core_tiles))
     current = h.get("current_by_group", {}).get(str(group), h.get("current"))
+    if current and (len(current) != 3 or current[2] not in (0, 1) or
+                    not 4 <= current[0] <= 10 or
+                    not max(4, g.align+current[2]) <= current[1] <= 10):
+      raise ValueError('Current hash selectors are outside the supported RTL CSR range')
     locality = None
     if meta.get("banks_per_tile"):
       group_words = meta["banks_per_tile"] * meta["tiles_per_group"]
       def local_fraction(addresses):
         return (sum((word // group_words) % args.groups == group
                     for _, word in addresses) / len(addresses)) if addresses else None
-      locality = dict(a=local_fraction(A), b=local_fraction(W))
-    results.append(dict(g=group, sharing=shared, locality=locality, singles=singles[:5], weights=weights[:5],
-        current_a=score(A, current[0], 0) if current else None,
-        current_w=score(W, current[1] if is_burst else current[0], current[2] if is_burst else 0) if current else None))
+      locality = dict(a=local_fraction(A), b=local_fraction(W + B_single))
+    results.append(dict(g=group, sharing=shared, locality=locality, request_counts=b_request_counts, singles=singles[:5], weights=weights[:5],
+        current_a=score(singles_addresses, current[0], 0) if current else None,
+        current_w=score(W, current[1], current[2]) if current else None))
   return dict(available=True, groups=results, banks=banks, entries=h["entries"],
-              burst_eligible=is_burst, sampled_steps=args.N, total_steps=N,
-              source=str(path), note=h.get("input_status", "")+" Modeled simultaneous k-steps; best bank spread among supplied legal settings, not a predicted speedup. Addresses/partition are assumptions unless captured from the run.")
+              burst_model=profile, burst_eligible=any_burst, sampled_steps=args.N, total_steps=N,
+              source=str(path), note=h.get("input_status", "")+" Single-class scores include A and scalar B requests; burst scores include burst B requests. First microtile, unmasked unit-stride loads, vstart=0; modeled simultaneous k-steps; best bank spread among supplied legal settings, not a predicted speedup. Addresses/partition are assumptions unless captured from the run.")

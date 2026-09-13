@@ -69,7 +69,7 @@ def main():
 
     captured_fields = ("mesh", "tiles_per_group", "cores_per_tile", "n_fpu",
                        "banks_per_tile", "mshr_entries", "mshr_ways", "kernel_size",
-                       "shape", "precision")
+                       "shape", "precision", "burst_model", "burst_geometry")
     preferred = set()
     source_details = {}
     source_stamps = {}

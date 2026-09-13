@@ -43,3 +43,9 @@ New `[DASHBOARD_META]` / `[GEMM_CONFIG]` lines report selected KS and sharing;
 `[GEMM_HASH]` reports group 0's programmed selectors. The dashboard RTL probe
 captures every group's actual CSR values. Search and printing are outside
 the timed benchmark. No shared `software/bin` ELF is needed for validation.
+
+The request model is `gemm_burst.h`, matching the current tile-contained VLSU.
+Run `python3 software/tests/gemm_config/test_burst.py` for C/Python request-stream
+parity, including short bursts, one-word tails, alignment, tile crossings and
+capacity fallback. The configuration test also checks B bases at bank 8 and
+bank 1. See [burst-model metadata and scope](../../../docs/tile_contained_burst_hash.md).

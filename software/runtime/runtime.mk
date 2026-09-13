@@ -157,6 +157,9 @@ DEFINES += -DMSHR_CFG_BANKFULL_BP=$(if $(group_mshr_bankfull_backpressure),$(gro
 # Geometry for the optional per-group software hash search.
 DEFINES += -DMSHR_CFG_ENTRIES=$(if $(group_mshr_num),$(group_mshr_num),NUM_TILES_PER_GROUP)
 DEFINES += -DMSHR_CFG_WAYS=$(if $(group_mshr_ways_per_bank),$(group_mshr_ways_per_bank),4)
+# Mirror VLSU burst admission in the GEMM request model.
+DEFINES += -DGEMM_BURST_ROB_DEPTH=$(if $(spatz_vlsu_rob_depth),$(spatz_vlsu_rob_depth),32)
+DEFINES += -DGEMM_BURST_ENABLED=$(if $(spatz_vlsu_burst),$(spatz_vlsu_burst),1)
 DEFINES += -DMSHR_CFG_HASH_MODE=$(if $(group_mshr_bank_hash),$(group_mshr_bank_hash),0)
 DEFINES += -DMSHR_MERGE_REQS=$(if $(group_mshr_merge_reqs),$(group_mshr_merge_reqs),4)
 DEFINES += -DNUM_GROUP_BARRIERS=$(shell awk 'BEGIN{print $(num_cores)/$(num_groups)}')

@@ -5,7 +5,9 @@
 
 // Shared work partition for the FP16/FP32 burst-merge applications. Select
 // among legal kernels by A/B sharing imbalance, then burst eligibility, then
-// larger KS. This is a static policy, not a measured performance optimum.
+// larger KS. The tie-breaker tests potential short-burst eligibility; actual
+// addresses, ROB capacity and tile crossings are checked by the runtime tuner.
+// This is a static policy, not a measured performance optimum.
 #if NUM_GROUPS < 1 || NUM_CORES < NUM_GROUPS || NUM_CORES % NUM_GROUPS != 0
 #error "GEMM requires an integral, nonempty core count per group"
 #endif
@@ -60,14 +62,14 @@
   ? GEMM_DECODE_PBLOCKS(k) : GEMM_PREFILL_PBLOCKS(k))
 #define GEMM_PSPAN(k) GEMM_DIV(GEMM_P, GEMM_PBLOCKS(k))
 #define GEMM_LMUL(k) GEMM_MIN(8, 16 / (k))
-#define GEMM_LOAD_WORDS(k) \
-  GEMM_MIN(VLEN * GEMM_LMUL(k) / 32, \
-           GEMM_PSPAN(k) * GEMM_ELEM_BYTES / 4)
+#define GEMM_LOAD_BYTES(k) \
+  GEMM_MIN(VLEN * GEMM_LMUL(k) / 8, GEMM_PSPAN(k) * GEMM_ELEM_BYTES)
+#define GEMM_LOAD_WORDS(k) (GEMM_LOAD_BYTES(k) / 4)
 #define GEMM_IMBALANCE(k) ((GEMM_SHARE_A(k) > GEMM_SHARE_B(k)) \
   ? GEMM_SHARE_A(k) - GEMM_SHARE_B(k) \
   : GEMM_SHARE_B(k) - GEMM_SHARE_A(k))
 #define GEMM_SCORE(k) (GEMM_LEGAL(k) \
-  ? 2 * GEMM_IMBALANCE(k) + (GEMM_LOAD_WORDS(k) < 16) : 1000000)
+  ? 2 * GEMM_IMBALANCE(k) + (GEMM_LOAD_BYTES(k) < 8 || GEMM_LOAD_BYTES(k) % 4 != 0) : 1000000)
 
 #ifndef KERNEL_SIZE
 #if GEMM_SCORE(8) <= GEMM_SCORE(4) && \

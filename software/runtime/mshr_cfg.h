@@ -592,13 +592,17 @@ static inline int mshr_cfg_check_splits(uint32_t share_w, uint32_t share_a, uint
   }
 #endif // GEMM_M
 
-// The GEMM applications select a legal, balanced work partition first. Tune
-// only hash mode 3, whose independent word-address selectors match this model.
+// The shape-derived initialiser above supplies legal seed settings; it does not
+// enumerate the address-dependent tile-contained request stream. The GEMM apps
+// refine those seeds here using the current burst model and actual operand bases.
+// Tune only hash mode 3; hold/cache policy is unchanged by bank-spread selection.
 #ifdef GEMM_CONFIG_H
 #include "gemm_hash.h"
 static inline void mshr_cfg_tune_gemm(mshr_cfg_t *c, const void *a,
                                       const void *b, uint32_t group) {
 #if MSHR_HASH_SEARCH && MSHR_CFG_HASH_MODE == 3
+  _Static_assert(MSHR_MAX_BURST_WORDS == GEMM_BURST_MAX_WORDS,
+                 "MSHR seed and VLSU model must use the same maximum burst length");
   _Static_assert(MSHR_CFG_WAYS > 0 &&
                  MSHR_CFG_ENTRIES % MSHR_CFG_WAYS == 0,
                  "Invalid MSHR banking geometry");
