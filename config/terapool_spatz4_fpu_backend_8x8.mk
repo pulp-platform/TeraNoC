@@ -9,10 +9,15 @@
 #   MSHR hold     2047 (window_burst and serve_timeout)
 #   router remap  2 (response remapping)
 #
-# TWO KNOBS DIFFER FROM THE BASE. terapool_spatz4_fpu_8x8.mk already ships hold_window_burst 2047,
-# serve_timeout 2047, and channel_config_mode baseline (rd 0 + rdwr 2, resp 2), so response
-# remapping and the stats guard are the entire delta. mshr_num 64, merge_reqs 4, hold_subs 4/4
-# and port_hash 7 all come from the base unchanged.
+# WHAT DIFFERS FROM THE BASE: response remapping, the stats guard, and merge_reqs (below).
+# channel_config_mode baseline (rd 0 + rdwr 2, resp 2), mshr_num 64, hold_subs 4/4 and port_hash 7
+# all come from the base unchanged.
+#
+# CORRECTED 2026-09-13: this header claimed the base shipped hold_window_burst / serve_timeout
+# 2047 and merge_reqs 4. Neither is true any more -- terapool_spatz4_fpu_8x8.mk sets none of the
+# three, so all of them come from terapool_spatz4_fpu.mk, which now ships 8191 / 8191 / 16. The
+# hold values are fine inherited; merge_reqs 16 is a simulation value and is pinned back to 4
+# below. Measurements quoted further down predate those base changes.
 #
 # NOTE the hold window moved 1023 -> 2047 under the standing decision of 2026-08-14 (one value at
 # every mesh). This header claimed 1023 until 2026-08-18; the measurements quoted below were taken
@@ -52,6 +57,12 @@ noc_router_remapping := 2
 # VERILATOR`), but the 4x4 config's own history records a bare translate_off guard leaking into
 # synthesis once. Beyond the leak risk: if the two backend configs disagree on this knob, a
 # 4x4-vs-8x8 area comparison is measuring the counters as well as the mesh.
+# MERGE_REQS: 4 for the backend, against the base's 16 -- an ELABORATION constant, not a tuning
+# knob. MshrMergeReqs sizes the per-entry sub_reqs array (mempool_group_mshr.sv:519), so 16 builds
+# four times the per-entry storage. Simulation wants 16 because software sets the real target
+# through the CSR; every OOC result we have was measured at 4. Kept in step with the 4x4 flavour.
+group_mshr_merge_reqs := 4
+
 group_mshr_enable_stats := 0
 
 # ---------------------------------------------------------------------------------------------

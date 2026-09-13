@@ -28,12 +28,24 @@
 # baseline, so it needs no override here -- but if you ever need a non-default channel split,
 # pass it as a MAKE ARGUMENT, e.g. `channel_config_mode=enhanced`, not as a pre-assignment.)
 #
-# hold=2047, per the standing decision of 2026-08-14 (see terapool_spatz4_fpu.mk). This file
-# previously pinned 511 with a note arguing that shorter windows complete faster -- that note is
-# superseded: the value is now uniform across 4x4 and 8x8 so that configs differ in the thing under
-# test and not in the hold window as well.
-group_mshr_hold_window_burst := 2047
-group_mshr_serve_timeout     := 2047
+# HOLD WINDOW: inherited, NOT pinned. The 2026-08-14 decision asked for one value at every mesh,
+# so that configs differ in the thing under test and not in the hold window as well. This file
+# pinned 2047 to get that. The base has since moved to 8191 and the 8x8 backend flavour inherits
+# it, so the pin now BREAKS the uniformity it existed to provide, and leaves every OOC result --
+# all measured at 8191 -- describing a config this file does not build. Removed: both backend
+# flavours now take hold_window_burst and serve_timeout from terapool_spatz4_fpu.mk.
+#
+# It never cost area either way: at cfg_runtime=1 these are reset values software overwrites, and
+# the counter width comes from MshrCfgHoldCntW in mempool_pkg, not from this number.
+
+# MERGE_REQS: 4 for the backend, against the base's 16. This is an ELABORATION constant, not a
+# tuning knob -- MshrMergeReqs sizes the per-entry sub_reqs array (mempool_group_mshr.sv:519), so
+# 16 builds FOUR TIMES the per-entry storage in every one of the 64 entries. Simulation wants 16
+# because software sets the real target through the CSR at run time; synthesis does not, and every
+# OOC number we have was measured at 4 -- until now only because run_ooc5.sh overrode it
+# internally, never because the config supplied it. Pinned here so the group run builds the MSHR
+# we actually characterised.
+group_mshr_merge_reqs := 4
 
 # Synthesis insurance. The stats blocks are contained three ways -- `pragma translate_off`, this
 # parameter, and `ifndef VERILATOR` -- and all eight stats always_ff sit inside translate_off, so
