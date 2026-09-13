@@ -69,6 +69,28 @@ module tcdm_burst_expander
   if ((NumContexts != 1) && (NumContexts != 2))
     $error("[tcdm_burst_expander] NumContexts (%0d) must be 1 or 2.", NumContexts);
 
+  // TILE-CONTAINMENT CONTRACT. The producer (spatz_vlsu) clamps every burst to the words left in
+  // the tile stripe, and since the checks moved out of the datapath neither this module nor the
+  // group MSHR clamps any more -- both only assert. The producer's stripe width must therefore BE
+  // this memory system's banks per tile: if it is larger, a burst runs past the end of the tile
+  // and silently reads another tile's words, with nothing left to correct it.
+  //
+  // spatz_vlsu derives its TileBurstWords from these same macros and falls back to a hardcoded 16
+  // when neither is defined -- right only by coincidence for the shipping configuration. Mirror
+  // that derivation here, where mempool_pkg knows the real answer, so a divergence (including a
+  // silent fallback) fails elaboration instead of reaching silicon.
+  //
+  // NumFUsPerCore stands in for Spatz's N_FU; the two are the same max(IPU,FPU) count, and a
+  // divergence there would break the VRF and port widths long before it reached a burst.
+  localparam int unsigned SpatzTileBurstWords =
+    `ifdef SPATZ_TCDM_BANKS_PER_TILE `SPATZ_TCDM_BANKS_PER_TILE
+    `elsif NUM_CORES_PER_TILE
+      `NUM_CORES_PER_TILE * mempool_pkg::NumFUsPerCore * `BANKING_FACTOR
+    `else 16 `endif;
+  if (SpatzTileBurstWords != NumBanksPerTile)
+    $error("[tcdm_burst_expander] Spatz TileBurstWords (%0d) != NumBanksPerTile (%0d): the burst producer would emit bursts that leave the tile bank stripe, and nothing clamps them any more.",
+           SpatzTileBurstWords, NumBanksPerTile);
+
   logic req_is_load;
   logic [BurstLenWidth-1:0] len_i;
   logic [BurstLenWidth-1:0] len_raw_i;
