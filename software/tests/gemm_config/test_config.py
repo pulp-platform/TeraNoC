@@ -6,8 +6,11 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import sys
 
 ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT/'sim_dashboard'))
+from trace_dashboard.burst import requests
 
 
 def partition(m, p, groups, ks, div=1, forced=None):
@@ -57,10 +60,11 @@ def model_score(allocations, n, p, elem, ks, group, banks, burst, shift, bits, a
     for row, col, _, _ in cohort:
       if not burst:
         addresses.update((a + ((row + r) * n + k) * elem) // 4 for r in range(ks))
-      full = words // 16 * 16
-      addresses.update((b + (k * p + col) * elem) // 4 + w
-                       for w in range(0 if burst else full,
-                                      full if burst else words, 16 if burst else 1))
+      address = b + (k*p+col)*elem
+      size = min(512*min(8,16//ks)//8, cohort[0][3]*elem)
+      addresses.update(word for word, count in requests(address,size,
+        profile='tile-contained-v1',tile_words=16,max_words=16,lanes=4,rob_depth=32)
+        if (count>1)==bool(burst))
     def bank(w):
       if not bits:
         return (w >> shift) % banks
@@ -80,7 +84,7 @@ def run():
               (groups, elem, 16, 128, 4096, 1, 2, 1)]
   with tempfile.TemporaryDirectory(prefix='gemm-config-test-') as folder:
     out = Path(folder)
-    for name in ('gemm_config.h', 'gemm_hash.h', 'mshr_cfg.h'):
+    for name in ('gemm_config.h', 'gemm_hash.h', 'gemm_burst.h', 'mshr_cfg.h'):
       shutil.copy(ROOT / 'software/runtime' / name, out)
     (out / 'encoding.h').write_text('')
     (out / 'runtime.h').write_text('''
@@ -99,7 +103,7 @@ static inline unsigned mempool_get_core_id(void) { return 0; }
       def rank(item):
         ks, (_, sa, sb, alloc) = item
         words = min(512 * min(8, 16 // ks) // 32, alloc[0][3] * elem // 4)
-        return abs(sa - sb), words < 16, -ks
+        return abs(sa - sb), words < 2, -ks
       ks, (decode, sa, sb, alloc) = (next(x for x in legal if x[0] == override)
                                    if override else min(legal, key=rank))
       defines = dict(NUM_GROUPS=groups, NUM_CORES=groups * 16, GEMM_M=m,
@@ -146,7 +150,8 @@ int select_hash(unsigned a, unsigned b, unsigned g, unsigned banks, unsigned *x)
       assert lib.check() == 0, (idx, 'runtime/constant CSR mismatch', lib.check())
       assert [lib.config(i) for i in range(4)] == [ks, decode, sa, sb]
       for group, banks, a, b in ((0, 16, 0x10000000, 0x10020000),
-                                  (groups // div - 1, 4, 0x100000c0, 0x10020140)):
+                                  (groups // div - 1, 4, 0x100000c0, 0x10020144),
+                                  (0, 16, 0x10000000, 0x10020020)):
         chosen = (ctypes.c_uint * 3)(*[lib.config(i) for i in range(4, 7)])
         assert lib.select_hash(a, b, group, banks, chosen) == 1
         for burst in (0, 1):

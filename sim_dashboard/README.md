@@ -398,3 +398,23 @@ available but explicitly materializes the full parsed dataset in memory.
 `generate_full.py` is now only a compatibility wrapper around the same command;
 there is no second generator implementation. Existing campaign commands keep
 working. Shared HTML packaging lives in `trace_dashboard/packaging.py`.
+
+## Burst-aware hash model
+
+Hash analysis now requires `burst_model` and `burst_geometry` from the run's
+`[DASHBOARD_META]` line or manifest. Use `tile-contained-v1` for the new RTL,
+and `aligned-v1` for the preceding aligned-start VLSU with short-burst support.
+Unversioned logs retain measured views but do not get an assumed hash model.
+The example manifest illustrates the new profile; verify every hardware value
+against the actual run before using it.
+
+Scalar hash candidates include both A and scalar B requests. Burst candidates
+include actual burst B requests, including short bursts and tile-boundary
+splits. The hash page reports the modeled B request mix for the selected group.
+Default sampling matches the runtime tuner's 16 evenly spaced reduction steps;
+`hash.max_steps` can request a larger offline sample. Candidate ties can be
+ordered differently: runtime keeps the seed, while the dashboard also displays
+histogram balance. Both maximize the same sampled occupied-bank score.
+
+`upgrade_full.py` refreshes hash analysis and diagnosis using embedded metadata
+while preserving original detail blocks. See [the model and migration notes](../docs/tile_contained_burst_hash.md).

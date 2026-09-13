@@ -5,6 +5,7 @@
 
 #include <stdint.h>
 #include "gemm_config.h"
+#include "gemm_burst.h"
 
 // Bounded, deterministic bank-spread model for the first row/column microtile
 // at evenly spaced reduction steps. This does not model arrival skew, cache
@@ -21,7 +22,7 @@
 
 static inline uint32_t gemm_hash_bank(uint32_t word, uint32_t shift,
                                       uint32_t bits, uint32_t banks) {
-  return (((word >> shift) << bits) | ((word >> 4) & bits)) & (banks - 1);
+  return (((word >> shift) << bits) | ((word >> GEMM_BURST_HASH_ALIGN) & bits)) & (banks - 1);
 }
 
 static inline uint32_t gemm_hash_score(uint32_t a_base, uint32_t b_base,
@@ -29,7 +30,7 @@ static inline uint32_t gemm_hash_score(uint32_t a_base, uint32_t b_base,
                                        uint32_t burst, uint32_t shift,
                                        uint32_t bits) {
   const uint32_t steps = GEMM_MIN(GEMM_N, MSHR_HASH_SAMPLE_STEPS);
-  const uint32_t words = GEMM_LOAD_WORDS(KERNEL_SIZE);
+  const uint32_t bytes = GEMM_LOAD_BYTES(KERNEL_SIZE);
   uint32_t score = 0;
   for (uint32_t s = 0; s < steps; ++s) {
     const uint32_t n = s * (GEMM_N - 1) / (steps > 1 ? steps - 1 : 1);
@@ -62,15 +63,16 @@ static inline uint32_t gemm_hash_score(uint32_t a_base, uint32_t b_base,
           occupied |= (uint64_t)1 << gemm_hash_bank(word, shift, 0, banks);
         }
       }
-      // A short vector uses single-word requests. Include it in that class;
-      // otherwise score full 16-word bursts and any residual words separately.
-      const uint32_t full = words / 16 * 16;
-      const uint32_t begin = burst ? 0 : full;
-      const uint32_t end = burst ? full : words;
       if (!unique_b) continue;
-      for (uint32_t w = begin; w < end; w += burst ? 16 : 1) {
-        uint32_t word = (b_base + (n * GEMM_P + col) * GEMM_ELEM_BYTES) / 4 + w;
-        occupied |= (uint64_t)1 << gemm_hash_bank(word, shift, bits, banks);
+      const uint32_t address = b_base + (n * GEMM_P + col) * GEMM_ELEM_BYTES;
+      const uint32_t eligible = gemm_burst_eligible(address, bytes);
+      const uint32_t words = (address % 4 + bytes + 3) / 4;
+      for (uint32_t w = 0; w < words;) {
+        const uint32_t word = address / 4 + w;
+        const uint32_t count = gemm_burst_next(word, words - w, eligible);
+        if ((count > 1) == burst)
+          occupied |= (uint64_t)1 << gemm_hash_bank(word, shift, bits, banks);
+        w += count;
       }
     }
     while (occupied) {
@@ -90,12 +92,10 @@ static inline int gemm_hash_select(uint32_t a_base, uint32_t b_base,
   if (!banks || banks > 64 || (banks & (banks - 1)) ||
       group >= GEMM_ACTIVE_GROUPS) return 0;
   const uint32_t steps = GEMM_MIN(GEMM_N, MSHR_HASH_SAMPLE_STEPS);
-  const uint32_t words = GEMM_LOAD_WORDS(KERNEL_SIZE);
-  const uint32_t max_s = steps * GEMM_MIN(banks,
-    KERNEL_SIZE * GEMM_SHARE_B(KERNEL_SIZE) +
-    (words % 16) * GEMM_SHARE_A(KERNEL_SIZE));
-  const uint32_t max_b = steps * GEMM_MIN(banks,
-    (words / 16) * GEMM_SHARE_A(KERNEL_SIZE));
+  // A bank-count ceiling is valid for every mixture of scalar and burst requests.
+  // Shape-only ceilings based on words/16 can terminate before testing short bursts.
+  const uint32_t max_s = steps * banks;
+  const uint32_t max_b = steps * banks;
   uint32_t best_s = gemm_hash_score(a_base, b_base, group, banks, 0, *single, 0);
   uint32_t best_b = gemm_hash_score(a_base, b_base, group, banks, 1, *burst, *bits);
   // Once every possible distinct line/bank is reached, no candidate can
@@ -110,7 +110,7 @@ static inline int gemm_hash_select(uint32_t a_base, uint32_t b_base,
       }
     }
     for (uint32_t bb = 0; bb <= 1; ++bb) {
-      if (shift < 4 + bb || best_b == max_b) continue;
+      if (shift < GEMM_BURST_HASH_ALIGN + bb || best_b == max_b) continue;
       score = gemm_hash_score(a_base, b_base, group, banks, 1, shift, bb);
       if (score > best_b) {
         best_b = score;

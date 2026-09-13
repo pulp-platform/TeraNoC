@@ -95,6 +95,7 @@
 // ---------------------------------------------------------------------------------------------
 // Select KS and the matching work split before the vector kernel is included.
 #include "gemm_config.h"
+#include "gemm_burst.h"
 
 #include "kernel/sp-fmatmul.c"
 #include "printf.h"
@@ -425,8 +426,13 @@ int main() {
   // with EXTRA_DEFINES=-DKERNEL_SIZE=... for a controlled performance sweep.
   kernel_size = KERNEL_SIZE;
   if (cid == 0) {
-    printf("[DASHBOARD_META] {\"kernel_size\":%u}\n",
-           (unsigned)kernel_size);
+    printf("[DASHBOARD_META] {\"kernel_size\":%u,\"burst_model\":\"%s\","
+           "\"burst_geometry\":{\"tile_words\":%u,\"max_words\":%u,"
+           "\"lanes\":%u,\"rob_depth\":%u,\"enabled\":%u}}\n",
+           (unsigned)kernel_size, GEMM_BURST_MODEL,
+           (unsigned)GEMM_BURST_TILE_WORDS, (unsigned)GEMM_BURST_MAX_WORDS,
+           (unsigned)GEMM_BURST_LANES, (unsigned)GEMM_BURST_ROB_DEPTH,
+           (unsigned)GEMM_BURST_ENABLED);
     printf("[GEMM_CONFIG] ks=%u decode=%u share_a=%u share_b=%u\n",
            (unsigned)kernel_size, (unsigned)MATMUL_DECODE_SPLIT,
            (unsigned)GEMM_SHARE_A(KERNEL_SIZE),

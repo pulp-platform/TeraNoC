@@ -693,11 +693,12 @@
       return;
     }
     $("hashNote").textContent = h.note + (M.software_merge_targets?.single === 1
-      ? " The compiled software policy bypasses single-word requests (merge target 1). The A hash plot is hypothetical bank spread, not observed scalar MSHR usage." : "");
+      ? " The compiled software policy bypasses single-word requests (merge target 1). The single-class hash plot is hypothetical bank spread, not observed scalar MSHR usage." : "");
     let g = h.groups.find((x) => x.g === group);
     stats("hashSummary", [
       ["MSHR banks", h.banks],
-      ["Burst eligible", h.burst_eligible ? "Yes" : "No"],
+      ["Burst model", h.burst_model || "Not specified"],
+      ["B requests modeled (this group)", g.request_counts ? `${g.request_counts.burst} bursts / ${g.request_counts.single} singles` : "Unavailable"],
       ["Reduction steps modeled", `${h.sampled_steps} / ${h.total_steps}`],
       ["Software kernel size (rows)", M.kernel_size ?? M.hash?.kernel ?? "Unavailable"],
     ]);
@@ -711,7 +712,7 @@
         : `${target(k)}${target(k) === 1 ? " — bypass table" : " — subscriber target"}`;
       table("hashSharing", ["Operand", "Potential cores sharing each element", "MSHR target / policy", "Distinct operand tiles/group"], [
         ["Matrix A", degree(sharing.a), targetText("single"), sharing.a.distinct_tiles],
-        ["Matrix B (weights)", degree(sharing.b), targetText("burst"), sharing.b.distinct_tiles],
+        ["Matrix B (weights)", degree(sharing.b), g.request_counts?.single ? `Single: ${targetText("single")}; burst: ${targetText("burst")}` : targetText("burst"), sharing.b.distinct_tiles],
       ]);
       $("sharingNote").textContent = `${sharing.cores} cores/group; each core computes a ${sharing.kernel_rows} × ${sharing.columns_per_core} output tile. Sharing follows the workload partition: A is shared across column tiles, B across row tiles. This is potential same-element sharing, not measured simultaneous accesses or achieved MSHR merging. The MSHR target is a separate software policy: 1 means bypass, not one physical sharer. Targets are ${sampled?.single_merge_target != null ? "sampled RTL settings at the selected window end" : "compiled ELF policy when available"}; they are not measured multicast factors.`;
     }
@@ -728,8 +729,8 @@
       "hashCandidates",
       ["Access", "Shift", "Burst bits", "Concurrent banks"],
       [
-        ["A", g.singles],
-        ["Weights", g.weights],
+        ["Singles (A + scalar B)", g.singles],
+        ["Bursts (B)", g.weights],
       ].flatMap(([kind, list]) =>
         list.map((c) => [
           kind,
