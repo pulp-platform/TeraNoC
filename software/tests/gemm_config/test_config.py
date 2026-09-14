@@ -50,10 +50,10 @@ def partition(m, p, groups, ks, div=1, forced=None):
   return int(decode), cpg // sb, sb, allocations
 
 
-def model_score(allocations, n, p, elem, ks, group, banks, burst, shift, bits, a, b):
+def model_metrics(allocations, n, p, elem, ks, group, banks, burst, shift, bits, a, b):
   cohort = allocations[group * 16:group * 16 + 16]
   words = min(512 * min(8, 16 // ks) // 32, cohort[0][3] * elem // 4)
-  total = 0
+  total, histogram = 0, [0] * banks
   for step in range(min(n, 16)):
     k = step * (n - 1) // (min(n, 16) - 1)
     addresses = set()
@@ -69,8 +69,16 @@ def model_score(allocations, n, p, elem, ks, group, banks, burst, shift, bits, a
       if not bits:
         return (w >> shift) % banks
       return (((w >> shift) % (max(1, banks // 2))) * 2 + ((w // 16) % 2)) % banks
-    total += len({bank(w) for w in addresses})
-  return total
+    selected = [bank(w) for w in addresses]
+    total += len(set(selected))
+    for target in selected:
+      histogram[target] += 1
+  return total, max(histogram)
+
+
+def model_score(allocations, n, p, elem, ks, group, banks, burst, shift, bits, a, b):
+  return model_metrics(allocations, n, p, elem, ks, group, banks,
+                       burst, shift, bits, a, b)[0]
 
 
 def run():
@@ -81,6 +89,7 @@ def run():
       cases.append((groups, elem, m, n, p, 1, None, None))
     cases += [(groups, elem, 512, 128, 512, 1, 2, None),
               (groups, elem, 16, 128, 4096, 4, None, None),
+              (groups, elem, 16, 512, 4096, 1, 4, None),
               (groups, elem, 16, 128, 4096, 1, 2, 1)]
   with tempfile.TemporaryDirectory(prefix='gemm-config-test-') as folder:
     out = Path(folder)
@@ -149,13 +158,17 @@ int select_hash(unsigned a, unsigned b, unsigned g, unsigned banks, unsigned *x)
       lib = ctypes.CDLL(str(so))
       assert lib.check() == 0, (idx, 'runtime/constant CSR mismatch', lib.check())
       assert [lib.config(i) for i in range(4)] == [ks, decode, sa, sb]
-      for group, banks, a, b in ((0, 16, 0x10000000, 0x10020000),
-                                  (groups // div - 1, 4, 0x100000c0, 0x10020144),
-                                  (0, 16, 0x10000000, 0x10020020)):
+      address_cases = [(0, 16, 0x10000000, 0x10020000),
+                       (groups // div - 1, 4, 0x100000c0, 0x10020144),
+                       (0, 16, 0x10000000, 0x10020020)]
+      exact_d16 = groups == 64 and elem == 2 and (m, n, p, ks) == (16, 512, 4096, 4)
+      if exact_d16:
+        address_cases.append((0, 16, 4784128, 540672))
+      for group, banks, a, b in address_cases:
         chosen = (ctypes.c_uint * 3)(*[lib.config(i) for i in range(4, 7)])
         assert lib.select_hash(a, b, group, banks, chosen) == 1
         for burst in (0, 1):
-          scores = {}
+          scores, metrics = {}, {}
           for shift in range(4, 11):
             for bits in range(2 if burst else 1):
               if shift < 4 + bits:
@@ -164,8 +177,16 @@ int select_hash(unsigned a, unsigned b, unsigned g, unsigned banks, unsigned *x)
                                      burst, shift, bits, a, b)
               assert lib.score(a, b, group, banks, burst, shift, bits) == expected
               scores[shift, bits] = expected
+              metrics[shift, bits] = model_metrics(
+                  alloc, n, p, elem, ks, group, banks,
+                  burst, shift, bits, a, b)
           key = (chosen[1], chosen[2]) if burst else (chosen[0], 0)
           assert scores[key] == max(scores.values()), (idx, key, scores)
+          expected_key = min(metrics, key=lambda candidate:
+              (-metrics[candidate][0], metrics[candidate][1], *candidate))
+          assert key == expected_key, (idx, burst, key, expected_key, metrics)
+        if exact_d16 and (a, b) == (4784128, 540672):
+          assert list(chosen) == [8, 10, 1], list(chosen)
         assert lib.select_hash(a, b, group, 3, chosen) == 0
       print(f'{groups:2} groups fp{elem*8} {m}x{n}x{p} div={div}: KS={ks}, A/B={sa}/{sb}')
     # Explicit illegal KS and unsupported shapes must fail at build time.

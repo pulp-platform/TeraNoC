@@ -25,13 +25,19 @@ static inline uint32_t gemm_hash_bank(uint32_t word, uint32_t shift,
   return (((word >> shift) << bits) | ((word >> GEMM_BURST_HASH_ALIGN) & bits)) & (banks - 1);
 }
 
-static inline uint32_t gemm_hash_score(uint32_t a_base, uint32_t b_base,
-                                       uint32_t group, uint32_t banks,
-                                       uint32_t burst, uint32_t shift,
-                                       uint32_t bits) {
+typedef struct {
+  uint32_t spread;
+  uint32_t peak;
+} gemm_hash_score_t;
+
+static inline gemm_hash_score_t gemm_hash_evaluate(
+    uint32_t a_base, uint32_t b_base, uint32_t group, uint32_t banks,
+    uint32_t burst, uint32_t shift, uint32_t bits) {
   const uint32_t steps = GEMM_MIN(GEMM_N, MSHR_HASH_SAMPLE_STEPS);
   const uint32_t bytes = GEMM_LOAD_BYTES(KERNEL_SIZE);
-  uint32_t score = 0;
+  uint32_t bank_load[banks];
+  gemm_hash_score_t score = {0, 0};
+  for (uint32_t bank = 0; bank < banks; ++bank) bank_load[bank] = 0;
   for (uint32_t s = 0; s < steps; ++s) {
     const uint32_t n = s * (GEMM_N - 1) / (steps > 1 ? steps - 1 : 1);
     uint64_t occupied = 0;
@@ -60,7 +66,9 @@ static inline uint32_t gemm_hash_score(uint32_t a_base, uint32_t b_base,
         for (uint32_t r = 0; r < KERNEL_SIZE; ++r) {
           uint32_t word = (a_base + ((row + r) * GEMM_N + n)
                            * GEMM_ELEM_BYTES) / 4;
-          occupied |= (uint64_t)1 << gemm_hash_bank(word, shift, 0, banks);
+          uint32_t bank = gemm_hash_bank(word, shift, 0, banks);
+          occupied |= (uint64_t)1 << bank;
+          ++bank_load[bank];
         }
       }
       if (!unique_b) continue;
@@ -70,49 +78,69 @@ static inline uint32_t gemm_hash_score(uint32_t a_base, uint32_t b_base,
       for (uint32_t w = 0; w < words;) {
         const uint32_t word = address / 4 + w;
         const uint32_t count = gemm_burst_next(word, words - w, eligible);
-        if ((count > 1) == burst)
-          occupied |= (uint64_t)1 << gemm_hash_bank(word, shift, bits, banks);
+        if ((count > 1) == burst) {
+          uint32_t bank = gemm_hash_bank(word, shift, bits, banks);
+          occupied |= (uint64_t)1 << bank;
+          ++bank_load[bank];
+        }
         w += count;
       }
     }
     while (occupied) {
       occupied &= occupied - 1;
-      ++score;
+      ++score.spread;
     }
   }
+  for (uint32_t bank = 0; bank < banks; ++bank)
+    if (bank_load[bank] > score.peak) score.peak = bank_load[bank];
   return score;
 }
 
-// Retain the seed on ties. Search each class independently because the RTL
-// provides independent single/burst selectors. Return 0 if geometry is invalid.
+static inline uint32_t gemm_hash_score(uint32_t a_base, uint32_t b_base,
+                                       uint32_t group, uint32_t banks,
+                                       uint32_t burst, uint32_t shift,
+                                       uint32_t bits) {
+  return gemm_hash_evaluate(a_base, b_base, group, banks, burst, shift, bits).spread;
+}
+
+static inline int gemm_hash_better(gemm_hash_score_t candidate,
+                                   uint32_t candidate_shift,
+                                   uint32_t candidate_bits,
+                                   gemm_hash_score_t best,
+                                   uint32_t best_shift,
+                                   uint32_t best_bits) {
+  if (candidate.spread != best.spread) return candidate.spread > best.spread;
+  if (candidate.peak != best.peak) return candidate.peak < best.peak;
+  if (candidate_shift != best_shift) return candidate_shift < best_shift;
+  return candidate_bits < best_bits;
+}
+
+// Search each class independently because the RTL provides independent
+// single/burst selectors. First maximize banks reached at each sampled step,
+// then spread requests over time by minimizing the busiest bank. The final
+// shift/bit ordering keeps fully tied choices deterministic and matches the
+// dashboard candidate ranking. Return 0 if geometry is invalid.
 static inline int gemm_hash_select(uint32_t a_base, uint32_t b_base,
                                    uint32_t group, uint32_t banks,
                                    uint32_t *single, uint32_t *burst,
                                    uint32_t *bits) {
   if (!banks || banks > 64 || (banks & (banks - 1)) ||
       group >= GEMM_ACTIVE_GROUPS) return 0;
-  const uint32_t steps = GEMM_MIN(GEMM_N, MSHR_HASH_SAMPLE_STEPS);
-  // A bank-count ceiling is valid for every mixture of scalar and burst requests.
-  // Shape-only ceilings based on words/16 can terminate before testing short bursts.
-  const uint32_t max_s = steps * banks;
-  const uint32_t max_b = steps * banks;
-  uint32_t best_s = gemm_hash_score(a_base, b_base, group, banks, 0, *single, 0);
-  uint32_t best_b = gemm_hash_score(a_base, b_base, group, banks, 1, *burst, *bits);
-  // Once every possible distinct line/bank is reached, no candidate can
-  // improve the score. This avoids exhaustive startup work on regular GEMMs.
-  for (uint32_t shift = 4; shift <= 10 && (best_s < max_s || best_b < max_b); ++shift) {
-    uint32_t score;
-    if (best_s < max_s) {
-      score = gemm_hash_score(a_base, b_base, group, banks, 0, shift, 0);
-      if (score > best_s) {
-        best_s = score;
-        *single = shift;
-      }
+  gemm_hash_score_t best_s =
+      gemm_hash_evaluate(a_base, b_base, group, banks, 0, *single, 0);
+  gemm_hash_score_t best_b =
+      gemm_hash_evaluate(a_base, b_base, group, banks, 1, *burst, *bits);
+  for (uint32_t shift = 4; shift <= 10; ++shift) {
+    gemm_hash_score_t score =
+        gemm_hash_evaluate(a_base, b_base, group, banks, 0, shift, 0);
+    if (gemm_hash_better(score, shift, 0, best_s, *single, 0)) {
+      best_s = score;
+      *single = shift;
     }
     for (uint32_t bb = 0; bb <= 1; ++bb) {
-      if (shift < GEMM_BURST_HASH_ALIGN + bb || best_b == max_b) continue;
-      score = gemm_hash_score(a_base, b_base, group, banks, 1, shift, bb);
-      if (score > best_b) {
+      if (shift < GEMM_BURST_HASH_ALIGN + bb) continue;
+      score = gemm_hash_evaluate(a_base, b_base, group, banks, 1, shift, bb);
+      if (gemm_hash_better(score, shift, bb, best_b, *burst, *bits)) {
         best_b = score;
         *burst = shift;
         *bits = bb;
