@@ -17360,3 +17360,58 @@ NOC_VIRTUAL_CHANNEL_NUM=1 NOC_TOPOLOGY=0 NOC_ROUTING_ALGORITHM=0`.
 **Status: FROZEN.** No further RTL changes to `mempool_group_mshr.sv` until the full-group run
 reports. 64/4 vs 48/3 is a `-D` choice and does not reopen the freeze; it waits on the last 4
 arms of the perf campaign (4 of 8 in, both 8x8 pairs at parity or better for 48/3).
+
+## 2026-09-13 03:10 — decode B×KS sweep (rb, wake-fixed 8x8): last two arms in
+
+**Purpose.** Pull in the last two running arms of the post-wake-fix rerun and republish the
+decode artifact.
+
+**Implementation.** Copied the node-local transcripts of `ce23/0003` (badile07) and `0db8/0007`
+(badile42) into `hardware/rb_rb_<arm>/transcript`, re-ran
+`scripts/gen_hashfix_results_artifact.py` (self-check OK), republished the artifact (v21).
+
+**Result.**
+
+| arm | cycles | RH STUCK | idle groups |
+|---|---:|---:|---:|
+| `8x8_fp16_ks4_128x1024x2048` | **88,095** | 0 | 0 |
+| `8x8_fp32_ks4_128x1024x1024` | **91,250** | 0 | 0 |
+
+Neither has a pre-fix number, so there is no new matched pair (still 6, all <1%). The artifact now
+shows 80 arms and 32 clean 8x8 goldens (was 30).
+
+**Both sims are stuck in the epilogue and never exit.** Each prints the result, then `[SPOT] g=0`
+and `g=1`, and stops before `g=2`. Finished siblings print g=0..3 and hit `[EOC]` about
+340k-520k cycles in. These two are at 20.4M and 19.1M cycles, with `insn=0` on every group and
+CMS `inflight=0`, after 10.3 and 9.5 days of wall time. Each still holds a VCS seat. The
+benchmark finished, so the cycle counts are valid, but the run cannot end on its own. Both B=128
+(the ks1 B=128 arm `ce23/0000` did reach EOC). This fits the known device-side verify FP wedge.
+
+**Status: DONE.** Every rb arm now has a result. With the user's approval, both stuck simv
+processes were killed by PID after checking their cwd (badile07 pid 3726708, badile42 pid 785211;
+0 left running). The ledger now shows both as `failed` rc=255, which is expected for a killed job;
+the local result copies are untouched. VCS seats afterwards: 16 in use, 84 free.
+
+## 2026-09-14 19:40 — group MSHR: OOC campaign closed, report written
+
+**Purpose.** Consolidate the 2026-09-10..14 out-of-context optimisation campaign into one
+reportable document before the full-group place-and-route.
+
+**Result.** `docs/mshr_ooc_campaign_report.md`. Headline at 64/4, TCK 1.0 ns, initial_opto,
+`func_ssgnp_0p675v_m40c`: **TNS -80.35 -> -7.17 and 1852 -> 142 violating endpoints (-92%)**,
+WNS -0.228 -> -0.180, area 103,774 -> 103,233. reg->reg is effectively closed (-0.054 over 32
+endpoints, TNS -0.55); **79% of the remaining TNS is the single in->out `req_ready_o` accept
+path** (32 endpoints, one per request lane), which carries 0.771 ns of logic against a 0.60 ns
+window and can be neither retimed nor pipelined as constrained.
+
+48/3 at the same RTL: WNS -0.222, TNS -38.90, 836 EPs, area 90,039 -- **12.8% smaller** than
+64/4. The two geometries moved in OPPOSITE directions against their baselines (64/4 0.047
+better, 48/3 0.017 worse), both partly inside the measured +/-0.036 ns / 3x TNS variance
+envelope, so the magnitude is not settled even though the 64/4 endpoint collapse looks real.
+
+Functional gate on the same RTL: 6776 cycles (was 6993, -3.1%), retval 0, zero assertion
+failures, merge counters byte-identical (burst 75.0%, single 87.5%).
+
+**Status.** RTL frozen at `d4988cd0` / tag `mshr-freeze-20260912`; backend config flavours
+pinned to the synthesis define set; synthesis and simulation now read the same Spatz revision
+(`e35712d`). Next is the full-group run, for measurement rather than closure.
