@@ -76,7 +76,7 @@
   const untip = () => ($("tooltip").style.display = "none");
   const span = (rs) =>
     rs.length
-      ? `${Math.min(...rs.map((r) => r.start))}–${Math.max(...rs.map((r) => r.end))} cycles`
+      ? `${rs.reduce((value, row) => Math.min(value, row.start), Infinity)}–${rs.reduce((value, row) => Math.max(value, row.end), -Infinity)} cycles`
       : "no coverage";
   function stats(id, items) {
     $(id).innerHTML = items
@@ -748,9 +748,15 @@
         (r) =>
           (hist[Math.floor(r.entry / ways)] += r.occupied / (r.end - r.start)),
       );
-      bars("hashObserved", [
-        { name: "Observed mean occupied entries", histogram: hist },
-      ]);
+      if (hist.some((value) => value > 0))
+        bars("hashObserved", [
+          { name: "Observed mean occupied entries", histogram: hist },
+        ]);
+      else
+        empty(
+          "hashObserved",
+          "Selected window has measured entry telemetry but zero MSHR occupancy. Choose another time window.",
+        );
     } else
       empty(
         "hashObserved",
@@ -1046,8 +1052,13 @@
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   };
+  // A boundary frame can contain setup only. Prefer measured activity for the
+  // selected group so the initial memory and utilization views are meaningful.
   const firstBenchmark = F.findIndex((frame) =>
-    frame.rows.some((row) => row.kind === "fpu" && row.phase === "bench"));
+    frame.rows.some((row) => row.phase === "bench" && row.g === group && (
+      (row.kind === "entry" && row.occupied > 0) ||
+      (row.kind === "mshr" && row.occupied > 0) ||
+      (row.kind === "fpu" && row.busy > 0))));
   if (firstBenchmark >= 0) selected = firstBenchmark;
   filter();
   window.dashboardTest = { select, setGroup, data: D, render, axisBounds, get visible() { return visible; } };

@@ -1,5 +1,6 @@
 """Simulator-independent telemetry validation and conservative aggregation."""
 import json
+import gzip
 import hashlib
 import math
 from collections import defaultdict
@@ -27,7 +28,8 @@ class RecordCollector(list):
 def iter_telemetry(path, source_info=None):
   """Yield validated headers and rows without retaining the trace in memory."""
   digest = hashlib.sha256() if source_info is not None else None
-  with open(path, 'rb') as stream:
+  opener = gzip.open if str(path).endswith('.gz') else open
+  with opener(path, 'rb') as stream:
     for line_number, line in enumerate(stream, 1):
       if digest is not None:
         digest.update(line)
@@ -50,6 +52,8 @@ def iter_telemetry(path, source_info=None):
 
   if source_info is not None:
     source_info['sha256'] = digest.hexdigest()
+    if str(path).endswith('.gz'):
+      source_info['sha256_scope'] = 'decoded JSONL bytes'
 
 
 def read_telemetry(path, bounds=None):

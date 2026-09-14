@@ -1,6 +1,11 @@
   const pager = $("timelinePage");
   const maxDetailCycles = root.meta.page_cycles * 3;
   let detailRange = [root.pages[pageNumber].start, root.pages[pageNumber].end];
+  // Load all detail for a short benchmark even when it crosses a page edge.
+  if (root.meta.benchmark?.every(Number.isFinite) &&
+      root.meta.benchmark[1] - root.meta.benchmark[0] <= maxDetailCycles) {
+    detailRange = [...root.meta.benchmark];
+  }
   let loading = false;
   root.pages.forEach(p => {
     const option = document.createElement("option"); option.value = p.index;
@@ -9,8 +14,15 @@
   });
   pager.value = String(pageNumber);
   const timelinePoints = root.overview || [];
-  const fullStart = Math.min(root.pages[0].start, ...timelinePoints.map(p => p.start), ...(root.long_intervals || []).map(r => r.start));
-  const fullEnd = Math.max(root.pages.at(-1).end, ...timelinePoints.map(p => p.end));
+  const fullStart = Math.min(
+    root.pages[0].start,
+    timelinePoints.reduce((value, point) => Math.min(value, point.start), Infinity),
+    (root.long_intervals || []).reduce((value, row) => Math.min(value, row.start), Infinity),
+  );
+  const fullEnd = Math.max(
+    root.pages.at(-1).end,
+    timelinePoints.reduce((value, point) => Math.max(value, point.end), -Infinity),
+  );
   function drawTimeline() {
     const w=1000, left=70, right=25, height=115, top=22, bottom=28;
     const x = cycle => left + (cycle-fullStart)/(fullEnd-fullStart)*(w-left-right);
@@ -23,7 +35,8 @@
     ];
     $("runTimelineCharts").innerHTML = metrics.map(m => {
       const values = timelinePoints.map(p => p[m.key] == null || !p[m.den] ? null : p[m.key]/p[m.den]*(m.scale || 1));
-      const max=m.max || Math.max(1,...values.filter(v=>v!=null));
+      const max=m.max || values.reduce((value, sample) =>
+        sample == null ? value : Math.max(value, sample), 1);
       const y=v=>height-bottom-v/max*(height-top-bottom);
       let s=`<svg class="timelineChart" viewBox="0 0 ${w} ${height}" role="img" aria-label="Full-run ${m.name}" style="width:100%;touch-action:none;user-select:none"><text x="${left}" y="14">${m.name}</text>`;
       const bench=root.meta.benchmark;

@@ -43,6 +43,27 @@ def test_out_of_order_pages_and_late_metadata(tmp_path):
   assert not list(tmp_path.glob('dashboard-pages-*'))
 
 
+def test_gzip_telemetry_input(tmp_path):
+  source = tmp_path/'input.jsonl.gz'
+  with gzip.open(source, 'wt') as stream:
+    stream.write(json.dumps(dict(kind='meta', mesh=[1, 1]))+'\n')
+    stream.write(json.dumps(dict(kind='fpu', g=0, start=0, end=1000,
+                                 phase='bench', busy=2, capacity=1000))+'\n')
+  out = tmp_path/'result.html'
+  cli = Path(__file__).resolve().parents[1]/'generate.py'
+  subprocess.run([sys.executable, str(cli), '--telemetry', str(source),
+                  '--out', str(out)], check=True)
+  scripts = dict(re.findall(
+      r'<script type="application/json" id="([^"]+)">(.*?)</script>',
+      out.read_text(), re.S))
+  root = json.loads(gzip.decompress(base64.b64decode(
+      json.loads(scripts['dataset'])['data'])))
+  page = json.loads(gzip.decompress(base64.b64decode(
+      json.loads(scripts['page-data-0'])['data'])))
+  assert root['sources'][0]['sha256_scope'] == 'decoded JSONL bytes'
+  assert page['frames'][0]['rows'][0]['busy'] == 2
+
+
 def test_gc_state_restored_on_invalid_input(tmp_path, monkeypatch):
   import gc
   import pytest

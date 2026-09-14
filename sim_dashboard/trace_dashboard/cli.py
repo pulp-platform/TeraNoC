@@ -1,6 +1,7 @@
 """CLI and single-file HTML packaging. Python standard library only."""
 import argparse
 import gc
+import gzip
 import json
 import pickle
 import tempfile
@@ -96,9 +97,9 @@ def main():
       # streams full rows. This supports headers anywhere and multiple inputs.
       source_stamps[path] = stamp(path)
       source_details[path] = {}
-      cached = Path(cache.name)/f'{len(caches)}.pickle'
+      cached = Path(cache.name)/f'{len(caches)}.pickle.gz'
       caches[path] = cached
-      with cached.open('wb') as stream:
+      with gzip.open(cached, 'wb', compresslevel=1) as stream:
         batch = []
         for row in iter_telemetry(path, source_details[path]):
           if row['kind'] == 'meta':
@@ -170,7 +171,7 @@ def main():
         if stamp(path) != source_stamps[path]:
           raise ValueError(f'{path} changed while reading; use a stable file snapshot')
         # Only read our private cache, never deserialize user-supplied pickle.
-        with caches[path].open('rb') as stream:
+        with gzip.open(caches[path], 'rb') as stream:
           while True:
             try:
               batch = pickle.load(stream)

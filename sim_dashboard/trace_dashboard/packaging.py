@@ -86,7 +86,7 @@ def render(records, meta, sources, warnings, args):
           handle, batch = handles.pop(next(iter(handles)))
           flush(handle, batch)
           handle.close()
-        handles[page] = ((temp/f'{page}.pickle').open('ab'), [])
+        handles[page] = (gzip.open(temp/f'{page}.pickle.gz', 'ab', compresslevel=1), [])
       handle, batch = handles[page]
       batch.append(row)
       if len(batch) >= 1024:
@@ -172,7 +172,7 @@ def render(records, meta, sources, warnings, args):
     # discovered during assembly are included in the exported dashboard.
     for n, i in enumerate(pages):
       rows = []
-      with (temp/f'{i}.pickle').open('rb') as page_file:
+      with gzip.open(temp/f'{i}.pickle.gz', 'rb') as page_file:
         while True:
           try:
             rows.extend(pickle.load(page_file))

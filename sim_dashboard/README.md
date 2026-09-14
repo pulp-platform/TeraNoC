@@ -8,7 +8,13 @@ Instrumentation uses a private testbench copy; the probe does not change RTL beh
 VCS is the preferred RTL simulator. The campaign scripts build private images
 and preload private ELFs to keep concurrent runs isolated.
 
-Python 3.9+ standard library is enough to generate a dashboard. Open the result
+This directory is the maintained, simulator-independent dashboard implementation
+used by both RTL and GVSoC. Backend repositories may prepare schema-v1 telemetry
+and enrich manifests, but should invoke this generator instead of carrying a
+second copy. Completed campaigns may retain immutable snapshots for provenance.
+
+Python 3.9+ standard library is enough to generate a dashboard. JSONL telemetry
+may be plain text or gzip-compressed (`.gz`). Open the result
 in a current Chrome, Edge or Firefox with `DecompressionStream` support. The HTML
 contains its JavaScript, styles and compressed data; it makes no network requests.
 
@@ -141,7 +147,8 @@ Detailed 8x8 telemetry can be large: every enabled physical bank, entry and link
 has a record per window, including zeros. Start with a larger period for long
 runs or a focused run. Compression reduces the HTML size, but Python and the
 browser still hold the decoded dataset in memory. This first version does not
-provide disk-backed querying or live tailing.
+provide disk-backed querying or live tailing. Temporary input caches and page
+spools are gzip-compressed to bound local-disk use during generation.
 
 ```sh
 python3 sim_dashboard/generate.py \
@@ -155,8 +162,9 @@ python3 sim_dashboard/generate.py \
 
 Structured telemetry takes precedence over legacy records of the same identity.
 Manifest and explicit CLI values supply missing workload context. See
-[SCHEMA.md](SCHEMA.md) for the simulator-independent adapter boundary. GVSOC can
-later emit this format or add a parser; no GVSOC adapter is implemented yet.
+[SCHEMA.md](SCHEMA.md) for the simulator-independent adapter boundary. The
+sibling GVSoC repository emits this format and adds only backend metadata before
+calling this generator.
 
 ## Hash and roofline interpretation
 
