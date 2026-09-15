@@ -53,7 +53,7 @@ let F = D.frames;
   marker='  const firstBenchmark = F.findIndex'
   extra = (HERE/'assets/full_timeline.js').read_text()
   js = js.replace(marker, extra+marker)
-  js = js.replace('window.dashboardTest = { select,', 'window.dashboardTest = { loadPage, loadRange, setDetailBudget(bytes) { detailBudget = bytes; }, get detailRange() { return detailRange; }, get pageNumber() { return pageNumber; }, select,')
+  js = js.replace('window.dashboardTest = { select,', 'window.dashboardTest = { loadPage, loadRange, setDetailBudget(bytes) { detailBudget = bytes; }, detailBytes: (start, end) => rangeBytes(start, end), get detailBudget() { return detailBudget; }, get detailRange() { return detailRange; }, get pageNumber() { return pageNumber; }, select,')
   js = js.replace('const lo = F[visible[0]].start, hi = F[visible.at(-1)].end;',
                   'const lo = D.detail_range?.[0] ?? F[visible[0]].start, hi = D.detail_range?.[1] ?? F[visible.at(-1)].end;')
   template = template.replace('/* DASHBOARD_JS */', js)

@@ -1,10 +1,10 @@
   const pager = $("timelinePage");
   // Detail loads are bounded by the packed records they decode, not by a fixed
   // number of blocks: sparse runs can open a whole benchmark or run while dense
-  // runs stay within browser memory. Loading 32 MiB of a dense 4x4 run (3.4 M
-  // records) used about 420 MiB of JavaScript heap. Three blocks always load.
-  let detailBudget = 32 * 2 ** 20;
-  const openBudget = 8 * 2 ** 20;
+  // runs stay within browser memory. Loading a whole dense 4x4 run (34 MiB,
+  // 3.4 M records) used about 420 MiB of JavaScript heap. Three blocks always load.
+  let detailBudget = 48 * 2 ** 20;
+  const openBudget = 12 * 2 ** 20;
   const pageBytes = root.pages.map(p => [...(document.getElementById("page-data-" + p.index)?.childNodes || [])]
     .reduce((total, node) => total + node.length, 0));
   const rangeBytes = (start, end) => root.pages.reduce((total, p, i) =>
