@@ -1,10 +1,24 @@
   const pager = $("timelinePage");
-  const maxDetailCycles = root.meta.page_cycles * 3;
+  // Detail loads are bounded by the packed records they decode, not by a fixed
+  // number of blocks: sparse runs can open a whole benchmark or run while dense
+  // runs stay within browser memory. Loading 32 MiB of a dense 4x4 run (3.4 M
+  // records) used about 420 MiB of JavaScript heap. Three blocks always load.
+  let detailBudget = 32 * 2 ** 20;
+  const openBudget = 8 * 2 ** 20;
+  const pageBytes = root.pages.map(p => [...(document.getElementById("page-data-" + p.index)?.childNodes || [])]
+    .reduce((total, node) => total + node.length, 0));
+  const rangeBytes = (start, end) => root.pages.reduce((total, p, i) =>
+    p.end > start && p.start < end + root.window ? total + pageBytes[i] : total, 0);
+  const mib = bytes => num(bytes / 2 ** 20, 1) + " MiB";
+  const typicalDetailCycles = () => Math.max(root.meta.page_cycles * 3, root.meta.page_cycles *
+    Math.floor(detailBudget * pageBytes.length / Math.max(1, pageBytes.reduce((a, b) => a + b, 0))));
+  const withinBudget = (start, end) => end - start <= root.meta.page_cycles * 3 || rangeBytes(start, end) <= detailBudget;
+  const benchmarkRange = root.meta.benchmark?.every(Number.isFinite) ? [...root.meta.benchmark] : null;
   let detailRange = [root.pages[pageNumber].start, root.pages[pageNumber].end];
-  // Load all detail for a short benchmark even when it crosses a page edge.
-  if (root.meta.benchmark?.every(Number.isFinite) &&
-      root.meta.benchmark[1] - root.meta.benchmark[0] <= maxDetailCycles) {
-    detailRange = [...root.meta.benchmark];
+  // Open on the whole benchmark when it decodes quickly, even across block edges.
+  if (benchmarkRange && (benchmarkRange[1] - benchmarkRange[0] <= root.meta.page_cycles * 3 ||
+      rangeBytes(...benchmarkRange) <= openBudget)) {
+    detailRange = [...benchmarkRange];
   }
   let loading = false;
   root.pages.forEach(p => {
@@ -59,7 +73,7 @@
       return s+'</svg>';
     }).join('');
     $("detailStart").value = detailRange[0]; $("detailEnd").value = detailRange[1];
-    $("overviewCoverage").textContent = `Overview: ${num(fullStart,0)}–${num(fullEnd,0)} cycles, all phases; gray background marks the benchmark. Rates use summed counters and denominators. Select up to ${num(maxDetailCycles,0)} cycles for full-resolution entry, bank and link detail. The Phase selector below filters the detail only.`;
+    $("overviewCoverage").textContent = `Overview: ${num(fullStart,0)}–${num(fullEnd,0)} cycles, all phases; gray background marks the benchmark. Rates use summed counters and denominators. Detail loads decode up to ${mib(detailBudget)} of original-resolution entry, bank and link records: about ${num(Math.min(typicalDetailCycles(),fullEnd-fullStart),0)} cycles at this run's average density (whole run ${mib(rangeBytes(fullStart,fullEnd))}). The Phase selector below filters the detail only.`;
     document.querySelectorAll('.timelineChart').forEach(svg=>{
       const cycle=e=>Math.max(fullStart,Math.min(fullEnd,Math.round((fullStart+Math.max(0,Math.min(1,((e.clientX-svg.getBoundingClientRect().left)/svg.getBoundingClientRect().width*w-left)/(w-left-right)))*(fullEnd-fullStart))/root.window)*root.window));
       let anchor=null;
@@ -86,8 +100,8 @@
     if(!Number.isFinite(start)||!Number.isFinite(end)||start<fullStart||end>fullEnd||end<=start) {
       $("pageStatus").textContent="Enter a valid range within the captured cycles.";drawTimeline();return false;
     }
-    if(end-start>maxDetailCycles) {
-      $("pageStatus").textContent=`Select ${num(maxDetailCycles,0)} cycles or fewer for detailed records; the overview always shows the full run.`;drawTimeline();return false;
+    if(!withinBudget(start,end)) {
+      $("pageStatus").textContent=`This range holds ${mib(rangeBytes(start,end))} of detailed records; select at most ${mib(detailBudget)}, about ${num(typicalDetailCycles(),0)} cycles at average density. The overview always shows the full run.`;drawTimeline();return false;
     }
     loading=true; pager.disabled=true; $("detailApply").disabled=true;
     if(timer){clearInterval(timer);timer=null;$("play").textContent="Play";}
@@ -144,6 +158,8 @@
     return loadRange(lo,lo+width);
   }
   $("detailPrev").onclick=()=>shiftDetail(-1);$("detailNext").onclick=()=>shiftDetail(1);
+  if($("detailBenchmark")) $("detailBenchmark").onclick=()=>benchmarkRange ? loadRange(...benchmarkRange) : ($("pageStatus").textContent="No closed benchmark interval was captured.");
+  if($("detailRun")) $("detailRun").onclick=()=>loadRange(fullStart,fullEnd);
   D.detail_range=detailRange;drawTimeline();
   $("pageStatus").textContent=`Detail: ${num(detailRange[0],0)}–${num(detailRange[1],0)} cycles`;
 

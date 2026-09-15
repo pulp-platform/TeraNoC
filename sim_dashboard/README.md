@@ -328,13 +328,17 @@ percentage, that series is explicitly labeled and duration-weighted; it is not
 converted into measured lane counters. Rates use summed numerators and
 denominators; missing measurements remain unavailable and gaps are not joined.
 
-Drag on an overview chart, click to center a detail interval, or enter start/end
-cycles and choose **Inspect range**. The full-run overview stays visible while
-the detailed charts load only the selected region, even across storage-block
-boundaries. Detail ranges are limited to three blocks (60,000 cycles by default)
-to bound browser memory. With a custom `--window`, the default block width rounds
-up from 20,000 cycles to a multiple of that window. Wider selections are explicitly rejected rather than
-silently truncated. Original measurement windows overlapping the selection are
+Drag on an overview chart, click to center a detail interval, enter start/end
+cycles and choose **Inspect range**, or choose **Whole benchmark** or **Whole
+run**. The full-run overview stays visible while the detailed charts load only
+the selected region, even across storage-block boundaries. A detail range may
+span any number of blocks while the packed records it decodes stay within
+32 MiB; three blocks always load. Sparse traces can therefore load a whole run,
+while dense 4x4 native traces load roughly 60 blocks. A dense 4x4 run at the
+limit used about 420 MiB of JavaScript heap. A dashboard opens on the whole
+benchmark when that range holds at most 8 MiB. With a custom `--window`, the
+default block width rounds up from 20,000 cycles to a multiple of that window.
+Larger selections are explicitly rejected rather than silently truncated. Original measurement windows overlapping the selection are
 retained whole; their counters are never proportionally split. The Phase selector
 filters detail only. Work-progress totals carry forward from earlier records.
 Benchmark roofline accounting and diagnosis retain their full-benchmark scope.
