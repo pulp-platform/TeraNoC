@@ -695,6 +695,13 @@
     $("hashNote").textContent = h.note + (M.software_merge_targets?.single === 1
       ? " The compiled software policy bypasses single-word requests (merge target 1). The single-class hash plot is hypothetical bank spread, not observed scalar MSHR usage." : "");
     let g = h.groups.find((x) => x.g === group);
+    if (!g) {
+      // Reduced active sets model only the groups that run the kernel.
+      empty("hashSummary", `Group ${group} does not run the kernel in this run: ${h.active_groups ?? h.groups.length} of ${h.mesh_groups ?? M.mesh[0] * M.mesh[1]} groups are active. Select an active group for the modeled hash distribution.`);
+      for (const id of ["hashSharing", "hashA", "hashW", "hashCandidates", "hashObserved"])
+        empty(id, "Inactive group: no modeled or observed hash distribution.");
+      return;
+    }
     stats("hashSummary", [
       ["MSHR banks", h.banks],
       ["Burst model", h.burst_model || "Not specified"],

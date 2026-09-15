@@ -93,12 +93,18 @@ def hash_explore(meta):
   banks = h["banks"]
   if banks < 2 or banks & (banks-1) or h["entries"] % banks:
     raise ValueError("Hash model requires power-of-two banks >= 2 and divisible entries")
+  # Reduced active sets (ACTIVE_GROUP_DIV) run the kernel on the first active_groups
+  # groups only; partition and model those, while addresses keep the full-mesh map.
+  mesh_groups = meta["mesh"][0]*meta["mesh"][1]
+  active_groups = h.get("active_groups", mesh_groups)
+  if not isinstance(active_groups, int) or not 1 <= active_groups <= mesh_groups or mesh_groups % active_groups:
+    raise ValueError("active_groups must divide the mesh group count")
   args = SimpleNamespace(M=M, N=min(N, h.get("max_steps", 16)), P=P,
       ks=h["kernel"], elem_bytes=2 if meta["precision"] == "fp16" else 4,
       min_burst=2, max_burst=geometry["max_words"],
       entries=h["entries"], banks=banks,
-      cores=meta["mesh"][0]*meta["mesh"][1]*meta["tiles_per_group"]*meta["cores_per_tile"],
-      groups=meta["mesh"][0]*meta["mesh"][1], vlen=meta.get("vlen", 512),
+      cores=active_groups*meta["tiles_per_group"]*meta["cores_per_tile"],
+      groups=active_groups, vlen=meta.get("vlen", 512),
       elen=32, split=h["split"])
   g = module.build(args)
   # Repository kernels cap LMUL at m8.
@@ -109,7 +115,7 @@ def hash_explore(meta):
   # Use the original N stride, even when sampling reduction steps.
   g.N = N
   g.a_words = M*N*g.elem_bytes//4
-  a_bases = h.get("a_base_per_group", [h.get("a_base", 0)]*args.groups)
+  a_bases = list(h.get("a_base_per_group", [h.get("a_base", 0)]*mesh_groups))[:args.groups]
   if (len(a_bases) != args.groups or
       any(not isinstance(base, int) or base < 0 or base % 4 for base in a_bases)):
     raise ValueError("Hash A bases require one word-aligned byte address per group")
@@ -177,12 +183,13 @@ def hash_explore(meta):
     if meta.get("banks_per_tile"):
       group_words = meta["banks_per_tile"] * meta["tiles_per_group"]
       def local_fraction(addresses):
-        return (sum((word // group_words) % args.groups == group
+        return (sum((word // group_words) % mesh_groups == group
                     for _, word in addresses) / len(addresses)) if addresses else None
       locality = dict(a=local_fraction(A), b=local_fraction(W + B_single))
     results.append(dict(g=group, sharing=shared, locality=locality, request_counts=b_request_counts, singles=singles[:5], weights=weights[:5],
         current_a=score(singles_addresses, current[0], 0) if current else None,
         current_w=score(W, current[1], current[2]) if current else None))
-  return dict(available=True, groups=results, banks=banks, entries=h["entries"],
+  return dict(available=True, groups=results, active_groups=args.groups, mesh_groups=mesh_groups,
+              banks=banks, entries=h["entries"],
               burst_model=profile, burst_eligible=any_burst, sampled_steps=args.N, total_steps=N,
               source=str(path), note=h.get("input_status", "")+" Single-class scores include A and scalar B requests; burst scores include burst B requests. First microtile, unmasked unit-stride loads, vstart=0; modeled simultaneous k-steps; best bank spread among supplied legal settings, not a predicted speedup. Addresses/partition are assumptions unless captured from the run.")
