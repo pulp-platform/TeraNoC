@@ -36,6 +36,17 @@ all_llvm: $(ALL_LLVM)
 
 $(APPS): % : $(BIN_DIR)/% $(APPS_DIR)/Makefile $(shell find $(RUNTIME_DIR)/**.{S,c,h,ld} -type f)
 
+# Only the optimized GEMM entry points embed the runtime selector fingerprint.  Keep the
+# generic runtime C-object rule independent of Python and GEMM headers for all other apps.
+GEMM_HASH_APPS := sp-fmatmul-opt-burst-merge sp-fmatmul-opt-burst-merge-fp16
+GEMM_HASH_DEPS := $(RUNTIME_DIR)/gemm_hash.h $(RUNTIME_DIR)/gemm_config.h \
+	$(RUNTIME_DIR)/gemm_burst.h $(RUNTIME_DIR)/gemm_hash_precomputed.h \
+	$(RUNTIME_DIR)/gemm_hash_fingerprint.py $(RUNTIME_DIR)/runtime.mk
+$(addprefix $(APPS_DIR)/,$(addsuffix /main.c.o,$(GEMM_HASH_APPS))): \
+	%/main.c.o: %/main.c $(GEMM_HASH_DEPS)
+	$(python) $(RUNTIME_DIR)/gemm_hash_fingerprint.py --runtime $(RUNTIME_DIR) -- \
+		$(RISCV_CC) $(RISCV_CCFLAGS) -c $< -o $@
+
 .PHONY: $(BINARIES)
 $(BINARIES): $(BIN_DIR)/%: %/main.c.o $(RUNTIME) $(LINKER_SCRIPT) data_%.h update_opcodes
 	mkdir -p $(dir $@)
