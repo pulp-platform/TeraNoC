@@ -9,7 +9,8 @@ A `meta` record has `schema_version: 1` and may supply run-manifest fields:
 
 - `mesh: [NumX, NumY]`, `backend`, `name`
 - `tiles_per_group`, `cores_per_tile`, `n_fpu`, `banks_per_tile`
-- `mshr_entries`, `mshr_ways`, `req_subnets`, `resp_subnets`
+- `mshr_entries`, `mshr_ways`, `req_subnets`, `resp_subnets`,
+  `mshr_overflow_entries` (bankless pool size; absent or 0 = no pool)
 - `shape: [M,N,P]`, `precision`, `repetitions`, `cycles_per_pass`
 - `benchmark: [start,end]` for a single timed region
 - `expected_fmac_per_group: [integer,...]`, actual GEMM FMAC assignment
@@ -24,7 +25,7 @@ Group identity is `g = x * NumY + y`; tile and bank IDs are local to that group.
 |---|---|---|
 | `fpu` | `g` | `busy` lane-cycles, `capacity` lane-cycles |
 | `work` | `g` | `fmac` completed scalar-equivalent FMACs; optional `workload_phase` identifies issuing region |
-| `mshr` | `g` | `occupied` entry-cycles, `capacity` entry-cycles, `entries`, `peak` entries, `full` cycles; optional timeout fields as on `entry`, as group totals |
+| `mshr` | `g` | `occupied` entry-cycles, `capacity` entry-cycles, `entries`, `peak` entries, `full` cycles; optional timeout fields as on `entry`, as group totals; optional `overflow_alloc`, `overflow_merge`, `overflow_occupied` |
 | `entry` | `g`, `entry` | `occupied`, `capacity`, `cached`, `held` cycles; optional `state` at final sampled cycle; optional `timeout_single`, `timeout_burst`, `timeout_subs`, `resp_hold_timeout`, `cache_timeout` |
 | `bank` | `g`, `t`, `bank` | `hsk` accepted accesses, `stall` valid-and-not-ready cycles |
 | `link` | `g`, `network`, `subnet`, `direction` | `hsk` accepted transfers, `stall` valid-and-not-ready cycles |
@@ -32,7 +33,16 @@ Group identity is `g = x * NumY + y`; tile and bank IDs are local to that group.
 | `stage` | `g`, `label`, `t` (-1 for group) | `hsk`, `stall`, `idle`, `active` cycles; legacy BP adapter |
 | `pressure` | `g` | `timeout`, `bypass`; legacy MSHRG adapter |
 
-Entry ID maps to bank `entry // mshr_ways` and way `entry % mshr_ways`.
+Entry ID maps to bank `entry // mshr_ways` and way `entry % mshr_ways`, for IDs
+below `mshr_entries`. IDs from `mshr_entries` to
+`mshr_entries + mshr_overflow_entries - 1` are the bankless overflow pool: they
+belong to no bank and must not be binned by that mapping. A pool entry is
+allocated only when the hashed bank has no free way, and is otherwise an
+ordinary entry (same hold windows, caching and request classes), so its
+`occupied`, `held` and timeout fields carry their usual meaning.
+`mshr.overflow_alloc` and `mshr.overflow_merge` count pool allocations and
+merges that hit a pool entry in the window; `mshr.overflow_occupied` is the
+pool's share of `occupied` entry-cycles.
 The optional timeout fields count expiries in the window, attributed to the entry
 that expired. `timeout_single` and `timeout_burst` are hold windows that expired
 below the subscriber target, classified by the entry's burst length;

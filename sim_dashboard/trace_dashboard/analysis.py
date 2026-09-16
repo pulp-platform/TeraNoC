@@ -191,10 +191,28 @@ def hash_explore(meta):
         return (sum((word // group_words) % mesh_groups == group
                     for _, word in addresses) / len(addresses)) if addresses else None
       locality = dict(a=local_fraction(A), b=local_fraction(W + B_single))
-    results.append(dict(g=group, sharing=shared, locality=locality, request_counts=b_request_counts, singles=singles[:5], weights=weights[:5],
+    # What the CONFIGURED hash does to one inner loop: how many single and burst lines of a
+    # single reduction step land in each bank. A bank that must hold more concurrent lines than
+    # it has ways cannot serve them all, and a held cohort there can block the very request it
+    # waits for, which the per-class spread scores above cannot show.
+    concurrency = None
+    if current:
+      step = sample_steps[0]
+      counts = [dict(single=0, burst=0) for _ in range(banks)]
+      for addresses, shift, bits, field in ((singles_addresses, current[0], 0, 'single'),
+                                            (W, current[1], current[2], 'burst')):
+        for at, word in addresses:
+          if at == step:
+            counts[module.bank_of(word, shift, bits, g.bankidw, g.align)][field] += 1
+      ways = h["entries"] // banks
+      concurrency = dict(step=step, ways=ways, banks=counts,
+                         busiest=max(c['single'] + c['burst'] for c in counts),
+                         over_ways=sum(c['single'] + c['burst'] > ways for c in counts))
+    results.append(dict(g=group, sharing=shared, locality=locality, request_counts=b_request_counts,
+        concurrency=concurrency, singles=singles[:5], weights=weights[:5],
         current_a=score(singles_addresses, current[0], 0) if current else None,
         current_w=score(W, current[1], current[2]) if current else None))
   return dict(available=True, groups=results, active_groups=args.groups, mesh_groups=mesh_groups,
-              banks=banks, entries=h["entries"],
+              banks=banks, entries=h["entries"], overflow_entries=h.get("overflow_entries", 0),
               burst_model=profile, burst_eligible=any_burst, sampled_steps=args.N, total_steps=N,
               source=str(path), note=h.get("input_status", "")+" Single-class scores include A and scalar B requests; burst scores include burst B requests. First microtile, unmasked unit-stride loads, vstart=0; modeled simultaneous k-steps; best bank spread among supplied legal settings, not a predicted speedup. Addresses/partition are assumptions unless captured from the run.")

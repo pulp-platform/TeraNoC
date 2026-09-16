@@ -369,6 +369,27 @@
             }`
           : "—",
       ],
+      // Bankless overflow pool: an entry is taken from it only when the hashed bank had no
+      // free way, so any use at all marks inner loops whose cohorts outnumber a bank's ways.
+      [
+        "Overflow pool (allocs / merges)",
+        rs.length && rs.every((r) => r.overflow_alloc != null)
+          ? `${num(sum(rs, "overflow_alloc"), 0)} / ${num(sum(rs, "overflow_merge"), 0)}`
+          : M.mshr_overflow_entries
+            ? "—"
+            : "Not configured",
+      ],
+      [
+        "Mean pool entries occupied",
+        rs.length && rs.every((r) => r.overflow_occupied != null)
+          ? num(
+              sum(rs, "overflow_occupied") /
+                rs.reduce((a, r) => a + r.end - r.start, 0),
+            )
+          : M.mshr_overflow_entries
+            ? "—"
+            : "Not configured",
+      ],
     ]);
     const classRatio = (rs, key) => rs.length && rs.every(r => r[key] != null)
       ? ratio(rs, key) : null;
@@ -453,9 +474,11 @@
       heat(
         "entryHeat",
         entries.map((e) =>
-          M.mshr_ways
-            ? `B${Math.floor(e / M.mshr_ways)} W${e % M.mshr_ways}`
-            : `Entry ${e}`,
+          M.mshr_entries && e >= M.mshr_entries
+            ? `Pool ${e - M.mshr_entries}` // bankless: no bank/way label applies
+            : M.mshr_ways
+              ? `B${Math.floor(e / M.mshr_ways)} W${e % M.mshr_ways}`
+              : `Entry ${e}`,
         ),
         entryValue,
         {
@@ -791,17 +814,48 @@
         ]),
       ),
     );
+    if (g.concurrency) {
+      let c = g.concurrency,
+        pool = h.overflow_entries || 0;
+      bars("hashConcurrency", [
+        {
+          name: "Singles (A + scalar B) in one k step",
+          histogram: c.banks.map((b) => b.single),
+        },
+        { name: "Bursts (B) in one k step", histogram: c.banks.map((b) => b.burst) },
+      ]);
+      $("hashConcurrencyNote").textContent =
+        `Modeled lines of reduction step ${c.step} placed by the current hash. The busiest bank holds ${c.busiest} concurrent lines against ${c.ways} ways` +
+        (pool ? ` plus ${pool} bankless overflow ${pool === 1 ? "entry" : "entries"} shared by every bank` : "") +
+        ". " +
+        (c.over_ways
+          ? `${c.over_ways} of ${h.banks} banks need more entries than they have ways. Those cohorts cannot all be resident at once: a request hashing to a full bank waits for a hold window to expire, even when the entry it would merge with is the one being waited for.`
+          : "No bank needs more entries than it has ways, so every inner-loop cohort can be resident at once.") +
+        " Modeled addresses for one step, not measured allocations.";
+    } else
+      empty(
+        "hashConcurrency",
+        "Per-bank concurrency requires the configured shift and burst bits for this group.",
+      );
     let rs = rows(selected, "entry", group);
     if (rs.length) {
       let ways = h.entries / h.banks,
-        hist = Array(h.banks).fill(0);
-      rs.forEach(
-        (r) =>
-          (hist[Math.floor(r.entry / ways)] += r.occupied / (r.end - r.start)),
-      );
+        hist = Array(h.banks).fill(0),
+        pool = 0;
+      // Pool entries (ids at or above the banked table) belong to no bank: binning them by
+      // entry/ways would invent occupancy in a bank that never held the line.
+      rs.forEach((r) => {
+        if (r.entry >= h.entries) pool += r.occupied / (r.end - r.start);
+        else hist[Math.floor(r.entry / ways)] += r.occupied / (r.end - r.start);
+      });
       if (hist.some((value) => value > 0))
         bars("hashObserved", [
-          { name: "Observed mean occupied entries", histogram: hist },
+          {
+            name: pool
+              ? `Observed mean occupied entries (plus ${num(pool, 2)} in the bankless pool)`
+              : "Observed mean occupied entries",
+            histogram: hist,
+          },
         ]);
       else
         empty(

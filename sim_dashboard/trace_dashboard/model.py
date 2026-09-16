@@ -6,7 +6,7 @@ import math
 from collections import defaultdict
 
 KINDS = {"fpu", "mshr", "entry", "bank", "link", "work", "traffic", "stage", "pressure", "overall"}
-ADDITIVE = {"busy", "capacity", "occupied", "occupied_single", "occupied_burst", "full", "hsk", "stall", "idle", "fmac", "cached", "held", "alloc", "release", "timeout", "timeout_single", "timeout_burst", "timeout_subs", "resp_hold_timeout", "cache_timeout", "bypass", "active"}
+ADDITIVE = {"busy", "capacity", "occupied", "occupied_single", "occupied_burst", "full", "hsk", "stall", "idle", "fmac", "cached", "held", "alloc", "release", "timeout", "timeout_single", "timeout_burst", "timeout_subs", "resp_hold_timeout", "cache_timeout", "bypass", "active", "overflow_alloc", "overflow_merge", "overflow_occupied"}
 
 
 class RecordCollector(list):
