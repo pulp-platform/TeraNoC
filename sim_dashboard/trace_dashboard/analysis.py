@@ -109,7 +109,13 @@ def hash_explore(meta):
   g = module.build(args)
   # Repository kernels cap LMUL at m8.
   g.lmul = min(8, max(1, 16//g.ks))
-  g.load_words = min(g.vlen*g.lmul//32, g.pspan*g.elem_bytes//4)
+  # B may be stored on padded column blocks (b_block elements per core, b_cols per row), with
+  # short loads rounded to whole words inside the padding; unpadded builds omit these fields.
+  b_block, b_cols = h.get("b_block", g.pspan), h.get("b_cols", P)
+  load_bytes = h.get("b_load_bytes", min(g.vlen*g.lmul//8, g.pspan*g.elem_bytes))
+  if b_block < g.pspan or b_cols < P:
+    raise ValueError("Padded B layout is smaller than the work partition")
+  g.load_words = load_bytes//4
   if g.load_words <= 0 or g.pspan <= 0:
     return {"available": False, "reason": "Work partition gives no full word per core; model does not support this shape."}
   # Use the original N stride, even when sampling reduction steps.
@@ -133,16 +139,15 @@ def hash_explore(meta):
         pblk, rc = divmod(cid, g.nrow)
       else:
         rc, pblk = divmod(c, g.npb)
-      p0 = pblk*g.pspan
+      p0 = pblk*b_block
       m0 = rc*g.ks + (group*(M//args.groups) if g.split == "prefill" else 0)
       if g.split == 'prefill' and (M//args.groups)//g.ks >= g.cpg:
         m0 = group*(M//args.groups) + c*((M//args.groups)//g.cpg)
       a_core_tiles[m0] += 1
       b_core_tiles[p0] += 1
       for step in sample_steps:
-        address = h.get("w_base", g.a_words*4) + (step*P+p0)*g.elem_bytes
-        size = min(g.vlen*g.lmul//8, g.pspan*g.elem_bytes)
-        for word, count in requests(address, size, profile=profile, **geometry):
+        address = h.get("w_base", g.a_words*4) + (step*b_cols+p0)*g.elem_bytes
+        for word, count in requests(address, load_bytes, profile=profile, **geometry):
           target = W if count > 1 else B_single
           target.append((step, word))
       for b in range(m0, min(m0+g.ks, M)):
