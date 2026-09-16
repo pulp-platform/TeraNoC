@@ -116,7 +116,8 @@ def render(records, meta, sources, warnings, args):
           bench[0] = min(bench[0] if bench[0] is not None else row['start'], row['start'])
           bench[1] = max(bench[1] or 0, row['end'])
           if row['kind'] == 'entry':
-            for field in ('occupied', 'held', 'cached'):
+            for field in ('occupied', 'held', 'cached', 'timeout_single', 'timeout_burst',
+                          'timeout_subs', 'resp_hold_timeout', 'cache_timeout'):
               entry_totals[row['g']][field] += row.get(field, 0)
     finally:
       for handle, batch in handles.values():

@@ -24,8 +24,8 @@ Group identity is `g = x * NumY + y`; tile and bank IDs are local to that group.
 |---|---|---|
 | `fpu` | `g` | `busy` lane-cycles, `capacity` lane-cycles |
 | `work` | `g` | `fmac` completed scalar-equivalent FMACs; optional `workload_phase` identifies issuing region |
-| `mshr` | `g` | `occupied` entry-cycles, `capacity` entry-cycles, `entries`, `peak` entries, `full` cycles |
-| `entry` | `g`, `entry` | `occupied`, `capacity`, `cached`, `held` cycles; optional `state` at final sampled cycle |
+| `mshr` | `g` | `occupied` entry-cycles, `capacity` entry-cycles, `entries`, `peak` entries, `full` cycles; optional timeout fields as on `entry`, as group totals |
+| `entry` | `g`, `entry` | `occupied`, `capacity`, `cached`, `held` cycles; optional `state` at final sampled cycle; optional `timeout_single`, `timeout_burst`, `timeout_subs`, `resp_hold_timeout`, `cache_timeout` |
 | `bank` | `g`, `t`, `bank` | `hsk` accepted accesses, `stall` valid-and-not-ready cycles |
 | `link` | `g`, `network`, `subnet`, `direction` | `hsk` accepted transfers, `stall` valid-and-not-ready cycles |
 | `traffic` | global | `mst_resp`, `slv_resp`: arrays of remote payload word counts per endpoint response port; `mst_req`, `slv_req`: accepted request counts per remote request port (optional in older traces) |
@@ -33,6 +33,14 @@ Group identity is `g = x * NumY + y`; tile and bank IDs are local to that group.
 | `pressure` | `g` | `timeout`, `bypass`; legacy MSHRG adapter |
 
 Entry ID maps to bank `entry // mshr_ways` and way `entry % mshr_ways`.
+The optional timeout fields count expiries in the window, attributed to the entry
+that expired. `timeout_single` and `timeout_burst` are hold windows that expired
+below the subscriber target, classified by the entry's burst length;
+`timeout_subs` sums the subscribers present at those expiries, so mean
+subscribers at expiry is `timeout_subs / (timeout_single + timeout_burst)`.
+`resp_hold_timeout` counts response-hold entries aged out by the serve timeout and
+`cache_timeout` cached lines aged out before reaching their reuse target; both are
+separate events and neither contributes to `timeout_subs`.
 States are 0 free, 1 waiting for response, 2 draining, 3 cached, 4 response hold.
 The `held` cycle count is a subset of waiting with `issued == 0`; it is not an
 additional occupied entry. Cached cycles are likewise included in occupancy.

@@ -338,6 +338,37 @@
         rs.length ? Math.max(...rs.map((r) => r.peak || 0)) : "—",
       ],
       ["Full cycles", rs.length ? num(sum(rs, "full"), 0) : "—"],
+      // Hold-window and serve-timeout expiries below the subscriber target: entries that waited
+      // out their window instead of being released by a merge. Optional probe.
+      [
+        "Hold timeouts (single / burst)",
+        rs.length && rs.every((r) => r.timeout_single != null)
+          ? `${num(sum(rs, "timeout_single"), 0)} / ${num(sum(rs, "timeout_burst"), 0)}`
+          : "—",
+      ],
+      // Subscribers present when a hold window expired: a cohort that never formed sits near
+      // zero, one that formed too late sits just below the merge target.
+      [
+        "Mean subscribers at expiry",
+        rs.length &&
+        rs.every((r) => r.timeout_subs != null) &&
+        sum(rs, "timeout_single") + sum(rs, "timeout_burst") > 0
+          ? num(
+              sum(rs, "timeout_subs") /
+                (sum(rs, "timeout_single") + sum(rs, "timeout_burst")),
+            )
+          : "—",
+      ],
+      [
+        "Response-hold / cache expiries",
+        rs.length && rs.every((r) => r.resp_hold_timeout != null)
+          ? `${num(sum(rs, "resp_hold_timeout"), 0)} / ${
+              rs.every((r) => r.cache_timeout != null)
+                ? num(sum(rs, "cache_timeout"), 0)
+                : "—"
+            }`
+          : "—",
+      ],
     ]);
     const classRatio = (rs, key) => rs.length && rs.every(r => r[key] != null)
       ? ratio(rs, key) : null;
@@ -397,7 +428,27 @@
           ),
         ),
       ].sort((a, b) => a - b),
-      metric = $("entryMetric").value;
+      metric = $("entryMetric").value,
+      // Timeout metrics are counts of expiries, not a fraction of the window.
+      counting = metric.startsWith("timeout"),
+      entryValue = (fi, j) => {
+        let rs = rows(fi, "entry", group).filter((r) => r.entry === entries[j]);
+        return rs.length && rs.every((r) => r[metric] != null)
+          ? metric === "state"
+            ? rs.at(-1).state
+            : counting
+              ? sum(rs, metric)
+              : sum(rs, metric) / rs.reduce((a, r) => a + r.end - r.start, 0)
+          : null;
+      },
+      entryPeak = counting
+        ? Math.max(
+            1,
+            ...visible.flatMap((fi) =>
+              entries.map((_, j) => entryValue(fi, j) || 0),
+            ),
+          )
+        : 1;
     if (entries.length)
       heat(
         "entryHeat",
@@ -406,23 +457,16 @@
             ? `B${Math.floor(e / M.mshr_ways)} W${e % M.mshr_ways}`
             : `Entry ${e}`,
         ),
-        (fi, j) => {
-          let rs = rows(fi, "entry", group).filter(
-            (r) => r.entry === entries[j],
-          );
-          return rs.length && rs.every(r => r[metric] != null)
-            ? metric === "state"
-              ? rs.at(-1).state
-              : sum(rs, metric) / rs.reduce((a, r) => a + r.end - r.start, 0)
-            : null;
-        },
+        entryValue,
         {
-          max: metric === "state" ? 4 : 1,
+          max: metric === "state" ? 4 : counting ? entryPeak : 1,
           format: (v) =>
             metric === "state"
               ? ["Free", "Waiting", "Draining", "Cached", "Response hold"][v] ||
                 String(v)
-              : num(100 * v) + "%",
+              : counting
+                ? num(v, 0) + (v === 1 ? " timeout" : " timeouts")
+                : num(100 * v) + "%",
         },
       );
     else
