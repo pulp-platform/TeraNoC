@@ -40,6 +40,7 @@ $(APPS): % : $(BIN_DIR)/% $(APPS_DIR)/Makefile $(shell find $(RUNTIME_DIR)/**.{S
 $(BINARIES): $(BIN_DIR)/%: %/main.c.o $(RUNTIME) $(LINKER_SCRIPT) data_%.h update_opcodes
 	mkdir -p $(dir $@)
 	$(RISCV_CC) -Iinclude -o $@ $< $(RUNTIME) $(RISCV_LDFLAGS) -T$(RUNTIME_DIR)/link.ld
+	$(if $(filter sp-fmatmul-opt-burst-merge sp-fmatmul-opt-burst-merge-fp16,$*),$(python) $(SOFTWARE_DIR)/scripts/precompute_gemm_hash.py $@,true)
 	$(RISCV_OBJDUMP) $(RISCV_OBJDUMP_FLAGS) -D $@ > $@.dump
 
 # Regenerate a per-shape GEMM data header from its shape spec. data_gemm.h carries the

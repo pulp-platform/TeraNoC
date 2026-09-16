@@ -262,6 +262,19 @@ static elem_t a_mesh[((NUM_GROUPS) * (A_GROUP_STRIDE)) / (GEMM_ELEM_BYTES)]
     __attribute__((section(".l1_prio"), aligned((NUM_GROUPS) * (A_GROUP_STRIDE))));
 #endif
 
+// Compact progress stays visible if a run hangs. Enable verbose boot logging
+// to retain the original metadata at startup instead of after measurement.
+#ifndef MATMUL_BOOT_PROGRESS
+#define MATMUL_BOOT_PROGRESS 1
+#endif
+#ifndef MATMUL_BOOT_VERBOSE
+#define MATMUL_BOOT_VERBOSE 0
+#endif
+#define BOOT_STAGE(stage) do { \
+  if (MATMUL_BOOT_PROGRESS && cid == 0) printf("[INIT] " stage "\n"); \
+} while (0)
+#include "gemm_hash_precomputed.h"
+
 //==========================================================
 // MATRIX INITIALIZATION
 //==========================================================
@@ -423,8 +436,13 @@ int main() {
   //========================================================--
   // INITIALIZATION
   //========================================================--
+  if (!GEMM_HASH_READY) {
+    if (cid == 0) printf("[INIT] missing precomputed hash table\n");
+    return -11;
+  }
   // Initialize barrier for multicore synchronization
   mempool_barrier_init(cid);
+  BOOT_STAGE("copy");
 
   // Initialize timer to maximum value (will be updated with actual time)
   timer = (uint32_t)-1;
@@ -433,6 +451,7 @@ int main() {
   // the legal KS with the most balanced within-group A/B sharing. Override
   // with EXTRA_DEFINES=-DKERNEL_SIZE=... for a controlled performance sweep.
   kernel_size = KERNEL_SIZE;
+#if MATMUL_BOOT_VERBOSE
   if (cid == 0) {
     printf("[DASHBOARD_META] {\"kernel_size\":%u,\"burst_model\":\"%s\","
            "\"burst_geometry\":{\"tile_words\":%u,\"max_words\":%u,"
@@ -446,6 +465,7 @@ int main() {
            (unsigned)GEMM_SHARE_A(KERNEL_SIZE),
            (unsigned)GEMM_SHARE_B(KERNEL_SIZE));
   }
+#endif
 
   //========================================================--
   // STEP 2: DISTRIBUTE WORK ACROSS CORES
@@ -539,8 +559,7 @@ int main() {
   }
 #endif
 
-  // Wait for all cores to finish work distribution
-  mempool_barrier(num_cores);
+  // Work distribution is core-local; DMA publication synchronizes below.
 
   //========================================================--
   // STEP 3: DATA TRANSFER FROM DRAM TO TCDM
@@ -571,6 +590,7 @@ int main() {
 #endif
   #endif
 
+#if MATMUL_BOOT_VERBOSE
   // Print status message from core 0
   if (cid == 0) {
     printf("finish copy\n");
@@ -578,8 +598,11 @@ int main() {
         gemm_l.M, gemm_l.N, gemm_l.P, m_start, m_end, p_start, p_end);
   }
 
+#endif
+
   // Wait for all cores to finish data transfer
   mempool_barrier(num_cores);
+  BOOT_STAGE("prepare");
 
   //========================================================--
   // STEP 3b: FAN A OUT ACROSS THE MESH
@@ -653,11 +676,13 @@ int main() {
   // to 1 exactly when A already spans the mesh.
   const uint32_t a_fill_cyc = 0;
 #endif
+#if MATMUL_BOOT_VERBOSE
   if (cid == 0)
     printf("[AREP] replicas=%u span=%u groups_per_replica=%u a_bytes=%u fill=%s fill_cyc=%u\n",
            (unsigned)(MATMUL_A_REPLICAS), (unsigned)(A_SPAN),
            (unsigned)(A_GROUPS_PER_REPLICA), (unsigned)(A_BYTES),
            (MATMUL_A_FILL_DMA) ? "dma" : "cores", (unsigned)a_fill_cyc);
+#endif
 
   //========================================================--
   // STEP 4: MATRIX MULTIPLICATION
@@ -687,7 +712,6 @@ int main() {
     if (wg < half)
       gbar_setup(wg, 2u, (1u << wg) | (1u << (wg + half)));
   }
-  mempool_barrier(num_cores);
 #endif
 
 #if GBAR_PLOOP
@@ -703,18 +727,22 @@ int main() {
                                               : ((1u << cores_per_group) - 1u);
     gbar_setup(GBAR_PLOOP_STRUCT, cores_per_group, gmask);
   }
+#endif
+#if GROUP_BARRIER || GBAR_PLOOP
+  // Publish both barrier structures before any warm-up arrivals.
   mempool_barrier(num_cores);
 #endif
 
 #if MSHR_RUNTIME_CFG
   mshr_cfg_t mshr_cfg = MSHR_CFG_DERIVED_INIT;
   if (mshr_cfg_is_group_writer()) {
-    mshr_cfg_tune_gemm(&mshr_cfg, a_use, b, gid);
+    gemm_hash_prepare(&mshr_cfg, a_use, b, gid);
   }
-  mempool_barrier(num_cores);
+  // Hash selection changes only the designated writer's local configuration.
 #endif
 
 #if ICACHE_WARMUP
+  BOOT_STAGE("warmup");
   // Instruction-cache warm-up: one short reduced-N pass of the kernel so the matmul
   // (+ gbar_sync) code is resident in each core's I$ before the timed run. Same m/p
   // ranges + active set keep the per-pair group barrier balanced. N is clamped down to
@@ -749,12 +777,13 @@ int main() {
   // core before the first timed access.
   {
     // Shape-derived at COMPILE TIME from GEMM_M/N/P (data_gemm.h): one source per
-    // precision, with a bounded address-based hash search before warm-up. The timeout and
+    // precision, with host-precomputed hashes (runtime search is optional). The timeout and
     // cache knobs stay macro-fed; MSHR_CFG_DERIVED_INIT gates the cache fields on
     // GEMM_ELEM_BYTES so fp32 keeps the legacy path automatically.
     uint32_t mshr_st = 0;
     if (mshr_cfg_is_group_writer()) {
       mshr_st = mshr_cfg_apply_group(&mshr_cfg);
+#if MATMUL_BOOT_VERBOSE
       if (gid == 0) {
         printf("[GEMM_HASH] group=0 single=%u burst=%u bits=%u search=%u\n",
                (unsigned)mshr_cfg.bank_shift_single,
@@ -762,6 +791,7 @@ int main() {
                (unsigned)mshr_cfg.bank_burst_bits,
                (unsigned)(MSHR_HASH_SEARCH && MSHR_CFG_HASH_MODE == 3));
       }
+#endif
     }
     mempool_barrier(num_cores);
     // Non-zero status means the configuration IN EFFECT is not the one requested -- a refused
@@ -810,6 +840,7 @@ int main() {
   }
 #endif
 
+  BOOT_STAGE("benchmark");
   for (uint32_t i = 0; i < measure_iterations; ++i) {
     if (is_core_active) {
       // Start timer
@@ -885,6 +916,38 @@ int main() {
       }
     }
   }
+
+#if !MATMUL_BOOT_VERBOSE
+  // Detailed metadata is outside the timed region. Compact INIT markers above
+  // remain available even when the benchmark does not finish.
+  if (cid == 0) {
+    printf("[DASHBOARD_META] {\"kernel_size\":%u,\"burst_model\":\"%s\","
+           "\"burst_geometry\":{\"tile_words\":%u,\"max_words\":%u,"
+           "\"lanes\":%u,\"rob_depth\":%u,\"enabled\":%u}}\n",
+           (unsigned)kernel_size, GEMM_BURST_MODEL,
+           (unsigned)GEMM_BURST_TILE_WORDS, (unsigned)GEMM_BURST_MAX_WORDS,
+           (unsigned)GEMM_BURST_LANES, (unsigned)GEMM_BURST_ROB_DEPTH,
+           (unsigned)GEMM_BURST_ENABLED);
+    printf("[GEMM_CONFIG] ks=%u decode=%u share_a=%u share_b=%u\n",
+           (unsigned)kernel_size, (unsigned)MATMUL_DECODE_SPLIT,
+           (unsigned)GEMM_SHARE_A(KERNEL_SIZE),
+           (unsigned)GEMM_SHARE_B(KERNEL_SIZE));
+  }
+  if (cid == 0)
+    printf("[AREP] replicas=%u span=%u groups_per_replica=%u a_bytes=%u fill=%s fill_cyc=%u\n",
+           (unsigned)(MATMUL_A_REPLICAS), (unsigned)(A_SPAN),
+           (unsigned)(A_GROUPS_PER_REPLICA), (unsigned)(A_BYTES),
+           (MATMUL_A_FILL_DMA) ? "dma" : "cores", (unsigned)a_fill_cyc);
+#if MSHR_RUNTIME_CFG
+  if (cid == 0) {
+    printf("[GEMM_HASH] group=0 single=%u burst=%u bits=%u search=%u\n",
+           (unsigned)mshr_cfg.bank_shift_single,
+           (unsigned)mshr_cfg.bank_shift_burst,
+           (unsigned)mshr_cfg.bank_burst_bits,
+           (unsigned)(MSHR_HASH_SEARCH && MSHR_CFG_HASH_MODE == 3));
+  }
+#endif
+#endif
 
   //========================================================--
   // STEP 5: PERFORMANCE REPORTING
