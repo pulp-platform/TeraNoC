@@ -253,8 +253,8 @@ OMP_RUNTIME := $(addsuffix .o,$(shell find $(OMP_DIR) -name "*.c"))
 %.S.o: %.S
 	$(RISCV_CC) $(RISCV_CCFLAGS) -c $< -o $@
 
-%.c.o: %.c
-	$(RISCV_CC) $(RISCV_CCFLAGS) -c $< -o $@
+%.c.o: %.c $(ROOT_DIR)/gemm_hash.h $(ROOT_DIR)/gemm_config.h $(ROOT_DIR)/gemm_burst.h $(ROOT_DIR)/gemm_hash_precomputed.h $(ROOT_DIR)/gemm_hash_fingerprint.py $(ROOT_DIR)/runtime.mk
+	$(python) $(ROOT_DIR)/gemm_hash_fingerprint.py --runtime $(ROOT_DIR) -- $(RISCV_CC) $(RISCV_CCFLAGS) -c $< -o $@
 
 %.cpp.o: %.cpp
 	$(RISCV_CXX) $(RISCV_CXXFLAGS) -c $< -o $@

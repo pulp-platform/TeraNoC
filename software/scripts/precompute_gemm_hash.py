@@ -8,9 +8,14 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
+import sys
 import struct
 import subprocess
 import tempfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'runtime'))
+from gemm_hash_fingerprint import HEADERS, SELECTOR_ABI, fingerprint
 
 DEFINES = ('GEMM_M GEMM_N GEMM_P GEMM_ELEM_BYTES NUM_CORES NUM_GROUPS '
            'ACTIVE_GROUP_DIV KERNEL_SIZE MATMUL_DECODE_SPLIT VLEN '
@@ -49,11 +54,11 @@ class Elf32:
 
 
 def selections(desc, a, b, runtime):
-    if len(desc) != 24 or desc[0] != 1:
+    if (desc[0], len(desc)) not in ((1, 24), (2, 33)):
         raise ValueError('Unsupported GEMM hash descriptor')
     macros = dict(zip(DEFINES, desc[1:17]))
     groups = macros['NUM_GROUPS']
-    banks, single, burst, bits, replicas, groups_per_replica, stride = desc[17:]
+    banks, single, burst, bits, replicas, groups_per_replica, stride = desc[17:24]
     source = '\n'.join(f'#define {key} {value}u' for key, value in macros.items())
     source += '\n#include "gemm_hash.h"\n#include <stdio.h>\nint main(void) {\n'
     source += f'''  for (unsigned g = 0; g < {groups}u; ++g) {{
@@ -77,7 +82,7 @@ def selections(desc, a, b, runtime):
     return values
 
 
-def patch(path, runtime):
+def patch(path, runtime, allow_header_mismatch=False):
     data = bytearray(path.read_bytes())
     elf = Elf32(data)
     if 'gemm_hash_descriptor' not in elf.symbols:
@@ -85,8 +90,31 @@ def patch(path, runtime):
         return
     offset, size = elf.span('gemm_hash_descriptor')
     desc = struct.unpack_from('<' + 'I' * (size // 4), data, offset)
+    if (desc[0], len(desc)) not in ((1, 24), (2, 33)):
+        raise ValueError('Unsupported GEMM hash descriptor')
+    expected_runtime = '(not recorded; rebuild this legacy ELF)'
+    if 'gemm_hash_build_runtime' in elf.symbols:
+        build_offset, build_size = elf.span('gemm_hash_build_runtime')
+        expected_runtime = bytes(data[build_offset:build_offset+build_size]).rstrip(b'\0').decode()
+    expected = struct.pack('<8I', *desc[25:33]).hex() if desc[0] == 2 else None
     a = elf.address('a_mesh' if desc[21] > 1 else 'a')
-    values = selections(desc, a, elf.address('b'), runtime)
+    # Compile only the private header snapshot whose bytes we verified.
+    with tempfile.TemporaryDirectory(prefix='gemm-hash-headers-') as tmp:
+        snapshot = Path(tmp)
+        for name in HEADERS:
+            shutil.copyfile(runtime/name, snapshot/name)
+        actual = fingerprint(snapshot).hex()
+        mismatch = expected != actual or desc[0] != 2 or desc[24] != SELECTOR_ABI
+        if mismatch and not allow_header_mismatch:
+            raise ValueError(
+                f'GEMM selector fingerprint mismatch: ELF expects {expected or "missing fingerprint"}; '
+                f'--runtime {runtime.resolve()} provides {actual}. '
+                f'Expected build runtime: {expected_runtime}. '
+                'Pass --runtime with that matching snapshot or rebuild the ELF. '
+                'For deliberate cross-version experiments only, use --allow-header-mismatch.')
+        if mismatch:
+            print('OVERRIDE: using a different GEMM selector; recorded in .hash.json', file=sys.stderr)
+        values = selections(desc, a, elf.address('b'), snapshot)
     offset, size = elf.span('gemm_hash_table')
     encoded = struct.pack('<' + 'I' * (1 + len(values)), 0x47484d31, *values)
     if len(encoded) != size:
@@ -102,7 +130,10 @@ def patch(path, runtime):
             os.replace(tmp, path)
         finally:
             tmp.unlink(missing_ok=True)
-    report = dict(schema_version=1, elf=str(path.resolve()),
+    report = dict(schema_version=2, elf=str(path.resolve()),
+                  selector_abi=SELECTOR_ABI, expected_runtime=expected_runtime,
+                  expected_fingerprint=expected, used_fingerprint=actual,
+                  header_mismatch=mismatch, mismatch_override=allow_header_mismatch,
                   config=dict(zip(DEFINES, desc[1:17])),
                   banks=desc[17], a_base=a, b_base=elf.address('b'),
                   replicas=desc[21], groups_per_replica=desc[22],
@@ -118,5 +149,10 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('elf', type=Path)
     parser.add_argument('--runtime', type=Path, default=Path(__file__).resolve().parents[1]/'runtime')
+    parser.add_argument('--allow-header-mismatch', action='store_true',
+                        help='Deliberately use different selector headers; records override in hash report')
     args = parser.parse_args()
-    patch(args.elf, args.runtime)
+    try:
+        patch(args.elf, args.runtime, args.allow_header_mismatch)
+    except (ValueError, OSError, KeyError, struct.error) as error:
+        parser.exit(2, f'error: {error}\n')

@@ -261,8 +261,8 @@ static float a_mesh[((NUM_GROUPS) * (A_GROUP_STRIDE)) / (GEMM_ELEM_BYTES)]
     __attribute__((section(".l1_prio"), aligned((NUM_GROUPS) * (A_GROUP_STRIDE))));
 #endif
 
-// Compact progress stays visible if a run hangs. Enable verbose boot logging
-// to retain the original metadata at startup instead of after measurement.
+// Dashboard metadata is always printed at startup. Verbose boot logging
+// additionally prints copy completion and per-core work ranges from core 0.
 #ifndef MATMUL_BOOT_PROGRESS
 #define MATMUL_BOOT_PROGRESS 1
 #endif
@@ -443,7 +443,6 @@ int main() {
   // the legal KS with the most balanced within-group A/B sharing. Override
   // with EXTRA_DEFINES=-DKERNEL_SIZE=... for a controlled performance sweep.
   kernel_size = KERNEL_SIZE;
-#if MATMUL_BOOT_VERBOSE
   if (cid == 0) {
     printf("[DASHBOARD_META] {\"kernel_size\":%u,\"burst_model\":\"%s\","
            "\"burst_geometry\":{\"tile_words\":%u,\"max_words\":%u,"
@@ -457,7 +456,6 @@ int main() {
            (unsigned)GEMM_SHARE_A(KERNEL_SIZE),
            (unsigned)GEMM_SHARE_B(KERNEL_SIZE));
   }
-#endif
 
   //========================================================--
   // STEP 2: DISTRIBUTE WORK ACROSS CORES
@@ -668,13 +666,11 @@ int main() {
   // to 1 exactly when A already spans the mesh.
   const uint32_t a_fill_cyc = 0;
 #endif
-#if MATMUL_BOOT_VERBOSE
   if (cid == 0)
     printf("[AREP] replicas=%u span=%u groups_per_replica=%u a_bytes=%u fill=%s fill_cyc=%u\n",
            (unsigned)(MATMUL_A_REPLICAS), (unsigned)(A_SPAN),
            (unsigned)(A_GROUPS_PER_REPLICA), (unsigned)(A_BYTES),
            (MATMUL_A_FILL_DMA) ? "dma" : "cores", (unsigned)a_fill_cyc);
-#endif
 
   //========================================================--
   // STEP 4: MATRIX MULTIPLICATION
@@ -729,6 +725,13 @@ int main() {
   mshr_cfg_t mshr_cfg = MSHR_CFG_DERIVED_INIT;
   if (mshr_cfg_is_group_writer()) {
     gemm_hash_prepare(&mshr_cfg, a_use, b, gid);
+    if (gid == 0) {
+      printf("[GEMM_HASH] group=0 single=%u burst=%u bits=%u search=%u\n",
+             (unsigned)mshr_cfg.bank_shift_single,
+             (unsigned)mshr_cfg.bank_shift_burst,
+             (unsigned)mshr_cfg.bank_burst_bits,
+             (unsigned)(MSHR_HASH_SEARCH && MSHR_CFG_HASH_MODE == 3));
+    }
   }
   // Hash selection changes only the designated writer's local configuration.
 #endif
@@ -775,15 +778,7 @@ int main() {
     uint32_t mshr_st = 0;
     if (mshr_cfg_is_group_writer()) {
       mshr_st = mshr_cfg_apply_group(&mshr_cfg);
-#if MATMUL_BOOT_VERBOSE
-      if (gid == 0) {
-        printf("[GEMM_HASH] group=0 single=%u burst=%u bits=%u search=%u\n",
-               (unsigned)mshr_cfg.bank_shift_single,
-               (unsigned)mshr_cfg.bank_shift_burst,
-               (unsigned)mshr_cfg.bank_burst_bits,
-               (unsigned)(MSHR_HASH_SEARCH && MSHR_CFG_HASH_MODE == 3));
-      }
-#endif
+
     }
     mempool_barrier(num_cores);
     // Non-zero status means the configuration IN EFFECT is not the one requested -- a refused
@@ -908,38 +903,6 @@ int main() {
       }
     }
   }
-
-#if !MATMUL_BOOT_VERBOSE
-  // Detailed metadata is outside the timed region. Compact INIT markers above
-  // remain available even when the benchmark does not finish.
-  if (cid == 0) {
-    printf("[DASHBOARD_META] {\"kernel_size\":%u,\"burst_model\":\"%s\","
-           "\"burst_geometry\":{\"tile_words\":%u,\"max_words\":%u,"
-           "\"lanes\":%u,\"rob_depth\":%u,\"enabled\":%u}}\n",
-           (unsigned)kernel_size, GEMM_BURST_MODEL,
-           (unsigned)GEMM_BURST_TILE_WORDS, (unsigned)GEMM_BURST_MAX_WORDS,
-           (unsigned)GEMM_BURST_LANES, (unsigned)GEMM_BURST_ROB_DEPTH,
-           (unsigned)GEMM_BURST_ENABLED);
-    printf("[GEMM_CONFIG] ks=%u decode=%u share_a=%u share_b=%u\n",
-           (unsigned)kernel_size, (unsigned)MATMUL_DECODE_SPLIT,
-           (unsigned)GEMM_SHARE_A(KERNEL_SIZE),
-           (unsigned)GEMM_SHARE_B(KERNEL_SIZE));
-  }
-  if (cid == 0)
-    printf("[AREP] replicas=%u span=%u groups_per_replica=%u a_bytes=%u fill=%s fill_cyc=%u\n",
-           (unsigned)(MATMUL_A_REPLICAS), (unsigned)(A_SPAN),
-           (unsigned)(A_GROUPS_PER_REPLICA), (unsigned)(A_BYTES),
-           (MATMUL_A_FILL_DMA) ? "dma" : "cores", (unsigned)a_fill_cyc);
-#if MSHR_RUNTIME_CFG
-  if (cid == 0) {
-    printf("[GEMM_HASH] group=0 single=%u burst=%u bits=%u search=%u\n",
-           (unsigned)mshr_cfg.bank_shift_single,
-           (unsigned)mshr_cfg.bank_shift_burst,
-           (unsigned)mshr_cfg.bank_burst_bits,
-           (unsigned)(MSHR_HASH_SEARCH && MSHR_CFG_HASH_MODE == 3));
-  }
-#endif
-#endif
 
   //========================================================--
   // STEP 5: PERFORMANCE REPORTING
