@@ -76,7 +76,15 @@ def main():
     ap.add_argument("--overlap", type=int, choices=[0, 1], default=1)
     ap.add_argument("--active-groups", type=int)
     ap.add_argument("--seed", type=int, default=20260916)
+    ap.add_argument(
+        "--source-revision", help="Original RTL revision when building a frozen source copy"
+    )
     ap.add_argument("--l2-bytes", type=int)
+    ap.add_argument(
+        "--layout-only",
+        action="store_true",
+        help="Compile a non-runnable layout ELF with placeholder L2 data; skip host references",
+    )
     args = ap.parse_args()
     if args.l2_bytes is not None and (
         not 0x1000000 <= args.l2_bytes <= 0x20000000 or args.l2_bytes % 2048
@@ -133,17 +141,22 @@ def main():
     for k in range(0, args.hidden, args.kt):
         packed_x[k // args.kt, :, : min(args.kt, args.hidden - k)] = x[:, k : k + args.kt]
     packed_x.tofile(args.out / "x.bin")
-    gate = projection(
-        x,
-        args.hidden,
-        args.intermediate,
-        args.kt,
-        args.pt,
-        dtype,
-        args.seed + 1,
-        args.out / "gate.bin",
-    )
-    if args.app == "ffn_stream":
+    if args.layout_only:
+        for name in ["gate", "up", "down"]:
+            (args.out / (name + ".bin")).write_bytes(bytes(args.precision // 8))
+        h = np.zeros((args.batch, args.intermediate), dtype=dtype)
+    else:
+        gate = projection(
+            x,
+            args.hidden,
+            args.intermediate,
+            args.kt,
+            args.pt,
+            dtype,
+            args.seed + 1,
+            args.out / "gate.bin",
+        )
+    if not args.layout_only and args.app == "ffn_stream":
         up = projection(
             x,
             args.hidden,
@@ -166,7 +179,7 @@ def main():
             args.out / "down.bin",
         )
         expected.tofile(args.out / "expected_output.bin")
-    else:
+    elif not args.layout_only:
         h = gate.astype(dtype)
         for name in ["up", "down"]:
             (args.out / (name + ".bin")).write_bytes(bytes(args.precision // 8))
@@ -233,11 +246,11 @@ config_report:
         "l2_operand_alignment": 64 * 256 * (args.mesh**2 // 16),
         "command": cmd,
         "build_returncode": result.returncode,
-        "rtl_commit": subprocess.check_output(
-            ["git", "-C", str(RTL), "rev-parse", "HEAD"], text=True
-        ).strip(),
+        "rtl_commit": args.source_revision
+        or subprocess.check_output(["git", "-C", str(RTL), "rev-parse", "HEAD"], text=True).strip(),
         "accumulation": f"fp{args.precision} within K tiles; fp32 between tiles",
         "input_kind": "deterministic synthetic; not pretrained model weights",
+        "elf_file": "layout.elf" if args.layout_only else "workload.elf",
         "files": {str(p.relative_to(args.out)): sha(p) for p in args.out.glob("*.bin")},
         "microkernel_adapter_sha256": sha(args.out / "qwen_microkernel.h"),
         "source_sha256": {str(p.relative_to(src)): sha(p) for p in src.rglob("*") if p.is_file()},
@@ -266,11 +279,14 @@ config_report:
                 stack_bytes_per_core=(syms["__stack_end"] - syms["__stack_start"])
                 // (args.mesh**2 * 16),
                 l2_payload_bytes=int(elf.get_section_by_name(".l2")["sh_size"]),
+                l2_payload_is_placeholder=args.layout_only,
             )
     (args.out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(
         json.dumps({k: manifest[k] for k in ["build_returncode", "active_groups", "accumulation"]})
     )
+    if args.layout_only and (args.out / "workload.elf").exists():
+        (args.out / "workload.elf").rename(args.out / "layout.elf")
     raise SystemExit(result.returncode)
 
 

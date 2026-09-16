@@ -104,6 +104,14 @@ Campaigns, raw traces, private model builds and dashboards belong outside this
 source tree. See `TeraNoC_gvsoc/gvsoc/docs/reports/qwen_stream_20260916.md` for
 accepted results, exact artifact paths and model limitations.
 
+Use `build.py --layout-only` with the intended dimensions for a quick compiler
+and linker L1-fit check. It skips weight/reference generation and creates
+`layout.elf` with placeholder L2 operands, explicitly marked in the manifest.
+This file cannot establish L2 fit, numerical correctness, or performance; the
+GVSoC runner rejects layout-only inputs. A normal build remains required before
+simulation. `--source-revision` records the original RTL commit when the builder
+is executed from a frozen source copy outside Git.
+
 ## MSHR policy
 
 Keep the configured MSHR coalescing/cache behavior enabled in the streaming
