@@ -132,6 +132,21 @@ least three distinct tiles so that each alternating address is reused. Tail
 tiles and reduced participant sets must have achievable targets. A barrier
 does not itself invalidate cached responses.
 
+The active native-FP16 `gate_up_ladder` builder pins the standalone GEMM timer
+policy to `hold_window_single=8191`, `hold_window_burst=8191`,
+`serve_timeout=8191`, and `cache_timeout=0`. The last value is the RTL legacy
+mode that lets a cached entry re-arm from the serve timeout; it is intentional,
+not a missing configuration. Matmul/merge arms additionally use the production
+sharing targets and the address-ranked hash settings recorded in each manifest.
+The older `qwen_gateup_ladder_20260917` binaries retain their historical
+64-cycle timer settings and must not be mixed with the current bundle.
+
+For the current source, the generated microkernel is emitted by
+`gate_up_ladder/build.py:kernel()` into an arm's `microkernel.h`; `q_block` is
+the generated inner FP16 block called by `q_compute`, not a separately
+maintained source file. The ladder README and GVSoC handover identify the
+persistent exact-ELF bundle and its checksums.
+
 ## DMA and L2 reference audit, 16 September 2026
 
 Use our RTL as the hardware contract, and the colleague model at

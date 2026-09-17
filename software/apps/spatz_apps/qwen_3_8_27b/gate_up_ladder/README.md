@@ -59,3 +59,26 @@ unchanged. `python3 test_tiling.py` checks both mesh budgets, exact column
 coverage, reduction tails and the production `gemm_burst.h` eligibility rule.
 
 The original KT32/PT8192 campaign's frozen ELFs and source bundles are unchanged.
+
+## Current persistent B2/B4 ELFs
+
+The current tuned bundle is kept outside the source tree at
+`/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC_gvsoc/sim_dashboard/campaigns/qwen_gateup_ladder_20260918_mshr8191/`.
+All four arms are exact native-FP16 `B × 5120 × 17408` Gate/Up matmul/merge
+builds with `KS=1`, `PT=17408`, one panel, the tuned
+`8191/8191/8191/0` MSHR timer policy, and the production `8/2` subscriber
+targets with `cache_reuse_target=16`. They are hash-checked in `SHA256SUMS`.
+They are built artifacts; no full-size GVSoC simulation has been accepted yet.
+
+| Arm | Mesh | Batch | KT | Column blocks | Active cores | `workload.elf` SHA-256 |
+|---|---:|---:|---:|---:|---:|---|
+| `b2_4x4_matmul_merge` | 4×4 | 2 | 40 | 128 | 256 | `55c9c8c5ab2e11cde3a0c5e50882d7059bff575c56503610c24a3b5dbbe8b381` |
+| `b4_4x4_matmul_merge` | 4×4 | 4 | 40 | 64 | 256 | `10d3acc9f7131220f074a4e9fb4a2166602e099364351d551a15ede72db90563` |
+| `b2_8x8_matmul_merge` | 8×8 | 2 | 160 | 512 | 1024 | `201cf53dad45a819ac81ebee1ba4756fc92cdf6252dacddc83bb2dfd38a0ea78` |
+| `b4_8x8_matmul_merge` | 8×8 | 4 | 160 | 256 | 1024 | `1cbf42383ee0dabb4e2fc7d368aba123eda1230f620a3eac0476135b04c4fd9f` |
+
+Use each arm's `manifest.json`, `csr_config.h`, `qwen_config.h` and
+`build.log` as the configuration record. The 512 MiB modeled L2 capacity is
+explicit in the build; it is not an external-memory model. Run the exact
+`workload.elf` in a new GVSoC output directory and retain the resulting
+validation and dashboard beside the arm.

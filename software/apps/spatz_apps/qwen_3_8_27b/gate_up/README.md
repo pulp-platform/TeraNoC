@@ -54,6 +54,14 @@ MSHR admission is enabled with single/burst targets 1 and reuse target 0, so
 these classes bypass retained merging. Old GEMM sharing targets are inappropriate
 for distinct per-core weight slices. Programmed CSR values/status are recorded.
 
+This is the legacy `gate_up` streaming program and its target-1 policy is
+deliberate. Its current source programs `hold_window_single=8191`,
+`hold_window_burst=8191`, `serve_timeout=8191`, and `cache_timeout=0`, but the
+target-1 setting still bypasses retained merging. The native-FP16 B2/B4
+matmul/merge experiments use `gate_up_ladder`; see that README for the current
+ELFs and production sharing policy. The 17 September campaign artifacts remain
+historical and keep the settings captured in their manifests.
+
 The default uses `vfwmacc.vf`: FP16 storage and FP32 arithmetic for every product.
 The current RTL widening helper has a known static-review issue converting zeros
 and special values. GVSoC implements floating-point conversion differently.
