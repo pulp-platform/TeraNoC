@@ -12,6 +12,10 @@
 extern const _Float16 q_x_data[], q_gate_weights[], q_up_weights[];
 static _Float16 q_weights[2][Q_WEIGHT_ELEMENTS] Q_L1;
 static _Float16 q_x[Q_X_REPLICAS * Q_X_REPLICA_ELEMENTS] Q_L1;
+#if Q_LOCAL_X_TILE
+// One 64-byte slice per physical tile; reused across outer batch row blocks.
+static _Float16 q_x_tile[Q_ROWS][NUM_CORES][Q_KT] Q_L1;
+#endif
 float q_partial[Q_PARTIAL_ELEMENTS] Q_L1;
 float q_output[2][Q_BATCH * Q_INTERMEDIATE] Q_L1;
 uint32_t q_core_compute[NUM_CORES][16] Q_L1;

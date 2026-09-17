@@ -43,6 +43,14 @@ def layout(p, workers, kt, tail_width=8):
 
 def microkernel(a, segments, workers, partial_row):
     lines = ["// Generated register blocks: FP16 loads and widening FP32 FMACs."]
+    if a.x_tile == "local":
+        lines += [
+            "__attribute__((noinline)) static void q_prefetch_x(const _Float16 *src, _Float16 *dst) {",
+            '  asm volatile("vsetvli t0, %0, e16, m1, ta, ma\\n"',
+            '               "vle16.v v0, (%1)\\nvse16.v v0, (%2)\\nfence\\n"',
+            '               :: "r"(Q_KT), "r"(src), "r"(dst) : "t0", "v0", "memory");',
+            "}",
+        ]
     groups = [
         segments[i : i + max(1, 6 // a.rows)] for i in range(0, len(segments), max(1, 6 // a.rows))
     ]
@@ -52,7 +60,8 @@ def microkernel(a, segments, workers, partial_row):
         ]
         code, outputs, inputs, clobbers = [], [], [], ["t0", "memory"]
         for r in range(a.rows):
-            lines += [f"  const _Float16 *x{r}=input+(row+{r})*Q_HIDDEN+t*Q_KT;"]
+            offset = f"{r}*NUM_CORES*Q_KT" if a.x_tile == "local" else f"(row+{r})*Q_HIDDEN+t*Q_KT"
+            lines += [f"  const _Float16 *x{r}=input+{offset};"]
             outputs.append(f'[x{r}] "+&r"(x{r})')
             clobbers.append(f"ft{r}")
         lines += ["  uint32_t count=Q_KT;"]
@@ -102,7 +111,13 @@ def microkernel(a, segments, workers, partial_row):
         "  const _Float16 *input=q_x+(Q_X_REPLICAS>1 ? cid/NUM_CORES_PER_GROUP : 0)*Q_X_REPLICA_ELEMENTS;",
         f"  {row_loop} {{",
     ]
-    lines += [f"    q_block_{i}(worker,row,t,w,input);" for i in range(len(groups))]
+    if a.x_tile == "local":
+        lines += [
+            "    for(uint32_t r=0;r<Q_ROWS;++r)",
+            "      q_prefetch_x(input+(row+r)*Q_HIDDEN+t*Q_KT,q_x_tile[r][cid]);",
+        ]
+    block_input = "q_x_tile[0][cid]" if a.x_tile == "local" else "input"
+    lines += [f"    q_block_{i}(worker,row,t,w,{block_input});" for i in range(len(groups))]
     lines += [
         "  }",
         "}",
@@ -144,6 +159,7 @@ def main():
     ap.add_argument("--tail-width", type=int, choices=[8, 32], default=8)
     ap.add_argument("--barrier", choices=["flat", "group"], default="group")
     ap.add_argument("--x-replicas", choices=["one", "group"], default="group")
+    ap.add_argument("--x-tile", choices=["off", "local"], default="off")
     ap.add_argument("--repeats", type=int, default=1)
     ap.add_argument("--pattern", choices=["random", "zero", "unit"], default="random")
     ap.add_argument("--unit-k", type=int, default=31)
@@ -156,6 +172,8 @@ def main():
         or a.hidden % a.kt
     ):
         ap.error("Positive dimensions, rows dividing batch and KT dividing K required")
+    if a.x_tile == "local" and a.kt != 32:
+        ap.error("Local X slices currently require KT32 to match the 64-byte tile stripe")
     cores = a.mesh * a.mesh * 16
     teams = 1 if a.distribution == "shared" else a.batch // a.rows
     if cores % teams:
@@ -224,6 +242,7 @@ def main():
         Q_WEIGHT_ELEMENTS=welems,
         Q_PARTIAL_ELEMENTS=a.batch * arow,
         Q_GROUP_BARRIER=int(a.barrier == "group"),
+        Q_LOCAL_X_TILE=int(a.x_tile == "local"),
         Q_X_REPLICAS=(a.mesh * a.mesh if a.x_replicas == "group" else 1),
         Q_X_REPLICA_ELEMENTS=(
             (align(a.batch * a.hidden * 2, 1024) // 1024 | 1) * 512

@@ -65,3 +65,16 @@ and offline dashboards are in `TeraNoC_gvsoc/gvsoc/scripts/qwen_gateup/`, reusin
 `scripts/qwen_stream/` for execution and the common compound-operator renderer.
 The campaign `qwen_gateup_20260917` retains measured comparisons and limitations.
 Useful peak for this widening kernel is four FP32 FMAs per core per cycle.
+
+`--x-tile local` is an optional diagnostic for KT32. Each core copies the current
+32-element X slice into its own 64-byte bank stripe before computing, reusing the
+allocation across outer batch row blocks. It costs 16/64 KiB per reused row on
+4×4/8×8; the copy and fence are inside the measured compute span. Numerical and
+repeated-buffer tests pass on both meshes, but the measured short B1/B4 cases
+were 2.6–3.7% slower than group X copies alone. The default remains `off`.
+
+`--tail-width 32` separately pads the final output segment to a full vector.
+At B1/4×4 it raises the double weight buffer from 2.25 to 3 MiB and the packed
+weight pair from 360 to 480 MiB. It improves the measured full-size run but
+reduces L1 headroom, so width 8 remains the baseline. Full-size B1/8×8 with width
+32 would need 640 MiB of source weights and is rejected by the current target.
