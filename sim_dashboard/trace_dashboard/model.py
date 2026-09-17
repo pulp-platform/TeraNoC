@@ -5,7 +5,7 @@ import hashlib
 import math
 from collections import defaultdict
 
-KINDS = {"fpu", "mshr", "entry", "bank", "link", "work", "traffic", "stage", "pressure", "overall"}
+KINDS = {"fpu", "mshr", "entry", "bank", "link", "work", "traffic", "stage", "pressure", "overall", "dma"}
 ADDITIVE = {"busy", "capacity", "occupied", "occupied_single", "occupied_burst", "full", "hsk", "stall", "idle", "fmac", "cached", "held", "alloc", "release", "timeout", "timeout_single", "timeout_burst", "timeout_subs", "resp_hold_timeout", "cache_timeout", "bypass", "active", "overflow_alloc", "overflow_merge", "overflow_occupied"}
 
 
@@ -86,12 +86,32 @@ def validate(row):
   if row["kind"] in {"bank", "link"}:
     if row.get("hsk", 0)+row.get("stall", 0) > row["end"]-row["start"]:
       raise ValueError("handshake + stall exceeds single-port window")
+  if row['kind'] == 'dma':
+    if row.get('scope') not in ('global', 'channel'):
+      raise ValueError('DMA requires explicit global or channel scope')
+    if row['scope'] == 'global' and 'g' in row:
+      raise ValueError('Global DMA must not be attributed to a selected group')
+    if row['scope'] == 'channel' and 'channel' not in row:
+      raise ValueError('Channel DMA requires a channel identifier')
+    if row.get('measurement') not in ('software', 'model', 'rtl'):
+      raise ValueError('DMA requires software, model, or rtl measurement boundary')
+    for key in ('programmed_bytes', 'completed_bytes', 'transactions',
+                'active_cycles', 'stall_cycles', 'wait_check_cycles'):
+      if key in row and (not isinstance(row[key], int) or isinstance(row[key], bool)
+                         or row[key] < 0):
+        raise ValueError(f'Invalid DMA {key}')
+    for key in ('active_cycles', 'stall_cycles', 'wait_check_cycles'):
+      if row.get(key, 0) > row['end'] - row['start']:
+        raise ValueError(f'DMA {key} exceeds interval')
+    if row['measurement'] == 'software' and any(
+        k in row for k in ('completed_bytes', 'active_cycles', 'stall_cycles')):
+      raise ValueError('Software timestamps cannot establish DMA bus activity')
 
 
 def identity(row):
   return (row.get("kind"), row.get("g"), row.get("t"), row.get("bank"),
           row.get("entry"), row.get("network"), row.get("subnet"),
-          row.get("direction"), row.get("label"))
+          row.get("direction"), row.get("label"), row.get("channel"))
 
 
 def assemble(records, meta, width, warnings, frame_bounds=None):

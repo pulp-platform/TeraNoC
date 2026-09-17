@@ -23,6 +23,12 @@ def positive(value):
 
 
 def expected_fmac_total(meta):
+  workload = meta.get('workload', {})
+  if 'executed_fmac' in workload:
+    value = workload['executed_fmac']
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+      raise ValueError('workload.executed_fmac must be a nonnegative integer')
+    return value
   m, n, p = meta['shape']
   steps = meta.get('fmac_reduction_steps', n)
   if not isinstance(steps, int) or not 0 <= steps <= n:

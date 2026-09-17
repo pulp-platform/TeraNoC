@@ -53,8 +53,8 @@ def benchmark_diagnostics(rows, meta, hash_result):
       f"{g // meta['mesh'][1]},{g % meta['mesh'][1]}", {})
     result.append(dict(g=g, assigned=assigned, fmac=done, completion=completion,
       progress=ratio(done, assigned), occupancy=ratio(total(mshr, 'occupied'),
-      total(mshr, 'capacity')), peak=max((r['peak'] for r in mshr), default=None),
-      full_cycles=total(mshr, 'full') if mshr else None,
+      total(mshr, 'capacity')), peak=max((r['peak'] for r in mshr if 'peak' in r), default=None),
+      full_cycles=total(mshr, 'full') if mshr and all('full' in r for r in mshr) else None,
       held_share=ratio(total(entries, 'held'), occupied),
       cached_share=ratio(total(entries, 'cached'), occupied),
       hash=score, locality=h.get('locality'),

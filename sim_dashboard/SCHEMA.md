@@ -117,3 +117,51 @@ The transcript adapter also preserves final `MSHRLIFE-BL` counters as
 entry counts and response-drain sums, not per-window occupancy or input
 request counts. `software_merge_targets`, when extracted from ELF DWARF by
 the campaign validator, are compiled software constants, not CSR readback.
+
+## Streaming operators and DMA (optional schema-v1 extensions)
+
+A compound workload can supply `workload.name`, `workload.useful_flops`,
+`workload.executed_fmac` and `workload.definition`. Useful FLOPs determine
+whole-benchmark roofline utilization; executed FMACs validate the sum of
+`expected_fmac_per_group` and may include padding. Neither value is inferred
+from the other. `shape` remains the logical M×N×P of one projection.
+`compute_precision` optionally selects the compute ceiling independently from
+storage `precision` (for example, FP16 storage with FP32 accumulation).
+
+Named `phase_ranges` contain exact `[start,end]` pairs. Records within a compound
+benchmark retain `phase:"bench"` and may add `subphase:"gate"` or `"up"`.
+Selecting a named subphase restricts the detail plots to that interval. The
+full-run navigation overview remains explicitly labeled as all phases.
+
+`kind:"dma"` records require integer `[start,end)`, `scope:"global"` or
+`"channel"`, and `measurement:"software"`, `"model"` or `"rtl"`.
+Global records must not carry a group ID. Channel records require `channel`;
+the identifier participates in record identity. Optional nonnegative fields:
+
+| Field | Unit and boundary |
+|---|---|
+| `programmed_bytes` | Bytes requested by software launches accepted at the named interface; not payload handshakes |
+| `completed_bytes` | Payload bytes completed at an explicitly documented model/RTL interface |
+| `transactions` | Accepted transactions at the documented interface |
+| `active_cycles` | Cycles active at the named DMA channel/interface |
+| `stall_cycles` | Backpressured cycles at that interface |
+| `wait_check_cycles` | Software time inside the documented DMA completion check, including polling/timer overhead |
+
+Counters are interval deltas. Active, stall and wait cycles cannot exceed the
+interval duration. Software observations cannot supply completed payload bytes,
+channel active cycles or bus stall cycles. A global wait-check record with a
+measured zero is valid; absent channel measurements remain unavailable.
+
+Optional `dma` metadata carries whole-system `programmed_bytes` by operand,
+`reuse_guard_cycles`, `wait_check_cycles`, projection summaries, explanatory
+`note`, and tile timestamps. Tile `begin`, `compute_end`, `joined`, `ready`
+are actual software timestamps. If begin precedes DMA launch, the first span
+must be labeled **launch + core 0 compute**, not pure compute. Ready does not
+identify the exact hardware completion cycle. Initial fills, output writeback
+and overlap efficiency require separate observations before they can be timed.
+
+For packed streaming layouts, optional `hash_samples` describes explicit remote
+word-address cohorts per group, captured current selectors, and sharing/locality
+assumptions. The shared analyzer ranks these samples without applying a
+contiguous-matrix layout. These are static address estimates, not measured
+bank activity. Individual-entry occupancy still requires `entry` records.

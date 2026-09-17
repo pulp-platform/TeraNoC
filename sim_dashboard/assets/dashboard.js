@@ -39,7 +39,7 @@
     rs.length && sum(rs, den) > 0 ? sum(rs, k) / sum(rs, den) : null;
   const phase = (r) =>
     $("phase").value === "all" ||
-    r.phase === $("phase").value;
+    r.phase === $("phase").value || r.subphase === $("phase").value;
   // Index once: heatmaps query each bank/entry across every time window.
   // Scanning every record for each cell makes full RTL traces unresponsive.
   const rowIndex = F.map((frame) => {
@@ -56,8 +56,7 @@
     const candidates = rowIndex[i].get(g === null ? kind : `${kind}:${g}`) || [];
     const mode = $("phase").value;
     if (mode === "all") return candidates;
-    return candidates.filter((r) =>
-      r.phase === mode);
+    return candidates.filter(phase);
   };
   const now = (kind) => rows(selected, kind);
   const color = (v) =>
@@ -93,9 +92,8 @@
   }
   function axisBounds() {
     const lo = F[visible[0]].start, hi = F[visible.at(-1)].end;
-    return $("phase").value === "bench" && M.benchmark
-      ? [Math.max(lo, M.benchmark[0]), Math.min(hi, M.benchmark[1])]
-      : [lo, hi];
+    const bounds = M.phase_ranges?.[$("phase").value] || ($("phase").value === "bench" ? M.benchmark : null);
+    return bounds ? [Math.max(lo, bounds[0]), Math.min(hi, bounds[1])] : [lo, hi];
   }
   function chart(
     id,
@@ -335,9 +333,11 @@
       ],
       [
         "Peak entries",
-        rs.length ? Math.max(...rs.map((r) => r.peak || 0)) : "—",
+        rs.length && rs.every(r => r.peak != null) ? Math.max(...rs.map(r => r.peak)) : "—",
       ],
-      ["Full cycles", rs.length ? num(sum(rs, "full"), 0) : "—"],
+      ["Full cycles", rs.length && rs.every(r => r.full != null) ? num(sum(rs, "full"), 0) : "—"],
+      ["Allocations / merges", rs.length && rs.every(r => r.alloc != null && r.merge != null)
+        ? `${num(sum(rs, "alloc"), 0)} / ${num(sum(rs, "merge"), 0)}` : "—"],
       // Hold-window and serve-timeout expiries below the subscriber target: entries that waited
       // out their window instead of being released by a merge. Optional probe.
       [
@@ -788,7 +788,7 @@
         ["Matrix A", degree(sharing.a), targetText("single"), sharing.a.distinct_tiles],
         ["Matrix B (weights)", degree(sharing.b), g.request_counts?.single ? `Single: ${targetText("single")}; burst: ${targetText("burst")}` : targetText("burst"), sharing.b.distinct_tiles],
       ]);
-      $("sharingNote").textContent = `${sharing.cores} cores/group; each core computes a ${sharing.kernel_rows} × ${sharing.columns_per_core} output tile. Sharing follows the workload partition: A is shared across column tiles, B across row tiles. This is potential same-element sharing, not measured simultaneous accesses or achieved MSHR merging. The MSHR target is a separate software policy: 1 means bypass, not one physical sharer. Targets are ${sampled?.single_merge_target != null ? "sampled RTL settings at the selected window end" : "compiled ELF policy when available"}; they are not measured multicast factors.`;
+      $("sharingNote").textContent = `${sharing.cores} cores/group; each core computes a ${sharing.kernel_rows} × ${sharing.columns_per_core} output tile. Sharing follows the workload partition: A is shared across column tiles, B across row tiles. This is potential same-element sharing, not measured simultaneous accesses or achieved MSHR merging. The MSHR target is a separate software policy: 1 means bypass, not one physical sharer. Targets are ${sampled?.single_merge_target != null ? "captured simulator CSR settings" : "compiled ELF policy when available"}; they are not measured multicast factors.`;
     }
     for (let [k, list, current] of [
       ["hashA", g.singles, g.current_a],
@@ -867,6 +867,56 @@
         "hashObserved",
         "Observed per-bank occupancy requires entry telemetry. The charts above are modeled address distributions.",
       );
+  }
+  function renderDma() {
+    const dma = M.dma;
+    if (!dma) {
+      for (const id of ["dmaSummary", "dmaPhases", "dmaChart", "dmaSchedule", "dmaTiles", "dmaInterfaces"])
+        empty(id, "DMA measurements were not collected for this run.");
+      return;
+    }
+    $("dmaNote").textContent = dma.note;
+    const bytes = dma.programmed_bytes || {};
+    stats("dmaSummary", [
+      ["Weights: programmed bytes", num(bytes.weights, 0)],
+      ["Inputs: programmed bytes", num(bytes.inputs, 0)],
+      ["Outputs: programmed bytes", num(bytes.outputs, 0)],
+      ["Reuse-guard timer cycles", num(dma.reuse_guard_cycles, 0)],
+      ["Observed post-compute wait checks", num(dma.wait_check_cycles, 0)],
+    ]);
+    table("dmaPhases", ["Projection", "Cycles", "Useful utilization", "FPU busy", "Whole-system scope"],
+      Object.entries(dma.projections || {}).map(([name, p]) => [name,
+        num(p.cycles, 0), num(100*p.utilization, 2)+"%",
+        num(100*p.fpu_busy_utilization, 2)+"%", "Includes fill, joins and output writeback"]));
+    const wait = i => {
+      const rs = rows(i, "dma").filter(r => r.measurement === "software" && r.scope === "global" && r.wait_check_cycles != null);
+      return rs.length ? sum(rs, "wait_check_cycles")/sum(rs.map(r => ({width:r.end-r.start})), "width") : null;
+    };
+    chart("dmaChart", [
+      {name:"Overall FPU busy", values:visible.map(i => fpu(i))},
+      {name:"Post-compute DMA wait-check fraction", color:"#c67b24", values:visible.map(wait)},
+    ]);
+    const [lo, hi] = axisBounds(), width = Math.max(1, hi-lo);
+    const tiles = (dma.tiles || []).filter(t => t.begin < hi && t.ready > lo);
+    const colors = ["#2487a8", "#a65fa2", "#d2932e"];
+    let svg = '<svg class="chart" viewBox="0 0 1000 130" role="img" aria-label="Software double-buffer schedule">';
+    for (let slot=0; slot<2; ++slot) svg += `<text x="0" y="${35+slot*42}">Buffer ${slot}</text>`;
+    const x = cycle => 85+900*(Math.max(lo, Math.min(hi, cycle))-lo)/width;
+    for (const t of tiles) {
+      const edges = [t.begin, t.compute_end, t.joined, t.ready];
+      for (let i=0; i<3; ++i) if (edges[i+1] > lo && edges[i] < hi)
+        svg += `<rect x="${x(edges[i])}" y="${16+t.buffer*42}" width="${Math.max(0, x(edges[i+1])-x(edges[i]))}" height="28" fill="${colors[i]}"><title>${esc(t.projection)} panel ${t.p} K tile ${t.k}: ${edges[i]}–${edges[i+1]}</title></rect>`;
+    }
+    svg += `<text x="85" y="116">${num(lo,0)}</text><text x="980" y="116" text-anchor="end">${num(hi,0)} cycles</text></svg>`;
+    $("dmaSchedule").innerHTML = svg+'<div class="legend">Blue: launch + core 0 compute · Purple: remaining join · Amber: DMA wait check. Blank intervals are not classified.</div>';
+    table("dmaTiles", ["Projection", "Panel / K tile", "Buffer", "Launch + core 0 compute", "Remaining join", "Wait check"],
+      tiles.slice(0, 100).map(t => [t.projection, `${t.p} / ${t.k}`, t.buffer,
+        t.compute_end-t.begin, t.joined-t.compute_end, t.ready-t.joined]));
+    const counters = now("dma").filter(r => r.measurement !== "software");
+    if (!counters.length) empty("dmaInterfaces", "DMA channel activity, payload handshakes and bus stalls: unavailable. This capture contains software timing and byte accounting only.");
+    else table("dmaInterfaces", ["Scope / channel", "Measurement", "Completed bytes", "Active cycles", "Stall cycles"],
+      counters.map(r => [r.scope === "global" ? "Whole system" : r.channel, r.measurement,
+        num(r.completed_bytes,0), num(r.active_cycles,0), num(r.stall_cycles,0)]));
   }
   function renderRoof() {
     let r = D.roofline;
@@ -993,7 +1043,7 @@
       ["Ideal compute cycles", num(roof.ideal_cycles, 2)],
       ["Actual benchmark cycles", num(roof.benchmark_cycles, 0)],
     ]);
-    $("benchmarkDefinition").textContent = "Ideal cycles = 2 × M × N × P × repetitions / peak FLOPs per cycle (including precision-dependent SIMD throughput). This workload-based utilization is separate from the busy-lane percentages plotted below.";
+    $("benchmarkDefinition").textContent = M.workload?.definition ? `${M.workload.definition}. Useful work excludes padding; FMAC progress includes executed padded outputs. Busy lanes are a separate measure.` : "Ideal cycles = 2 × M × N × P × repetitions / peak FLOPs per cycle (including precision-dependent SIMD throughput). This workload-based utilization is separate from the busy-lane percentages plotted below.";
     stats("summary", [
       [
         "Current overall FPU",
@@ -1017,6 +1067,7 @@
       noc: renderNoc,
       hash: renderHash,
       diagnostics: renderDiagnostics,
+      dma: renderDma,
       roof: renderRoof,
       sources: renderSources,
     })[tab]();
@@ -1053,7 +1104,7 @@
   }
   $("title").textContent = M.name;
   $("subtitle").textContent =
-    `${M.backend.toUpperCase()} · ${M.mesh.join(" × ")} groups · ${M.precision || "precision unknown"}${M.shape ? " · GEMM " + M.shape.join(" × ") : ""} · KS=${M.kernel_size ?? M.hash?.kernel ?? "unknown"} rows · ${D.window}-cycle display windows`;
+    `${M.backend.toUpperCase()} · ${M.mesh.join(" × ")} groups · ${M.precision || "precision unknown"}${M.shape ? " · " + (M.workload?.name || "GEMM") + " " + M.shape.join(" × ") : ""} · KS=${M.kernel_size ?? M.hash?.kernel ?? "unknown"} rows · ${D.window}-cycle display windows`;
   for (let g = 0; g < M.mesh[0] * M.mesh[1]; g++) {
     let o = document.createElement("option");
     o.value = g;
@@ -1082,7 +1133,22 @@
       $("subnet").append(o);
     });
   $("time").oninput = (e) => select(visible[+e.target.value]);
-  $("phase").onchange = filter;
+  for (const name of Object.keys(M.phase_ranges || {})) {
+    if (![...$("phase").options].some(o => o.value === name)) {
+      const option = document.createElement("option");
+      option.value = name; option.textContent = name[0].toUpperCase()+name.slice(1);
+      $("phase").append(option);
+    }
+  }
+  $("phase").onchange = async () => {
+    filter();
+    const bounds = M.phase_ranges?.[$("phase").value];
+    if (bounds && typeof loadRange === "function") {
+      const width = D.detail_range ? D.detail_range[1]-D.detail_range[0] : 20000;
+      await loadRange(bounds[0], Math.min(bounds[1], bounds[0]+width));
+    }
+    filter();
+  };
   $("group").onchange = (e) => setGroup(+e.target.value);
   $("prev").onclick = () =>
     select(visible[Math.max(0, visible.indexOf(selected) - 1)]);

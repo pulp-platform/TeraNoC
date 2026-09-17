@@ -24,7 +24,7 @@ def roofline(rows, meta, peaks_path, warnings):
   precision = meta.get("precision")
   if precision not in ("fp16", "fp32"):
     return {"available": False, "reason": "Specify fp16 or fp32 precision."}
-  peak = d["compute"][precision+"_flop_per_cyc"]
+  peak = d["compute"][meta.get('compute_precision', precision)+"_flop_per_cyc"]
   roofs = [{"name": "L1 ports", "boundary": "l1", "bandwidth": d["l1_local"]["chip_port_bytes_per_cyc"]},
            {"name": "Remote receive", "boundary": "demand", "bandwidth": d["l1_remote"]["chip_recv_bytes_per_cyc"]},
            {"name": "Mesh: uniform-traffic model", "boundary": "mesh", "bandwidth": d["l1_remote"]["uniform_random_cap_bytes_per_cyc"]},
@@ -46,12 +46,17 @@ def roofline(rows, meta, peaks_path, warnings):
     out["reason"] = "Ceilings available; whole-run point needs GEMM shape and timed cycles."
     return out
   repeats = meta.get("repetitions", 1)
-  flops = 2*shape[0]*shape[1]*shape[2]*repeats
+  flops = meta.get('workload', {}).get('useful_flops', 2*shape[0]*shape[1]*shape[2]*repeats)
+  if not isinstance(flops, int) or isinstance(flops, bool) or flops <= 0:
+    raise ValueError('Useful workload FLOPs must be a positive integer')
   actual_cycles = bench[1]-bench[0] if bench else cycles*repeats
-  out.update(flops=flops, cycles=cycles*repeats, performance=flops/(cycles*repeats),
+  timed_cycles = actual_cycles if meta.get('workload') else cycles*repeats
+  out.update(flops=flops, cycles=timed_cycles, performance=flops/timed_cycles,
              ideal_cycles=flops/peak, benchmark_cycles=actual_cycles,
              benchmark_compute_utilization=flops/peak/actual_cycles,
-             utilization_definition="Conventional GEMM work (2*M*N*P*repetitions) / peak FLOPs per cycle / benchmark cycles; distinct from busy-lane utilization.")
+             utilization_definition=meta.get('workload', {}).get('definition',
+               'Conventional GEMM work (2*M*N*P*repetitions)') +
+               ' / peak FLOPs per cycle / benchmark cycles; distinct from busy-lane utilization.')
   for boundary, key in (("demand", "mst_resp"), ("mesh", "slv_resp")):
     count = sum(sum(r.get(key, [])) for r in traffic)
     if count:
@@ -68,6 +73,9 @@ def roofline(rows, meta, peaks_path, warnings):
 
 
 def hash_explore(meta):
+  if meta.get('hash_samples'):
+    from .hash_samples import explore
+    return explore(meta)
   h = meta.get("hash")
   if not h or not meta.get("shape"):
     return {"available": False, "reason": "Add hash geometry, kernel size, split and current settings to the manifest (see examples)."}
