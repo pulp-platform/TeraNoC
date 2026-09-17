@@ -42,6 +42,13 @@
   `grep -aqm1 '\[FPU\] bench' <buildpath>/transcript`; back up and restore the shared ELF around
   the build; preload long runs from a private absolute-path copy (`hardware/matmul_*.elf`).
 - For RTL changes, record the exact `make simc ...` command and build path used.
+- For full-system RTL validation intended for dashboard review, compile a private
+  testbench with `sim_dashboard/rtl/dashboard_probe.svh` and run with a private
+  absolute `+dashboard_file=...` path plus `+dashboard_entries`,
+  `+dashboard_banks`, and `+dashboard_links`. Pass the resulting JSONL together
+  with the transcript to `sim_dashboard/generate.py`. Verify nonzero telemetry
+  and required record types after startup; text statistics alone do not supply
+  all dashboard panels. Preserve the run's verified workload/layout manifest.
 - Name new app tests by purpose (`vector-burst-test`, `sp-fmatmul-opt-burst-merge`) and keep each app in its own folder with `main.c`.
 - When debugging stalls, keep wave dumps enabled and note the key signal path in the change description.
 

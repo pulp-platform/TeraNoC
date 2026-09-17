@@ -20,6 +20,9 @@
   `ifndef VERILATOR
   generate
     if (EnableStats) begin : gen_stats
+      // Occupancy, capacity, free-entry cohorts and hold-release histograms below remain
+      // banked-table measurements. Request/response and cache event totals include the pool.
+      logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1] stat_cache_store_match;
       // Root-cause instrumentation (whole-run accumulators, one dump at final): - per-bank alloc /
       // Bank-full histograms: is the way-conflict pressure concentrated in a few hot banks or
       logic [63:0] stat_bank_alloc_hist [MshrBankNum];
@@ -50,8 +53,14 @@
         for (int t = 0; t < NumTilesPerGroup; t++) begin
           for (int p = 1; p < NumRemoteReqPortsPerTile; p++) begin
             if (req_in_valid[t][p] && req_can_merge[t][p]) begin
-              if (req_in_ready[t][p] && !req_merge_valid[t][p]) begin
-                if (req_alloc_found[t][p]) begin
+              if (req_in_ready[t][p] && !req_merge_valid[t][p] &&
+                  !req_merge_pool_valid[t][p]) begin
+                // A POOL grant is a per-bank ALLOCATION too: the request hashed to this bank and did
+                // get an entry, it simply came from the pool rather than a way. Counting it in
+                // bank_ovf_hist would say the bank overflowed AND the request was lost, which is
+                // wrong on the second half. The bank it is binned under is still the hashed bank,
+                // which is the informative part.
+                if (req_alloc_found[t][p] || req_alloc_found_pool[t][p]) begin
                   rc_bank_alloc_inc[req_bank[t][p]] = rc_bank_alloc_inc[req_bank[t][p]] + 1'b1;
                 end else begin
                   rc_bank_ovf_inc[req_bank[t][p]] = rc_bank_ovf_inc[req_bank[t][p]] + 1'b1;
@@ -322,7 +331,7 @@
               end else begin
                 stat_req_accept_burst_cycle = stat_req_accept_burst_cycle + 1'b1;
               end
-              if (req_merge_valid[tile_i][port_i]) begin
+              if (req_merge_valid[tile_i][port_i] || req_merge_pool_valid[tile_i][port_i]) begin
                 stat_req_merge_cycle = stat_req_merge_cycle + 1'b1;
                 if (req_len[tile_i][port_i] == BurstLenWidth'(1)) begin
                   stat_req_merge_single_cycle = stat_req_merge_single_cycle + 1'b1;
@@ -332,7 +341,18 @@
               end else begin
                 stat_req_bypass_cycle = stat_req_bypass_cycle + 1'b1;
                 if (req_can_merge[tile_i][port_i]) begin
-                  if (req_alloc_found[tile_i][port_i]) begin
+                  // A POOL grant is an allocation. Without this term it fell to the else-arm and was
+                  // counted as an mshr_overflow -- "the request could not get an entry" -- when it
+                  // HAD got one; it was also missing from stat_req_alloc entirely. This is the
+                  // counter half of the same trap as the drive term: a pooled request walks a branch
+                  // that used to mean "the bank was full and the request lost", so every statistic
+                  // hanging off that branch silently changes meaning.
+                  //
+                  // stat_req_bypass_cycle is deliberately left alone. Its pre-existing definition is
+                  // "the request did not merge" -- it already counts banked allocations too -- and a
+                  // pooled request also did not merge, so it is consistent. Redefining it here would
+                  // be the same error in the other direction.
+                  if (req_alloc_found[tile_i][port_i] || req_alloc_found_pool[tile_i][port_i]) begin
                     stat_req_alloc_cycle = stat_req_alloc_cycle + 1'b1;
                     if (req_len[tile_i][port_i] == BurstLenWidth'(1)) begin
                       stat_req_alloc_single_cycle = stat_req_alloc_single_cycle + 1'b1;
@@ -358,6 +378,7 @@
         stat_cache_fill_cycle = '0;
         stat_cache_evict_cycle = '0;
         stat_cache_store_update_cycle = '0;
+        stat_cache_store_match = '0;
         stat_cache_amo_inval_cycle = '0;
         stat_cache_self_inval_cycle = '0;
         for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
@@ -378,8 +399,11 @@
             for (int port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin
               if (req_in_valid[tile_i][port_i] &&
                   req_in_ready[tile_i][port_i] &&
-                  req_hit_mshr_sel_valid[tile_i][port_i] &&
-                  (mshr_q[req_hit_mshr_sel_id[tile_i][port_i]].state == MSHR_CACHED)) begin
+                  ((req_hit_mshr_sel_valid[tile_i][port_i] &&
+                    (mshr_q[req_hit_mshr_sel_id[tile_i][port_i]].state == MSHR_CACHED)) ||
+                   (req_merge_pool_valid[tile_i][port_i] &&
+                    pool_q_valid[req_hit_pool_sel_id[tile_i][port_i]] &&
+                    (pool_q[req_hit_pool_sel_id[tile_i][port_i]].state == MSHR_CACHED)))) begin
                 stat_cache_hit_cycle = stat_cache_hit_cycle + 1'b1;
               end
               if (req_in_valid[tile_i][port_i] &&
@@ -400,9 +424,18 @@
                   if (mshr_q_valid[hit_e] &&
                       (mshr_q[hit_e].state == MSHR_CACHED) &&
                       req_addr_hit_way[tile_i][port_i][way_i]) begin
-                    stat_cache_store_update_cycle = stat_cache_store_update_cycle + 1'b1;
+                    stat_cache_store_match[tile_i][port_i] = 1'b1;
                     break;
                   end
+                end
+                for (int p = 0; p < PoolNum; p++) begin
+                  if (pool_q_valid[p] && (pool_q[p].state == MSHR_CACHED) &&
+                      pool_addr_hit_way[tile_i][port_i][p]) begin
+                    stat_cache_store_match[tile_i][port_i] = 1'b1;
+                  end
+                end
+                if (stat_cache_store_match[tile_i][port_i]) begin
+                  stat_cache_store_update_cycle = stat_cache_store_update_cycle + 1'b1;
                 end
               end
             end
@@ -410,6 +443,11 @@
           if (amo_invalidate) begin
             for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
               if (mshr_q_valid[mshr_i] && (mshr_q[mshr_i].state == MSHR_CACHED)) begin
+                stat_cache_amo_inval_cycle = stat_cache_amo_inval_cycle + 1'b1;
+              end
+            end
+            for (int p = 0; p < PoolNum; p++) begin
+              if (pool_q_valid[p] && (pool_q[p].state == MSHR_CACHED)) begin
                 stat_cache_amo_inval_cycle = stat_cache_amo_inval_cycle + 1'b1;
               end
             end
@@ -421,12 +459,24 @@
               stat_cache_fill_cycle = stat_cache_fill_cycle + 1'b1;
             end
           end
+          for (int p = 0; p < PoolNum; p++) begin
+            if (pool_q_valid[p] && (pool_q[p].state != MSHR_CACHED) &&
+                (pool_d[p].state == MSHR_CACHED)) begin
+              stat_cache_fill_cycle = stat_cache_fill_cycle + 1'b1;
+            end
+          end
           // Cache self-invalidate (idea 1): a CACHED way that goes invalid this cycle without an
           // AMO and without being reclaimed by an allocation (alloc-reclaim keeps mshr_d_valid=1)
           if (CacheSelfInval) begin
             for (int mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin
               if (mshr_q_valid[mshr_i] && (mshr_q[mshr_i].state == MSHR_CACHED) &&
                   !mshr_d_valid[mshr_i] && !amo_invalidate) begin
+                stat_cache_self_inval_cycle = stat_cache_self_inval_cycle + 1'b1;
+              end
+            end
+            for (int p = 0; p < PoolNum; p++) begin
+              if (pool_q_valid[p] && (pool_q[p].state == MSHR_CACHED) &&
+                  !pool_d_valid[p] && !amo_invalidate) begin
                 stat_cache_self_inval_cycle = stat_cache_self_inval_cycle + 1'b1;
               end
             end

@@ -167,6 +167,12 @@ group_mshr_num           ?= 64
 # slots (16 tiles x 2 remote ports) -- 32 entries already collapsed the matmul ~14x, so 16 is very
 # likely to collapse harder. Revert to 64 (16 banks x 4 ways) for the measured-safe design.
 group_mshr_ways_per_bank ?= 4
+# Unbanked overflow entries. Allocated ONLY when a request's hashed bank has no free way -- and that
+# test already includes the cache-reclaim pass, so a bank holding a reclaimable cached way is not
+# "full" and the pool stays free for the case it exists for: a cohort that holds every way of one
+# bank while the request which would complete it hashes to that same bank, which otherwise only ends
+# at the serve timeout. 0 removes the pool entirely (netlist identical to the design without it).
+group_mshr_overflow_num  ?= 1
 # Max sub-requests coalesced into one MSHR entry.
 # MUST be max(A-share, B-share), where A-share = split_p_count and B-share =
 # split_m_count. The two INVERT with M: at M<=256 A is the shared matrix, at

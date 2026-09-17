@@ -374,6 +374,12 @@ vlog_defs += -DGROUP_MSHR_NUM=$(group_mshr_num)
 ifneq ($(strip $(group_mshr_ways_per_bank)),)
   vlog_defs += -DGROUP_MSHR_WAYS_PER_BANK=$(group_mshr_ways_per_bank)
 endif
+# Unbanked overflow entries, allocated only when a request's hashed bank has no free way. Its own
+# guard, per the rule above.
+group_mshr_overflow_num ?=
+ifneq ($(strip $(group_mshr_overflow_num)),)
+  vlog_defs += -DGROUP_MSHR_OVERFLOW_NUM=$(group_mshr_overflow_num)
+endif
 # ParityDrain bypass-track depth. Unset = derived max(2, RobDepth/MaxBurstWords) -- bit-identical.
 # That bound is exact only while vl < RobDepth words; at vl == RobDepth (a 512 B load at ROB128)
 # one instruction fills the whole track and a back-to-back second overflows it, degrading the
