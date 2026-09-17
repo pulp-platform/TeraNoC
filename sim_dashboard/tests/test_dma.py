@@ -40,6 +40,9 @@ class StreamingTests(unittest.TestCase):
     result = roofline([], meta, peak, [])
     self.assertAlmostEqual(result['benchmark_compute_utilization'], 0.1441412796513053)
     self.assertEqual(result['ideal_cycles'], 174080)
+    meta['compute_precision'] = 'fp32'
+    widened = roofline([], meta, peak, [])
+    self.assertEqual(widened['ideal_cycles'], 348160)
 
   def test_missing_mshr_counters_stay_unavailable(self):
     rows = [dict(kind='mshr', phase='bench', g=0, start=0, end=100,

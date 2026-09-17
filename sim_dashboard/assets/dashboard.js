@@ -982,7 +982,7 @@
       s += `<path d="M${xx(2 ** x)} ${t}V${h - b}" stroke="#e8edf2"/><text x="${xx(2 ** x)}" y="${h - b + 18}" text-anchor="middle">${num(2 ** x, 2)}</text>`;
     for (let y = ymin; y <= ymax; y += 2)
       s += `<path d="M${l} ${yy(2 ** y)}H${w - 30}" stroke="#e8edf2"/><text x="${l - 8}" y="${yy(2 ** y) + 4}" text-anchor="end">${num(2 ** y, 0)}</text>`;
-    s += `<path d="M${l} ${yy(r.peak)}H${w - 30}" stroke="#7b8794" stroke-dasharray="5 4"/><text x="${w - 230}" y="${yy(r.peak) - 8}">${M.precision} peak: ${num(r.peak, 0)}</text>`;
+    s += `<path d="M${l} ${yy(r.peak)}H${w - 30}" stroke="#7b8794" stroke-dasharray="5 4"/><text x="${w - 230}" y="${yy(r.peak) - 8}">${M.compute_precision || M.precision} peak: ${num(r.peak, 0)}</text>`;
     let x0 = 2 ** xmin,
       x1 = 2 ** xmax,
       knee = r.peak / roof.bandwidth;
