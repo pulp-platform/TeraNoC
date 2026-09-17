@@ -115,12 +115,14 @@ int main(void) {
   mempool_barrier(NUM_CORES);
   if (mshr_cfg_is_group_writer()) {
     // Distinct weights: one subscriber bypasses retention for each class.
-    // Keep admission enabled, with no assumed four-way GEMM sharing.
+    // Keep admission enabled, with no assumed four-way GEMM sharing. The
+    // timer values remain the tuned standalone FP16 GEMM policy even though
+    // target=1 bypasses retention for this kernel's distinct requests.
     const mshr_cfg_t cfg = {.hold_subs_single = 1,
                             .hold_subs_burst = 1,
-                            .hold_window_single = 1,
-                            .hold_window_burst = 1,
-                            .serve_timeout = 64,
+                            .hold_window_single = 8191,
+                            .hold_window_burst = 8191,
+                            .serve_timeout = 8191,
                             .bank_shift_single = 4,
                             .bank_shift_burst = 4,
                             .bank_burst_bits = 0,

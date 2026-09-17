@@ -16,6 +16,14 @@ from tiling import select as select_tiling, vectors
 HERE = Path(__file__).resolve().parent
 RTL = HERE.parents[4]
 
+# Tuned standalone FP16 GEMM MSHR policy. Keep these values aligned with
+# config/terapool_spatz4_fpu.mk and sp-fmatmul-opt-burst-merge-fp16; they are
+# latency/liveness policy and must not be replaced with shape-derived values.
+MSHR_HOLD_WINDOW_SINGLE = 8191
+MSHR_HOLD_WINDOW_BURST = 8191
+MSHR_SERVE_TIMEOUT = 8191
+MSHR_CACHE_TIMEOUT = 0
+
 
 def align(n, multiple):
     return (n + multiple - 1) // multiple * multiple
@@ -315,20 +323,24 @@ data.o: data.S
         f"LLVM_INSTALL_DIR={RTL}/install/llvm",
         f"GCC_INSTALL_DIR={RTL}/install/riscv-gcc",
         "group_mshr_merge_reqs=16",
+        f"group_mshr_hold_window_single={MSHR_HOLD_WINDOW_SINGLE}",
+        f"group_mshr_hold_window_burst={MSHR_HOLD_WINDOW_BURST}",
+        f"group_mshr_serve_timeout={MSHR_SERVE_TIMEOUT}",
+        f"group_mshr_cache_timeout={MSHR_CACHE_TIMEOUT}",
         "l2_size=536870912",
         "workload.elf",
     ]
     cfg = dict(
         hold_subs_single=1,
         hold_subs_burst=1,
-        hold_window_single=64,
-        hold_window_burst=64,
-        serve_timeout=64,
+        hold_window_single=MSHR_HOLD_WINDOW_SINGLE,
+        hold_window_burst=MSHR_HOLD_WINDOW_BURST,
+        serve_timeout=MSHR_SERVE_TIMEOUT,
         bank_shift_single=4,
         bank_shift_burst=4,
         bank_burst_bits=0,
         cache_reuse_target=0,
-        cache_timeout=0,
+        cache_timeout=MSHR_CACHE_TIMEOUT,
         bankfull_backpressure=1,
     )
     csr_header(a.out / "csr_config.h", [cfg] * ng)

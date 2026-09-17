@@ -17,8 +17,10 @@ output writeback. Each projection computes B × 5120 × 17408 in the full campai
 
 The microkernel keeps FP16 accumulation across K tiles, with K FMACs/output.
 Both W and replicated X use DMA ping-pong buffers. All readers join before a
-slot is reused; a 128-cycle guard bounds stale cache lifetime with a 64-cycle
-serve timeout and cache_timeout=0 (inherit). Model coherence conveniences are
+slot is reused; a 128-cycle guard bounds stale cache lifetime. New ELFs use the
+tuned standalone FP16 GEMM MSHR policy: 8191-cycle single/burst hold windows,
+8191-cycle serve timeout, and cache_timeout=0 (legacy mode, which re-arms from
+the serve timeout). Model coherence conveniences are
 disabled in the experiment runner. Production merge targets are enabled only
 for the matmul/merge variant. Bypass controls use targets one.
 
