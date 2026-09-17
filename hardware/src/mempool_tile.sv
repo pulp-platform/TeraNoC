@@ -1172,7 +1172,7 @@ module mempool_tile
     TCDM_EXTERNAL = 0, TCDM_LOCAL, SOC
   } addr_map_slave_t;
 
-  address_map_t [2:0] mask_map;
+  address_map_t [3:0] mask_map;
   assign mask_map = '{
     // Lowest priority: send request through the SoC port
     '{slave_idx: SOC,
@@ -1184,10 +1184,20 @@ module mempool_tile
       mask     : TCDMMask,
       value    : TCDMBaseAddr
     },
-    // Highest priority: send request through the local TCDM port
+    // Own-tile SRAM takes the local TCDM port
     '{slave_idx: TCDM_LOCAL,
       mask     : TCDMMask | ({idx_width(NumTiles){1'b1}} << (ByteOffset + $clog2(NumBanksPerTile))),
       value    : TCDMBaseAddr | (tile_id_i << (ByteOffset + $clog2(NumBanksPerTile)))
+    },
+    // Control always takes the group path, including an own-tile target.
+    // Match the caller's group so this selector never enters the NoC.
+    '{slave_idx: GroupControlEnable ? TCDM_EXTERNAL : SOC,
+      mask     : GroupControlMask |
+                 ((NumGroups-1) << (ByteOffset + $clog2(NumBanksPerTile) +
+                                    $clog2(NumTilesPerGroup))),
+      value    : GroupControlStart |
+                 ((tile_id_i / NumTilesPerGroup) <<
+                  (ByteOffset + $clog2(NumBanksPerTile) + $clog2(NumTilesPerGroup)))
     }
   };
 
@@ -1223,6 +1233,11 @@ module mempool_tile
         assign remote_req_interco_tgt_sel[idx] = remote_req_interco_tgt_sel_remapped[idx];
         assign remote_req_interco_raw[idx].tgt_group_id = tgt_group_id[idx];
       end
+
+      // Capture the selector with the request, before upper address bits are dropped.
+      assign remote_req_interco_raw[idx].group_ctrl =
+          GroupControlEnable &&
+          ((prescramble_tcdm_req_tgt_addr[idx] & GroupControlMask) == GroupControlStart);
 
       // We don't care about these
       assign local_req_interco_payload_raw[idx].wdata.core_id = '0;
@@ -1262,7 +1277,7 @@ module mempool_tile
           .MaxOutStandingTrans (snitch_pkg::NumIntOutstandingLoads),
           .NrTCDM              (2                                 ),
           .NrSoC               (1                                 ),
-          .NumRules            (3                                 ),
+          .NumRules            (4                                 ),
           .ByteOffset          (ByteOffset                        ),
           .NumTiles            (NumTiles                          ),
           .NumTilesPerDma      (NumTilesPerDma                    ),
@@ -1320,7 +1335,7 @@ module mempool_tile
         );
       end else begin: gen_traffic_generator
         traffic_generator #(
-          .NumRules           (3                                 ),
+          .NumRules           (4                                 ),
           .TCDMBaseAddr       (TCDMBaseAddr                      ),
           .MaxOutStandingReads(snitch_pkg::NumIntOutstandingLoads)
         ) i_traffic_gen (

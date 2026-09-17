@@ -18,19 +18,8 @@ module mempool_group
   parameter int unsigned GroupId      = 32'd0,
   // Enable the group-level MSHR in the remote request path.
   parameter bit          EnableGroupMshr = 1'b1,
-  // Group-level fine-grained barrier (held-response TCDM slave). Integrated as a
-  // DEDICATED extra output port of the group local interconnect (i_local_interco
-  // NumOut = NumTilesPerGroup+1; see below). Default ON; disable with
-  // -DGROUP_BARRIER_OFF (Makefile: group_barrier=0). A core ARRIVES+WAITS with a
-  // local integer load to a same-group, DIFFERENT-tile address whose word field
-  // == GroupBarrierWord + a fence; the load is routed (by the re-encoded tgt_sel)
-  // to the barrier port, its response withheld until the core's pair rendezvous,
-  // then driven back via the LIC (routed by ini_addr). The barrier must target a
-  // different tile (a same-tile access is TCDM_LOCAL and never enters this xbar).
-  // GroupBarrierWord is the reserved within-tile word (the master-port tgt_addr
-  // word field = tgt_addr[TCDMAddrMemWidth +: ...]); with the barrier ON for ALL
-  // apps the SW/linker MUST reserve this word group-wide so no data load aliases
-  // it. Only sp-fmatmul is known clear of word 200.
+  // Group-local control slave. A load to the separate control aperture arrives
+  // at the barrier; its response is held until the configured participants arrive.
 `ifdef GROUP_BARRIER_OFF
   parameter bit          EnableGroupBarrier   = 1'b0,
 `else
@@ -48,25 +37,8 @@ module mempool_group
   // you deliberately want a deadlock escape while debugging. Driven by group_barrier_wd_limit.
   parameter int unsigned GroupBarrierWdLimit  =
     `ifdef GROUP_BARRIER_WD_LIMIT `GROUP_BARRIER_WD_LIMIT `else 0 `endif,
-  // Reserved within-tile word base (master-port tgt_addr word field). The barrier
-  // owns words [GroupBarrierWord, GroupBarrierWord+NumGroupBarriers); struct =
-  // word - GroupBarrierWord. SW forms a load at byte addr (word<<14)|(target_tile<<6),
-  // target_tile = a same-group tile != own. The bank
-  // field (byte[5:2]) selects the op: 0=arrive(load), 1=set target, 2=set mask.
-  //
-  // These words are STOLEN FROM THE DATA ADDRESS SPACE group-wide: any intra-group,
-  // different-tile access whose word field lands here is re-routed to the barrier port
-  // and its response is WITHHELD until a rendezvous that a data access never performs
-  // -> silent deadlock. The linker MUST keep data out of the window; the l1 region in
-  // software/runtime/arch.ld.c is truncated at GROUP_BARRIER_WORD<<14 to enforce it,
-  // and `gbar_window_no_data_access` below fires if anything slips through.
-  //
-  // Default 240 (not 200): with NumGroupBarriers=16 and TCDMAddrMemWidth=8 (256 words)
-  // the window [240,256) is exactly the TOP 16 words of L1, so the reservation costs a
-  // trailing 256 KB instead of punching a hole in the middle of the data region. At
-  // word 200 the hole sat at 0x320000, which a >3.125 MB working set cannot grow past
-  // (a contiguous array cannot straddle it) -- that is what deadlocked 512x512x512.
-  // MUST stay in sync with GBAR_BASE_WORD in the barrier-using software.
+  // Index base within the separate control aperture, not an SRAM reservation.
+  // Keep this encoding in sync with the software GROUP_BARRIER_WORD definition.
   parameter int unsigned GroupBarrierWord     =
     `ifdef GROUP_BARRIER_WORD `GROUP_BARRIER_WORD `else 240 `endif
 ) (
@@ -352,19 +324,8 @@ module mempool_group
   // 0 just above the tile-select so the 16 tiles keep tgt_sel={1'b0,tile} + mem-addr
   // unchanged; a barrier word forces tgt_sel = NumTilesPerGroup (the barrier port).
   for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_bar_addr_remap
-    // barrier window = words [GroupBarrierWord, GroupBarrierWord+NumGroupBarriers)
-    // The bounds are compared ONE BIT WIDER than the word field. The upper bound
-    // GroupBarrierWord+NumGroupBarriers can legitimately equal 2**TCDMAddrMemWidth (the window
-    // ending exactly at the top of the bank, e.g. 240+16 = 256 with an 8-bit word field); casting
-    // it to TCDMAddrMemWidth would truncate it to 0, making `word < 0` always false and silently
-    // DISABLING the barrier for every access. That is not hypothetical: it cost a 2x matmul
-    // slowdown (the per-iteration group barrier stopped synchronizing, so cores drifted apart)
-    // before being caught. Zero-extending both sides keeps the compare exact.
-    assign bar_sel[t] = EnableGroupBarrier &&
-      ({1'b0, master_local_req_tgt_addr[t][TCDMAddrWidth-1 -: TCDMAddrMemWidth]} >=
-       (TCDMAddrMemWidth+1)'(GroupBarrierWord)) &&
-      ({1'b0, master_local_req_tgt_addr[t][TCDMAddrWidth-1 -: TCDMAddrMemWidth]} <
-       (TCDMAddrMemWidth+1)'(GroupBarrierWord + NumGroupBarriers));
+    // The registered selector distinguishes control from all physical SRAM words.
+    assign bar_sel[t] = EnableGroupBarrier && tcdm_master_req[0][t].group_ctrl;
     assign req_tgt_addr_lic[t] = bar_sel[t]
       // barrier: tgt_sel = NumTilesPerGroup (port 16); pass {word,bank} as the mem-addr
       // so the adapter can decode struct (word-base) + op (bank).
@@ -374,48 +335,27 @@ module mempool_group
           master_local_req_tgt_addr[t][TileSelW-1 : 0] };             // tile = LIC output select
   end
 
-  // Data-alias tripwire for the reserved barrier window.
-  //
-  // The barrier's own ops span BOTH directions: bank0 = arrive (LOAD), bank1 = set target
-  // (STORE), bank2 = set mask (STORE) -- see gbar_setup() in the barrier-using software. So
-  // loads and stores are both legitimate in this window and must NOT be flagged; doing so
-  // would $fatal on correct barrier configuration.
-  //
-  // An **AMO** is never a barrier op, so an AMO landing in [GroupBarrierWord, +NumGroupBarriers)
-  // can only be ordinary data that the linker failed to keep out of the window. It is re-routed
-  // to the barrier port and has its response withheld forever, deadlocking the core with NO
-  // other symptom (no MSHR entry, no orphan response, no backpressure: nothing else sees it).
-  // This fires at the exact cycle of the aliasing access instead of leaving a silent hang; the
-  // 512x512x512 failure was `amoadd.w` on the runtime `barrier` word.
-  //
-  // Coverage caveat: this catches the AMO case only. A plain load/store alias is
-  // indistinguishable from a real barrier op here and stays silent -- the linker reservation in
-  // software/runtime/arch.ld.c is the actual guarantee; this is only a backstop.
-  // NOTE: Verilator ignores SVA unless run with --assert, so this is effective under
-  // QuestaSim/VCS but inert in the default Verilator flow.
-  // Elaboration guard: the window must fit inside the word field and must not be empty.
-  // A window that runs past 2**TCDMAddrMemWidth would wrap and disable the barrier silently.
+  // Mask decoding requires a power-of-two, aligned aperture.
   if (EnableGroupBarrier) begin : gen_gbar_window_check
-    if (GroupBarrierWord + NumGroupBarriers > (1 << TCDMAddrMemWidth))
-      $fatal(1, "GroupBarrierWord(%0d)+NumGroupBarriers(%0d) exceeds the %0d-word bank (max %0d).",
-             GroupBarrierWord, NumGroupBarriers, 1 << TCDMAddrMemWidth, 1 << TCDMAddrMemWidth);
-    if (NumGroupBarriers == 0)
-      $fatal(1, "NumGroupBarriers must be > 0 when EnableGroupBarrier is set.");
+    if (NumGroupBarriers == 0 || (NumGroupBarriers & (NumGroupBarriers-1)) != 0 ||
+        (GroupBarrierWord % NumGroupBarriers) != 0 ||
+        NumGroupBarriers != NumCoresPerGroup || GroupBarrierWord != GroupControlWord ||
+        GroupBarrierWord + NumGroupBarriers > (1 << TCDMAddrMemWidth))
+      $fatal(1, "Invalid group-control aperture geometry.");
+    if ((GroupControlStart & TCDMMask) == TCDMBaseAddr)
+      $fatal(1, "Group-control aperture overlaps physical L1.");
   end
 
 `ifndef TARGET_SYNTHESIS
-  if (EnableGroupBarrier) begin : gen_gbar_alias_check
-    for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_gbar_alias_tile
-      gbar_window_no_amo_alias: assert property (@(posedge clk_i) disable iff (!rst_ni)
-          (master_local_req_valid[t] && bar_sel[t])
-            |-> (master_local_req_wdata[t].amo == '0))
-        else $fatal(1,
-          {"GROUP BARRIER WINDOW ALIASED BY DATA: tile %0d issued an AMO to reserved word %0d ",
-           "(window [%0d,%0d)). The linker placed data in the barrier window; this request is ",
-           "re-routed to the barrier port and its response is withheld forever. Keep data below ",
-           "GROUP_BARRIER_WORD<<14 -- see the l1 region in software/runtime/arch.ld.c."},
-          t, master_local_req_tgt_addr[t][TCDMAddrWidth-1 -: TCDMAddrMemWidth],
-          GroupBarrierWord, GroupBarrierWord + NumGroupBarriers);
+  for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_group_ctrl_check
+    group_ctrl_scalar: assert property (@(posedge clk_i) disable iff (!rst_ni)
+        (master_local_req_valid[t] && bar_sel[t]) |->
+        (master_local_req_wdata[t].amo == '0 && master_local_req_burst_len[t] == 1))
+      else $fatal(1, "Group control requires a scalar non-AMO access.");
+    for (genvar r = 1; r < NumRemoteReqPortsPerTile; r++) begin : gen_no_ctrl_noc
+      group_ctrl_local: assert property (@(posedge clk_i) disable iff (!rst_ni)
+          tcdm_master_req_valid[r][t] |-> !tcdm_master_req[r][t].group_ctrl)
+        else $fatal(1, "Group control escaped onto the NoC.");
     end
   end
 `endif
@@ -490,9 +430,9 @@ module mempool_group
     assign bar_word   = bar_req_tgt_addr[TCDMAddrMemWidth + BankW - 1 : BankW];  // word field
     assign bar_bank   = bar_req_tgt_addr[BankW-1 : 0];                           // bank field = op
     assign bar_struct = BarStructW'(bar_word - TCDMAddrMemWidth'(GroupBarrierWord));
-    // Bank encoding 3 carries the group MSHR CSR file, reusing bar_struct as the CSR index: 16 CSRs
-    // x 32 bits on an ALREADY-DECODED group-level port, so no new address space and no new crossbar
-    // decode. See docs/mshr_runtime_csr_design.md.
+    // Bank encoding 3 selects the MSHR CSR file; bar_struct is the CSR index.
+    // The register file shares the decoded group-control port with the barrier.
+    // See docs/group_control_memory_map.md for the address map.
     //
     // CORRECTION (2026-08-15). An earlier version of this comment said struct N with bank 1 and
     // struct N with bank 3 "never collide because the op distinguishes them". That was FALSE and it

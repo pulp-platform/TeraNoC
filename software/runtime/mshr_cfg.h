@@ -4,17 +4,10 @@
 
 // Group MSHR runtime configuration.
 //
-// Written through the group-barrier port's unused op encoding (bank field == 3), so this costs no
-// new address space and no new crossbar decode. See docs/mshr_runtime_csr_design.md for the map and
-// hardware/src/mempool_group_mshr_cfg.sv for the register file.
-//
-// Address form:  (GROUP_BARRIER_WORD + csr) * WORD_STRIDE
-//              | (group * GROUP_STRIDE)
-//              | (tile  << 6)
-//              | (3 << 2)                      <- bank field selects the MSHR-CSR op
-//
-// The write must target a tile in the destination group OTHER than our own: a same-tile access is
-// TCDM_LOCAL and never reaches the group crossbar, so it would never arrive.
+// Uses bank encoding 3 of the separate group-control aperture.
+// Address: GROUP_CONTROL_BASE + (GROUP_BARRIER_WORD + csr) * WORD_STRIDE
+//          + group * GROUP_STRIDE + tile * TILE_STRIDE + 3 * 4.
+// Accesses are local to the caller's group; any target tile is valid.
 
 #ifndef MSHR_CFG_H
 #define MSHR_CFG_H
@@ -83,10 +76,7 @@ typedef struct {
 /// The group this core belongs to.
 static inline uint32_t mshr_cfg_my_group(void) { return mempool_get_group_id(); }
 
-/// A tile in our own group that is NOT ours.
-///
-/// A same-tile access is TCDM_LOCAL and never reaches the group crossbar, so a CSR write aimed at
-/// our own tile would simply never arrive -- silently, with no error. Pick the next tile round-robin.
+/// Retain the existing next-tile encoding; own-tile control targets also work.
 static inline uint32_t mshr_cfg_peer_tile(void) {
   const uint32_t tile_in_group = mempool_get_tile_id() % NUM_TILES_PER_GROUP;
   return (tile_in_group + 1) % NUM_TILES_PER_GROUP;
@@ -100,10 +90,10 @@ static inline int mshr_cfg_is_group_writer(void) {
   return (mempool_get_core_id() % (NUM_CORES / NUM_GROUPS)) == 0;
 }
 
-/// Write one CSR of one group. `tile` must be a tile in `group` other than the caller's own.
+/// Write one CSR of the caller's group. Any tile in that group is valid.
 static inline void mshr_cfg_write(uint32_t group, uint32_t tile, uint32_t csr, uint32_t val) {
   volatile uint32_t *p = (volatile uint32_t *)(uintptr_t)(
-      ((GROUP_BARRIER_WORD + csr) * MSHR_WORD_STRIDE) +
+      GROUP_CONTROL_BASE + ((GROUP_BARRIER_WORD + csr) * MSHR_WORD_STRIDE) +
       (group * MSHR_GROUP_STRIDE) + (tile * MSHR_TILE_STRIDE) +
       (MSHR_CSR_OP * 4));
   *p = val;
@@ -112,7 +102,7 @@ static inline void mshr_cfg_write(uint32_t group, uint32_t tile, uint32_t csr, u
 /// Read CFG_STATUS of one group. Zero means every write was accepted.
 static inline uint32_t mshr_cfg_status(uint32_t group, uint32_t tile) {
   volatile uint32_t *p = (volatile uint32_t *)(uintptr_t)(
-      ((GROUP_BARRIER_WORD + MSHR_CSR_STATUS) * MSHR_WORD_STRIDE) +
+      GROUP_CONTROL_BASE + ((GROUP_BARRIER_WORD + MSHR_CSR_STATUS) * MSHR_WORD_STRIDE) +
       (group * MSHR_GROUP_STRIDE) + (tile * MSHR_TILE_STRIDE) +
       (MSHR_CSR_OP * 4));
   return *p;

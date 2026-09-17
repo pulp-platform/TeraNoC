@@ -117,10 +117,10 @@ DEFINES += -DLOG2_SEQ_MEM_SIZE=$(shell awk 'BEGIN{print log($(seq_mem_size))/log
 DEFINES += -DSTACK_SIZE=$(stack_size)
 DEFINES += -DLOG2_STACK_SIZE=$(shell awk 'BEGIN{print log($(stack_size))/log(2)}')
 DEFINES += -DXQUEUE_SIZE=$(xqueue_size)
-# Group-barrier reserved word window. Consumed by arch.ld.c (to truncate L1 so no data can
-# alias the window) and by barrier-using apps (GBAR_BASE_WORD). MUST match GroupBarrierWord
-# in hardware/src/mempool_group.sv.
+# Group-control aperture and index encoding, shared with the RTL package.
+group_barrier_word ?= 240
 DEFINES += -DGROUP_BARRIER_WORD=$(group_barrier_word)
+DEFINES += -DGROUP_CONTROL_BASE=0x20000000
 
 # --- Group MSHR runtime configuration -------------------------------------------------------
 # The software values come from the SAME make variables the hardware elaborates from, so the CSR

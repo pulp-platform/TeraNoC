@@ -306,6 +306,7 @@ package mempool_pkg;
     tcdm_payload_t wdata;
     logic wen;
     strb_t be;
+    logic group_ctrl; // Local group-control window; never sent over the NoC.
     group_id_t tgt_group_id; // FlooNoC Added
     tcdm_addr_t tgt_addr;
     logic [BurstLenWidth-1:0] burst_len;
@@ -519,6 +520,16 @@ package mempool_pkg;
   // TCDM Memory Region
   localparam addr_t TCDMSize = NumBanks * TCDMSizePerBank;
   localparam addr_t TCDMMask = ~(TCDMSize - 1);
+
+  // Separate control aperture, with the existing word/group/tile/bank encoding.
+  // Only the barrier index range is decoded; physical SRAM retains every word.
+  localparam addr_t GroupControlBase = 32'h2000_0000;
+  localparam bit GroupControlEnable =
+    `ifdef GROUP_BARRIER_OFF 1'b0 `else 1'b1 `endif;
+  localparam int unsigned GroupControlWord =
+    `ifdef GROUP_BARRIER_WORD `GROUP_BARRIER_WORD `else 240 `endif;
+  localparam addr_t GroupControlMask = ~(NumCoresPerGroup * BeWidth * NumBanks - 1);
+  localparam addr_t GroupControlStart = GroupControlBase + GroupControlWord * BeWidth * NumBanks;
 
   // Size in bytes of memory that is sequentially addressable per tile
   localparam int unsigned SeqMemSizePerCore = `ifdef SEQ_MEM_SIZE `SEQ_MEM_SIZE `else 0 `endif;

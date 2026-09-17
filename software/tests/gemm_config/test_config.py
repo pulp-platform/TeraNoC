@@ -98,6 +98,7 @@ def run():
     (out / 'encoding.h').write_text('')
     (out / 'runtime.h').write_text('''
 #define GROUP_BARRIER_WORD 0
+#define GROUP_CONTROL_BASE 0x20000000
 #define N_FU 4
 #define BANKING_FACTOR 4
 #define NUM_CORES_PER_TILE 1

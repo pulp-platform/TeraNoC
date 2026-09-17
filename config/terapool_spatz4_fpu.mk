@@ -583,11 +583,8 @@ group_mshr_stall_on_resp ?= 1
 # warm-up pass and the timed run disagreeing on barrier count) HANGS instead of degrading
 # silently -- that is intended, it surfaces the bug.
 group_barrier_wd_limit ?= 0
-# Reserved within-tile word base for the group barrier (see mempool_group.sv GroupBarrierWord).
-# The window [group_barrier_word, +cores_per_group) is STOLEN from the data address space
-# group-wide; arch.ld.c truncates L1 at group_barrier_word<<14 to keep data out. 240 puts the
-# window at the very top of L1 (words 240..255), costing a trailing 256 KB and no fragmentation.
-# Changing this REQUIRES changing GBAR_BASE_WORD in the barrier-using software to match.
+# Index base within the separate group-control aperture at 0x20000000.
+# This encoding no longer reserves any physical L1 SRAM.
 group_barrier_word ?= 240
 
 ###########################

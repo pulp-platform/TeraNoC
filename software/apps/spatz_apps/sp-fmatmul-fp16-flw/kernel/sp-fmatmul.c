@@ -32,16 +32,14 @@
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 
 // ---- Group barrier (memory-mapped, general-purpose structs) ----------------
-// The HW barrier (group LIC output port = NumTilesPerGroup) owns L1 words
-// [GBAR_BASE_WORD, +NumBarriers); struct s = word - GBAR_BASE_WORD. Per struct,
+// The HW barrier uses the separate group-control aperture; SRAM is unaffected.
+// Struct s is encoded by word = GBAR_BASE_WORD + s. Per struct,
 // SW writes target+mask ONCE (gbar_setup, persists/auto-reused); then each
 // participant does gbar_arrive(struct) (a held load) + gbar_wait (fence). When the
 // struct's arrival count hits target, the HW fires the held responses to the
-// resp_mask cores, releasing them aligned.  The access MUST target a different tile
-// in the same group ((own_tile+1)%16) so it is TCDM_EXTERNAL and reaches the xbar
-// barrier port (a same-tile address is TCDM_LOCAL -> served tile-internally). The
-// struct is selected by the word (shared across the group); the tile field is only
-// routing. bank field = op: 0=arrive(load), 1=set target, 2=set mask.
+// resp_mask cores, releasing them aligned. Control accesses always take the
+// group path, including own-tile targets. The word field selects the struct;
+// bank field selects the op: 0=arrive(load), 1=set target, 2=set mask.
 // Gated by GROUP_BARRIER; must match the RTL EnableGroupBarrier.
 #ifndef GROUP_BARRIER
 // DEFAULT 0 since the 2026-07-16 ablation (docs/matmul_bottleneck_report.md §7): the per-step
@@ -82,27 +80,12 @@
 #endif
 #define GBAR_PLOOP_STRUCT 8u
 #if GROUP_BARRIER || GBAR_PLOOP
-// Reserved barrier word base. Derived from the build's GROUP_BARRIER_WORD (runtime.mk) so it
-// cannot drift from mempool_group.sv's GroupBarrierWord -- a mismatch either misses the barrier
-// port entirely or, worse, points ordinary data at it (response withheld forever = silent hang).
+// Index encoding within the separate group-control aperture.
 #ifndef GROUP_BARRIER_WORD
-#error "GROUP_BARRIER_WORD not defined: build via the app Makefile so runtime.mk supplies it."
+#error "Build via the app Makefile to supply GROUP_BARRIER_WORD."
 #endif
 #define GBAR_BASE_WORD ((uint32_t)GROUP_BARRIER_WORD)
-// Byte-address strides of the L1 word-interleave fields. The barrier address is
-// word|group|tile|bank|byte, so every field's position depends on the widths BELOW it:
-//
-//     byte(4) | bank(BanksPerTile) | tile(TilesPerGroup) | group(NumGroups) | word
-//
-// DERIVED, never hardcoded. These were previously written as the literals `<<14` (word)
-// and `<<6` (tile) with the group carried by `hid & 0xF0`, all of which are correct ONLY
-// at 16 groups. The group field widens with the mesh (4 bits at 16 groups, 6 at 64) and
-// pushes the word field up with it, so at 8x8 the old form put the word value's low 2 bits
-// INSIDE the group field: every barrier op addressed word 60 (never in the barrier window
-// [240,256), so the HW re-route at mempool_group.sv never fired) and 3 of every 4 landed in
-// a REMOTE group. The barrier was a silent no-op at 8x8 -- `bar_rel` was 0 in every period
-// of every 8x8 run. software/runtime/arch.ld.c already derives the same stride for the
-// linker window; this is the matching derivation on the access side. Keep the two in sync.
+// Derive field strides so both 4x4 and 8x8 use the RTL address layout.
 #define GBAR_BANKS_PER_TILE (N_FU * BANKING_FACTOR * NUM_CORES_PER_TILE)
 #define GBAR_TILE_STRIDE    (4u * (uint32_t)GBAR_BANKS_PER_TILE)
 #define GBAR_GROUP_STRIDE   (GBAR_TILE_STRIDE * (uint32_t)NUM_TILES_PER_GROUP)
@@ -113,10 +96,9 @@ static inline uint32_t gbar_base(uint32_t s) {               // byte addr: word=
   // the group survives at any NumGroups (the old `hid & 0xF0u` dropped group[5:4] at 64).
   uint32_t tile = hid % (uint32_t)NUM_TILES_PER_GROUP;
   uint32_t grp  = hid / (uint32_t)NUM_TILES_PER_GROUP;
-  // MUST be a different tile in the SAME group: a same-tile address is TCDM_LOCAL and never
-  // reaches the group crossbar, so it would never see the barrier port.
+  // Control accesses always take the group path; retain the existing tile encoding.
   uint32_t tgt  = (tile + 1u) % (uint32_t)NUM_TILES_PER_GROUP;
-  return (GBAR_BASE_WORD + s) * GBAR_WORD_STRIDE
+  return GROUP_CONTROL_BASE + (GBAR_BASE_WORD + s) * GBAR_WORD_STRIDE
        + grp * GBAR_GROUP_STRIDE
        + tgt * GBAR_TILE_STRIDE;
 }
