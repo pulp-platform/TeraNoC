@@ -1,7 +1,8 @@
 # Gate/Up streaming projections
 
 This app computes two independent projections, Gate and Up, from FP16 X/weights
-into FP32 outputs. It does not implement SiLU, Down or a full FFN. The same
+into FP32 output storage. Accumulation defaults to FP32; native FP16 is an explicit
+experimental option. It does not implement SiLU, Down or a full FFN. The same
 sources support the 4×4 and 8×8 Spatz configurations. This is synthetic-data
 software development; it is not a pretrained-model deployment.
 
@@ -23,7 +24,7 @@ different weights and each input row is used unchanged by both projections.
 All copies use real target DMA, including optional X replication.
 
 At B1/4×4 each core owns 68 real outputs, packed as 32+32+8 halfwords. The last
-four are padding. Two 32-row weight buffers occupy 2.25 MiB. FP32 accumulators
+four are padding. Two 32-row weight buffers occupy 2.25 MiB. Default FP32 accumulators
 stay in vector registers across each K tile, and the same partial-sum allocation
 persists across all tiles. Compact outputs are stored separately for validation.
 Every weight load begins at a 16-byte-aligned address; full mesh-stripe buffer
@@ -53,12 +54,38 @@ MSHR admission is enabled with single/burst targets 1 and reuse target 0, so
 these classes bypass retained merging. Old GEMM sharing targets are inappropriate
 for distinct per-core weight slices. Programmed CSR values/status are recorded.
 
-The code uses `vfwmacc.vf`: FP16 storage and FP32 arithmetic for every product.
+The default uses `vfwmacc.vf`: FP16 storage and FP32 arithmetic for every product.
 The current RTL widening helper has a known static-review issue converting zeros
 and special values. GVSoC implements floating-point conversion differently.
 GVSoC correctness therefore does **not** establish this instruction path's RTL
 correctness; resolve that separately before claiming RTL validation. No fallback
 to lower accumulation precision is made.
+
+`--accumulator fp16` explicitly selects native `vfmacc.vf`, with FP16 rounding
+after every fused multiply-add across the entire K reduction. Partials are
+loaded/stored as FP16 between tiles; final results are converted to FP32 output
+storage without recovering lost precision. Its arithmetic peak is eight FMAs
+per core per cycle, versus four for widening FP32 accumulation. The weight
+packing, real DMA overlap, work assignment and barriers are unchanged.
+
+For controlled comparisons, this option retains the FP32 scratch allocation size
+and all L1 buffer bases. A local FP16 accumulator occupies one 64-byte stripe;
+the remaining reserved space is unused. This initial option does not claim L1
+capacity savings from compacting the allocation. Baseline FP32 generated kernels
+remain byte-identical with their original settings.
+
+The builder generates both FP32 and native FP16 references from the logical
+unpacked operands. Native FP16 validation checks the whole output against its
+own once-rounded FMA reference, then separately reports error against FP32.
+Passing the arithmetic check does not establish application/inference accuracy.
+`--values dense` uses bounded random FP16 values with more significand bits;
+the default small-integer `grid` inputs can hide accumulation error. The focused
+`--pattern fma` case checks a cancellation residual that non-fused arithmetic
+would round away. Zero/unit/repeated tests remain available.
+
+`--platform-source /ABS/FROZEN/source` reuses an existing arm's config/runtime
+sources while compiling the current app. Use it when isolating precision changes
+from concurrent platform changes; the selected root and source hashes are recorded.
 
 GVSoC runners, full numerical/work/CSR validation, bounded telemetry processing,
 and offline dashboards are in `TeraNoC_gvsoc/gvsoc/scripts/qwen_gateup/`, reusing

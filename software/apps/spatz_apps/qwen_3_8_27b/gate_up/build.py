@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build isolated FP16-storage/FP32-accumulation Gate/Up projections."""
+"""Build isolated Gate/Up projections with explicit accumulation precision."""
 import argparse
 import hashlib
 import json
@@ -43,8 +43,15 @@ def layout(p, workers, kt, tail_width=8):
 
 def microkernel(a, segments, workers, partial_row):
     local_partial = a.partial_layout == "local"
+    native_half = getattr(a, "accumulator", "fp32") == "fp16"
 
     def partial_index(seg, row, index):
+        if native_half:
+            # Retain the FP32 scratch allocation and subsequent symbol addresses
+            # for controlled comparisons. A native accumulator needs one stripe.
+            base = f'({row})*{partial_row*2}+{seg["aoff"]*2}'
+            stride = 32 if local_partial else seg["astride"] * 2
+            return base + f"+worker*{stride}+{index}"
         base = f'({row})*{partial_row}+{seg["aoff"]}'
         if local_partial:
             # A 16-float register half occupies one tile's 64-byte bank stripe.
@@ -54,6 +61,8 @@ def microkernel(a, segments, workers, partial_row):
         return base + f'+worker*{seg["astride"]}+{index}'
 
     lines = ["// Generated register blocks: FP16 loads and widening FP32 FMACs."]
+    if native_half:
+        lines = ["// Generated register blocks: FP16 loads and native FP16 FMACs."]
     if a.x_tile == "local":
         lines += [
             "__attribute__((noinline)) static void q_prefetch_x(const _Float16 *src, _Float16 *dst) {",
@@ -83,11 +92,18 @@ def microkernel(a, segments, workers, partial_row):
             lines += [f'  const _Float16 *w{s}=w+{seg["woff"]}+worker*{width};']
             outputs.append(f'[w{s}] "+&r"(w{s})')
             inputs += [f'[step{s}] "r"({workers*width*2})', f'[vl{s}] "r"({width})']
-            if not local_partial:
+            if native_half:
+                code.append(f"vsetvli t0, %[vl{s}], e16, m1, ta, ma")
+            elif not local_partial:
                 code.append(f"vsetvli t0, %[vl{s}], e32, m2, ta, ma")
             for r in range(a.rows):
                 reg = 8 + 2 * (s * a.rows + r)
-                if local_partial:
+                if native_half:
+                    offset = partial_index(seg, f"row+{r}", "0")
+                    lines.append(f"  _Float16 *a{s}_{r}=q_partial+{offset};")
+                    inputs.append(f'[a{s}_{r}] "r"(a{s}_{r})')
+                    code.append(f"vle16.v v{reg}, (%[a{s}_{r}])")
+                elif local_partial:
                     for h in range((width + 15) // 16):
                         n = min(16, width - h * 16)
                         if n not in partial_vls:
@@ -124,11 +140,16 @@ def microkernel(a, segments, workers, partial_row):
             code += [f"vle16.v v{weight_reg}, (%[w{s}])"]
             last_width = seg["width"]
             for r in range(a.rows):
-                code += [f"vfwmacc.vf v{8+2*(s*a.rows+r)}, ft{r}, v{weight_reg}"]
+                opcode = "vfmacc.vf" if native_half else "vfwmacc.vf"
+                code += [f"{opcode} v{8+2*(s*a.rows+r)}, ft{r}, v{weight_reg}"]
             code += [f"add %[w{s}], %[w{s}], %[step{s}]"]
         code += ["addi %[n], %[n], -1", "bnez %[n], 1b"]
         for s, seg in enumerate(group):
-            if local_partial:
+            if native_half:
+                code += [f"vsetvli t0, %[vl{s}], e16, m1, ta, ma"]
+                for r in range(a.rows):
+                    code += [f"vse16.v v{8+2*(s*a.rows+r)}, (%[a{s}_{r}])"]
+            elif local_partial:
                 for r in range(a.rows):
                     for h in range((seg["width"] + 15) // 16):
                         n = min(16, seg["width"] - h * 16)
@@ -218,8 +239,11 @@ def main():
     ap.add_argument("--partial-layout", choices=["linear", "local"], default="linear")
     ap.add_argument("--vset-policy", choices=["each-segment", "hoist"], default="each-segment")
     ap.add_argument("--weight-registers", choices=["shared", "separate"], default="shared")
+    ap.add_argument("--accumulator", choices=["fp32", "fp16"], default="fp32")
+    ap.add_argument("--values", choices=["grid", "dense"], default="grid")
+    ap.add_argument("--platform-source", type=Path, help="Frozen config/runtime source root")
     ap.add_argument("--repeats", type=int, default=1)
-    ap.add_argument("--pattern", choices=["random", "zero", "unit"], default="random")
+    ap.add_argument("--pattern", choices=["random", "zero", "unit", "fma"], default="random")
     ap.add_argument("--unit-k", type=int, default=31)
     ap.add_argument("--seed", type=int, default=20260917)
     ap.add_argument("--app-source", type=Path, help="Build a focused runtime probe instead")
@@ -251,9 +275,10 @@ def main():
     a.out.mkdir(parents=True, exist_ok=False)
     src = a.out / "source"
     (src / "software").mkdir(parents=True)
-    shutil.copytree(RTL / "config", src / "config")
+    platform = a.platform_source.resolve() if a.platform_source else RTL
+    shutil.copytree(platform / "config", src / "config")
     shutil.copytree(
-        RTL / "software/runtime",
+        platform / "software/runtime",
         src / "software/runtime",
         ignore=shutil.ignore_patterns("*.o", "*.pyc", "__pycache__", "arch.ld"),
     )
@@ -263,7 +288,11 @@ def main():
         ignore=shutil.ignore_patterns("__pycache__"),
     )
     rng = np.random.default_rng(a.seed)
-    x = (rng.integers(-4, 5, (a.batch, a.hidden)) / 16).astype("<f2")
+    x = (
+        rng.uniform(-0.25, 0.25, (a.batch, a.hidden))
+        if a.values == "dense"
+        else rng.integers(-4, 5, (a.batch, a.hidden)) / 16
+    ).astype("<f2")
     if a.pattern == "zero":
         x[:] = 0
     if a.pattern == "unit":
@@ -271,19 +300,41 @@ def main():
             ap.error("unit-k outside input")
         x[:] = 0
         x[:, a.unit_k] = 1
+    if a.pattern == "fma":
+        if a.hidden < 2 or a.kt < 2:
+            ap.error("Fused-arithmetic probe needs at least two terms in its first tile")
+        # -1 + (1+2^-10)*(1-2^-10) must retain -2^-20, not round to zero.
+        x[:] = 0
+        x[:, 0], x[:, 1] = 1, 1 + 2**-10
     x.tofile(a.out / "x.bin")
     for stage in ["gate", "up"]:
         y = np.zeros((a.batch, a.intermediate), np.float32)
+        y16 = np.zeros_like(y, dtype=np.float16) if a.accumulator == "fp16" else None
         with (a.out / f"{stage}.bin").open("wb") as f:
             for k in range(0, a.hidden, a.kt):
                 # Generate logical row-major weights before packing; oracle does
                 # not use the target's address expressions or packed representation.
-                logical = (rng.integers(-4, 5, (a.kt, a.intermediate)) / 64).astype("<f2")
+                logical = (
+                    rng.uniform(-0.0625, 0.0625, (a.kt, a.intermediate))
+                    if a.values == "dense"
+                    else rng.integers(-4, 5, (a.kt, a.intermediate)) / 64
+                ).astype("<f2")
+                if a.pattern == "fma":
+                    logical[:] = 0
+                    if k == 0:
+                        logical[0], logical[1] = -1, 1 - 2**-10
                 for r in range(a.kt):
                     y = (
                         y.astype(np.float64)
                         + x[:, k + r, None].astype(np.float64) * logical[r].astype(np.float64)
                     ).astype(np.float32)
+                    if y16 is not None:
+                        # FP64 retains the bits needed for a once-rounded FP16
+                        # FMA for these bounded inputs, including cancellation.
+                        y16 = (
+                            y16.astype(np.float64)
+                            + x[:, k + r, None].astype(np.float64) * logical[r].astype(np.float64)
+                        ).astype(np.float16)
                 for s in segments:
                     packed = np.zeros((a.kt, workers, s["width"]), dtype="<f2")
                     packed[:, :, : s["valid"]] = logical[
@@ -291,6 +342,8 @@ def main():
                     ].reshape(a.kt, workers, s["valid"])
                     f.write(packed.tobytes())
         y.tofile(a.out / f"expected_{stage}.bin")
+        if y16 is not None:
+            y16.astype("<f4").tofile(a.out / f"expected_fp16_{stage}.bin")
     defines = dict(
         Q_BATCH=a.batch,
         Q_HIDDEN=a.hidden,
@@ -300,7 +353,8 @@ def main():
         Q_TEAMS=teams,
         Q_WORKERS=workers,
         Q_WEIGHT_ELEMENTS=welems,
-        Q_PARTIAL_ELEMENTS=a.batch * arow,
+        Q_PARTIAL_ELEMENTS=a.batch * arow * (2 if a.accumulator == "fp16" else 1),
+        Q_ACCUMULATOR_FP16=int(a.accumulator == "fp16"),
         Q_GROUP_BARRIER=int(a.barrier == "group"),
         Q_LOCAL_X_TILE=int(a.x_tile == "local"),
         Q_X_REPLICAS=(a.mesh * a.mesh if a.x_replicas == "group" else 1),
@@ -354,9 +408,15 @@ data.o: data.S
         **vars(a),
         "out": str(a.out),
         "app_source": str(a.app_source) if a.app_source else None,
+        "platform_source": str(platform),
         "app": "gate_up",
         "precision": 16,
-        "accumulation": "fp32 widening FMA for every multiply",
+        "accumulation": (
+            "native fp16 FMA for every multiply; scalar widening of final output"
+            if a.accumulator == "fp16"
+            else "fp32 widening FMA for every multiply"
+        ),
+        "fmac_per_core_cycle": 8 if a.accumulator == "fp16" else 4,
         "input_kind": "deterministic synthetic, not pretrained weights",
         "active_cores": cores,
         "active_groups": a.mesh * a.mesh,
@@ -368,6 +428,9 @@ data.o: data.S
         "segments": segments,
         "weight_tile_bytes": welems * 2,
         "partial_row_elements": arow,
+        "partial_storage_row_elements": arow * (2 if a.accumulator == "fp16" else 1),
+        "partial_storage_element_bytes": 2 if a.accumulator == "fp16" else 4,
+        "partial_allocation_policy": "preserve fp32 scratch footprint for precision comparisons",
         "command": cmd,
         "build_returncode": rc,
         "rtl_commit": subprocess.check_output(

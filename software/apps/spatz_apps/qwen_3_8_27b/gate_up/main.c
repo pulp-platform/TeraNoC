@@ -16,7 +16,11 @@ static _Float16 q_x[Q_X_REPLICAS * Q_X_REPLICA_ELEMENTS] Q_L1;
 // One 64-byte slice per physical tile; reused across outer batch row blocks.
 static _Float16 q_x_tile[Q_ROWS][NUM_CORES][Q_KT] Q_L1;
 #endif
+#if Q_ACCUMULATOR_FP16
+_Float16 q_partial[Q_PARTIAL_ELEMENTS] Q_L1;
+#else
 float q_partial[Q_PARTIAL_ELEMENTS] Q_L1;
+#endif
 float q_output[2][Q_BATCH * Q_INTERMEDIATE] Q_L1;
 uint32_t q_core_compute[NUM_CORES][16] Q_L1;
 uint32_t q_status[NUM_CORES][16] Q_L1;
