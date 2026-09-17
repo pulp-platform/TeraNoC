@@ -42,6 +42,17 @@ def layout(p, workers, kt, tail_width=8):
 
 
 def microkernel(a, segments, workers, partial_row):
+    local_partial = a.partial_layout == "local"
+
+    def partial_index(seg, row, index):
+        base = f'({row})*{partial_row}+{seg["aoff"]}'
+        if local_partial:
+            # A 16-float register half occupies one tile's 64-byte bank stripe.
+            # Interleave halves across workers instead of putting two adjacent
+            # stripes at the same worker's address.
+            return base + f"+(({index})/16)*{workers*16}+worker*16+({index})%16"
+        return base + f'+worker*{seg["astride"]}+{index}'
+
     lines = ["// Generated register blocks: FP16 loads and widening FP32 FMACs."]
     if a.x_tile == "local":
         lines += [
@@ -59,6 +70,7 @@ def microkernel(a, segments, workers, partial_row):
             f"__attribute__((noinline)) static void q_block_{bi}(uint32_t worker, uint32_t row, uint32_t t, const _Float16 *w, const _Float16 *input) {{"
         ]
         code, outputs, inputs, clobbers = [], [], [], ["t0", "memory"]
+        partial_vls = set()
         for r in range(a.rows):
             offset = f"{r}*NUM_CORES*Q_KT" if a.x_tile == "local" else f"(row+{r})*Q_HIDDEN+t*Q_KT"
             lines += [f"  const _Float16 *x{r}=input+{offset};"]
@@ -71,33 +83,74 @@ def microkernel(a, segments, workers, partial_row):
             lines += [f'  const _Float16 *w{s}=w+{seg["woff"]}+worker*{width};']
             outputs.append(f'[w{s}] "+&r"(w{s})')
             inputs += [f'[step{s}] "r"({workers*width*2})', f'[vl{s}] "r"({width})']
-            code.append(f"vsetvli t0, %[vl{s}], e32, m2, ta, ma")
+            if not local_partial:
+                code.append(f"vsetvli t0, %[vl{s}], e32, m2, ta, ma")
             for r in range(a.rows):
                 reg = 8 + 2 * (s * a.rows + r)
-                lines += [
-                    f'  float *a{s}_{r}=q_partial+(row+{r})*{partial_row}+{seg["aoff"]}+worker*{pad};'
-                ]
-                inputs.append(f'[a{s}_{r}] "r"(a{s}_{r})')
-                code.append(f"vle32.v v{reg}, (%[a{s}_{r}])")
+                if local_partial:
+                    for h in range((width + 15) // 16):
+                        n = min(16, width - h * 16)
+                        if n not in partial_vls:
+                            inputs.append(f'[pvl{n}] "r"({n})')
+                            partial_vls.add(n)
+                        operand = f"a{s}_{r}_{h}"
+                        offset = partial_index(seg, f"row+{r}", str(h * 16))
+                        lines.append(f"  float *{operand}=q_partial+{offset};")
+                        inputs.append(f'[{operand}] "r"({operand})')
+                        code += [
+                            f"vsetvli t0, %[pvl{n}], e32, m1, ta, ma",
+                            f"vle32.v v{reg+h}, (%[{operand}])",
+                        ]
+                else:
+                    lines += [
+                        f'  float *a{s}_{r}=q_partial+(row+{r})*{partial_row}+{seg["aoff"]}+worker*{pad};'
+                    ]
+                    inputs.append(f'[a{s}_{r}] "r"(a{s}_{r})')
+                    code.append(f"vle32.v v{reg}, (%[a{s}_{r}])")
                 clobbers += [f"v{reg}", f"v{reg+1}"]
+        fixed_vl = a.vset_policy == "hoist" and len({s["width"] for s in group}) == 1
+        if fixed_vl:
+            code += ["vsetvli t0, %[vl0], e16, m1, ta, ma"]
         code += ["1:"]
         for r in range(a.rows):
             code += [f"flh ft{r}, 0(%[x{r}])", f"addi %[x{r}], %[x{r}], 2"]
+        last_width = None
         for s, seg in enumerate(group):
-            code += [f"vsetvli t0, %[vl{s}], e16, m1, ta, ma", f"vle16.v v0, (%[w{s}])"]
+            if not fixed_vl and (a.vset_policy != "hoist" or seg["width"] != last_width):
+                code += [f"vsetvli t0, %[vl{s}], e16, m1, ta, ma"]
+            # Distinct registers let the next segment load avoid reusing the
+            # previous segment's still-live vector source. Accumulators start at v8.
+            weight_reg = s if a.weight_registers == "separate" else 0
+            code += [f"vle16.v v{weight_reg}, (%[w{s}])"]
+            last_width = seg["width"]
             for r in range(a.rows):
-                code += [f"vfwmacc.vf v{8+2*(s*a.rows+r)}, ft{r}, v0"]
+                code += [f"vfwmacc.vf v{8+2*(s*a.rows+r)}, ft{r}, v{weight_reg}"]
             code += [f"add %[w{s}], %[w{s}], %[step{s}]"]
         code += ["addi %[n], %[n], -1", "bnez %[n], 1b"]
         for s, seg in enumerate(group):
-            code += [f"vsetvli t0, %[vl{s}], e32, m2, ta, ma"]
-            for r in range(a.rows):
-                code += [f"vse32.v v{8+2*(s*a.rows+r)}, (%[a{s}_{r}])"]
+            if local_partial:
+                for r in range(a.rows):
+                    for h in range((seg["width"] + 15) // 16):
+                        n = min(16, seg["width"] - h * 16)
+                        code += [
+                            f"vsetvli t0, %[pvl{n}], e32, m1, ta, ma",
+                            f"vse32.v v{8+2*(s*a.rows+r)+h}, (%[a{s}_{r}_{h}])",
+                        ]
+            else:
+                code += [f"vsetvli t0, %[vl{s}], e32, m2, ta, ma"]
+                for r in range(a.rows):
+                    code += [f"vse32.v v{8+2*(s*a.rows+r)}, (%[a{s}_{r}])"]
         lines += ["  asm volatile("] + [f'    "{x}\\n"' for x in code]
         lines += [
             "    : " + ", ".join(outputs),
             "    : " + ", ".join(inputs),
-            "    : " + ", ".join(f'"{x}"' for x in clobbers + ["v0"]) + ");",
+            "    : "
+            + ", ".join(
+                f'"{x}"'
+                for x in clobbers
+                + [f"v{i}" for i in range(len(group) if a.weight_registers == "separate" else 1)]
+            )
+            + ");",
             "}",
         ]
     row_loop = (
@@ -126,9 +179,10 @@ def microkernel(a, segments, workers, partial_row):
         f"  {row_loop} {{",
     ]
     for seg in segments:
+        index = partial_index(seg, "row+r", "j")
         lines += [
             f'    for(uint32_t r=0;r<Q_ROWS;++r) for(uint32_t j=0;j<{seg["astride"]};++j)',
-            f'      q_partial[(row+r)*{partial_row}+{seg["aoff"]}+worker*{seg["astride"]}+j]=0;',
+            f"      q_partial[{index}]=0;",
         ]
     lines += [
         "  }",
@@ -138,9 +192,10 @@ def microkernel(a, segments, workers, partial_row):
         f"  {row_loop} {{",
     ]
     for seg in segments:
+        index = partial_index(seg, "row+r", "j")
         lines += [
             f'    for(uint32_t r=0;r<Q_ROWS;++r) for(uint32_t j=0;j<{seg["valid"]};++j)',
-            f'      out[(row+r)*Q_INTERMEDIATE+{seg["col"]}+worker*{seg["valid"]}+j]=q_partial[(row+r)*{partial_row}+{seg["aoff"]}+worker*{seg["astride"]}+j];',
+            f'      out[(row+r)*Q_INTERMEDIATE+{seg["col"]}+worker*{seg["valid"]}+j]=q_partial[{index}];',
         ]
     return "\n".join(lines + ["  }", "}", ""])
 
@@ -160,6 +215,9 @@ def main():
     ap.add_argument("--barrier", choices=["flat", "group"], default="group")
     ap.add_argument("--x-replicas", choices=["one", "group"], default="group")
     ap.add_argument("--x-tile", choices=["off", "local"], default="off")
+    ap.add_argument("--partial-layout", choices=["linear", "local"], default="linear")
+    ap.add_argument("--vset-policy", choices=["each-segment", "hoist"], default="each-segment")
+    ap.add_argument("--weight-registers", choices=["shared", "separate"], default="shared")
     ap.add_argument("--repeats", type=int, default=1)
     ap.add_argument("--pattern", choices=["random", "zero", "unit"], default="random")
     ap.add_argument("--unit-k", type=int, default=31)
@@ -174,6 +232,8 @@ def main():
         ap.error("Positive dimensions, rows dividing batch and KT dividing K required")
     if a.x_tile == "local" and a.kt != 32:
         ap.error("Local X slices currently require KT32 to match the 64-byte tile stripe")
+    if a.partial_layout == "local" and a.distribution != "shared":
+        ap.error("Local partial sums currently require the all-core shared-column distribution")
     cores = a.mesh * a.mesh * 16
     teams = 1 if a.distribution == "shared" else a.batch // a.rows
     if cores % teams:

@@ -78,3 +78,29 @@ At B1/4×4 it raises the double weight buffer from 2.25 to 3 MiB and the packed
 weight pair from 360 to 480 MiB. It improves the measured full-size run but
 reduces L1 headroom, so width 8 remains the baseline. Full-size B1/8×8 with width
 32 would need 640 MiB of source weights and is rejected by the current target.
+
+Three optional scheduling/layout controls retain the original settings for
+matched comparisons:
+
+- `--partial-layout local` stores each 16-float half of an accumulator in a
+  separate core-local 64-byte stripe. Loads/stores use the individual vector
+  register halves; arithmetic still uses FP32 widening accumulators. The scratch
+  allocation is unchanged. This currently requires `--distribution shared`.
+- `--vset-policy hoist` moves vector configuration outside the K loop when a
+  register block has identical segment widths. For mixed widths it removes
+  adjacent redundant configurations while preserving changes at the tail.
+- `--weight-registers separate` gives each segment a distinct weight register,
+  reducing reuse dependencies between segment loads. A single-segment block
+  generates the same register assignment with either setting.
+
+The comparison defaults remain `linear`, `each-segment`, and `shared` respectively.
+The tested 4×4 B1 tuning recipe adds the following to the full-size command above:
+
+```sh
+--tail-width 32 --partial-layout local --vset-policy hoist --weight-registers separate
+```
+
+Full-size and short correctness/performance results are recorded in the GVSoC
+campaign report. Local partial sums are also tested on 8×8 and with two/four-row
+reuse. Do not infer full-size 8×8 performance from those short tests: the current
+24-element weight packing remains predominantly nonlocal despite valid bursts.
