@@ -1140,14 +1140,22 @@
       $("phase").append(option);
     }
   }
+  let phaseRequest = 0;
   $("phase").onchange = async () => {
+    const request = ++phaseRequest;
     filter();
     const bounds = M.phase_ranges?.[$("phase").value];
     if (bounds && typeof loadRange === "function") {
+      // A second selection can arrive while a compressed detail page is being
+      // decoded. The pager rejects overlapping loads; queue only the newest
+      // phase selection so it cannot leave an empty view on the old page.
+      while (typeof loading !== "undefined" && loading)
+        await new Promise(resolve => setTimeout(resolve, 10));
+      if (request !== phaseRequest) return;
       const width = D.detail_range ? D.detail_range[1]-D.detail_range[0] : 20000;
       await loadRange(bounds[0], Math.min(bounds[1], bounds[0]+width));
     }
-    filter();
+    if (request === phaseRequest) filter();
   };
   $("group").onchange = (e) => setGroup(+e.target.value);
   $("prev").onclick = () =>
