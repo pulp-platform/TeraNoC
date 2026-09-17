@@ -847,6 +847,11 @@ module mempool_group_mshr
   logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][PoolIdxW-1:0] req_alloc_found_pool_id;
   // Combinational pool grant records (the _q forms are declared with the staged records).
   logic                                      apb_v;
+  /// Load enable for the staged allocation payload. Every winner is a candidate, so this is a
+  /// superset of apb_v, and it is safe because every read of the apb_q payload fields is qualified
+  /// by apb_q_v, which stays exact: a capture in a cycle without a grant is never read. It keeps
+  /// the round-robin pick over all request lanes off the payload clock-gate enable.
+  logic                                      apb_en;
   logic [PoolIdxW-1:0]                       apb_way;
   tcdm_addr_t                                apb_addr;
   group_id_t                                 apb_grp;
@@ -1116,6 +1121,14 @@ module mempool_group_mshr
   logic [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]                    drain_fire;
   logic [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]                    drain_fire_sv;
   logic [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1][MshrMergeReqs-1:0] drain_fire_sub_oh;
+  /// The banked-only twins of the three records above, read by the banked clear scatter.
+  logic [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]                    drain_fire_bank;
+  logic [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]                    drain_fire_bank_sv;
+  logic [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1][MshrMergeReqs-1:0] drain_fire_bank_sub_oh;
+`ifndef TARGET_SYNTHESIS
+  /// The pool-qualified scatter the banked-only form replaces, kept so the run proves them identical.
+  logic [MshrNum-1:0][MshrMergeReqs-1:0]                                         bp_clr_ref, sv_clr_ref;
+`endif
   // Store byte-merge into CACHED lines, decided per entry instead of chained across lanes.
   localparam int unsigned NumReqPortsActiveF3 = (NumRemoteReqPortsPerTile > 1) ?
                                                 (NumRemoteReqPortsPerTile - 1) : 1;
@@ -2626,6 +2639,7 @@ module mempool_group_mshr
       // Keep the stage enables separate from the payload reduction. Allocation grants require
       // acceptance; a merge grant already implies the complete input handshake.
       assign apb_v = |(pool_alloc_win_oh & alloc_accept);
+      assign apb_en = |(pool_alloc_cand_flat & alloc_accept);
       // The picker always returns one winner for a nonempty candidate vector.
       // Keep RR selection and prefix isolation off the stage-register enable.
       assign mpb_v = |pool_merge_cand_flat;
@@ -2684,6 +2698,7 @@ module mempool_group_mshr
         req_alloc_found_pool = '0;
         req_alloc_found_pool_id = '0;
         apb_v    = 1'b0;
+        apb_en   = 1'b0;
         apb_way  = '0;
         apb_addr = '0; apb_grp = '0; apb_len = '0;
         apb_tile = '0; apb_port = '0; apb_core = '0; apb_meta = '0;
@@ -3408,6 +3423,8 @@ module mempool_group_mshr
   data_t                                               drv_sel_data;
   logic          [BurstLenWidth-1:0]                   drv_sel_beat_off;
   logic                                                drv_sel_burst_one;
+  /// The banked row's burst_one for this lane, independent of the pool operands.
+  logic                                                drv_bank_burst_one;
   tile_core_id_t [MshrMergeReqs-1:0]                   drv_sel_sub_core;
   meta_id_t      [MshrMergeReqs-1:0]                   drv_sel_sub_meta;
   logic [MshrBankNum-1:0]   bank_cand, bank_cand_rot, bank_cand_eff, bank_pfx, bank_first;
@@ -3423,6 +3440,12 @@ module mempool_group_mshr
   /// the handshake scatter takes it directly instead of through drain_win_s's encoder and a
   /// per-slot equality compare.
   logic [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1][MshrMergeReqs-1:0] resp_sel_sub_oh;
+  /// A banked row won this lane, and its sub-request one-hot. Written only by the banked selection,
+  /// so the banked drive select and the banked clear scatter carry no pool term. The pool is offered
+  /// a lane only when no banked row won it, so inside a valid selection "not banked" is exactly
+  /// "pool", and a banked handshake is exactly a handshake without a pool selection.
+  logic [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]                    resp_sel_bank_valid;
+  logic [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1][MshrMergeReqs-1:0] resp_sel_bank_sub_oh;
   logic [BankIdW-1:0]       bank_base, bank_idx, bank_win_d, bank_win;
   logic [VictimPtrW-1:0]    base_way;
   logic                     bank_demote;
@@ -3858,14 +3881,14 @@ module mempool_group_mshr
   `FF(apb_q_v, apb_v, '0)
   `FF(mpb_q_v, mpb_v, '0)
   // D input is the COMBINATIONAL apb_* / mpb_* record; the _q form is the output.
-  `FFL(apb_q_way,  apb_way,  apb_v, '0)
-  `FFL(apb_q_addr, apb_addr, apb_v, '0)
-  `FFL(apb_q_grp,  apb_grp,  apb_v, '0)
-  `FFL(apb_q_len,  apb_len,  apb_v, '0)
-  `FFL(apb_q_tile, apb_tile, apb_v, '0)
-  `FFL(apb_q_port, apb_port, apb_v, '0)
-  `FFL(apb_q_core, apb_core, apb_v, '0)
-  `FFL(apb_q_meta, apb_meta, apb_v, '0)
+  `FFL(apb_q_way,  apb_way,  apb_en, '0)
+  `FFL(apb_q_addr, apb_addr, apb_en, '0)
+  `FFL(apb_q_grp,  apb_grp,  apb_en, '0)
+  `FFL(apb_q_len,  apb_len,  apb_en, '0)
+  `FFL(apb_q_tile, apb_tile, apb_en, '0)
+  `FFL(apb_q_port, apb_port, apb_en, '0)
+  `FFL(apb_q_core, apb_core, apb_en, '0)
+  `FFL(apb_q_meta, apb_meta, apb_en, '0)
   `FFL(mpb_q_way,  mpb_way,  mpb_v, '0)
   `FFL(mpb_q_tile, mpb_tile, mpb_v, '0)
   `FFL(mpb_q_port, mpb_port, mpb_v, '0)
@@ -5300,6 +5323,12 @@ module mempool_group_mshr
     bp_clr = '0; bp2_clr = '0; sv_clr = '0;
     pool_bp_clr = '0; pool_sv_clr = '0;
     drain_fire = '0; drain_fire_sv = '0; drain_fire_sub_oh = '0;
+    drain_fire_bank = '0; drain_fire_bank_sv = '0; drain_fire_bank_sub_oh = '0;
+    resp_sel_bank_valid = '0; resp_sel_bank_sub_oh = '0;
+    drv_bank_burst_one = 1'b0;
+`ifndef TARGET_SYNTHESIS
+    bp_clr_ref = '0; sv_clr_ref = '0;
+`endif
     if (DrainMultiPort) begin
       // Use all available response ports per cycle.
       for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
@@ -5508,10 +5537,12 @@ module mempool_group_mshr
                 drain_win_s = drain_win_s | ({SubIdxW{sub_first[s]}} & SubIdxW'(s));
               end
               if (drain_have_s) begin
-                resp_sel_valid[tile_i][port_i]      = 1'b1;
-                resp_sel_mshr_id[tile_i][port_i]    = mshr_id_t'(drain_win_e);
-                resp_sel_subreq_idx[tile_i][port_i] = drain_win_s;   // already SubIdxW wide
-                resp_sel_sub_oh[tile_i][port_i]     = sub_first;
+                resp_sel_valid[tile_i][port_i]       = 1'b1;
+                resp_sel_bank_valid[tile_i][port_i]  = 1'b1;
+                resp_sel_mshr_id[tile_i][port_i]     = mshr_id_t'(drain_win_e);
+                resp_sel_subreq_idx[tile_i][port_i]  = drain_win_s;   // already SubIdxW wide
+                resp_sel_sub_oh[tile_i][port_i]      = sub_first;
+                resp_sel_bank_sub_oh[tile_i][port_i] = sub_first;
                 resp_sel_bank[tile_i][port_i]       = bank_win;
                 resp_sel_bank_oh[tile_i][port_i]    = bank_first;
               end
@@ -5574,6 +5605,11 @@ module mempool_group_mshr
       // Drive responses and clear sub-requests on handshake.
       for (int tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin
         for (int port_i = 1; port_i < NumRemoteRespPortsPerTile; port_i++) begin
+          // Computed for every lane from the banked operands alone, so the banked clear record does
+          // not wait on the pool/banked operand select below.
+          drv_bank_burst_one = BankPublish
+                             ? |(resp_sel_bank_oh[tile_i][port_i] & pub_drv_burst_one)
+                             : drv_burst_one[resp_sel_mshr_id[tile_i][port_i]];
           if (resp_sel_valid[tile_i][port_i]) begin
             resp_out_valid[tile_i][port_i] = 1'b1;
             // A buffered beat is a READ response by construction: the capture gate only admits
@@ -5583,7 +5619,7 @@ module mempool_group_mshr
             // One select per lane, on the bank the winner came from. Under BankPublish the winning
             // entry IS its bank's published entry, so these are the same values the MshrNum-wide
             // reads returned.
-            if (resp_sel_pool_valid[tile_i][port_i]) begin
+            if (!resp_sel_bank_valid[tile_i][port_i]) begin
               // Pool drive operands, read at the pool index -- never through resp_sel_mshr_id.
               drv_sel_data      = pool_drv_data     [resp_sel_pool_id[tile_i][port_i]];
               drv_sel_beat_off  = pool_drv_beat_off [resp_sel_pool_id[tile_i][port_i]];
@@ -5634,6 +5670,9 @@ module mempool_group_mshr
               drain_fire   [tile_i][port_i] = 1'b1;
               drain_fire_sv[tile_i][port_i] = drv_sel_burst_one;
               drain_fire_sub_oh[tile_i][port_i] = resp_sel_sub_oh[tile_i][port_i];
+              drain_fire_bank       [tile_i][port_i] = resp_sel_bank_valid[tile_i][port_i];
+              drain_fire_bank_sv    [tile_i][port_i] = drv_bank_burst_one;
+              drain_fire_bank_sub_oh[tile_i][port_i] = resp_sel_bank_sub_oh[tile_i][port_i];
             end
           end
         end
@@ -5645,15 +5684,26 @@ module mempool_group_mshr
       for (int e = 0; e < MshrNum; e++) begin
         for (int t = 0; t < NumTilesPerGroup; t++) begin
           for (int p = 1; p < NumRemoteRespPortsPerTile; p++) begin
+            if (drain_published[e] && drain_fire_bank[t][p] &&
+                (resp_sel_bank[t][p] == BankIdW'(e / MshrWaysPerBank))) begin
+              for (int s = 0; s < MshrMergeReqs; s++) begin
+                if (drain_fire_bank_sub_oh[t][p][s]) begin
+                  bp_clr[e][s] = 1'b1;
+                  if (drain_fire_bank_sv[t][p]) sv_clr[e][s] = 1'b1;
+                end
+              end
+            end
+`ifndef TARGET_SYNTHESIS
             if (drain_published[e] && drain_fire[t][p] && !resp_sel_pool_valid[t][p] &&
                 (resp_sel_bank[t][p] == BankIdW'(e / MshrWaysPerBank))) begin
               for (int s = 0; s < MshrMergeReqs; s++) begin
                 if (drain_fire_sub_oh[t][p][s]) begin
-                  bp_clr[e][s] = 1'b1;
-                  if (drain_fire_sv[t][p]) sv_clr[e][s] = 1'b1;
+                  bp_clr_ref[e][s] = 1'b1;
+                  if (drain_fire_sv[t][p]) sv_clr_ref[e][s] = 1'b1;
                 end
               end
             end
+`endif
           end
         end
       end
@@ -6238,7 +6288,19 @@ module mempool_group_mshr
     // -------------------------------------------------------------------------------------------
     // No generate/endgenerate here: this sits inside an existing generate region, and vlog rejects
     // a nested pair outright -- the bare if/for forms are generate constructs already.
+      // The banked clear scatter carries no pool term; it must equal the pool-qualified form.
+      drain_clr_bank_equiv: assert property(
+        @(posedge clk_i) disable iff (!rst_ni)
+          (bp_clr == bp_clr_ref) && (sv_clr == sv_clr_ref))
+        else $fatal(1, "banked drain clear diverged from the pool-qualified reference");
+      drain_sel_bank_pool_exclusive: assert property(
+        @(posedge clk_i) disable iff (!rst_ni)
+          (resp_sel_bank_valid & resp_sel_pool_valid) == '0)
+        else $fatal(1, "a lane holds both a banked and a pool drain selection");
       if (PoolNum > 0) begin : gen_pool_checks
+        apb_en_covers_valid: assert property(
+          @(posedge clk_i) disable iff (!rst_ni) apb_v |-> apb_en)
+          else $fatal(1, "pool allocation payload enable does not cover the staged valid");
         pool_grants_onehot: assert property(
           @(posedge clk_i) disable iff (!rst_ni)
             $onehot0(pool_alloc_win_oh) && $onehot0(pool_merge_win_oh))

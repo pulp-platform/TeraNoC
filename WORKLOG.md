@@ -17415,3 +17415,22 @@ failures, merge counters byte-identical (burst 75.0%, single 87.5%).
 **Status.** RTL frozen at `d4988cd0` / tag `mshr-freeze-20260912`; backend config flavours
 pinned to the synthesis define set; synthesis and simulation now read the same Spatz revision
 (`e35712d`). Next is the full-group run, for measurement rather than closure.
+
+## 2026-09-17 04:05 — group MSHR overflow pool: pick off the payload enable and the banked clear
+
+**Purpose.** Keep the overflow pool out of two cones it widened: the staged allocation payload's
+clock-gate enable, and the banked drain clear enables of every entry.
+
+**Implementation.** (A) The staged pool allocation payload loads on `apb_en =
+|(pool_alloc_cand_flat & alloc_accept)`, a superset of `apb_v`; every read of the payload is gated
+by the exact `apb_q_v`. (B) The banked drain drive select and banked clear scatter key on a
+banked-only `resp_sel_bank_valid`; the pool is offered a lane only when no banked row won it, so
+this equals the pool-qualified form. Assertions `drain_clr_bank_equiv`,
+`drain_sel_bank_pool_exclusive`, `apb_en_covers_valid`.
+
+**Result.** Overflow-pool directed suites (pool 0/1/2, handshake + response incl. `cross_clear`):
+15/15 pass with cycle-stamped TRACE lines identical to `f127f114`; new assertions compiled in and
+silent. Full-chip VCS gate (`L_fp16_512x64x256`, HEAD vs A+B) still running at commit time.
+
+**Status.** Committed ahead of the full-chip gate at the user's request. OOC pair `pool0ab`
+(overflow_num=0) and `pool1ab` (=1) running at TCK 1.0 from md5 `239316407c61f7d3`.
