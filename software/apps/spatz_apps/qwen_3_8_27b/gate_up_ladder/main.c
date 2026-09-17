@@ -7,6 +7,11 @@
 #include "runtime.h"
 #include "synchronization.h"
 
+_Static_assert(NUM_CORES_PER_TILE * N_FU * BANKING_FACTOR == 16 &&
+                   N_FU == 4 && VLEN == 512,
+               "Vector segmentation requires the Spatz4 16-bank tile geometry");
+_Static_assert(Q_PT % 32 == 0, "Weight row strides must preserve tile alignment");
+
 #define Q_L1 __attribute__((section(".l1_prio"), aligned(64 * NUM_CORES)))
 extern const _Float16 q_x_data[], q_gate_weights[], q_up_weights[];
 extern _Float16 q_output_l2[];
@@ -89,7 +94,7 @@ static void q_project(uint32_t stage, uint32_t cid, const _Float16 *weights) {
           q_fill(1 - slot, panel, step + 1, weights);
       }
       uint32_t begin = mempool_get_timer();
-      q_compute(cid, slot);
+      q_compute(cid, slot, panel, step);
       asm volatile("fence" ::: "memory");
       uint32_t end = mempool_get_timer();
       q_core_compute[cid][0] += end - begin;

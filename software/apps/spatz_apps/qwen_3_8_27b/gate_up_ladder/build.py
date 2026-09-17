@@ -11,6 +11,7 @@ import numpy as np
 from elftools.elf.elffile import ELFFile
 from data import sha
 from partition import select, assignments
+from tiling import select as select_tiling, vectors
 
 HERE = Path(__file__).resolve().parent
 RTL = HERE.parents[4]
@@ -45,7 +46,7 @@ def kernel(rows):
         "*last=*first+Q_GROUP_ROWS/NUM_CORES_PER_GROUP; *pb=0;",
         "#endif",
         "}",
-        "__attribute__((noinline)) static void q_block(uint32_t row,uint32_t col,const _Float16 *w,const _Float16 *x) {",
+        "__attribute__((noinline)) static void q_block(uint32_t row,uint32_t col,const _Float16 *w,const _Float16 *x,uint32_t vl,uint32_t n) {",
     ]
     ops = ["vsetvli t0, %[vl], e16, m1, ta, ma"]
     outputs, inputs, clobbers = [], [], ["t0", "v0", "memory"]
@@ -58,9 +59,9 @@ def kernel(rows):
         inputs += [f'[a{r}] "r"(a{r})']
         clobbers += [f"ft{r}", f"v{8+r}"]
         ops += [f"vle16.v v{8+r}, (%[a{r}])"]
-    text += ["const _Float16 *weights=w+col;", "uint32_t n=Q_KT;"]
+    text += ["const _Float16 *weights=w+col;"]
     outputs += ['[w] "+&r"(weights)', '[n] "+&r"(n)']
-    inputs += ['[stride] "r"(2*Q_PT)', '[vl] "r"(Q_VL)']
+    inputs += ['[stride] "r"(2*Q_PT)', '[vl] "r"(vl)']
     ops += ["1:"]
     for r in range(rows):
         ops += [f"flh ft{r}, 0(%[x{r}])", f"addi %[x{r}], %[x{r}], 2"]
@@ -76,78 +77,97 @@ def kernel(rows):
         ": " + ",".join(inputs),
         ": " + ",".join('"' + x + '"' for x in clobbers) + ");",
         "}",
-        "static void q_compute(uint32_t cid,uint32_t slot) {",
+        "static inline uint32_t q_vl(uint32_t col,uint32_t left) {",
+        "uint32_t vl=32-(col%32); if(vl>left) vl=left;",
+        "if(col%2) return 1; return vl>1 ? vl-(vl%2) : vl;",
+        "}",
+        "static void q_compute(uint32_t cid,uint32_t slot,uint32_t panel,uint32_t step) {",
         "uint32_t first,last,pb; q_owner(cid,&first,&last,&pb);",
+        "uint32_t count=Q_PSPAN-panel*Q_PANEL_SPAN;",
+        "if(count>Q_PANEL_SPAN) count=Q_PANEL_SPAN;",
+        "uint32_t n=Q_HIDDEN-step*Q_KT; if(n>Q_KT) n=Q_KT;",
         "const _Float16 *x=q_x[slot]+(cid/NUM_CORES_PER_GROUP)*Q_X_STRIDE;",
         "for(uint32_t row=first;row<last;row+=Q_ROWS)",
-        "for(uint32_t j=0;j<Q_PANEL_SPAN;j+=Q_VL)",
-        "q_block(row,pb*Q_PANEL_SPAN+j,q_weights[slot],x);",
+        "for(uint32_t j=0;j<count;) {",
+        "uint32_t col=pb*Q_PANEL_SPAN+j,vl=q_vl(col,count-j);",
+        "q_block(row,col,q_weights[slot],x,vl,n); j+=vl; }",
         "}",
         "static void q_zero(uint32_t cid) {",
         "uint32_t first,last,pb; q_owner(cid,&first,&last,&pb);",
         "for(uint32_t row=first;row<last;++row)",
-        "for(uint32_t j=0;j<Q_PANEL_SPAN;j+=Q_VL) {",
+        "for(uint32_t j=0;j<Q_PANEL_SPAN;) {",
+        "uint32_t vl=q_vl(pb*Q_PANEL_SPAN+j,Q_PANEL_SPAN-j);",
         "_Float16 *p=q_partial+row*Q_PT+pb*Q_PANEL_SPAN+j;",
         'asm volatile("vsetvli t0,%0,e16,m1,ta,ma\\nvmv.v.i v0,0\\nvse16.v v0,(%1)\\n"',
-        ':: "r"(Q_VL),"r"(p):"t0","v0","memory");',
+        ':: "r"(vl),"r"(p):"t0","v0","memory"); j+=vl;',
         "}",
         "}",
     ]
     return "\n".join(text) + "\n"
 
 
-def hash_choices(m, syms):
-    """Production spread/peak ranking on actual tiled remote operand addresses."""
+def request_samples(m, syms):
+    """Sample the actual vector segments, including scalar halfword tails."""
     ng, kt, pt = m["active_groups"], m["kt"], m["pt"]
-    span, vl, stride = m["panel_span"], m["vl"], m["x_stride_elements"]
-    result = []
+    span, stride = m["panel_span"], m["x_stride_elements"]
+    groups = []
+    points = lambda n, limit: sorted(set(int(v) for v in np.linspace(0, n - 1, min(limit, n))))
     for g in range(ng):
-        samples = [[], []]
         owners = m["assignments"][g * 16 : (g + 1) * 16]
-        for slot in range(2):
-            for n in sorted(set(int(v) for v in np.linspace(0, kt - 1, min(16, kt)))):
-                for j in sorted(
-                    set(int(v) * vl for v in np.linspace(0, span // vl - 1, min(4, span // vl)))
-                ):
-                    singles, bursts = set(), set()
-                    for owner in owners:
-                        for row in sorted(
-                            {
-                                owner["row_start"],
-                                max(owner["row_start"], owner["row_end"] - m["rows"]),
-                            }
-                        ):
-                            for r in range(m["rows"]):
-                                addr = syms["q_x"] + 2 * (
-                                    slot * ng * stride + g * stride + (row + r) * kt + n
-                                )
-                                if (addr // 1024) % ng != g:
-                                    singles.add(addr // 4)
-                        addr = syms["q_weights"] + 2 * (
-                            slot * kt * pt + n * pt + owner["pblock"] * span + j
-                        )
-                        assert addr % 4 == 0 and (addr % 64 + vl * 2 <= 64 or addr % 16 == 0)
-                        if (addr // 1024) % ng != g:
-                            bursts.add(addr // 4)
-                    samples[0].append(singles)
-                    samples[1].append(bursts)
+        cohorts, local = [], Counter()
+        for panel in sorted({0, m["panels"] - 1}):
+            count = min(span, m["pspan"] - panel * span)
+            blocks = [list(vectors(o["pblock"] * span, count)) for o in owners]
+            for slot in range(2):
+                for n in points(min(kt, m["hidden"]), 16):
+                    for j in points(max(map(len, blocks)), 4):
+                        single, single_b, burst = set(), set(), set()
+                        for owner, segments in zip(owners, blocks):
+                            if j >= len(segments):
+                                continue
+                            for row in sorted({owner["row_start"], owner["row_end"] - m["rows"]}):
+                                for r in range(m["rows"]):
+                                    addr = syms["q_x"] + 2 * (
+                                        slot * ng * stride + g * stride + (row + r) * kt + n)
+                                    local["a_total"] += 1
+                                    local["a_local"] += (addr // 1024) % ng == g
+                                    if (addr // 1024) % ng != g:
+                                        single.add(addr // 4)
+                            col, vl = segments[j]
+                            addr = syms["q_weights"] + 2 * (slot * kt * pt + n * pt + col)
+                            assert vl <= 2 or (addr % 4 == 0 and addr % 64 + 2 * vl <= 64)
+                            local["b_total"] += 1
+                            local["b_local"] += (addr // 1024) % ng == g
+                            if (addr // 1024) % ng != g:
+                                (burst if vl >= 4 else single_b).add(addr // 4)
+                        cohorts.append(dict(panel=panel, slot=slot, step=n, vector_index=j,
+                                            single=sorted(single | single_b), single_b=sorted(single_b),
+                                            burst=sorted(burst)))
+        groups.append(dict(g=g, cohorts=cohorts, locality={
+            cls: local[cls + "_local"] / local[cls + "_total"] for cls in ["a", "b"]}))
+    return groups
+
+
+def hash_choices(samples):
+    """Production spread/peak ranking on actual tiled remote operand addresses."""
+    result = []
+    for group in samples:
         selected = []
         for cls in range(2):
+            cohorts = [set(c["burst"] if cls else c["single"] + c["single_b"])
+                       for c in group["cohorts"]]
             candidates = []
             for shift in range(4, 11):
                 for bits in range(2 if cls else 1):
                     if shift < 4 + bits:
                         continue
                     histogram, spread = Counter(), 0
-                    for sample in samples[cls]:
-                        banks = [
-                            (((word >> shift) << bits) | ((word >> 4) & bits)) & 15
-                            for word in sample
-                        ]
+                    for sample in cohorts:
+                        banks = [(((word >> shift) << bits) | ((word >> 4) & bits)) & 15
+                                 for word in sample]
                         histogram.update(banks)
                         spread += len(set(banks))
-                    peak = max(histogram.values(), default=0)
-                    candidates.append((-spread, peak, shift, bits))
+                    candidates.append((-spread, max(histogram.values(), default=0), shift, bits))
             best = min(candidates)
             selected.append(dict(shift=best[2], bits=best[3], spread=-best[0], peak=best[1]))
         result.append(selected)
@@ -186,7 +206,7 @@ def main():
     ap.add_argument("--batch", type=int, required=True)
     ap.add_argument("--mapping", choices=["auto", "register", "matmul"], default="auto")
     ap.add_argument("--mshr", choices=["bypass", "merge"], default="merge")
-    ap.add_argument("--kt", type=int, default=32)
+    ap.add_argument("--kt", type=int, default=0)
     ap.add_argument("--pt", type=int, default=0)
     ap.add_argument("--repeats", type=int, default=1)
     a = ap.parse_args()
@@ -197,25 +217,13 @@ def main():
     B, K, P, ng = a.batch, d["hidden"], d["intermediate"], a.mesh * a.mesh
     if a.mapping == "auto":
         a.mapping = "register" if B == 1 else "matmul"
-    assert 1 <= B <= d["batch"] and B & (B - 1) == 0 and K % a.kt == 0
+    assert 1 <= B <= d["batch"] and B & (B - 1) == 0
     policy = select(a.platform_source / "software/runtime", a.out, a.mesh, B, K, P)
     partition = assignments(a.mesh, B, P, policy, a.mapping)
-    stride = ((align(B * a.kt * 2, 1024) // 1024) | 1) * 512
-    pt = a.pt or 8192
-
-    def budget(pt):
-        panels = math.ceil(P / pt)
-        return (
-            4 * K * pt * panels + 2 * (K // a.kt) * ng * stride + 4 * panels * B * pt + 1024 * 1024
-        )
-
-    while not a.pt and budget(pt) > 536870912:
-        pt //= 2
-    assert budget(pt) <= 536870912 and pt % partition["pblocks"] == 0
-    span = pt // partition["pblocks"]
-    vl = min(32, span)
-    assert vl >= 4 and vl & (vl - 1) == 0
-    panels = math.ceil(partition["pspan"] / span)
+    tiling = select_tiling(a.mesh, B, K, P, partition["pblocks"], a.kt, a.pt)
+    a.kt, pt, span = tiling["kt"], tiling["pt"], tiling["panel_span"]
+    stride, steps, panels = tiling["x_stride_elements"], tiling["steps"], tiling["panels"]
+    vl = 32
     src = a.out / "source"
     (src / "software").mkdir(parents=True)
     shutil.copytree(a.platform_source / "config", src / "config")
@@ -234,7 +242,8 @@ def main():
     with (a.out / "x.bin").open("wb") as stream:
         for k in range(0, K, a.kt):
             tile = np.zeros((ng, stride), "<f2")
-            tile[:, : B * a.kt] = x[:, k : k + a.kt].reshape(-1)
+            count = min(a.kt, K - k)
+            tile[:, : B * a.kt].reshape(ng, B, a.kt)[:, :, :count] = x[:, k : k + count]
             stream.write(tile.tobytes())
     for stage in ["gate", "up"]:
         weights = np.memmap(a.dataset / f"{stage}.bin", dtype="<f2", mode="r", shape=(K, P))
@@ -245,7 +254,8 @@ def main():
                     tile = np.zeros((a.kt, partition["pblocks"], span), "<f2")
                     for block in range(partition["pblocks"]):
                         start = block * partition["pspan"] + panel * span
-                        tile[:, block, :valid] = weights[k : k + a.kt, start : start + valid]
+                        count = min(a.kt, K - k)
+                        tile[:count, block, :valid] = weights[k : k + count, start : start + valid]
                     stream.write(tile.tobytes())
         for prefix in ["expected_", "expected_fp16_"]:
             ref = np.memmap(
@@ -258,7 +268,8 @@ def main():
         Q_INTERMEDIATE=P,
         Q_KT=a.kt,
         Q_PT=pt,
-        Q_STEPS=K // a.kt,
+        Q_STEPS=steps,
+        Q_PSPAN=partition["pspan"],
         Q_PANELS=panels,
         Q_ROWS=partition["ks"],
         Q_PBLOCKS=partition["pblocks"],
@@ -340,6 +351,11 @@ data.o: data.S
         active_groups=ng,
         active_cores=ng * 16,
         kt=a.kt,
+        steps=steps,
+        tiling_policy="mesh_full_width_v1",
+        vector_policy="tile_contained_exact_tail_v1",
+        compute_padding=False,
+        tiling_budget=tiling,
         pt=pt,
         panels=panels,
         panel_span=span,
@@ -370,17 +386,21 @@ data.o: data.S
         dataset_manifest=d,
         values=d["values"],
         pattern=d["pattern"],
-        expected_group_barrier_releases=4 + 2 * a.repeats * panels * (3 + 2 * (K // a.kt)),
-        expected_fmac_per_group=[2 * a.repeats * B * K * pt * panels // ng] * ng,
+        expected_group_barrier_releases=4 + 2 * a.repeats * panels * (3 + 2 * steps),
+        expected_fmac_per_group=[sum(2 * a.repeats * K * (o["row_end"] - o["row_start"]) *
+                                     (o["col_end"] - o["col_start"])
+                                     for o in partition["assignments"] if o["group"] == g)
+                                 for g in range(ng)],
         useful_flops=4 * a.repeats * B * K * P,
         reuse_guard_cycles=128,
         programmed_dma_bytes=dict(
-            weights=4 * a.repeats * K * pt * panels,
-            inputs=4 * a.repeats * panels * (K // a.kt) * ng * stride,
+            weights=4 * a.repeats * steps * a.kt * pt * panels,
+            inputs=4 * a.repeats * panels * steps * ng * stride,
             outputs=a.repeats * output_bytes,
         ),
     )
-    choices = hash_choices(m, initial)
+    m["hash_request_samples"] = request_samples(m, initial)
+    choices = hash_choices(m["hash_request_samples"])
     configs = []
     for g in range(ng):
         c = cfg.copy()
@@ -401,6 +421,7 @@ data.o: data.S
         subprocess.run(command, cwd=a.out, stdout=log, stderr=subprocess.STDOUT, check=True)
     final = symbols(a.out / "workload.elf")
     assert all(initial[k] == final[k] for k in ["q_x", "q_weights", "q_partial", "q_output_l2"])
+    assert final["__l1_alloc_base"] <= final["__l1_end"], "Linked L1 overflow"
     names = [
         "enable",
         "hold_subs_single",
@@ -431,7 +452,7 @@ data.o: data.S
             l1_static_and_stacks=final["__l1_alloc_base"],
             l1_usable=final["__l1_end"],
             l1_headroom=final["__l1_end"] - final["__l1_alloc_base"],
-            l2_budget_upper_bound=budget(pt),
+            l2_budget_upper_bound=tiling["l2_estimate"],
         ),
         expected_csr={
             str(g): {str(i): 1 if i == 0 else c[name] for i, name in enumerate(names)}
