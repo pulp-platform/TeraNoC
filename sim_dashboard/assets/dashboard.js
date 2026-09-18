@@ -59,6 +59,14 @@
     return candidates.filter(phase);
   };
   const now = (kind) => rows(selected, kind);
+  // DMA bytes on one interface in a frame, as a share of the L2 bandwidth roof.
+  const axiShare = (fi, channel, field) => {
+    const l2 = (D.roofline?.roofs || []).find((r) => r.boundary === "l2");
+    const rs = rows(fi, "dma").filter((r) => r.channel === channel);
+    if (!rs.length || !l2) return null;
+    const cycles = sum(rs.map((r) => ({ width: r.end - r.start })), "width");
+    return cycles ? sum(rs, field) / cycles / l2.bandwidth : null;
+  };
   const color = (v) =>
     v == null
       ? "#dce2e8"
@@ -284,6 +292,13 @@
         }),
       );
     chart("fpuChart", series);
+    // Delivered DMA bandwidth per direction, as a fraction of the L2 ceiling.
+    chart("axiChart", [
+      { name: "AXI read (delivered)", color: "#2487a8", values: visible.map((i) => axiShare(i, "axi_read", "completed_bytes")) },
+      { name: "AXI write (delivered)", color: "#a65fa2", values: visible.map((i) => axiShare(i, "axi_write", "completed_bytes")) },
+      { name: "AXI read (requested)", color: "#8fc4d6", values: visible.map((i) => axiShare(i, "axi_read", "programmed_bytes")) },
+      { name: "AXI write (requested)", color: "#d0aecd", values: visible.map((i) => axiShare(i, "axi_write", "programmed_bytes")) },
+    ]);
     let [nx, ny] = M.mesh;
     const mesh = $("mesh");
     mesh.style.gridTemplateColumns = `repeat(${nx},minmax(0,1fr))`;
@@ -877,13 +892,34 @@
     }
     $("dmaNote").textContent = dma.note;
     const bytes = dma.programmed_bytes || {};
-    stats("dmaSummary", [
-      ["Weights: programmed bytes", num(bytes.weights, 0)],
-      ["Inputs: programmed bytes", num(bytes.inputs, 0)],
-      ["Outputs: programmed bytes", num(bytes.outputs, 0)],
-      ["Reuse-guard timer cycles", num(dma.reuse_guard_cycles, 0)],
-      ["Observed post-compute wait checks", num(dma.wait_check_cycles, 0)],
-    ]);
+    if (dma.channels) {
+      // Bus-side observation: what each interface moved, and how much of the
+      // benchmark it was busy at all.
+      stats(
+        "dmaSummary",
+        Object.entries(dma.channels).flatMap(([name, c]) => [
+          [`${name}: delivered bytes`, num(c.completed_bytes, 0)],
+          [`${name}: requested bytes`, num(c.programmed_bytes, 0)],
+          [`${name}: bursts`, num(c.transactions, 0)],
+          [`${name}: mean bytes/cycle`, num(c.bytes_per_cycle, 2)],
+          [
+            `${name}: windows with traffic`,
+            `${num(c.active_windows, 0)} of ${num(c.windows, 0)}`,
+          ],
+        ]),
+      );
+    } else {
+      stats("dmaSummary", [
+        ["Weights: programmed bytes", num(bytes.weights, 0)],
+        ["Inputs: programmed bytes", num(bytes.inputs, 0)],
+        ["Outputs: programmed bytes", num(bytes.outputs, 0)],
+        ["Reuse-guard timer cycles", num(dma.reuse_guard_cycles, 0)],
+        ["Observed post-compute wait checks", num(dma.wait_check_cycles, 0)],
+      ]);
+    }
+    if (!dma.projections && dma.channels)
+      empty("dmaPhases", "Per-projection accounting needs application-supplied DMA metadata; the interface totals above are measured.");
+    else
     table("dmaPhases", ["Projection", "Cycles", "Useful utilization", "FPU busy", "Whole-system scope"],
       Object.entries(dma.projections || {}).map(([name, p]) => [name,
         num(p.cycles, 0), num(100*p.utilization, 2)+"%",
@@ -892,10 +928,17 @@
       const rs = rows(i, "dma").filter(r => r.measurement === "software" && r.scope === "global" && r.wait_check_cycles != null);
       return rs.length ? sum(rs, "wait_check_cycles")/sum(rs.map(r => ({width:r.end-r.start})), "width") : null;
     };
-    chart("dmaChart", [
-      {name:"Overall FPU busy", values:visible.map(i => fpu(i))},
-      {name:"Post-compute DMA wait-check fraction", color:"#c67b24", values:visible.map(wait)},
-    ]);
+    const dmaSeries = [{name:"Overall FPU busy", values:visible.map(i => fpu(i))}];
+    if (dma.channels)
+      Object.keys(dma.channels).forEach((name, n) =>
+        dmaSeries.push({
+          name: `${name} delivered (of L2 roof)`,
+          color: ["#2487a8", "#a65fa2"][n % 2],
+          values: visible.map((i) => axiShare(i, name, "completed_bytes")),
+        }));
+    else
+      dmaSeries.push({name:"Post-compute DMA wait-check fraction", color:"#c67b24", values:visible.map(wait)});
+    chart("dmaChart", dmaSeries);
     const [lo, hi] = axisBounds(), width = Math.max(1, hi-lo);
     const tiles = (dma.tiles || []).filter(t => t.begin < hi && t.ready > lo);
     const colors = ["#2487a8", "#a65fa2", "#d2932e"];

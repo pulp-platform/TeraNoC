@@ -15,6 +15,7 @@
 <div id="summary" class="summary"></div>
 <section id="overview" class="tab active">
 <article><h2>FPU lane utilization over time</h2><div class="inline"><label><input id="groupLines" type="checkbox"> Show selected group lines</label><button id="allGroups">Select all groups</button><button id="clearGroups">Clear group lines</button></div><div id="lineGroups" class="chips"></div><div id="fpuChart"></div><p class="hint">Busy lane-cycles / available lane-cycles. Click the chart to select a window; missing windows break the line.</p></article>
+<article><h2>AXI DMA bandwidth over time</h2><div id="axiChart"></div><p class="hint">Bytes delivered on the DMA's AXI interfaces per cycle, against the L2 ceiling from the peaks file. Read bytes are counted per received beat; write bytes are acknowledged once per burst, so the write line is lumpier at fine windows. Dashed lines are the bytes asked of the bus; the gap to the solid lines is backpressure.</p></article>
 <div class="columns"><article><h2>Group mesh & workload progress</h2><p class="hint">Color: FPU utilization, 0–100%. Bars: completed FMAC / assigned FMAC. Click a group to inspect it.</p><div id="mesh" class="mesh"></div></article><article><h2>Group utilization history</h2><div id="fpuHeat"></div><p class="hint">Rows are groups; columns are time windows. Gray means unavailable.</p></article></div>
 </section>
 <section id="memory" class="tab">

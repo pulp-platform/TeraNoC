@@ -93,6 +93,9 @@ def render(records, meta, sources, warnings, args):
         flush(handle, batch)
     page_ids = set()
     page_work = defaultdict(lambda: defaultdict(int))
+    # Measured DMA interface totals, which stand in for the software
+    # double-buffer summary when a run has no application-supplied one.
+    dma_totals = defaultdict(lambda: defaultdict(int))
     try:
       for row in records:
         validate(row)
@@ -108,6 +111,13 @@ def render(records, meta, sources, warnings, args):
           crossing = True
         if row['end']-row['start'] > args.window:
           long_intervals.append(row)
+        if row['kind'] == 'dma' and row.get('phase') == 'bench' and 'channel' in row:
+          d = dma_totals[row['channel']]
+          for field in ('programmed_bytes', 'completed_bytes', 'transactions'):
+            d[field] += row.get(field, 0)
+          d['cycles'] += row['end'] - row['start']
+          d['windows'] += 1
+          d['active_windows'] += 1 if row.get('completed_bytes') else 0
         if row['kind'] == 'work' and (row.get('phase') == 'bench' or
                                       row.get('workload_phase') == 'bench'):
           page_work[page][row['g']] += row['fmac']
@@ -143,6 +153,21 @@ def render(records, meta, sources, warnings, args):
     meta.pop('snapshot_note', None)
     if all(value is not None for value in bench):
       meta.setdefault('benchmark', bench)
+    if dma_totals and 'dma' not in meta:
+      # Bus-side observation only: what each interface actually moved. It does
+      # not describe the application's buffers, so it does not pretend to.
+      meta['dma'] = dict(
+        note='Measured on the DMA AXI interfaces over the benchmark. Delivered bytes '
+             'are read beats received and write bursts acknowledged; requested bytes are '
+             'what the backend asked of the bus, so the difference is backpressure. '
+             'Writes are acknowledged once per burst, so their windows are coarser.',
+        measurement='model',
+        channels={name: dict(
+          programmed_bytes=d['programmed_bytes'], completed_bytes=d['completed_bytes'],
+          transactions=d['transactions'], windows=d['windows'],
+          active_windows=d['active_windows'],
+          bytes_per_cycle=(d['completed_bytes']/d['cycles'] if d['cycles'] else None))
+          for name, d in sorted(dma_totals.items())})
     meta['name'] = meta['name'].split(' — ')[0] + (
       ' — FULL COVERAGE' if args.complete else ' — FULL COVERAGE / COMPLETION UNCONFIRMED')
     warning = (f'Captured records through cycle {extent[1]}. '
