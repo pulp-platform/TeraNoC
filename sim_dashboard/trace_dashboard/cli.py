@@ -2,6 +2,7 @@
 import argparse
 import gc
 import gzip
+import hashlib
 import json
 import pickle
 import tempfile
@@ -55,6 +56,9 @@ def main():
   p.add_argument("--cutoff", type=positive, help="Keep records ending at or before this cycle; default: all recorded intervals")
   p.add_argument("--complete", action="store_true", help="Declare simulation finished; does not validate correctness")
   p.add_argument("--page-cycles", type=positive, help="Detail block width; default: 20000 rounded up to a multiple of --window")
+  p.add_argument("--jobs", type=int, default=1,
+                 help="worker processes for telemetry ingest; 1 (default) reads "
+                      "sequentially. Output is identical either way")
   p.add_argument("--compression-level", type=int, choices=range(1, 10), default=3,
                  help="Lossless gzip level: 3 (default) favors speed; 9 favors file size")
   args = p.parse_args()
@@ -105,23 +109,45 @@ def main():
       source_details[path] = {}
       cached = Path(cache.name)/f'{len(caches)}.pickle.gz'
       caches[path] = cached
+      def accept_header(row):
+        header = {k: v for k, v in row.items() if k != 'kind'}
+        for field in captured_fields:
+          if field in header and field in meta and header[field] != meta[field]:
+            raise ValueError(f"Captured {field} differs between input sources")
+        meta.update(header)
+
       with gzip.open(cached, 'wb', compresslevel=1) as stream:
-        batch = []
-        for row in iter_telemetry(path, source_details[path]):
-          if row['kind'] == 'meta':
-            header = {k: v for k, v in row.items() if k != 'kind'}
-            for field in captured_fields:
-              if field in header and field in meta and header[field] != meta[field]:
-                raise ValueError(f"Captured {field} differs between input sources")
-            meta.update(header)
-          elif selected(row):
-            preferred.add(identity(row))
-            batch.append(row)
-            if len(batch) >= 1024:
-              pickle.dump(batch, stream, protocol=pickle.HIGHEST_PROTOCOL)
-              batch.clear()
-        if batch:
-          pickle.dump(batch, stream, protocol=pickle.HIGHEST_PROTOCOL)
+        if args.jobs > 1:
+          # json.loads and validate() dominate ingest and are pure per row, so the
+          # decode is spread across processes. Reading, the digest and the order
+          # batches reach the cache stay here, which keeps the bytes identical.
+          from concurrent.futures import ProcessPoolExecutor
+          from .parallel import chunks, parse_chunk
+          digest = hashlib.sha256()
+          with ProcessPoolExecutor(max_workers=args.jobs) as pool:
+            tasks = ((str(path), first, blob, args.cutoff, bounds)
+                     for first, blob in chunks(path, digest))
+            for data, ids, headers, _ in pool.map(parse_chunk, tasks):
+              for row in headers:
+                accept_header(row)
+              preferred.update(ids)
+              stream.write(data)
+          source_details[path]['sha256'] = digest.hexdigest()
+          if str(path).endswith('.gz'):
+            source_details[path]['sha256_scope'] = 'decoded JSONL bytes'
+        else:
+          batch = []
+          for row in iter_telemetry(path, source_details[path]):
+            if row['kind'] == 'meta':
+              accept_header(row)
+            elif selected(row):
+              preferred.add(identity(row))
+              batch.append(row)
+              if len(batch) >= 1024:
+                pickle.dump(batch, stream, protocol=pickle.HIGHEST_PROTOCOL)
+                batch.clear()
+          if batch:
+            pickle.dump(batch, stream, protocol=pickle.HIGHEST_PROTOCOL)
       print(f'Validated and cached {path.name} ({time.monotonic()-started:.1f}s)', flush=True)
       if stamp(path) != source_stamps[path]:
         raise ValueError(f'{path} changed while reading; use a stable file snapshot')
