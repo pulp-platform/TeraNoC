@@ -92,6 +92,7 @@ def render(records, meta, sources, warnings, args):
       if len(batch) >= 1024:
         flush(handle, batch)
     page_ids = set()
+    page_work = defaultdict(lambda: defaultdict(int))
     try:
       for row in records:
         validate(row)
@@ -107,6 +108,9 @@ def render(records, meta, sources, warnings, args):
           crossing = True
         if row['end']-row['start'] > args.window:
           long_intervals.append(row)
+        if row['kind'] == 'work' and (row.get('phase') == 'bench' or
+                                      row.get('workload_phase') == 'bench'):
+          page_work[page][row['g']] += row['fmac']
         if row['kind'] not in ('entry', 'bank', 'link'):
           summary.append(row)
         if row.get('phase') == 'bench':
@@ -163,7 +167,7 @@ def render(records, meta, sources, warnings, args):
     root = dict(schema_version=1, meta=meta, hash=hash_result, roofline=roof,
                 diagnostics=diagnostics, warnings=warnings, window=args.window,
                 overview=overview_points(summary), long_intervals=long_intervals,
-                sources=sources,
+                sources=sources, record_counts=dict(counts),
                 pages=[dict(index=n, start=i*args.page_cycles,
                             end=min((i+1)*args.page_cycles, cutoff))
                        for n, i in enumerate(pages)])
@@ -172,24 +176,44 @@ def render(records, meta, sources, warnings, args):
     exported_rows = [] if args.json_out else None
     # Validate and compress detail before serializing the root, so warnings
     # discovered during assembly are included in the exported dashboard.
-    for n, i in enumerate(pages):
-      rows = []
-      with gzip.open(temp/f'{i}.pickle.gz', 'rb') as page_file:
-        while True:
-          try:
-            rows.extend(pickle.load(page_file))
-          except EOFError:
-            break
-      frames, clean = assemble(rows, meta, args.window, warnings,
-                               frame_bounds=(i*args.page_cycles, (i+1)*args.page_cycles))
-      counts_out.update(r['kind'] for r in clean)
-      if exported_rows is not None:
-        exported_rows.extend(clean)
-      (temp/f'{n}.packed').write_text(packed(dict(frames=frames, work_before=work_before.copy()), args.compression_level))
-      print(f'Packed detail block {n+1}/{len(pages)} ({time.monotonic()-started:.1f}s)', flush=True)
-      for row in clean:
-        if row['kind'] == 'work' and (row.get('phase') == 'bench' or row.get('workload_phase') == 'bench'):
-          work_before[row['g']] += row['fmac']
+    # work_before is the bench FMAC of every earlier block, which the partition
+    # pass already counted, so each block can be packed independently.
+    prefixes, running = [], [0]*len(work_before)
+    for i in pages:
+      prefixes.append(list(running))
+      for g, fmac in page_work.get(i, {}).items():
+        running[g] += fmac
+
+    if args.jobs > 1 and exported_rows is None:
+      from concurrent.futures import ProcessPoolExecutor
+      from .parallel import pack_page
+      tasks = [(str(temp), i, n, meta, args.window, args.page_cycles,
+                args.compression_level, prefixes[n]) for n, i in enumerate(pages)]
+      collected = {}
+      with ProcessPoolExecutor(max_workers=args.jobs) as pool:
+        for done, (n, counts_n, block_warnings) in enumerate(pool.map(pack_page, tasks), 1):
+          collected[n] = (counts_n, block_warnings)
+          print(f'Packed detail block {done}/{len(pages)} ({time.monotonic()-started:.1f}s)', flush=True)
+      for n in range(len(pages)):
+        counts_n, block_warnings = collected[n]
+        counts_out.update(counts_n)
+        warnings.extend(block_warnings)
+    else:
+      for n, i in enumerate(pages):
+        rows = []
+        with gzip.open(temp/f'{i}.pickle.gz', 'rb') as page_file:
+          while True:
+            try:
+              rows.extend(pickle.load(page_file))
+            except EOFError:
+              break
+        frames, clean = assemble(rows, meta, args.window, warnings,
+                                 frame_bounds=(i*args.page_cycles, (i+1)*args.page_cycles))
+        counts_out.update(r['kind'] for r in clean)
+        if exported_rows is not None:
+          exported_rows.extend(clean)
+        (temp/f'{n}.packed').write_text(packed(dict(frames=frames, work_before=prefixes[n]), args.compression_level))
+        print(f'Packed detail block {n+1}/{len(pages)} ({time.monotonic()-started:.1f}s)', flush=True)
     if counts_out != counts:
       raise ValueError(f'Record preservation failed: {counts} != {counts_out}')
     warnings[:] = list(dict.fromkeys(warnings))

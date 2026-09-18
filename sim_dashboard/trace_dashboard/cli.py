@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 
 from .packaging import render
-from .model import iter_telemetry, identity
+from .model import iter_telemetry, identity, benchmark_bounds
 from .rtl import parse_transcript
 
 HERE = Path(__file__).resolve().parents[1]
@@ -45,7 +45,8 @@ def main():
   p.add_argument("--mesh", help="NxM, e.g. 4x4 or 8x8; never inferred from group count")
   p.add_argument("--shape", help="GEMM MxNxP; N is reduction dimension")
   p.add_argument("--precision", choices=["fp16", "fp32"])
-  p.add_argument("--cycle-range", help="Display records overlapping START:END cycles; source windows are kept whole")
+  p.add_argument("--cycle-range", help="Display records overlapping START:END cycles, or "
+                 "'bench' for the captured benchmark phase; source windows are kept whole")
   p.add_argument("--cycles", type=positive, help="timed cycles per GEMM pass")
   p.add_argument("--repeat", type=positive)
   p.add_argument("--period", type=positive, default=1000, help="legacy FPU/LP period")
@@ -77,7 +78,14 @@ def main():
   gc.disable()
   try:
     bounds = None
-    if args.cycle_range:
+    if args.cycle_range == 'bench':
+      # The timed region, read from the capture's own phase labels. A run that
+      # streams operands in spends most of its cycles outside it.
+      bounds = benchmark_bounds(args.telemetry)
+      if bounds is None:
+        raise ValueError('--cycle-range bench needs telemetry with a bench phase')
+      print(f'Benchmark phase: cycles {bounds[0]}-{bounds[1]}', flush=True)
+    elif args.cycle_range:
       bounds = [int(x) for x in args.cycle_range.split(':')]
       if len(bounds) != 2 or bounds[0] < 0 or bounds[1] <= bounds[0]:
         raise ValueError('cycle range must be nonnegative START:END with END > START')
@@ -195,6 +203,10 @@ def main():
     if bounds is not None:
       meta['display_cycle_range'] = bounds
       warnings.append(f'Display limited to cycles {bounds[0]}–{bounds[1]}; overlapping source windows are retained whole. Complete raw traces remain in the source files.')
+    if not args.peaks and meta.get('peaks'):
+      args.peaks = Path(meta['peaks'])
+    if args.complete or meta.get('run_complete'):
+      args.complete = True
     if args.peaks:
       sources.append(args.peaks)
 

@@ -86,3 +86,31 @@ def chunks(path, digest, target=4 << 20):
                 buffer, size = [], 0
     if buffer:
         yield line_number, b"".join(buffer)
+
+
+def pack_page(task):
+    """Assemble and compress one detail block; returns its counts and warnings.
+
+    Runs in a worker process. Every block is independent once `work_before` is
+    known, which the partition pass computes, so blocks pack in any order.
+    """
+    import gzip as _gzip
+    from .model import assemble
+    from .packaging import packed
+
+    temp, source, index, meta, window, page_cycles, level, work_before = task
+    rows, warnings = [], []
+    with _gzip.open(f"{temp}/{source}.pickle.gz", "rb") as page_file:
+        while True:
+            try:
+                rows.extend(pickle.load(page_file))
+            except EOFError:
+                break
+    frames, clean = assemble(rows, meta, window, warnings,
+                             frame_bounds=(source * page_cycles, (source + 1) * page_cycles))
+    with open(f"{temp}/{index}.packed", "w") as out:
+        out.write(packed(dict(frames=frames, work_before=work_before), level))
+    counts = {}
+    for row in clean:
+        counts[row["kind"]] = counts.get(row["kind"], 0) + 1
+    return index, counts, warnings

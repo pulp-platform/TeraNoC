@@ -1,5 +1,6 @@
 """Simulator-independent telemetry validation and conservative aggregation."""
 import json
+import re
 import gzip
 import hashlib
 import math
@@ -54,6 +55,34 @@ def iter_telemetry(path, source_info=None):
     source_info['sha256'] = digest.hexdigest()
     if str(path).endswith('.gz'):
       source_info['sha256_scope'] = 'decoded JSONL bytes'
+
+
+BENCH_BOUNDS = re.compile(rb'"start":(\d+),"end":(\d+),"phase":"bench"')
+
+
+def benchmark_bounds(paths):
+  """First and last cycle labelled bench across the given captures, or None.
+
+  Scans the global per-window traffic records so the cost stays proportional to
+  the number of windows rather than the number of records, and falls back to a
+  full scan for captures that carry no traffic records.
+  """
+  lo = hi = None
+  for marker in (b'"kind":"traffic"', b''):
+    for path in paths:
+      opener = gzip.open if str(path).endswith('.gz') else open
+      with opener(path, 'rb') as stream:
+        for line in stream:
+          if marker and marker not in line:
+            continue
+          found = BENCH_BOUNDS.search(line)
+          if found:
+            start, end = int(found[1]), int(found[2])
+            lo = start if lo is None else min(lo, start)
+            hi = end if hi is None else max(hi, end)
+    if lo is not None:
+      return [lo, hi]
+  return None
 
 
 def read_telemetry(path, bounds=None):
