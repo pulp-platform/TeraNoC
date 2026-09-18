@@ -4,6 +4,7 @@ import gc
 import gzip
 import hashlib
 import json
+import re
 import pickle
 import tempfile
 import time
@@ -45,8 +46,9 @@ def main():
   p.add_argument("--mesh", help="NxM, e.g. 4x4 or 8x8; never inferred from group count")
   p.add_argument("--shape", help="GEMM MxNxP; N is reduction dimension")
   p.add_argument("--precision", choices=["fp16", "fp32"])
-  p.add_argument("--cycle-range", help="Display records overlapping START:END cycles, or "
-                 "'bench' for the captured benchmark phase; source windows are kept whole")
+  p.add_argument("--cycle-range", help="Display records overlapping START:END cycles, "
+                 "'bench' for the whole captured benchmark phase, or 'bench+<cycles>' for "
+                 "its first <cycles>; source windows are kept whole")
   p.add_argument("--cycles", type=positive, help="timed cycles per GEMM pass")
   p.add_argument("--repeat", type=positive)
   p.add_argument("--period", type=positive, default=1000, help="legacy FPU/LP period")
@@ -78,13 +80,24 @@ def main():
   gc.disable()
   try:
     bounds = None
-    if args.cycle_range == 'bench':
+    if args.cycle_range and args.cycle_range.startswith('bench'):
       # The timed region, read from the capture's own phase labels. A run that
-      # streams operands in spends most of its cycles outside it.
+      # streams operands in spends most of its cycles outside it, and a long run
+      # is usually read from its start rather than in full, so 'bench+N' takes
+      # the first N cycles of it.
       bounds = benchmark_bounds(args.telemetry)
       if bounds is None:
         raise ValueError('--cycle-range bench needs telemetry with a bench phase')
-      print(f'Benchmark phase: cycles {bounds[0]}-{bounds[1]}', flush=True)
+      span = args.cycle_range[len('bench'):]
+      if span:
+        if not re.fullmatch(r'\+\d+', span):
+          raise ValueError("--cycle-range takes 'bench', 'bench+<cycles>' or START:END")
+        length = int(span[1:])
+        if length < 1:
+          raise ValueError('--cycle-range bench+<cycles> needs a positive length')
+        bounds = [bounds[0], min(bounds[0] + length, bounds[1])]
+      print(f'Benchmark phase: cycles {bounds[0]}-{bounds[1]}'
+            f'{" (truncated)" if span else ""}', flush=True)
     elif args.cycle_range:
       bounds = [int(x) for x in args.cycle_range.split(':')]
       if len(bounds) != 2 or bounds[0] < 0 or bounds[1] <= bounds[0]:
