@@ -508,6 +508,12 @@ int main(void) {
   // of reset, so the fill, the DMA and the warm-up all bypass it and cannot leave
   // a line in its response cache before the measured region.
   //--------------------------------------------------------------------------
+  // Fill the pipeline before the timer starts, so the measured region begins
+  // exactly when the cores enter the first compute stage -- and before the
+  // warm-up below, which reads the tile it lands.
+  qwen_prime(QWEN_GATE, cid);
+  mempool_barrier(num_cores);
+
 #if ICACHE_WARMUP
   {
     const uint32_t warm = (QWEN_KT < 6u) ? (uint32_t)QWEN_KT : 6u;
@@ -561,11 +567,6 @@ int main(void) {
   // Per-projection boundaries, printed after the region so timing is undisturbed:
   // they answer whether the second projection costs the same as the first.
   uint32_t stage_end[QWEN_STAGES] = {0, 0};
-
-  // Fill the pipeline before the timer starts, so the measured region begins
-  // exactly when the cores enter the first compute stage.
-  qwen_prime(QWEN_GATE, cid);
-  mempool_barrier(num_cores);
 
   const uint32_t t0 = mempool_get_timer();
   mempool_start_benchmark();
