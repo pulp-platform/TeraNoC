@@ -5632,15 +5632,19 @@ module mempool_group_mshr
               drv_sel_beat_off  = '0;
               drv_sel_burst_one = 1'b0;
               drv_sel_sub_core  = '0;
+              drv_sel_sub_meta  = '0;
               for (int b = 0; b < MshrBankNum; b++) begin
                 if (resp_sel_bank_oh[tile_i][port_i][b]) begin
                   drv_sel_data      = pub_drv_data     [b];
                   drv_sel_beat_off  = pub_drv_beat_off [b];
                   drv_sel_burst_one = pub_drv_burst_one[b];
                   drv_sel_sub_core  = pub_drv_sub_core [b];
+                  // Selected with the bank one-hot, like every operand above. bank_first is
+                  // one-hot in every branch, so this is pub_drv_sub_meta[bank_win] without the
+                  // encoder in front of it.
+                  drv_sel_sub_meta  = pub_drv_sub_meta [b];
                 end
               end
-              drv_sel_sub_meta  = pub_drv_sub_meta [resp_sel_bank[tile_i][port_i]];
             end else begin
               drv_sel_data      = drv_data     [resp_sel_mshr_id[tile_i][port_i]];
               drv_sel_beat_off  = drv_beat_off [resp_sel_mshr_id[tile_i][port_i]];
@@ -5684,8 +5688,11 @@ module mempool_group_mshr
       for (int e = 0; e < MshrNum; e++) begin
         for (int t = 0; t < NumTilesPerGroup; t++) begin
           for (int p = 1; p < NumRemoteRespPortsPerTile; p++) begin
+            // Membership on the bank ONE-HOT: e / MshrWaysPerBank is a constant once the loop is
+            // unrolled, so this is a wire, where the encoded form was a bank encoder feeding a
+            // BankIdW compare in every (entry, lane) pair.
             if (drain_published[e] && drain_fire_bank[t][p] &&
-                (resp_sel_bank[t][p] == BankIdW'(e / MshrWaysPerBank))) begin
+                resp_sel_bank_oh[t][p][e / MshrWaysPerBank]) begin
               for (int s = 0; s < MshrMergeReqs; s++) begin
                 if (drain_fire_bank_sub_oh[t][p][s]) begin
                   bp_clr[e][s] = 1'b1;
@@ -6288,6 +6295,18 @@ module mempool_group_mshr
     // -------------------------------------------------------------------------------------------
     // No generate/endgenerate here: this sits inside an existing generate region, and vlog rejects
     // a nested pair outright -- the bare if/for forms are generate constructs already.
+      // Both the drive select and the clear scatter read the bank one-hot where they used to read
+      // its encoding, so the two must agree whenever a banked row won the lane.
+      for (genvar bt = 0; bt < NumTilesPerGroup; bt++) begin : gen_bank_sel_oh_tile
+        for (genvar bp = 1; bp < NumRemoteRespPortsPerTile; bp++) begin : gen_bank_sel_oh_port
+          bank_sel_oh_matches_encoding: assert property(
+            @(posedge clk_i) disable iff (!rst_ni)
+              !resp_sel_bank_valid[bt][bp] ||
+              ($onehot(resp_sel_bank_oh[bt][bp]) &&
+               resp_sel_bank_oh[bt][bp][resp_sel_bank[bt][bp]]))
+            else $fatal(1, "bank one-hot disagrees with its encoding at tile %0d port %0d", bt, bp);
+        end
+      end
       // The banked clear scatter carries no pool term; it must equal the pool-qualified form.
       drain_clr_bank_equiv: assert property(
         @(posedge clk_i) disable iff (!rst_ni)

@@ -17434,3 +17434,25 @@ silent. Full-chip VCS gate (`L_fp16_512x64x256`, HEAD vs A+B) still running at c
 
 **Status.** Committed ahead of the full-chip gate at the user's request. OOC pair `pool0ab`
 (overflow_num=0) and `pool1ab` (=1) running at TCK 1.0 from md5 `239316407c61f7d3`.
+
+## 2026-09-19 18:05 — group MSHR: drain operands and clear scatter on the bank one-hot
+
+**Purpose.** Remove the bank ENCODER from the response drain. Two sites still read the encoded
+`resp_sel_bank` while every sibling operand already read `resp_sel_bank_oh`.
+
+**Implementation.** `drv_sel_sub_meta` moves inside the existing one-hot select loop; the banked
+clear scatter tests `resp_sel_bank_oh[t][p][e / MshrWaysPerBank]` (a constant index once unrolled)
+instead of a BankIdW compare replicated over every entry x lane pair. Added
+`bank_sel_oh_matches_encoding`, asserting the one-hot and its encoding agree whenever a banked row
+won the lane. After this `resp_sel_bank` has no synthesised reader, so the encoder folds away.
+
+**Result.** Overflow-pool directed suites 15/15 cycle-identical (pool 0/1/2, handshake + response
+incl. `cross_clear`), no assertion fired. Full-chip VCS gate: the baseline and transformed logs are
+**md5-identical** (`9514bcb2de8fe856`, 240,321,066 bytes), 16233 cycles, retval 0, 0 fatals.
+
+**Note.** `hardware/elf/` was deleted by cleanup elsewhere, including `L_fp16_512x64x256.elf` (the
+reference workload behind the 6993/6776/7089 figures). This gate used a private copy of the
+`gemm_20260910/decode_4x4` campaign workload instead.
+
+**Status.** Committed. The `f127f114` reg->reg regression is separately confirmed by `bisB0` and is
+NOT from this change or from `e41ce910`.
