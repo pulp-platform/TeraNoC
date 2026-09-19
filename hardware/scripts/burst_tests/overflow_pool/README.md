@@ -39,7 +39,7 @@ remain free. It does not seed or force internal state. Cases are:
 | Case | Check |
 | --- | --- |
 | `alloc_stall` | With a zero hold window and blocked egress, the pool does not allocate an unaccepted scalar request; reopening egress produces exactly one fetch and response. |
-| `owner_inflight` | A prior allocation in another bank with overlapping owner IDs blocks a new pool allocation before its entry becomes resident. |
+| `owner_parallel` | Two bursts with disjoint per-lane IDs but overlapping legacy metadata windows allocate consecutively into a bank and the pool. |
 | `replay_scalar` | A scalar cohort survives an eight-cycle gap, merges, waits for egress readiness and delivers one fetched word to each subscriber. |
 | `replay_burst` | The same sequence for an eight-beat burst, with response input/output backpressure and checks for every subscriber's data, beat ID and duplicate delivery. |
 | `two_entries` | At `--pool-num 2`, two distinct requests occupy both pool entries, wait for egress, issue tags `MshrNum+1` and `MshrNum+2`, and return distinct payloads to their respective owners. |

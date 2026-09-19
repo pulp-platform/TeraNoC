@@ -46,7 +46,7 @@ def main():
     parser.add_argument('--define', action='append', default=[], metavar='NAME=VALUE',
                         help='Override an additional compile define; repeatable')
     parser.add_argument('--cases', nargs='+',
-                        default=['alloc_stall', 'owner_inflight',
+                        default=['alloc_stall', 'owner_parallel',
                                  'replay_scalar', 'replay_burst'])
     parser.add_argument('--vcs', default='vcs-2024.09-zr')
     args = parser.parse_args()

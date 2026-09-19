@@ -216,29 +216,34 @@ module overflow_pool_tb;
     wait_delivery(1, 1);
   endtask
 
-  task automatic owner_inflight;
-    // Allocate on another bank, then immediately present an overlapping owner
-    // ID at the full bank. Its first cycle sees the registered allocation before
-    // that entry becomes resident, so only the owner interlock can block it.
+  task automatic owner_parallel;
+    // Two eight-word bursts occupy distinct per-lane IDs (0..1 and 2..3), but
+    // their old burst_len-wide metadata windows overlap. Admit the second into
+    // the pool while the first banked allocation is still pending.
     @(negedge clk);
-    present(0, TestAddr, 1);
+    present(0, TestAddr, 8);
     req[0][1].tgt_addr = TestAddr + tcdm_addr_t'('h10);
     #0.1;
-    if (dut.req_bank[0][1] !== 1) $fatal(1, "owner setup did not use bank one");
+    if (NumMemPortsPerSpatz != 4 || dut.req_bank[0][1] !== 1)
+      $fatal(1, "owner-parallel setup requires four lanes and bank one");
     @(posedge clk);
-    if (req_ready[0][1] !== 1) $fatal(1, "owner setup was not accepted");
+    if (req_ready[0][1] !== 1) $fatal(1, "banked allocation was not accepted");
     @(negedge clk);
-    present(0, TestAddr, 1);
-    if (dut.req_owner_inflight[0][1] !== 1 ||
-        dut.req_alloc_found_pool[0][1] !== 1)
-      $fatal(1, "owner-inflight hazard was not exercised");
+    present(0, TestAddr, 8);
+    req[0][1].wdata.meta_id = meta_id_t'(2);
+    #0.1;
+    if (dut.agb_q_v[1] !== 1 || dut.req_alloc_found_pool[0][1] !== 1)
+      $fatal(1, "pending banked allocation and pool grant were not exercised");
     @(posedge clk);
-    if (req_ready[0][1] !== 0 || dut.apb_v !== 0)
-      $fatal(1, "owner-inflight request allocated pool: ready=%b grant=%b",
-             req_ready[0][1], dut.apb_v);
+    if (req_ready[0][1] !== 1 || dut.apb_v !== 1)
+      $fatal(1, "legal same-owner request stalled behind pending allocation");
+    @(negedge clk);
+    req_valid = '0;
     repeat (4) @(negedge clk);
-    if (dut.pool_q_valid !== 0 || accepted != 1 || fetches != 0)
-      $fatal(1, "blocked owner request escaped after allocation became resident");
+    if (dut.pool_q_valid[0] !== 1 || accepted != 2 || fetches != 0 ||
+        $countones(dut.mshr_q_valid) != 3 ||
+        dut.pool_q[0].sub_reqs[0].meta_id_base !== meta_id_t'(2))
+      $fatal(1, "parallel owner allocations did not remain independently resident");
   endtask
 
   task automatic replay_stall(input int len);
@@ -317,7 +322,7 @@ module overflow_pool_tb;
     fill_bank();
     if (PoolNum == 0) check_pool_off();
     else if (test_case == "alloc_stall") alloc_stall();
-    else if (test_case == "owner_inflight") owner_inflight();
+    else if (test_case == "owner_parallel") owner_parallel();
     else if (test_case == "replay_scalar") replay_stall(1);
     else if (test_case == "replay_burst") replay_stall(8);
     else if (test_case == "two_entries") two_entries();

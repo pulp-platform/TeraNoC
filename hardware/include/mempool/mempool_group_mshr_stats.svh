@@ -66,7 +66,7 @@
                   rc_bank_ovf_inc[req_bank[t][p]] = rc_bank_ovf_inc[req_bank[t][p]] + 1'b1;
                 end
               end
-              if (req_addr_hit_drain[t][p] || req_meta_conflict[t][p]) begin
+              if (req_addr_hit_drain[t][p]) begin
                 if (req_len[t][p] == BurstLenWidth'(1)) begin
                   rc_drain_stall_s_inc = rc_drain_stall_s_inc + 1'b1;
                 end else begin

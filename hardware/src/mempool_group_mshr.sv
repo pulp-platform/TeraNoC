@@ -274,10 +274,6 @@ module mempool_group_mshr
   // Source the hold-the-fetch REPLAY walker from the registered array.
   localparam bit ReplayFromQ = `ifdef GROUP_MSHR_REPLAY_FROM_Q `GROUP_MSHR_REPLAY_FROM_Q `else 1'b1 `endif;
 
-  // req_meta_ovlp_map is the last [lane][MshrNum] structure in the module: 32 lanes x 64 entries =
-  // 2048 replications of a tile compare, a core compare and a two-sided modular range test. But the
-  // relation is SPARSE -- the test is gated on sub_reqs[0].tile_id == tile_i, and an entry has
-  localparam bit MetaOvlpByOwner = `ifdef GROUP_MSHR_META_OVLP_BY_OWNER `GROUP_MSHR_META_OVLP_BY_OWNER `else 1'b1 `endif;
   // Extend the head-beat drain's BankPublish narrowing to the second-slot (drain2) selector,
   // which is otherwise ungated and runs MshrNum-wide in every config x 32 (tile, resp port)
   // instances. Published entries are addressed as b*MshrWaysPerBank + pub_w[b] with b a loop
@@ -735,22 +731,8 @@ module mempool_group_mshr
   // Merge capacity for this way, evaluated where the entry index is still the EARLY req_bank.
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrWaysPerBank-1:0] req_hit_cap_way;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrWaysPerBank-1:0] req_hit_retire_way;
-  // Same-address exclusion for the meta-overlap test, evaluated where the tile is a loop constant.
-  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrNum-1:0] req_same_addr_ent;
-  // Meta-overlap is a CROSS-address check (same tile+core, different address, overlapping meta_id
-  // range) that protects core-side (core,meta_id) response uniqueness.
-  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrNum-1:0]         req_meta_ovlp_map;
-  // Meta-range overlap: one result per (entry, req port), scattered by an owner one-hot. An entry
-  // has exactly one owner tile, so the per-lane form was 63/64 dead.
-  logic      [MshrNum-1:0][NumRemoteReqPortsPerTile-1:1]                             mo_ovlp;
-  logic      [MshrNum-1:0][NumTilesPerGroup-1:0]                                     mo_owner_oh;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_hit_mshr;
   logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_addr_hit_drain;
-  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_meta_conflict;
-  /// An allocation from this lane's own (tile, core) is recorded but not yet in mshr_q, so
-  /// req_meta_ovlp_map cannot see its meta range. Conservative: same owner, any bank.
-  logic      [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_owner_inflight;
-  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][MshrBankNum-1:0]  req_owner_inflight_bank;
   /// This request's line is being allocated right now -- recorded in agb_q_*, not yet in mshr_q.
   /// req_addr_hit_way reads the way's OLD key and would miss, so without forwarding the request
   /// either allocates a duplicate (wrong) or waits a cycle. Forward instead: the target entry id
@@ -800,7 +782,7 @@ module mempool_group_mshr
   logic    [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                req_alloc_found;
   mshr_id_t[NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                req_alloc_found_mshr_id;
   // Per-bank single-allocation-per-cycle scheme: req_alloc_cand marks a request that
-  // wants a new entry: a mergeable load that missed, with no drain or meta hazard.
+  // wants a new entry: a mergeable load that missed, with no same-address drain hazard.
   logic    [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]                req_alloc_cand;
   logic    [MshrBankNum-1:0]                                                   bank_has_free;
   mshr_id_t[MshrBankNum-1:0]                                                   bank_free_id;
@@ -825,12 +807,8 @@ module mempool_group_mshr
   logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][PoolArr-1:0] pool_hit_way;
   logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][PoolArr-1:0] pool_addr_hit_drain_way;
   logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][PoolArr-1:0] pool_cap_way;
-  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][PoolArr-1:0] pool_meta_ovlp;
-  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][PoolArr-1:0] pool_same_addr_excl;
   logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_hit_pool;
   logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_addr_hit_drain_pool;
-  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_meta_conflict_pool;
-  logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_owner_inflight_pool;
   logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1]              req_fwd_pool_hit;
   logic [NumTilesPerGroup-1:0][NumRemoteReqPortsPerTile-1:1][PoolIdxW-1:0] req_fwd_pool_id;
   /// The selected pool merge target. Kept separate from req_hit_mshr_sel_id because that is
@@ -1448,8 +1426,6 @@ module mempool_group_mshr
     map_resp_port_id = mapped_port;
   endfunction
 
-  // Meta-range overlap between a request and an entry.
-
   assign scan_data_o = scan_data_i;
   assign csr_trace_any_i = 1'b1;
 
@@ -1895,76 +1871,13 @@ module mempool_group_mshr
           // from a register-only vector.
           assign req_hit_retire_way[tile_i][port_i][way_i] = retire_eligible[e_abs];
         end
-        // Full-table meta-overlap (cross-bank): same tile+core, overlapping meta_id, different
-        // address.
-        if (MetaOvlpByOwner) begin : gen_req_meta_ovlp_owner
-          for (genvar mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin : gen_map
-            // Same-address exclusion, moved here from mo_ovlp: there the owner tile is a signal,
-            // so it muxed req_addr_hit_way -- the deepest term in the lookup -- through a
-            // NumTilesPerGroup:1 select. Here tile_i is a loop constant and no mux exists. Exact:
-            // mo_owner_oh[e][t] implies sub_reqs[0].tile_id == t, so under it the two forms read
-            // the same signals, and where mo_owner_oh is 0 the product is 0 either way.
-            // Bank-local, as before: a same-address entry must lie in the request's own bank, so
-            // the bank compare plus the bank-scoped req_addr_hit_way is the whole test.
-            assign req_same_addr_ent[tile_i][port_i][mshr_i] =
-                (req_bank[tile_i][port_i] == BankIdW'(mshr_i / MshrWaysPerBank)) &&
-                req_addr_hit_way[tile_i][port_i][mshr_i % MshrWaysPerBank];
-            assign req_meta_ovlp_map[tile_i][port_i][mshr_i] =
-                mo_owner_oh[mshr_i][tile_i] && mo_ovlp[mshr_i][port_i] &&
-                !req_same_addr_ent[tile_i][port_i][mshr_i];
-          end
-        end else begin : gen_req_meta_ovlp_perlane
-          for (genvar mshr_i = 0; mshr_i < MshrNum; mshr_i++) begin : gen_req_meta_ovlp
-            logic same_addr_excl;
-            assign same_addr_excl =
-                (req_bank[tile_i][port_i] == BankIdW'(mshr_i / MshrWaysPerBank)) &&
-                req_addr_hit_way[tile_i][port_i][mshr_i % MshrWaysPerBank];
-            assign req_meta_ovlp_map[tile_i][port_i][mshr_i] =
-                req_can_merge[tile_i][port_i] &&
-                mshr_q_valid[mshr_i] &&
-                ((mshr_q[mshr_i].state == MSHR_WAIT_RESP) ||
-                 (mshr_q[mshr_i].state == MSHR_DRAIN_RESP) ||
-                 (mshr_q[mshr_i].state == MSHR_RESP_HOLD)) &&
-                (mshr_q[mshr_i].sub_reqs[0].tile_id == tile_group_id_t'(tile_i)) &&
-                (mshr_q[mshr_i].sub_reqs[0].core_id == req_in[tile_i][port_i].wdata.core_id) &&
-                // Keep same-entry hits legal; block only cross-entry overlaps.
-                !same_addr_excl &&
-                // Two-sided modular range test in place of a MetaSpace-wide mask AND +
-                // OR-reduce.
-                (mshr_q[mshr_i].burst_len != '0) &&
-                (req_len[tile_i][port_i] != '0) &&
-                ((meta_id_t'(mshr_q[mshr_i].sub_reqs[0].meta_id_base -
-                             req_in[tile_i][port_i].wdata.meta_id) < req_len[tile_i][port_i]) ||
-                 (meta_id_t'(req_in[tile_i][port_i].wdata.meta_id -
-                             mshr_q[mshr_i].sub_reqs[0].meta_id_base) < mshr_q[mshr_i].burst_len));
-          end
-        end
-        // Pool hits are folded into the same three reductions. Without this, a request that hits a
+        // Pool hits are folded into the same two reductions. Without this, a request that hits a
         // pool entry would also read as "missed every entry" and could win the allocator, resident
         // twice -- the single-copy violation the pool must not create.
         assign req_hit_mshr[tile_i][port_i] = |req_hit_way[tile_i][port_i] |
                                               req_hit_pool[tile_i][port_i];
         assign req_addr_hit_drain[tile_i][port_i] = |req_addr_hit_drain_way[tile_i][port_i] |
                                                     req_addr_hit_drain_pool[tile_i][port_i];
-        assign req_meta_conflict[tile_i][port_i] = |req_meta_ovlp_map[tile_i][port_i] |
-                                                   req_meta_conflict_pool[tile_i][port_i];
-
-        // req_meta_ovlp_map scans mshr_q across ALL banks, so the per-bank hold below cannot
-        // cover it: an in-flight allocation in another bank is invisible to the overlap check.
-        // Same (tile, core) is the conservative stand-in -- one registered compare per bank.
-        for (genvar b = 0; b < MshrBankNum; b++) begin : gen_owner_inflight_bank
-          assign req_owner_inflight_bank[tile_i][port_i][b] =
-              agb_q_v[b] && (agb_q_tile[b] == tile_group_id_t'(tile_i)) &&
-              (agb_q_core[b] == req_in[tile_i][port_i].wdata.core_id) &&
-              ((meta_id_t'(agb_q_meta[b] - req_in[tile_i][port_i].wdata.meta_id) <
-                req_len[tile_i][port_i]) ||
-               (meta_id_t'(req_in[tile_i][port_i].wdata.meta_id - agb_q_meta[b]) <
-                agb_q_len[b]));
-        end
-        // A forwarding lane is excluded from candidacy below; the pool's forwarding record needs its
-        // own exclusion because req_fwd_hit covers the per-bank records only.
-        assign req_owner_inflight[tile_i][port_i] = |req_owner_inflight_bank[tile_i][port_i] |
-                                                    req_owner_inflight_pool[tile_i][port_i];
         // Exactly the req_addr_hit_way key, compared against the in-flight allocation record.
         // agb_q_len keeps a different-length request free to allocate its own entry, as req_hit_way
         // would have let it.
@@ -2007,40 +1920,6 @@ module mempool_group_mshr
     end
   end
 
-  // Meta-range overlap, computed ONCE PER ENTRY (see MetaOvlpByOwner).
-  generate
-    for (genvar e = 0; e < MshrNum; e++) begin : gen_mo_entry
-      // Owner one-hot. Only read where mo_ovlp is non-zero, which requires mshr_q_valid[e].
-      for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_mo_owner
-        assign mo_owner_oh[e][t] =
-            mshr_q_valid[e] && (mshr_q[e].sub_reqs[0].tile_id == tile_group_id_t'(t));
-      end
-      for (genvar p = 1; p < NumRemoteReqPortsPerTile; p++) begin : gen_mo_port
-        // NumTilesPerGroup:1 select of the owner tile's request on this port.
-        tile_group_id_t mo_ot;
-        assign mo_ot = mshr_q[e].sub_reqs[0].tile_id;
-        assign mo_ovlp[e][p] =
-            // req_can_merge is NOT tested here: both readers of req_meta_conflict already AND
-            // req_can_merge[tile_i][port_i], which under mo_owner_oh is this same signal. Testing
-            // it here only added a NumTilesPerGroup:1 mux per entry per port.
-            mshr_q_valid[e] &&
-            ((mshr_q[e].state == MSHR_WAIT_RESP) ||
-             (mshr_q[e].state == MSHR_DRAIN_RESP) ||
-             (mshr_q[e].state == MSHR_RESP_HOLD)) &&
-            (mshr_q[e].sub_reqs[0].core_id == req_in[mo_ot][p].wdata.core_id) &&
-            // Length guards are load-bearing -- see the per-lane form for why.
-            (mshr_q[e].burst_len != '0) &&
-            // req_len != 0 is not tested: len_o is `? 1 : len_raw_o` and len_raw_o is
-            // `? 1 : burst_len` with the zero case yielding 1, so it is >= 1 by construction.
-            // Synthesis cannot fold that across the req_decode ungroup boundary.
-            ((meta_id_t'(mshr_q[e].sub_reqs[0].meta_id_base -
-                         req_in[mo_ot][p].wdata.meta_id) < req_len[mo_ot][p]) ||
-             (meta_id_t'(req_in[mo_ot][p].wdata.meta_id -
-                         mshr_q[e].sub_reqs[0].meta_id_base) < mshr_q[e].burst_len));
-      end
-    end
-  endgenerate
-
   /// Store byte-merge lane pack: a flat view of req_in for the merge below. Reads req_in only and
   /// nothing else drives these, so it carries no order dependence on the main pass.
   generate
@@ -2061,8 +1940,8 @@ module mempool_group_mshr
     for (int i = 0; i < NumReqLanes; i++) stb_hi_isolate[i] = iso[NumReqLanes-1-i];
   endfunction
 
-  // Stores cannot merge, so their input handshake reduces to the owner interlock and
-  // downstream ready. Constant entry indices and one-hot byte winners avoid a lane priority mux.
+  // Stores cannot merge, so their input handshake reduces to downstream ready. Constant entry
+  // indices and one-hot byte winners avoid a lane priority mux.
   generate
     if (PoolNum > 0 && CacheStoreUpdate && EnableRespCache) begin : gen_pool_stb
       for (genvar p = 0; p < PoolNum; p++) begin : gen_entry
@@ -2074,7 +1953,7 @@ module mempool_group_mshr
                 (pool_q[p].state == MSHR_CACHED) && pool_addr_hit_way[t][rp][p] &&
                 req_in_valid[t][rp] && req_is_store[t][rp] &&
                 (req_len[t][rp] == BurstLenWidth'(1)) &&
-                !req_owner_inflight[t][rp] && req_out_ready[t][rp];
+                req_out_ready[t][rp];
           end
         end
         for (genvar b = 0; b < StrbW; b++) begin : gen_byte
@@ -2145,8 +2024,8 @@ module mempool_group_mshr
   end
 
   // ---------------------------------------------------------------------------------------------
-  // POOL request-side lookup: the twins of req_hit_way / req_fwd_eq / req_meta_ovlp / the owner
-  // conflict, evaluated against the pool instead of the request's bank ways.
+  // POOL request-side lookup: the twins of req_hit_way and req_fwd_eq, evaluated against the
+  // pool instead of the request's bank ways.
   //
   // A pool entry is reachable by EVERY bank's requests, so this compare is not bank-scoped and is
   // therefore wider than the banked one -- but only by PoolNum, so at K=1 it is one comparator per
@@ -2201,36 +2080,9 @@ module mempool_group_mshr
             assign pool_cap_way[tile_i][port_i][p] =
                 ((MergeRankW'(pool_q[p].sub_reqs_num + SubReqCountW'(pool_merge_inflight[p])) +
                   MergeRankW'(1)) <= MergeRankW'(MshrMergeReqs));
-            assign pool_same_addr_excl[tile_i][port_i][p] = pool_addr_hit_way[tile_i][port_i][p];
-            // Meta-range overlap, the per-lane form of gen_req_meta_ovlp. A pool entry has no bank
-            // so there is no bank compare to narrow it: the entry is a candidate for every request.
-            assign pool_meta_ovlp[tile_i][port_i][p] =
-                req_can_merge[tile_i][port_i] &&
-                pool_q_valid[p] &&
-                ((pool_q[p].state == MSHR_WAIT_RESP) ||
-                 (pool_q[p].state == MSHR_DRAIN_RESP) ||
-                 (pool_q[p].state == MSHR_RESP_HOLD)) &&
-                (pool_q[p].sub_reqs[0].tile_id == tile_group_id_t'(tile_i)) &&
-                (pool_q[p].sub_reqs[0].core_id == req_in[tile_i][port_i].wdata.core_id) &&
-                !pool_same_addr_excl[tile_i][port_i][p] &&
-                (pool_q[p].burst_len != '0) &&
-                (req_len[tile_i][port_i] != '0) &&
-                ((meta_id_t'(pool_q[p].sub_reqs[0].meta_id_base -
-                             req_in[tile_i][port_i].wdata.meta_id) < req_len[tile_i][port_i]) ||
-                 (meta_id_t'(req_in[tile_i][port_i].wdata.meta_id -
-                             pool_q[p].sub_reqs[0].meta_id_base) < pool_q[p].burst_len));
           end
           assign req_hit_pool[tile_i][port_i]            = |pool_hit_way[tile_i][port_i];
           assign req_addr_hit_drain_pool[tile_i][port_i] = |pool_addr_hit_drain_way[tile_i][port_i];
-          assign req_meta_conflict_pool[tile_i][port_i]  = |pool_meta_ovlp[tile_i][port_i];
-          // The in-flight ALLOCATION record's twin. One record, so no per-bank reduce: the same
-          // (tile, core, meta-range) stand-in the per-bank form uses, against apb_q.
-          assign req_owner_inflight_pool[tile_i][port_i] =
-              apb_q_v && (apb_q_tile == tile_group_id_t'(tile_i)) &&
-              (apb_q_core == req_in[tile_i][port_i].wdata.core_id) &&
-              ((meta_id_t'(apb_q_meta - req_in[tile_i][port_i].wdata.meta_id) <
-                req_len[tile_i][port_i]) ||
-               (meta_id_t'(req_in[tile_i][port_i].wdata.meta_id - apb_q_meta) < apb_q_len));
           // Forward into an in-flight POOL allocation: exactly the req_fwd_eq key, and the id is the
           // record's own way -- already a pool index, so no mshr_id_t round trip is possible and
           // none is needed.
@@ -2247,12 +2099,8 @@ module mempool_group_mshr
       assign pool_hit_way            = '0;
       assign pool_addr_hit_drain_way = '0;
       assign pool_cap_way            = '0;
-      assign pool_meta_ovlp          = '0;
-      assign pool_same_addr_excl     = '0;
       assign req_hit_pool            = '0;
       assign req_addr_hit_drain_pool = '0;
-      assign req_meta_conflict_pool  = '0;
-      assign req_owner_inflight_pool = '0;
       assign req_fwd_pool_hit        = '0;
       assign req_fwd_pool_id         = '0;
     end
@@ -2309,8 +2157,10 @@ module mempool_group_mshr
     end
   end
 
-  // Allocation candidacy: a mergeable load that missed every resident entry and has no drain/meta
-  // hazard wants a new entry.
+  // Allocation candidacy: a mergeable load that missed every resident entry and has no
+  // same-address drain hazard wants a new entry. Responses select an entry by mshr_tag;
+  // requester metadata IDs need only remain unique until that requester consumes its responses,
+  // not until all other subscribers of the old entry finish draining.
   for (genvar tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin : gen_req_alloc_cand_tile
     for (genvar port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin : gen_req_alloc_cand_port
       assign req_alloc_cand[tile_i][port_i] =
@@ -2321,8 +2171,7 @@ module mempool_group_mshr
           // win the arbiter -- allocating a second entry for a line it is already merging into.
           !req_fwd_hit[tile_i][port_i]       &&
           !req_fwd_pool_hit[tile_i][port_i]  &&
-          !req_addr_hit_drain[tile_i][port_i] &&
-          !req_meta_conflict[tile_i][port_i];
+          !req_addr_hit_drain[tile_i][port_i];
     end
   end
 
@@ -2738,7 +2587,7 @@ module mempool_group_mshr
                 ((pool_q[p].state == MSHR_RESP_HOLD) ||
                  (pool_st_post_cap[p] == MSHR_RESP_HOLD)) && pool_addr_hit_way[t][rp][p] &&
                 req_in_valid[t][rp] && req_is_store[t][rp] &&
-                !req_owner_inflight[t][rp] && req_out_ready[t][rp] &&
+                req_out_ready[t][rp] &&
                 (req_len[t][rp] == BurstLenWidth'(1));
           end
         end
@@ -3748,10 +3597,8 @@ module mempool_group_mshr
   // Keep explicit validity in acceptance even though req_can_merge also
   // carries validity through request decoding.
   // Allocation accept, by the same argument. bank_win_oh[b][s] implies req_alloc_cand[s], which
-  // carries req_can_merge, !req_hit_mshr, !req_fwd_hit, !req_addr_hit_drain and
-  // !req_meta_conflict. Walk the ready chain with that: req_hit_mshr_sel_valid is 0 so the merge
-  // branch is dead; branch 1 needs drain or conflict; branch 3 needs !req_alloc_found, which the
-  // grant contradicts. Only the owner-inflight stall and the hold/NoC arm survive.
+  // excludes resident and in-flight hits and same-address drain hazards. The grant also
+  // excludes the bank-full stall, leaving only the hold-window/NoC acceptance condition.
   logic [NumAllocSlots-1:0]                     arb_hold_nz;
   tcdm_addr_t [NumAllocSlots-1:0]               arb_addr;
   group_id_t [NumAllocSlots-1:0]                arb_grp;
@@ -3776,11 +3623,10 @@ module mempool_group_mshr
         assign arb_hold_nz[Sl]  = ((((req_len[t][p] == BurstLenWidth'(1)) ? cfg_hold_window_single
                                                                          : cfg_hold_window_burst)
                                     != '0));
-        // req_in_valid is in the candidate now. req_out_ready must NOT be folded there: branch 3
-        // of the ready chain would stall the lane and drop req_out_valid, making valid depend on
+        // req_in_valid is in the candidate now. req_out_ready must NOT be folded there: the
+        // bank-full arm would stall the lane and drop req_out_valid, making valid depend on
         // ready. So the allocation keeps a narrow accept.
-        assign alloc_accept[Sl] = !req_owner_inflight[t][p] &&
-                                  (arb_hold_nz[Sl] || req_out_ready[t][p]);
+        assign alloc_accept[Sl] = arb_hold_nz[Sl] || req_out_ready[t][p];
         assign arb_addr  [Sl] = req_addr_key[t][p];
         assign arb_grp   [Sl] = req_in[t][p].tgt_group_id;
         assign arb_len   [Sl] = req_len[t][p];
@@ -3798,9 +3644,8 @@ module mempool_group_mshr
         // The request leaves this port free whatever the grant says.
         assign replay_lane_stall[t][p] =
             !req_in_valid[t][p] || req_merge_valid[t][p] ||
-            req_merge_pool_valid[t][p] || req_owner_inflight[t][p] ||
-            (req_can_merge[t][p] &&
-             (req_addr_hit_drain[t][p] || req_meta_conflict[t][p]));
+            req_merge_pool_valid[t][p] ||
+            (req_can_merge[t][p] && req_addr_hit_drain[t][p]);
         // The two grant arms: bank-full stall when the lane did not win a slot, hold-the-fetch when
         // it did. Both are decode and hit terms only.
         assign replay_fire_a0[t][p] = replay_arm[t][p] &&
@@ -4106,14 +3951,8 @@ module mempool_group_mshr
           end else begin
             // Not a merge into a resident entry: decide STALL / ALLOCATE / BYPASS.
             if (req_can_merge[tile_i][port_i] &&
-                (req_addr_hit_drain[tile_i][port_i] || req_meta_conflict[tile_i][port_i])) begin
-              // A same-address entry is draining, or a meta-id range conflict exists: wait for it.
-              req_in_ready[tile_i][port_i]  = 1'b0;
-            end else if (req_owner_inflight[tile_i][port_i]) begin
-              // The one conflict with an in-flight allocation that cannot be forwarded:
-              // req_meta_ovlp_map scans mshr_q, so it cannot see an in-flight allocation whose meta
-              // range overlaps this request's. Same-line requests do not come here -- they forward
-              // into the in-flight entry (req_fwd_hit) and merge in the same cycle.
+                req_addr_hit_drain[tile_i][port_i]) begin
+              // A same-address entry is draining: wait for it.
               req_in_ready[tile_i][port_i]  = 1'b0;
             end else if (req_can_merge[tile_i][port_i] && !req_alloc_found[tile_i][port_i] &&
                          !req_alloc_found_pool[tile_i][port_i] &&
@@ -4995,11 +4834,11 @@ module mempool_group_mshr
         // req_in_ready is written out rather than read, because it COLLAPSES under req_is_store
         // and synthesis cannot see it: is_store implies !is_load implies !req_can_merge, which
         // kills the merge branch and both mergeable-stall branches, and the hold arm needs
-        // req_can_merge too -- leaving only the owner-inflight stall and the NoC handshake. The
-        // general req_in_ready carries both arbiters; these two operands do not.
+        // req_can_merge too -- leaving only the NoC handshake. The general req_in_ready
+        // carries both arbiters; req_out_ready does not.
         if (StoreForceDrain &&
             req_in_valid[tile_i][port_i] && req_is_store[tile_i][port_i] &&
-            !req_owner_inflight[tile_i][port_i] && req_out_ready[tile_i][port_i] &&
+            req_out_ready[tile_i][port_i] &&
             (req_len[tile_i][port_i] == BurstLenWidth'(1))) begin
           for (int way_i = 0; way_i < MshrWaysPerBank; way_i++) begin
             cache_hit_e =
@@ -5050,7 +4889,7 @@ module mempool_group_mshr
         for (int t = 0; t < NumTilesPerGroup; t++) begin
           for (int rp = 1; rp < NumRemoteReqPortsPerTile; rp++) begin
             if (pool_addr_hit_way[t][rp][p] && req_in_valid[t][rp] &&
-                req_is_store[t][rp] && !req_owner_inflight[t][rp] &&
+                req_is_store[t][rp] &&
                 req_out_ready[t][rp] && (req_len[t][rp] == BurstLenWidth'(1))) begin
               pool_d[p].cacheable = 1'b0;
             end
@@ -6140,7 +5979,7 @@ module mempool_group_mshr
   generate
     // Interlock firing counters. Distinguishes "the interlocks over-block" from "the extra cycle
     // of entry-visibility latency costs throughput" -- the two have the same symptom in cycles.
-    logic [31:0] cut_addr_stall_dbg, cut_owner_stall_dbg, cut_alloc_dbg, cut_bench_cyc_dbg;
+    logic [31:0] cut_addr_stall_dbg, cut_alloc_dbg, cut_bench_cyc_dbg;
     // Port-concurrency probe. The two remote request ports of a tile arbitrate independently
     // today, which is what makes NumAllocSlots 32 and sets the OR-32 + 32-bit LSB-isolate in both
     // bank arbiters. If a tile almost never presents two requests in the same cycle, a 2:1
@@ -6159,7 +5998,7 @@ module mempool_group_mshr
       for (int t = 0; t < NumTilesPerGroup; t++) begin
         for (int pp = 1; pp < NumRemoteReqPortsPerTile; pp++) begin
           if (req_in_valid[t][pp] && req_is_store[t][pp] &&
-              !req_owner_inflight[t][pp] && req_out_ready[t][pp] &&
+              req_out_ready[t][pp] &&
               (req_len[t][pp] == BurstLenWidth'(1))) begin
             for (int w = 0; w < MshrWaysPerBank; w++) begin
               if (req_addr_hit_way[t][pp][w] &&
@@ -6189,12 +6028,10 @@ module mempool_group_mshr
         sfd_hit_cnt_dbg     <= '0;
         pc_tile_both_dbg    <= '0;
         pc_both_rdy_dbg     <= '0;
-        cut_owner_stall_dbg <= '0;
         cut_alloc_dbg       <= '0;
         cut_bench_cyc_dbg   <= '0;
       end else begin
         cut_addr_stall_dbg  <= cut_addr_stall_dbg  + 32'($countones(req_fwd_hit));
-        cut_owner_stall_dbg <= cut_owner_stall_dbg + 32'($countones(req_owner_inflight));
         cut_alloc_dbg       <= cut_alloc_dbg       + 32'($countones(agb_v));
         cut_bench_cyc_dbg   <= cut_bench_cyc_dbg   + 32'd1;
         // Sum across tiles COMBINATIONALLY first: 16 non-blocking increments of one variable in
@@ -6205,8 +6042,8 @@ module mempool_group_mshr
         sfd_hit_cnt_dbg  <= sfd_hit_cnt_dbg  + 32'($countones(sfd_would_fire));
       end
     end
-    final $display("[CUTSTALL] fwd_hits=%0d owner_stalls=%0d allocations=%0d cycles=%0d",
-                   cut_addr_stall_dbg, cut_owner_stall_dbg, cut_alloc_dbg, cut_bench_cyc_dbg);
+    final $display("[CUTSTALL] fwd_hits=%0d allocations=%0d cycles=%0d",
+                   cut_addr_stall_dbg, cut_alloc_dbg, cut_bench_cyc_dbg);
     final $display("[PORTCONC] tile_any=%0d tile_both=%0d both_ready=%0d cycles=%0d",
                    pc_tile_any_dbg, pc_tile_both_dbg, pc_both_rdy_dbg, cut_bench_cyc_dbg);
     final $display("[SFD] group=%0d store_hits_held_entry=%0d knob=%0d",
