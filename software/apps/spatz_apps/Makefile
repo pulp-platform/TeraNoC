@@ -36,11 +36,14 @@ all_llvm: $(ALL_LLVM)
 
 $(APPS): % : $(BIN_DIR)/% $(APPS_DIR)/Makefile $(shell find $(RUNTIME_DIR)/**.{S,c,h,ld} -type f)
 
+# The dump is disassembled with -S, so the source each instruction came from is
+# interleaved as comments. At -O3 that mapping is approximate: one line lands on
+# scattered instruction groups, and inlined code appears under the caller.
 .PHONY: $(BINARIES)
 $(BINARIES): $(BIN_DIR)/%: %/main.c.o $(RUNTIME) $(LINKER_SCRIPT) data_%.h update_opcodes
 	mkdir -p $(dir $@)
 	$(RISCV_CC) -Iinclude -o $@ $< $(RUNTIME) $(RISCV_LDFLAGS) -T$(RUNTIME_DIR)/link.ld
-	$(RISCV_OBJDUMP) $(RISCV_OBJDUMP_FLAGS) -D $@ > $@.dump
+	$(RISCV_OBJDUMP) $(RISCV_OBJDUMP_FLAGS) -D -S $@ > $@.dump
 
 # Regenerate a per-shape GEMM data header from its shape spec. data_gemm.h carries the
 # GEMM_M/N/P/ELEM_BYTES macros that runtime/mshr_cfg.h derives the MSHR tuning from at compile
