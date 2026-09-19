@@ -272,7 +272,6 @@ static float a_mesh[((NUM_GROUPS) * (A_GROUP_STRIDE)) / (GEMM_ELEM_BYTES)]
 #define BOOT_STAGE(stage) do { \
   if (MATMUL_BOOT_PROGRESS && cid == 0) printf("[INIT] " stage "\n"); \
 } while (0)
-#include "gemm_hash_precomputed.h"
 
 //==========================================================
 // MATRIX INITIALIZATION
@@ -428,10 +427,6 @@ int main() {
   //========================================================--
   // INITIALIZATION
   //========================================================--
-  if (!GEMM_HASH_READY) {
-    if (cid == 0) printf("[INIT] missing precomputed hash table\n");
-    return -11;
-  }
   // Initialize barrier for multicore synchronization
   mempool_barrier_init(cid);
   BOOT_STAGE("copy");
@@ -724,7 +719,7 @@ int main() {
 #if MSHR_RUNTIME_CFG
   mshr_cfg_t mshr_cfg = MSHR_CFG_DERIVED_INIT;
   if (mshr_cfg_is_group_writer()) {
-    gemm_hash_prepare(&mshr_cfg, a_use, b, gid);
+    mshr_cfg_tune_gemm(&mshr_cfg, a_use, b, gid);
     if (gid == 0) {
       printf("[GEMM_HASH] group=0 single=%u burst=%u bits=%u search=%u\n",
              (unsigned)mshr_cfg.bank_shift_single,
