@@ -98,6 +98,16 @@
 //              fp16 counts integers exactly only that far.
 #define QWEN_UNIT_K0 3u  // which X column the unit pattern lights up
 
+// Whether the operands are written on target at all. Off by default: the
+// platform is expected to hand us defined memory (tc_sram SimInit on RTL,
+// zeroed L2 in GVSoC). When it is on, it writes the SAME pattern a check build
+// uses -- filling with zeros would cost the same and leave any later comparison
+// meaningless.
+#ifndef QWEN_INIT
+#define QWEN_INIT 0
+#endif
+#define QWEN_FILL ((QWEN_INIT) || (QWEN_CHECK))
+
 _Static_assert(GEMM_ELEM_BYTES == 2, "This app is fp16 only");
 _Static_assert((QWEN_K % QWEN_KT) == 0,
                "K must be a whole number of K tiles: pick a QWEN_KT that divides it");
@@ -161,7 +171,7 @@ static uint32_t qwen_fmac_core[NUM_CORES];
 // Bit patterns, not arithmetic: every value below is exact in fp16, so the whole
 // fill-and-verify path is integer stores, integer loads and integer compares.
 
-#if QWEN_CHECK
+#if QWEN_FILL
 #define QWEN_FP16_ONE 0x3c00u
 // (n/8) for n = -4..4.
 static const uint16_t qwen_grid[9] = {0xb800u, 0xb600u, 0xb400u, 0xb000u, 0x0000u,
@@ -260,27 +270,7 @@ static uint32_t qwen_verify(uint32_t *first_p, uint16_t *got, uint16_t *want) {
   }
   return bad;
 }
-#endif  // QWEN_CHECK
-
-//==============================================================================
-// Defined operands for perf builds
-//==============================================================================
-// .l2_bss reserves the operands without storing them, so on RTL they power up
-// undefined and the x reaches the MSHR response buffer. Zeroing is enough --
-// nothing reads the values back in a perf build -- and it is far cheaper than
-// the check pattern, which costs an integer divide per element. Word stores,
-// strided by core, outside the measured region.
-#if !QWEN_CHECK
-static void qwen_zero_operands(uint32_t cid, uint32_t num_cores) {
-  uint32_t *const w = (uint32_t *)qwen_w_l2;
-  for (uint32_t i = cid; i < (uint32_t)(QWEN_STAGES * QWEN_K * QWEN_LDP) / 2u;
-       i += num_cores)
-    w[i] = 0u;
-  uint32_t *const x = (uint32_t *)qwen_x_l2;
-  for (uint32_t i = cid; i < (uint32_t)(QWEN_B * QWEN_K) / 2u; i += num_cores)
-    x[i] = 0u;
-}
-#endif
+#endif  // QWEN_FILL
 
 //==============================================================================
 // The K-tile pipeline
@@ -501,12 +491,10 @@ int main(void) {
   //--------------------------------------------------------------------------
   // STEP 2: operands.
   //--------------------------------------------------------------------------
-#if QWEN_CHECK
+#if QWEN_FILL
   qwen_fill_operands(cid, num_cores);
-#else
-  qwen_zero_operands(cid, num_cores);
+  mempool_barrier(num_cores);  // every core has written its share of the operands
 #endif
-  mempool_barrier(num_cores);  // the operands hold defined data
   if (cid == 0)
     for (uint32_t r = 0; r < (uint32_t)QWEN_X_REPLICAS; ++r)
       dma_memcpy_blocking(qwen_x + r * (uint32_t)QWEN_X_STRIDE_E, qwen_x_l2,

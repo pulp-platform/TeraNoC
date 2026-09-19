@@ -114,6 +114,9 @@ qwen_k     ?= 5120
 qwen_p     ?= 17408
 qwen_kt    ?= 40
 qwen_check ?= 0
+# Fill the operands on target. Off by default: the platform is expected to hand us
+# defined memory (RTL tc_sram SimInit, GVSoC zeroed). A check build implies it.
+qwen_init ?= 0
 qwen_repeats ?= 1
 qwen-gate-up/data/qwen_shape.h: FORCE
 	@mkdir -p $(@D)
@@ -127,6 +130,7 @@ qwen-gate-up/data/qwen_shape.h: FORCE
 	  echo '#define GEMM_ELEM_BYTES 2'; \
 	  echo '#define QWEN_KT $(qwen_kt)        // reduction rows of W per streamed tile'; \
 	  echo '#define QWEN_CHECK $(qwen_check)'; \
+	  echo '#define QWEN_INIT $(qwen_init)'; \
 	  echo '#define QWEN_REPEATS $(qwen_repeats)'; \
 	  echo '#endif'; \
 	} > $@.tmp
