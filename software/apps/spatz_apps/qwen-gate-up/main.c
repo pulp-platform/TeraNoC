@@ -154,6 +154,7 @@ static elem_t qwen_x[QWEN_X_ELEMS] QWEN_L1;
 // assignment comes from the real split rather than a second copy of the formula.
 static uint32_t qwen_fmac_core[NUM_CORES];
 
+
 //==============================================================================
 // Synthetic operands (QWEN_CHECK builds only)
 //==============================================================================
@@ -265,11 +266,55 @@ static uint32_t qwen_verify(uint32_t *first_p, uint16_t *got, uint16_t *want) {
 // The K-tile pipeline
 //==============================================================================
 
-// Fan-in of the timed region's rendezvous, as log2. 4 means 16, so the first
-// level of the tree is exactly the 16 cores of one group and the second is the
-// 16 groups of the mesh -- each level stays inside one level of the hierarchy.
-// The plain barrier is kept outside the region: it runs once and is simpler.
-#define QWEN_BARRIER_RADIX 4
+// The timed region's rendezvous, ported from the verified MemPool double-buffer
+// barrier (double_buffer_2/apps/tests/main.c).
+//
+// Each stage counts in ONE core's sequential memory -- crt0 puts that region in
+// the core's own tile, so the cores of a group settle their stage without leaving
+// it, which a shared counter array cannot promise. The word is the deepest one of
+// that core's stack slot (crt0.S sets stacklimit to exactly core_id*SEQ_MEM_SIZE),
+// so it is only safe while no stack comes within 8 bytes of its limit; that is the
+// reference's assumption too, and its config matches ours.
+//
+// Radix follows the reference's rule: 16 at 256 cores, so the first stage is the
+// 16 cores of a group and the second the 16 groups of the mesh.
+#if NUM_CORES > 256
+#define QWEN_LOG2_RADIX 5
+#elif NUM_CORES > 64
+#define QWEN_LOG2_RADIX 4
+#elif NUM_CORES > 16
+#define QWEN_LOG2_RADIX 3
+#else
+#define QWEN_LOG2_RADIX 2
+#endif
+#define QWEN_RADIX (1u << QWEN_LOG2_RADIX)
+
+// Returns the counter address to the one core that closed the last stage, and 0
+// to everyone else -- who are asleep until that core wakes them.
+static uint32_t qwen_log_barrier(uint32_t step, uint32_t core_id) {
+  uint32_t *bar = (uint32_t *)(((core_id / step) * step +
+                                (step >> QWEN_LOG2_RADIX) - 1) *
+                                   SEQ_MEM_SIZE +
+                               4);
+  uint32_t val = __atomic_fetch_add(bar, 1, __ATOMIC_RELAXED);
+  if (val == (uint32_t)(QWEN_RADIX - 1)) {
+    if (step == (uint32_t)NUM_CORES) return (uint32_t)bar;  // last stage
+    __atomic_store_n(bar, 0, __ATOMIC_RELAXED);
+    return qwen_log_barrier(step << QWEN_LOG2_RADIX, core_id);
+  }
+  mempool_wfi();
+  return 0;
+}
+
+static inline void qwen_barrier(uint32_t core_id) {
+  uint32_t bar = qwen_log_barrier(QWEN_RADIX, core_id);
+  if (bar) {
+    __atomic_store_n((uint32_t *)bar, 0, __ATOMIC_RELAXED);
+    __sync_synchronize();
+    wake_up_all();
+    mempool_wfi();  // clear our own trigger, as the plain barrier does
+  }
+}
 
 // Launch the DMA that refills buffer slot `slot` with K tile `step` of `stage`.
 // Core 0 only; the caller has already barriered every reader off this slot.
@@ -295,8 +340,8 @@ static void qwen_prime(uint32_t stage, uint32_t cid) {
 // it -- waits for the in-flight tile and launches the next into the slot just
 // freed. Exactly one transfer is outstanding: the global DMA frontend has one
 // {src,dst,len} register set, so a second launch would overwrite the first.
-static void qwen_project(uint32_t stage, uint32_t cid, uint32_t num_cores,
-                         const elem_t *x, uint32_t m_start, uint32_t m_end,
+static void qwen_project(uint32_t stage, uint32_t cid, const elem_t *x,
+                         uint32_t m_start, uint32_t m_end,
                          uint32_t p_start, uint32_t p_end) {
   elem_t *c = qwen_c[stage];
 
@@ -321,13 +366,13 @@ static void qwen_project(uint32_t stage, uint32_t cid, uint32_t num_cores,
                 QWEN_K, accum);
 #endif
 
-    mempool_anyradixlog_barrier(QWEN_BARRIER_RADIX, cid);  // every reader has left this slot
+    qwen_barrier(cid);  // every reader has left this slot
     if (cid == 0) {
       if (step + 1u < (uint32_t)QWEN_STEPS) dma_wait();            // tile step+1 landed
       if (step + 2u < (uint32_t)QWEN_STEPS)
         qwen_refill(slot, stage, step + 2u);                       // reuse the free slot
     }
-    mempool_anyradixlog_barrier(QWEN_BARRIER_RADIX, cid);  // the next tile is resident
+    qwen_barrier(cid);  // the next tile is resident
   }
 }
 
@@ -353,6 +398,8 @@ int main(void) {
   uint32_t share_burst = 1, share_single = 1, pblocks = 1;
 
   mempool_barrier_init(cid);
+  // Every stage counter this core can host, cleared before anyone counts on it.
+  *(volatile uint32_t *)(cid * SEQ_MEM_SIZE + 4) = 0u;
 
   //--------------------------------------------------------------------------
   // STEP 1: work split. Verbatim from sp-fmatmul-opt-burst-merge-fp16, because
@@ -436,31 +483,28 @@ int main(void) {
   //--------------------------------------------------------------------------
 #if QWEN_CHECK
   qwen_fill_operands(cid, num_cores);
+  mempool_barrier(num_cores);  // every core has written its share of X
 #endif
   if (cid == 0)
     for (uint32_t r = 0; r < (uint32_t)QWEN_X_REPLICAS; ++r)
       dma_memcpy_blocking(qwen_x + r * (uint32_t)QWEN_X_STRIDE_E, qwen_x_l2,
                           (size_t)(QWEN_B * QWEN_K) * GEMM_ELEM_BYTES);
-  mempool_barrier(num_cores);
+#if GBAR_PLOOP
+  // Independent of the copy above, so it shares that copy's rendezvous.
+  if (is_core_active && core_gid == 0u) {
+    const uint32_t gmask =
+        (cores_per_group >= 32u) ? 0xFFFFFFFFu : ((1u << cores_per_group) - 1u);
+    gbar_setup(GBAR_PLOOP_STRUCT, cores_per_group, gmask);
+  }
+#endif
+  mempool_barrier(num_cores);  // X is resident and the group barriers are armed
 
   // Every core reads the copy nearest its own group.
   const elem_t *const x_use =
       qwen_x + (uint32_t)QWEN_X_REPLICA_OF(gid) * (uint32_t)QWEN_X_STRIDE_E;
 
   //--------------------------------------------------------------------------
-  // STEP 3: group barrier struct (the kernel's once-per-K-tile rendezvous).
-  //--------------------------------------------------------------------------
-#if GBAR_PLOOP
-  if (is_core_active && core_gid == 0u) {
-    const uint32_t gmask =
-        (cores_per_group >= 32u) ? 0xFFFFFFFFu : ((1u << cores_per_group) - 1u);
-    gbar_setup(GBAR_PLOOP_STRUCT, cores_per_group, gmask);
-  }
-  mempool_barrier(num_cores);
-#endif
-
-  //--------------------------------------------------------------------------
-  // STEP 4: I$ warm-up, then the MSHR. In that order: the MSHR ships disabled out
+  // STEP 3: I$ warm-up, then the MSHR. In that order: the MSHR ships disabled out
   // of reset, so the fill, the DMA and the warm-up all bypass it and cannot leave
   // a line in its response cache before the measured region.
   //--------------------------------------------------------------------------
@@ -508,12 +552,11 @@ int main(void) {
       cfg.bank_burst_bits = qwen_hash_sel[gid][2];
       mshr_status = mshr_cfg_apply_group(&cfg);
     }
-    mempool_barrier(num_cores);
   }
 #endif
 
   //--------------------------------------------------------------------------
-  // STEP 5: the measured region.
+  // STEP 4: the measured region.
   //--------------------------------------------------------------------------
   // Per-projection boundaries, printed after the region so timing is undisturbed:
   // they answer whether the second projection costs the same as the first.
@@ -527,17 +570,17 @@ int main(void) {
   const uint32_t t0 = mempool_get_timer();
   mempool_start_benchmark();
   for (uint32_t rep = 0; rep < (uint32_t)QWEN_REPEATS; ++rep) {
-    qwen_project(QWEN_GATE, cid, num_cores, x_use, m_start, m_end, p_start, p_end);
+    qwen_project(QWEN_GATE, cid, x_use, m_start, m_end, p_start, p_end);
     if (cid == 0) stage_end[QWEN_GATE] = mempool_get_timer();
     // The up projection's own prime IS measured: by then L1 is warm and this is an
     // ordinary pipeline restart, which a real FFN would pay too.
     qwen_prime(QWEN_UP, cid);
-    mempool_anyradixlog_barrier(QWEN_BARRIER_RADIX, cid);
-    qwen_project(QWEN_UP, cid, num_cores, x_use, m_start, m_end, p_start, p_end);
+    qwen_barrier(cid);
+    qwen_project(QWEN_UP, cid, x_use, m_start, m_end, p_start, p_end);
     if (cid == 0) stage_end[QWEN_UP] = mempool_get_timer();
     if (rep + 1u < (uint32_t)QWEN_REPEATS) {
       qwen_prime(QWEN_GATE, cid);
-      mempool_anyradixlog_barrier(QWEN_BARRIER_RADIX, cid);
+      qwen_barrier(cid);
     }
   }
   mempool_stop_benchmark();
@@ -549,7 +592,6 @@ int main(void) {
   // allocates gets 2 subscribers against a target of 16 and waits out
   // serve_timeout. That costs no measured time, but it lands in the same
   // cumulative counters and makes a correctly tuned MSHR look mistuned.
-  mempool_barrier(num_cores);
   if (mshr_cfg_is_group_writer())
     mshr_cfg_write(mshr_cfg_my_group(), mshr_cfg_peer_tile(), MSHR_CSR_ENABLE, 0);
   mempool_barrier(num_cores);
@@ -632,7 +674,7 @@ int main(void) {
   }
 
   //--------------------------------------------------------------------------
-  // STEP 6: the correctness check.
+  // STEP 5: the correctness check.
   //--------------------------------------------------------------------------
 #if QWEN_CHECK
   if (cid == 0) {
