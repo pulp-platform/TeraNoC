@@ -73,6 +73,16 @@ SECTIONS {
     __l2_alloc_base = ALIGN(0x10);
   } > l2
 
+  /* Reserved but NOT stored in the ELF. .l2 above is PROGBITS, so an object put
+     there occupies file space -- a streamed-weight app reserving hundreds of MiB
+     of L2 operands it fills on the target (or does not care about at all) would
+     otherwise produce an ELF of that size. */
+  .l2_bss (NOLOAD) : {
+    . = ALIGN(0x10);
+    *(.l2_bss)
+    __l2_bss_end = ALIGN(0x10);
+  } > l2
+
   .comment : {
     *(.comment)
   } > l2
