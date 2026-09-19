@@ -265,6 +265,12 @@ static uint32_t qwen_verify(uint32_t *first_p, uint16_t *got, uint16_t *want) {
 // The K-tile pipeline
 //==============================================================================
 
+// Fan-in of the timed region's rendezvous, as log2. 4 means 16, so the first
+// level of the tree is exactly the 16 cores of one group and the second is the
+// 16 groups of the mesh -- each level stays inside one level of the hierarchy.
+// The plain barrier is kept outside the region: it runs once and is simpler.
+#define QWEN_BARRIER_RADIX 4
+
 // Launch the DMA that refills buffer slot `slot` with K tile `step` of `stage`.
 // Core 0 only; the caller has already barriered every reader off this slot.
 static void qwen_refill(uint32_t slot, uint32_t stage, uint32_t step) {
@@ -315,13 +321,13 @@ static void qwen_project(uint32_t stage, uint32_t cid, uint32_t num_cores,
                 QWEN_K, accum);
 #endif
 
-    mempool_barrier(num_cores);  // every reader has left this slot
+    mempool_anyradixlog_barrier(QWEN_BARRIER_RADIX, cid);  // every reader has left this slot
     if (cid == 0) {
       if (step + 1u < (uint32_t)QWEN_STEPS) dma_wait();            // tile step+1 landed
       if (step + 2u < (uint32_t)QWEN_STEPS)
         qwen_refill(slot, stage, step + 2u);                       // reuse the free slot
     }
-    mempool_barrier(num_cores);  // the next tile is resident
+    mempool_anyradixlog_barrier(QWEN_BARRIER_RADIX, cid);  // the next tile is resident
   }
 }
 
@@ -526,12 +532,12 @@ int main(void) {
     // The up projection's own prime IS measured: by then L1 is warm and this is an
     // ordinary pipeline restart, which a real FFN would pay too.
     qwen_prime(QWEN_UP, cid);
-    mempool_barrier(num_cores);
+    mempool_anyradixlog_barrier(QWEN_BARRIER_RADIX, cid);
     qwen_project(QWEN_UP, cid, num_cores, x_use, m_start, m_end, p_start, p_end);
     if (cid == 0) stage_end[QWEN_UP] = mempool_get_timer();
     if (rep + 1u < (uint32_t)QWEN_REPEATS) {
       qwen_prime(QWEN_GATE, cid);
-      mempool_barrier(num_cores);
+      mempool_anyradixlog_barrier(QWEN_BARRIER_RADIX, cid);
     }
   }
   mempool_stop_benchmark();
