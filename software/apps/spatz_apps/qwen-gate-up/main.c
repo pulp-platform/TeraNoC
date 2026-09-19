@@ -263,6 +263,26 @@ static uint32_t qwen_verify(uint32_t *first_p, uint16_t *got, uint16_t *want) {
 #endif  // QWEN_CHECK
 
 //==============================================================================
+// Defined operands for perf builds
+//==============================================================================
+// .l2_bss reserves the operands without storing them, so on RTL they power up
+// undefined and the x reaches the MSHR response buffer. Zeroing is enough --
+// nothing reads the values back in a perf build -- and it is far cheaper than
+// the check pattern, which costs an integer divide per element. Word stores,
+// strided by core, outside the measured region.
+#if !QWEN_CHECK
+static void qwen_zero_operands(uint32_t cid, uint32_t num_cores) {
+  uint32_t *const w = (uint32_t *)qwen_w_l2;
+  for (uint32_t i = cid; i < (uint32_t)(QWEN_STAGES * QWEN_K * QWEN_LDP) / 2u;
+       i += num_cores)
+    w[i] = 0u;
+  uint32_t *const x = (uint32_t *)qwen_x_l2;
+  for (uint32_t i = cid; i < (uint32_t)(QWEN_B * QWEN_K) / 2u; i += num_cores)
+    x[i] = 0u;
+}
+#endif
+
+//==============================================================================
 // The K-tile pipeline
 //==============================================================================
 
@@ -483,8 +503,10 @@ int main(void) {
   //--------------------------------------------------------------------------
 #if QWEN_CHECK
   qwen_fill_operands(cid, num_cores);
-  mempool_barrier(num_cores);  // every core has written its share of X
+#else
+  qwen_zero_operands(cid, num_cores);
 #endif
+  mempool_barrier(num_cores);  // the operands hold defined data
   if (cid == 0)
     for (uint32_t r = 0; r < (uint32_t)QWEN_X_REPLICAS; ++r)
       dma_memcpy_blocking(qwen_x + r * (uint32_t)QWEN_X_STRIDE_E, qwen_x_l2,
