@@ -424,41 +424,6 @@ int main(void) {
   // used because the padding columns are FMACs the machine really issues.
   qwen_fmac_core[cid] = (p_end - p_start) * (m_end - m_start) *
                         (uint32_t)QWEN_K * 2u * (uint32_t)QWEN_REPEATS;
-  // mempool_barrier(num_cores);
-
-  if (cid == 0) {
-    printf("[QWEN] B=%u K=%u P=%u ldp=%u (pad %u%%o) cols/core=%u kt=%u steps=%u "
-           "ks=%u decode=%u check=%u\n",
-           (unsigned)QWEN_B, (unsigned)QWEN_K, (unsigned)QWEN_P, (unsigned)QWEN_LDP,
-           (unsigned)(1000u * (QWEN_LDP - QWEN_P) / QWEN_P),
-           (unsigned)(p_end - p_start), (unsigned)QWEN_KT, (unsigned)QWEN_STEPS,
-           (unsigned)kernel_size, (unsigned)MATMUL_DECODE_SPLIT, (unsigned)QWEN_CHECK);
-    // The dashboard reads the shape from this line, so --shape is not needed on
-    // the generator command line. Gate and up are two independent B x K x P
-    // projections; stacking them on M states the real FMAC count, 2*B*K*P.
-    // shape is the USEFUL work (roofline); workload.executed_fmac is what the
-    // machine actually issues, which includes the padding columns.
-    printf("[DASHBOARD_META] {\"shape\":[%u,%u,%u],\"precision\":\"%s\","
-           "\"repetitions\":%u,\"kernel_size\":%u,\"burst_model\":\"%s\","
-           "\"burst_geometry\":{\"tile_words\":%u,\"max_words\":%u,\"lanes\":%u,"
-           "\"rob_depth\":%u,\"enabled\":%u}}\n",
-           (unsigned)(2u * QWEN_B), (unsigned)QWEN_K, (unsigned)QWEN_P,
-           GEMM_ELEM_BYTES == 2 ? "fp16" : "fp32", (unsigned)QWEN_REPEATS,
-           (unsigned)kernel_size, GEMM_BURST_MODEL, (unsigned)GEMM_BURST_TILE_WORDS,
-           (unsigned)GEMM_BURST_MAX_WORDS, (unsigned)GEMM_BURST_LANES,
-           (unsigned)GEMM_BURST_ROB_DEPTH, (unsigned)GEMM_BURST_ENABLED);
-    // The per-group assignment, plus the executed total it must sum to. Without
-    // these the dashboard cannot report progress, completion or the run tail.
-    printf("[DASHBOARD_META] {\"expected_fmac_per_group\":[");
-    uint32_t executed = 0u;
-    for (uint32_t g = 0; g < (uint32_t)NUM_GROUPS; ++g) {
-      uint32_t sum = 0u;
-      for (uint32_t c = 0; c < cores_per_group; ++c) sum += qwen_fmac_core[g * cores_per_group + c];
-      executed += sum;
-      printf("%s%u", g ? "," : "", (unsigned)sum);
-    }
-    printf("],\"workload\":{\"executed_fmac\":%u}}\n", (unsigned)executed);
-  }
 
   //--------------------------------------------------------------------------
   // STEP 2: operands.
@@ -514,46 +479,30 @@ int main(void) {
 #endif
 
 #if MSHR_RUNTIME_CFG
+  // Configure, but report later: a printf here is simulated time before the
+  // measured region, and on RTL that is the slowest part of the whole run.
+  mshr_cfg_t cfg = MSHR_CFG_DERIVED_INIT;
+  uint32_t mshr_status = 0, mshr_split_bad = 0, mshr_align_bad = 0;
   {
     // The subscriber targets are derived at compile time from the shape; the split
     // that decides how many cores really issue each address is computed above. If
     // they disagree, every mergeable request waits for a cohort that never arrives
     // and times out -- which looks like too long a hold window and is not fixed by
     // shortening it. Both come from gemm_config.h, and this proves it every run.
-    if (cid == 0 && mshr_cfg_check_splits(share_burst, share_single, pblocks) != 0)
-      printf("[MSHR] SPLIT MISMATCH: kernel burst=%u single=%u pblocks=%u, "
-             "MSHR derived %d/%d/%d -- MSHR IS MISTUNED\n",
-             (unsigned)share_burst, (unsigned)share_single, (unsigned)pblocks,
-             (int)MSHR_D_SPLIT_M, (int)MSHR_D_SPLIT_P, (int)MSHR_D_PGAP);
+    mshr_split_bad = mshr_cfg_check_splits(share_burst, share_single, pblocks) != 0;
 
-    mshr_cfg_t cfg = MSHR_CFG_DERIVED_INIT;
-    uint32_t status = 0;
     if (mshr_cfg_is_group_writer()) {
       // script/gen_hash.c chose these on the host from the shape and the replica
       // layout. They are exact only while every operand stays aligned to a mesh
-      // sweep, which is what keeps the link addresses out of the hash; say so
-      // loudly rather than run a mistuned MSHR if that ever stops holding.
-      if ((((uintptr_t)qwen_x | (uintptr_t)qwen_w[0]) & (QWEN_MESH_SWEEP - 1)) != 0u)
-        printf("[MSHR] operands are not mesh-sweep aligned -- the build-time bank "
-               "hash does not apply to this layout\n");
+      // sweep, which is what keeps the link addresses out of the hash.
+      mshr_align_bad =
+          (((uintptr_t)qwen_x | (uintptr_t)qwen_w[0]) & (QWEN_MESH_SWEEP - 1)) != 0u;
       cfg.bank_shift_single = qwen_hash_sel[gid][0];
       cfg.bank_shift_burst = qwen_hash_sel[gid][1];
       cfg.bank_burst_bits = qwen_hash_sel[gid][2];
-      status = mshr_cfg_apply_group(&cfg);
+      mshr_status = mshr_cfg_apply_group(&cfg);
     }
     mempool_barrier(num_cores);
-    if (status != 0)
-      printf("[MSHR] cfg REJECTED status=0x%x group=%d -- MEASUREMENT INVALID\n",
-             (unsigned)status, (int)mshr_cfg_my_group());
-    if (cid == 0)
-      printf("[MSHR] share burst=%u single=%u pblocks=%u | subs=%u/%u window=%u/%u "
-             "serve=%u reuse=%u cache_timeout=%u shift=%u/%u/%u\n",
-             (unsigned)share_burst, (unsigned)share_single, (unsigned)pblocks,
-             (unsigned)cfg.hold_subs_single, (unsigned)cfg.hold_subs_burst,
-             (unsigned)cfg.hold_window_single, (unsigned)cfg.hold_window_burst,
-             (unsigned)cfg.serve_timeout, (unsigned)cfg.cache_reuse_target,
-             (unsigned)cfg.cache_timeout, (unsigned)cfg.bank_shift_single,
-             (unsigned)cfg.bank_shift_burst, (unsigned)cfg.bank_burst_bits);
   }
 #endif
 
@@ -598,6 +547,67 @@ int main(void) {
   if (mshr_cfg_is_group_writer())
     mshr_cfg_write(mshr_cfg_my_group(), mshr_cfg_peer_tile(), MSHR_CSR_ENABLE, 0);
   mempool_barrier(num_cores);
+#endif
+
+  //--------------------------------------------------------------------------
+  // The startup report, deferred to here so nothing prints before the measured
+  // region: on RTL a printf costs far more wall clock than the kernel does.
+  //--------------------------------------------------------------------------
+  if (cid == 0) {
+    printf("[QWEN] B=%u K=%u P=%u ldp=%u (pad %u%%o) cols/core=%u kt=%u steps=%u "
+           "ks=%u decode=%u check=%u xrep=%u\n",
+           (unsigned)QWEN_B, (unsigned)QWEN_K, (unsigned)QWEN_P, (unsigned)QWEN_LDP,
+           (unsigned)(1000u * (QWEN_LDP - QWEN_P) / QWEN_P),
+           (unsigned)(p_end - p_start), (unsigned)QWEN_KT, (unsigned)QWEN_STEPS,
+           (unsigned)kernel_size, (unsigned)MATMUL_DECODE_SPLIT, (unsigned)QWEN_CHECK,
+           (unsigned)QWEN_X_REPLICAS);
+    // The dashboard reads the shape from this line, so --shape is not needed on
+    // the generator command line. Gate and up are two independent B x K x P
+    // projections; stacking them on M states the real FMAC count, 2*B*K*P.
+    // shape is the USEFUL work (roofline); workload.executed_fmac is what the
+    // machine actually issues, which includes the padding columns.
+    printf("[DASHBOARD_META] {\"shape\":[%u,%u,%u],\"precision\":\"%s\","
+           "\"repetitions\":%u,\"kernel_size\":%u,\"burst_model\":\"%s\","
+           "\"burst_geometry\":{\"tile_words\":%u,\"max_words\":%u,\"lanes\":%u,"
+           "\"rob_depth\":%u,\"enabled\":%u}}\n",
+           (unsigned)(2u * QWEN_B), (unsigned)QWEN_K, (unsigned)QWEN_P,
+           GEMM_ELEM_BYTES == 2 ? "fp16" : "fp32", (unsigned)QWEN_REPEATS,
+           (unsigned)kernel_size, GEMM_BURST_MODEL, (unsigned)GEMM_BURST_TILE_WORDS,
+           (unsigned)GEMM_BURST_MAX_WORDS, (unsigned)GEMM_BURST_LANES,
+           (unsigned)GEMM_BURST_ROB_DEPTH, (unsigned)GEMM_BURST_ENABLED);
+    // The per-group assignment, plus the executed total it must sum to. Without
+    // these the dashboard cannot report progress, completion or the run tail.
+    printf("[DASHBOARD_META] {\"expected_fmac_per_group\":[");
+    uint32_t executed = 0u;
+    for (uint32_t g = 0; g < (uint32_t)NUM_GROUPS; ++g) {
+      uint32_t sum = 0u;
+      for (uint32_t c = 0; c < cores_per_group; ++c) sum += qwen_fmac_core[g * cores_per_group + c];
+      executed += sum;
+      printf("%s%u", g ? "," : "", (unsigned)sum);
+    }
+    printf("],\"workload\":{\"executed_fmac\":%u}}\n", (unsigned)executed);
+  }
+#if MSHR_RUNTIME_CFG
+  if (cid == 0 && mshr_split_bad)
+    printf("[MSHR] SPLIT MISMATCH: kernel burst=%u single=%u pblocks=%u, "
+           "MSHR derived %d/%d/%d -- MSHR IS MISTUNED\n",
+           (unsigned)share_burst, (unsigned)share_single, (unsigned)pblocks,
+           (int)MSHR_D_SPLIT_M, (int)MSHR_D_SPLIT_P, (int)MSHR_D_PGAP);
+  if (mshr_align_bad)
+    printf("[MSHR] operands are not mesh-sweep aligned -- the build-time bank hash "
+           "does not apply to this layout\n");
+  if (mshr_status != 0)
+    printf("[MSHR] cfg REJECTED status=0x%x group=%d -- MEASUREMENT INVALID\n",
+           (unsigned)mshr_status, (int)mshr_cfg_my_group());
+  if (cid == 0)
+    printf("[MSHR] share burst=%u single=%u pblocks=%u | subs=%u/%u window=%u/%u "
+           "serve=%u reuse=%u cache_timeout=%u shift=%u/%u/%u\n",
+           (unsigned)share_burst, (unsigned)share_single, (unsigned)pblocks,
+           (unsigned)cfg.hold_subs_single, (unsigned)cfg.hold_subs_burst,
+           (unsigned)cfg.hold_window_single, (unsigned)cfg.hold_window_burst,
+           (unsigned)cfg.serve_timeout, (unsigned)cfg.cache_reuse_target,
+           (unsigned)cfg.cache_timeout, (unsigned)cfg.bank_shift_single,
+           (unsigned)cfg.bank_shift_burst, (unsigned)cfg.bank_burst_bits);
 #endif
 
   if (cid == 0) {
