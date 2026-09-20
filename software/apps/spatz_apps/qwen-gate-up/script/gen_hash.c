@@ -46,14 +46,13 @@ int main(void) {
   // The shared model in gemm_hash.h scores only the spread ACROSS CORES at a
   // single step. That misses both axes that matter here: the sub-requests of one
   // load, 64 bytes apart, and the reduction step, a whole row apart.
-  // Cores sharing one column block -- main.c's share_burst. It is B/KERNEL_SIZE,
-  // NOT B: with KS > 1 a core owns KS rows, so B/KS row chunks share a block and
-  // the group holds GEMM_CPG/(B/KS) DISTINCT blocks. Using B here collapsed
-  // `blocks` to 1 at B == GEMM_CPG, which made every shift tie at one bank and
-  // let the in-flight tie-break pick the widest (worst) granule.
-  const uint32_t rows   = (uint32_t)QWEN_B / (uint32_t)KERNEL_SIZE;
-  const uint32_t share  = (rows < GEMM_CPG) ? (rows ? rows : 1u) : (uint32_t)GEMM_CPG;
-  const uint32_t blocks = (uint32_t)GEMM_CPG / share;
+  // Cores sharing one column block, and the DISTINCT blocks a group therefore
+  // has outstanding. Take it from GEMM_SHARE_B, the same macro main.c's split and
+  // mshr_cfg.h's merge targets come from: it is B/KERNEL_SIZE in the decode split
+  // but ROWS_PER_GROUP/KERNEL_SIZE in the prefill one, and deriving it here from
+  // QWEN_B instead got both wrong once KERNEL_SIZE stopped being 1.
+  const uint32_t share  = (uint32_t)GEMM_SHARE_B(KERNEL_SIZE);
+  const uint32_t blocks = (uint32_t)GEMM_CPG / (share ? share : 1u);
   const uint32_t span   = (uint32_t)QWEN_LDP / (uint32_t)GEMM_PBLOCKS(KERNEL_SIZE);
   // One load covers min(span, VL_MAX) elements and splits into that many bursts;
   // its id cost then caps how many loads can overlap.
