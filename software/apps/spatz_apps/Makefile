@@ -143,6 +143,15 @@ qwen_repeats ?= 1
 # MSHR finding a merge partner inside its hold window. `qwen_ks=score` restores
 # gemm_config.h's A/B-balance policy; qwen_ks=1|2|4|8 pins one kernel.
 qwen_ks ?= max
+# Column-span alignment in elements. Default `stripe` = one whole tile stripe (32
+# at fp16), so every vector load is a full 16-word burst; costs stored width (see
+# qwen_layout.h). `4` restores the old 8-byte spans with no padding.
+qwen_span_align ?= stripe
+ifeq ($(qwen_span_align),stripe)
+qwen_span_def := QWEN_SPAN_ALIGN_DEFAULT 1
+else
+qwen_span_def := QWEN_SPAN_ALIGN $(qwen_span_align)
+endif
 ifeq ($(qwen_ks),max)
 qwen_ks_def := GEMM_KS_PREFER_MAX 1
 else ifeq ($(qwen_ks),score)
@@ -167,6 +176,7 @@ qwen-gate-up/data/qwen_shape.h: FORCE
 	  echo '#define QWEN_PRELOAD $(qwen_preload)'; \
 	  echo '#define QWEN_REPEATS $(qwen_repeats)'; \
 	  echo '#define $(qwen_ks_def)'; \
+	  echo '#define $(qwen_span_def)'; \
 	  echo '#endif'; \
 	} > $@.tmp
 	@if cmp -s $@.tmp $@; then rm -f $@.tmp; else mv $@.tmp $@; fi

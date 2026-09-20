@@ -40,7 +40,17 @@
 // 16-byte spans for free, while B=1 has 256 column blocks and would round LDP up
 // to 18432 -- 5.9% more weight traffic on the one shape that is already
 // bandwidth-bound with all 16 banks engaged.
-#define QWEN_SPAN_ALIGN 4
+// Default: align every core's column span to a WHOLE tile stripe. Then
+// p_start = p_block * span is stripe-aligned for every core, qwen_burst_vl never
+// has to clip a load to a stripe remainder, and every vector load is a full
+// 16-word burst instead of the 16/12/8/4-word sawtooth that an unaligned span
+// produces (span % STRIPE_E = 8 at B=16 walks the start offset 0,8,16,24).
+// The price is stored width: PAD_UNIT becomes PBLOCKS*STRIPE_E, which rounds
+// LDP 17408 -> 20480 at 128 blocks (+17.6%) and -> 24576 at 256 (+41%).
+// qwen_span_align=4 restores the unpadded, stripe-capped behaviour.
+#ifndef QWEN_SPAN_ALIGN
+#define QWEN_SPAN_ALIGN QWEN_STRIPE_E
+#endif
 #define QWEN_PAD_UNIT                                     \
   (((QWEN_PBLOCKS) * (QWEN_SPAN_ALIGN)) > (QWEN_STRIPE_E) \
        ? ((QWEN_PBLOCKS) * (QWEN_SPAN_ALIGN))             \
