@@ -46,7 +46,13 @@ int main(void) {
   // The shared model in gemm_hash.h scores only the spread ACROSS CORES at a
   // single step. That misses both axes that matter here: the sub-requests of one
   // load, 64 bytes apart, and the reduction step, a whole row apart.
-  const uint32_t share  = (QWEN_B < GEMM_CPG) ? (uint32_t)QWEN_B : (uint32_t)GEMM_CPG;
+  // Cores sharing one column block -- main.c's share_burst. It is B/KERNEL_SIZE,
+  // NOT B: with KS > 1 a core owns KS rows, so B/KS row chunks share a block and
+  // the group holds GEMM_CPG/(B/KS) DISTINCT blocks. Using B here collapsed
+  // `blocks` to 1 at B == GEMM_CPG, which made every shift tie at one bank and
+  // let the in-flight tie-break pick the widest (worst) granule.
+  const uint32_t rows   = (uint32_t)QWEN_B / (uint32_t)KERNEL_SIZE;
+  const uint32_t share  = (rows < GEMM_CPG) ? (rows ? rows : 1u) : (uint32_t)GEMM_CPG;
   const uint32_t blocks = (uint32_t)GEMM_CPG / share;
   const uint32_t span   = (uint32_t)QWEN_LDP / (uint32_t)GEMM_PBLOCKS(KERNEL_SIZE);
   // One load covers min(span, VL_MAX) elements and splits into that many bursts;
@@ -69,6 +75,12 @@ int main(void) {
   printf("// { bank_shift_single, bank_shift_burst, bank_burst_bits }\n");
   printf("// one load = %u elems = %u bursts = %u ids/ROB -> %u load(s) in flight\n",
          (unsigned)vl, (unsigned)subs, (unsigned)ids, (unsigned)inflight);
+  // The sharing model the scores are built on, and the ceiling they can reach:
+  // a group cannot occupy more banks than it has distinct addresses outstanding.
+  printf("// ks=%u share=%u blocks=%u -> %u distinct addrs/step, bank ceiling %u\n",
+         (unsigned)KERNEL_SIZE, (unsigned)share, (unsigned)blocks,
+         (unsigned)(blocks * subs),
+         (unsigned)(blocks * subs < banks ? blocks * subs : banks));
   printf("static const uint8_t qwen_hash_sel[%u][3] = {\n", (unsigned)NUM_GROUPS);
 
   for (uint32_t g = 0; g < (uint32_t)NUM_GROUPS; ++g) {
@@ -89,8 +101,11 @@ int main(void) {
           for (uint32_t ld = 0; ld < loads; ++ld)          // successive k
             for (uint32_t blk = 0; blk < blocks; ++blk)    // the group's blocks
               for (uint32_t sub = 0; sub < subs; ++sub) {  // bursts of one load
+                // Consecutive p_blocks of a group are `span` elements apart
+                // (main.c: p_start = p_block * p_span, p_block = cid / rows), so
+                // the stride is span, not span*share.
                 const uint32_t word =
-                    (ld * (uint32_t)QWEN_LDP + blk * span * share) * GEMM_ELEM_BYTES / 4 +
+                    (ld * (uint32_t)QWEN_LDP + blk * span) * GEMM_ELEM_BYTES / 4 +
                     sub * QWEN_BURST_WORDS;
                 seen |= 1u << gemm_hash_bank(word, shift, bb, banks);
               }
