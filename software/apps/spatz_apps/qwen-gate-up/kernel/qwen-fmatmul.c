@@ -296,10 +296,12 @@ static inline void qwen_mshr_enable(uint32_t on) {
 #ifndef QWEN_CBYPASS_BARRIERS
 #define QWEN_CBYPASS_BARRIERS 4
 #endif
-// The FIRST barrier of each edge drains: the MSHR must be empty before CFG_ENABLE
-// moves, or entries allocated under the old setting are still resident across the
-// flip. The SECOND only has to publish the new setting, so issue-order is enough.
-// QWEN_CBYPASS_DRAIN=0 reverts both to the issue-only barrier for A/B.
+// EVERY barrier of the toggle drains. The first of each edge so the MSHR is empty
+// before CFG_ENABLE moves -- entries allocated under the old setting must not still
+// be resident across the flip. The second for the same reason applied to the flip
+// ITSELF: the CSR write is a memory transaction, and issue order would release the
+// group into an MSHR whose setting has not landed yet.
+// QWEN_CBYPASS_DRAIN=0 reverts all of them to the issue-only barrier for A/B.
 #ifndef QWEN_CBYPASS_DRAIN
 #define QWEN_CBYPASS_DRAIN 1
 #endif
@@ -309,8 +311,8 @@ static inline void qwen_mshr_enable(uint32_t on) {
 #define QWEN_CBYPASS_FENCE(a) gbar_sync(a)
 #endif
 #if QWEN_CBYPASS_BARRIERS >= 4
-#define QWEN_CBYPASS_ENTER(a) do { QWEN_CBYPASS_FENCE(a); qwen_mshr_enable(0u); gbar_sync(a); } while (0)
-#define QWEN_CBYPASS_EXIT(a)  do { QWEN_CBYPASS_FENCE(a); qwen_mshr_enable(1u); gbar_sync(a); } while (0)
+#define QWEN_CBYPASS_ENTER(a) do { QWEN_CBYPASS_FENCE(a); qwen_mshr_enable(0u); QWEN_CBYPASS_FENCE(a); } while (0)
+#define QWEN_CBYPASS_EXIT(a)  do { QWEN_CBYPASS_FENCE(a); qwen_mshr_enable(1u); QWEN_CBYPASS_FENCE(a); } while (0)
 #else
 #define QWEN_CBYPASS_ENTER(a) do { QWEN_CBYPASS_FENCE(a); qwen_mshr_enable(0u); } while (0)
 #define QWEN_CBYPASS_EXIT(a)  do { QWEN_CBYPASS_FENCE(a); qwen_mshr_enable(1u); } while (0)
