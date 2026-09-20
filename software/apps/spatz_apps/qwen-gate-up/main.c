@@ -41,6 +41,10 @@
 #include "gemm_config.h"  // KERNEL_SIZE + MATMUL_DECODE_SPLIT from the shape
 #include "gemm_burst.h"   // GEMM_BURST_* geometry; the kernel's stripe rule needs it
 
+// Before the kernel: it brackets its C-accumulator reload with CFG_ENABLE writes
+// (QWEN_CBYPASS), so mshr_cfg_write must already be declared.
+#define MSHR_HASH_SEARCH 0
+#include "mshr_cfg.h"
 #include "kernel/qwen-fmatmul.c"
 
 #include "printf.h"
@@ -48,10 +52,6 @@
 #include "runtime.h"
 #include "synchronization.h"
 #include "encoding.h"
-// The bank hash is selected on the host (script/gen_hash.c), so the target needs
-// no search code at all.
-#define MSHR_HASH_SEARCH 0
-#include "mshr_cfg.h"
 #include "dma.h"
 
 //==============================================================================

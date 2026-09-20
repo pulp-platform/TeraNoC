@@ -250,6 +250,52 @@ static inline void gbar_sync(uint32_t a) {
 #define GBAR_SYNC_PLOOP(a) ((void)0)
 #endif
 
+// ---- MSHR bypass around the C-accumulator reload ---------------------------
+// 0 = off (the reload allocates MSHR entries, as before). 1 = disable the group
+// MSHR for the reload window only. Needs GBAR_PLOOP for the rendezvous and
+// MSHR_RUNTIME_CFG for the CSR.
+// Default: on exactly where it pays. The reload only hurts when the burst class is
+// actually merging, i.e. GEMM_SHARE_B >= 2; at share 1 the hold window is already
+// zeroed, entries retire immediately and the rendezvous would be pure cost (~10%).
+#ifndef QWEN_CBYPASS
+#define QWEN_CBYPASS (GEMM_SHARE_B(KERNEL_SIZE) >= 2)
+#endif
+// Barriers only, no CSR: separates "the rendezvous re-aligned the cores" from
+// "the MSHR stopped seeing unmergeable entries".
+#ifndef QWEN_CBYPASS_BARRIER_ONLY
+#define QWEN_CBYPASS_BARRIER_ONLY 0
+#endif
+#if (QWEN_CBYPASS || QWEN_CBYPASS_BARRIER_ONLY) && GBAR_PLOOP && MSHR_RUNTIME_CFG
+static inline void qwen_mshr_enable(uint32_t on) {
+#if QWEN_CBYPASS
+  if (mshr_cfg_is_group_writer())
+    mshr_cfg_write(mshr_cfg_my_group(), mshr_cfg_peer_tile(), MSHR_CSR_ENABLE, on);
+#else
+  (void)on;
+#endif
+}
+// Rendezvous count per toggle. 4 (default) is the tight form: one barrier so every
+// core's prior requests are issued before the flip, a second so the new setting is
+// visible before anyone issues into it. 2 drops the visibility barrier and flips
+// straight after the release -- a core can then race ahead of the CSR by a few
+// cycles. Ordered barrier-then-flip on BOTH edges deliberately: the leak is then at
+// most the block's first W load taking the bypass, instead of up to eight C loads
+// allocating.
+#ifndef QWEN_CBYPASS_BARRIERS
+#define QWEN_CBYPASS_BARRIERS 4
+#endif
+#if QWEN_CBYPASS_BARRIERS >= 4
+#define QWEN_CBYPASS_ENTER(a) do { gbar_sync(a); qwen_mshr_enable(0u); gbar_sync(a); } while (0)
+#define QWEN_CBYPASS_EXIT(a)  do { gbar_sync(a); qwen_mshr_enable(1u); gbar_sync(a); } while (0)
+#else
+#define QWEN_CBYPASS_ENTER(a) do { gbar_sync(a); qwen_mshr_enable(0u); } while (0)
+#define QWEN_CBYPASS_EXIT(a)  do { gbar_sync(a); qwen_mshr_enable(1u); } while (0)
+#endif
+#else
+#define QWEN_CBYPASS_ENTER(a) ((void)0)
+#define QWEN_CBYPASS_EXIT(a)  ((void)0)
+#endif
+
 //==========================================================
 // 8xVL: Process 8 output rows per iteration, LMUL=2
 //
@@ -337,7 +383,18 @@ void matmul_8xVL(elem_t *c, const elem_t *a, const elem_t *b,
       // accum != 0: continue the partial sums an earlier tile left in C.
       // The load mirrors the epilogue's store sequence exactly -- same registers,
       // same c__ walk -- so the two can never drift apart.
+      // ---- C reload window ---------------------------------------------
+      // These eight loads are per-core PRIVATE (c__ = c_ + m_start*P), so no two
+      // cores of the group ever share one. Under a live MSHR they allocate
+      // unmergeable entries that hold bank ways and evict the W cohort -- the
+      // merge rate collapses from ~88% to ~52% the moment accum goes high.
+      // Bracket them with CFG_ENABLE=0, which gates merge/alloc only (resident
+      // entries keep draining), so they bypass the MSHR entirely. Each toggle
+      // needs its own rendezvous: gbar_sync guarantees a core's prior requests
+      // are ISSUED, so after the release the writer may flip the CSR, and after
+      // the next release every core sees the new setting.
       if (accum) {
+        QWEN_CBYPASS_ENTER(gbar_pl);
         elem_t *c_ld = c__;
         asm volatile("vle16.v v0, (%0);" ::"r"(c_ld));
         c_ld += P;
@@ -355,6 +412,7 @@ void matmul_8xVL(elem_t *c, const elem_t *a, const elem_t *b,
         c_ld += P;
         asm volatile("vle16.v v14, (%0);" ::"r"(c_ld));
         (void)c_ld;
+        QWEN_CBYPASS_EXIT(gbar_pl);
       } else {
         asm volatile("vmv.v.i v0, 0");
         asm volatile("vmv.v.i v2, 0");
@@ -567,7 +625,18 @@ void matmul_4xVL(elem_t *c, const elem_t *a, const elem_t *b,
       // accum != 0: continue the partial sums an earlier tile left in C.
       // The load mirrors the epilogue's store sequence exactly -- same registers,
       // same c__ walk -- so the two can never drift apart.
+      // ---- C reload window ---------------------------------------------
+      // These eight loads are per-core PRIVATE (c__ = c_ + m_start*P), so no two
+      // cores of the group ever share one. Under a live MSHR they allocate
+      // unmergeable entries that hold bank ways and evict the W cohort -- the
+      // merge rate collapses from ~88% to ~52% the moment accum goes high.
+      // Bracket them with CFG_ENABLE=0, which gates merge/alloc only (resident
+      // entries keep draining), so they bypass the MSHR entirely. Each toggle
+      // needs its own rendezvous: gbar_sync guarantees a core's prior requests
+      // are ISSUED, so after the release the writer may flip the CSR, and after
+      // the next release every core sees the new setting.
       if (accum) {
+        QWEN_CBYPASS_ENTER(gbar_pl);
         elem_t *c_ld = c__;
         asm volatile("vle16.v v0, (%0);" ::"r"(c_ld));
         c_ld += P;
@@ -577,6 +646,7 @@ void matmul_4xVL(elem_t *c, const elem_t *a, const elem_t *b,
         c_ld += P;
         asm volatile("vle16.v v12, (%0);" ::"r"(c_ld));
         (void)c_ld;
+        QWEN_CBYPASS_EXIT(gbar_pl);
       } else {
         asm volatile("vmv.v.i v0, 0");
         asm volatile("vmv.v.i v4, 0");
@@ -1040,12 +1110,24 @@ void matmul_2xVL(elem_t *c, const elem_t *a, const elem_t *b,
       // accum != 0: continue the partial sums an earlier tile left in C.
       // The load mirrors the epilogue's store sequence exactly -- same registers,
       // same c__ walk -- so the two can never drift apart.
+      // ---- C reload window ---------------------------------------------
+      // These eight loads are per-core PRIVATE (c__ = c_ + m_start*P), so no two
+      // cores of the group ever share one. Under a live MSHR they allocate
+      // unmergeable entries that hold bank ways and evict the W cohort -- the
+      // merge rate collapses from ~88% to ~52% the moment accum goes high.
+      // Bracket them with CFG_ENABLE=0, which gates merge/alloc only (resident
+      // entries keep draining), so they bypass the MSHR entirely. Each toggle
+      // needs its own rendezvous: gbar_sync guarantees a core's prior requests
+      // are ISSUED, so after the release the writer may flip the CSR, and after
+      // the next release every core sees the new setting.
       if (accum) {
+        QWEN_CBYPASS_ENTER(gbar_pl);
         elem_t *c_ld = c__;
         asm volatile("vle16.v v0, (%0);" ::"r"(c_ld));
         c_ld += P;
         asm volatile("vle16.v v8, (%0);" ::"r"(c_ld));
         (void)c_ld;
+        QWEN_CBYPASS_EXIT(gbar_pl);
       } else {
         asm volatile("vmv.v.i v0, 0");
         asm volatile("vmv.v.i v8, 0");
