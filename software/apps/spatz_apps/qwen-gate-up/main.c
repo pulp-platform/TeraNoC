@@ -35,6 +35,7 @@
 
 #include "data/qwen_shape.h"  // GEMM_M/N/P, GEMM_ELEM_BYTES, QWEN_KT, QWEN_CHECK
 #include "qwen_layout.h"      // where X's replicas sit in L1
+#include "qwen_pattern.h"     // the synthetic operand values
 #include "data/qwen_hash.h"   // bank-hash selectors chosen at build time
 
 #include "gemm_config.h"  // KERNEL_SIZE + MATMUL_DECODE_SPLIT from the shape
@@ -57,35 +58,6 @@
 // Derived shape
 //==============================================================================
 
-#define QWEN_B GEMM_M
-#define QWEN_K GEMM_N
-#define QWEN_P GEMM_P
-
-// ---- Stored width, and why it is padded ------------------------------------
-//
-// Elements in one 64-byte tile bank stripe (32 at fp16).
-#define QWEN_STRIPE_E ((GEMM_BURST_TILE_WORDS * 4) / GEMM_ELEM_BYTES)
-//
-// docs/qwen3_8_27b/tile_contained_burst_hash.md: a vector load bursts only if it
-// is stripe-contained from a 4-byte-aligned start. Given the kernel's stripe cap
-// (qwen_burst_vl), it is enough that every core's column span is a multiple of 4
-// elements -- then no emitted vector is ever below the burst floor or oddly
-// aligned. script/test_burst_vl.py checks this against the runtime's own
-// eligibility predicate.
-//
-// So the STORED width is P rounded up until the per-core span divides by 4. At
-// 4x4 B=1 nothing is padded; at 8x8 B=1 the span would be 17 and 74% of the
-// weight bytes would take the single-word path, so it is rounded to 20 for +17.6%
-// traffic. The [QWEN] line prints what the padding cost.
-#define QWEN_PBLOCKS GEMM_PBLOCKS(KERNEL_SIZE)
-#define QWEN_SPAN_ALIGN 4
-#define QWEN_PAD_UNIT                                     \
-  (((QWEN_PBLOCKS) * (QWEN_SPAN_ALIGN)) > (QWEN_STRIPE_E) \
-       ? ((QWEN_PBLOCKS) * (QWEN_SPAN_ALIGN))             \
-       : (QWEN_STRIPE_E))
-#define QWEN_LDP \
-  ((((QWEN_P) + (QWEN_PAD_UNIT)-1) / (QWEN_PAD_UNIT)) * (QWEN_PAD_UNIT))
-
 #define QWEN_STEPS ((QWEN_K) / (QWEN_KT))
 
 // Correctness patterns, all exactly representable in fp16 so the check is an
@@ -96,7 +68,18 @@
 //   2 = ones:  X = W = 1, so C[b][p] == K exactly. Checks the MAC count and the
 //              accumulation across K tiles. Needs K a power of two <= 2048, since
 //              fp16 counts integers exactly only that far.
-#define QWEN_UNIT_K0 3u  // which X column the unit pattern lights up
+// Core 0 is the long pole at start-up: it copies X to every replica and primes
+// the pipeline. The once-per-group setup -- the group barrier and the MSHR CSRs
+// -- needs only "some core of this group", so give it to another one and let it
+// overlap with core 0's DMA. Any tile in a group can write that group's CSRs.
+#define QWEN_GROUP_HELPER 1u
+
+// Which core drives the global DMA. Core 0 by default; set to a core of another
+// group to test whether the DMA duty, rather than the buffers' home, is what
+// desynchronises a merge pair.
+#ifndef QWEN_DMA_CORE
+#define QWEN_DMA_CORE 0u
+#endif
 
 // Whether the operands are written on target at all. Off by default: the
 // platform is expected to hand us defined memory (tc_sram SimInit on RTL,
@@ -106,7 +89,10 @@
 #ifndef QWEN_INIT
 #define QWEN_INIT 0
 #endif
-#define QWEN_FILL ((QWEN_INIT) || (QWEN_CHECK))
+#ifndef QWEN_PRELOAD
+#define QWEN_PRELOAD 0
+#endif
+#define QWEN_FILL (!(QWEN_PRELOAD) && ((QWEN_INIT) || (QWEN_CHECK)))
 
 _Static_assert(GEMM_ELEM_BYTES == 2, "This app is fp16 only");
 _Static_assert((QWEN_K % QWEN_KT) == 0,
@@ -151,8 +137,14 @@ _Static_assert(QWEN_L1_USED < QWEN_L1_BYTES,
 
 enum { QWEN_GATE = 0, QWEN_UP = 1, QWEN_STAGES = 2 };
 
+#if QWEN_PRELOAD
+// Defined by data/qwen_operands.S, which .incbin's the images the host wrote.
+extern elem_t qwen_w_l2[QWEN_STAGES][QWEN_K * QWEN_LDP];
+extern elem_t qwen_x_l2[QWEN_B * QWEN_K];
+#else
 static elem_t qwen_w_l2[QWEN_STAGES][QWEN_K * QWEN_LDP] QWEN_L2;
 static elem_t qwen_x_l2[QWEN_B * QWEN_K] QWEN_L2;
+#endif
 
 static elem_t qwen_w[2][QWEN_KT * QWEN_LDP] QWEN_L1;          // K-tile double buffer
 static elem_t qwen_c[QWEN_STAGES][QWEN_B * QWEN_LDP] QWEN_L1; // accumulator + output
@@ -171,41 +163,7 @@ static uint32_t qwen_fmac_core[NUM_CORES];
 // Bit patterns, not arithmetic: every value below is exact in fp16, so the whole
 // fill-and-verify path is integer stores, integer loads and integer compares.
 
-#if QWEN_FILL
-#define QWEN_FP16_ONE 0x3c00u
-// (n/8) for n = -4..4.
-static const uint16_t qwen_grid[9] = {0xb800u, 0xb600u, 0xb400u, 0xb000u, 0x0000u,
-                                      0x3000u, 0x3400u, 0x3600u, 0x3800u};
-
-// Gate and up get DIFFERENT weights, so a run that fed one projection the other's
-// base would fail rather than quietly agree with itself.
-static inline uint16_t qwen_w_bits(uint32_t stage, uint32_t k, uint32_t p) {
-#if QWEN_CHECK == 2
-  (void)stage;
-  (void)k;
-  (void)p;
-  return QWEN_FP16_ONE;
-#else
-  return qwen_grid[(k * 7u + p * 3u + stage * 5u) % 9u];
-#endif
-}
-
-// Which X column row b's one-hot lights up. MODULO K: without the wrap, B=64 at
-// K=64 ran the index off the end for b >= 61, leaving those rows all-zero while the
-// expected value was not -- 21,846 spurious mismatches that looked like a kernel bug
-// and were a harness bug.
-#define QWEN_UNIT_COL(b) (((QWEN_UNIT_K0) + (b)) % (uint32_t)QWEN_K)
-
-static inline uint16_t qwen_x_bits(uint32_t b, uint32_t k) {
-#if QWEN_CHECK == 2
-  (void)b;
-  (void)k;
-  return QWEN_FP16_ONE;
-#else
-  return (k == QWEN_UNIT_COL(b)) ? QWEN_FP16_ONE : 0u;
-#endif
-}
-
+#if QWEN_CHECK
 // What C must hold afterwards.
 static inline uint16_t qwen_expect_bits(uint32_t stage, uint32_t b, uint32_t p) {
 #if QWEN_CHECK == 2
@@ -221,6 +179,9 @@ static inline uint16_t qwen_expect_bits(uint32_t stage, uint32_t b, uint32_t p) 
 #endif
 }
 
+#endif  // QWEN_CHECK (expectation)
+
+#if QWEN_FILL
 // Every core fills its own interleaved share; this runs before the MSHR is
 // enabled and outside the timed region.
 //
@@ -248,6 +209,9 @@ static void qwen_fill_operands(uint32_t cid, uint32_t num_cores) {
   }
 }
 
+#endif  // QWEN_FILL
+
+#if QWEN_CHECK
 // Integer compare of the whole output. Returns the number of wrong elements and
 // reports the first one. Both stages carry the same expected value.
 static uint32_t qwen_verify(uint32_t *first_p, uint16_t *got, uint16_t *want) {
@@ -270,7 +234,7 @@ static uint32_t qwen_verify(uint32_t *first_p, uint16_t *got, uint16_t *want) {
   }
   return bad;
 }
-#endif  // QWEN_FILL
+#endif  // QWEN_CHECK (verify)
 
 //==============================================================================
 // The K-tile pipeline
@@ -338,7 +302,7 @@ static void qwen_refill(uint32_t slot, uint32_t stage, uint32_t step) {
 // Separate from the loop so the first projection's prime can sit outside the
 // measured region -- a fill into an empty L1 has nothing to overlap with.
 static void qwen_prime(uint32_t stage, uint32_t cid) {
-  if (cid != 0) return;
+  if (cid != (uint32_t)QWEN_DMA_CORE) return;
   qwen_refill(0, stage, 0);
   dma_wait();
   if ((uint32_t)QWEN_STEPS > 1u) qwen_refill(1, stage, 1);
@@ -377,7 +341,7 @@ static void qwen_project(uint32_t stage, uint32_t cid, const elem_t *x,
 #endif
 
     qwen_barrier(cid);  // every reader has left this slot
-    if (cid == 0) {
+    if (cid == (uint32_t)QWEN_DMA_CORE) {
       if (step + 1u < (uint32_t)QWEN_STEPS) dma_wait();            // tile step+1 landed
       if (step + 2u < (uint32_t)QWEN_STEPS)
         qwen_refill(slot, stage, step + 2u);                       // reuse the free slot
@@ -495,19 +459,20 @@ int main(void) {
   qwen_fill_operands(cid, num_cores);
   mempool_barrier(num_cores);  // every core has written its share of the operands
 #endif
-  if (cid == 0)
+  if (cid == (uint32_t)QWEN_DMA_CORE)
     for (uint32_t r = 0; r < (uint32_t)QWEN_X_REPLICAS; ++r)
       dma_memcpy_blocking(qwen_x + r * (uint32_t)QWEN_X_STRIDE_E, qwen_x_l2,
                           (size_t)(QWEN_B * QWEN_K) * GEMM_ELEM_BYTES);
 #if GBAR_PLOOP
   // Independent of the copy above, so it shares that copy's rendezvous.
-  if (is_core_active && core_gid == 0u) {
+  if (is_core_active && core_gid == QWEN_GROUP_HELPER) {
     const uint32_t gmask =
         (cores_per_group >= 32u) ? 0xFFFFFFFFu : ((1u << cores_per_group) - 1u);
     gbar_setup(GBAR_PLOOP_STRUCT, cores_per_group, gmask);
   }
 #endif
-  mempool_barrier(num_cores);  // X is resident and the group barriers are armed
+  // No rendezvous here: the barrier after qwen_prime below covers both the copy
+  // and the setup, and nothing between reads either.
 
   // Every core reads the copy nearest its own group.
   const elem_t *const x_use =
@@ -557,7 +522,7 @@ int main(void) {
     // shortening it. Both come from gemm_config.h, and this proves it every run.
     mshr_split_bad = mshr_cfg_check_splits(share_burst, share_single, pblocks) != 0;
 
-    if (mshr_cfg_is_group_writer()) {
+    if (core_gid == QWEN_GROUP_HELPER) {
       // script/gen_hash.c chose these on the host from the shape and the replica
       // layout. They are exact only while every operand stays aligned to a mesh
       // sweep, which is what keeps the link addresses out of the hash.
@@ -603,8 +568,10 @@ int main(void) {
   // allocates gets 2 subscribers against a target of 16 and waits out
   // serve_timeout. That costs no measured time, but it lands in the same
   // cumulative counters and makes a correctly tuned MSHR look mistuned.
-  if (mshr_cfg_is_group_writer())
+  if (core_gid == QWEN_GROUP_HELPER)
     mshr_cfg_write(mshr_cfg_my_group(), mshr_cfg_peer_tile(), MSHR_CSR_ENABLE, 0);
+  // Every group has to be disabled before the verify below starts issuing remote
+  // loads into it, or the loads land in the MSHRs this is meant to spare.
   mempool_barrier(num_cores);
 #endif
 

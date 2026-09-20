@@ -28,6 +28,14 @@ FP_APPS := $(foreach suf, $(I_SUFFIXES), $(filter %_$(suf), $(ALL)))
 ALL_GCC := $(filter-out $(I_APPS), $(ALL))
 ALL_LLVM := $(filter-out $(FP_APPS), $(ALL))
 
+# Carry the operands in the ELF instead of writing them on target. The image is
+# the operand size -- 13 MiB at K=200, 340 MiB at K=5120 -- and the testbench
+# preload walks every word once per L2 bank, so weigh it against qwen_init=1.
+qwen_preload ?= 0
+ifeq ($(qwen_preload),1)
+QWEN_EXTRA_OBJS := qwen-gate-up/data/qwen_operands.S.o
+endif
+
 # Make all applications
 all: $(ALL_GCC)
 
@@ -40,9 +48,9 @@ $(APPS): % : $(BIN_DIR)/% $(APPS_DIR)/Makefile $(shell find $(RUNTIME_DIR)/**.{S
 # interleaved as comments. At -O3 that mapping is approximate: one line lands on
 # scattered instruction groups, and inlined code appears under the caller.
 .PHONY: $(BINARIES)
-$(BINARIES): $(BIN_DIR)/%: %/main.c.o $(RUNTIME) $(LINKER_SCRIPT) data_%.h update_opcodes
+$(BINARIES): $(BIN_DIR)/%: %/main.c.o $(RUNTIME) $(LINKER_SCRIPT) data_%.h update_opcodes $(QWEN_EXTRA_OBJS)
 	mkdir -p $(dir $@)
-	$(RISCV_CC) -Iinclude -o $@ $< $(RUNTIME) $(RISCV_LDFLAGS) -T$(RUNTIME_DIR)/link.ld
+	$(RISCV_CC) -Iinclude -o $@ $< $(QWEN_EXTRA_OBJS) $(RUNTIME) $(RISCV_LDFLAGS) -T$(RUNTIME_DIR)/link.ld
 	$(RISCV_OBJDUMP) $(RISCV_OBJDUMP_FLAGS) -D -S $@ > $@.dump
 
 # Regenerate a per-shape GEMM data header from its shape spec. data_gemm.h carries the
@@ -120,7 +128,28 @@ qwen_check ?= 0
 # Fill the operands on target. Off by default: the platform is expected to hand us
 # defined memory (RTL tc_sram SimInit, GVSoC zeroed). A check build implies it.
 qwen_init ?= 0
+# Which core drives the global DMA. Moving it to another group separates "core 0
+# is busy with the DMA" from "group 0 hosts the buffers" when reading MSHR stats.
+qwen_dma_core ?= 0
+# Carry the operands in the ELF instead of writing them on target. The image is
+# the operand size -- 13 MiB at K=200, 340 MiB at K=5120 -- and the testbench
+# preload walks every word once per L2 bank, so weigh it against qwen_init=1.
+qwen_preload ?= 0
 qwen_repeats ?= 1
+# Rows of C each core computes. Default `max`: the largest legal kernel. LMUL is
+# min(8,16/KS), so KS*LMUL is pinned at 16 and an iteration computes 512 fp16
+# FMACs against only 512/KS loaded W elements -- arithmetic intensity scales with
+# KS. A larger KS also lowers share_B, so the kernel stops depending on the group
+# MSHR finding a merge partner inside its hold window. `qwen_ks=score` restores
+# gemm_config.h's A/B-balance policy; qwen_ks=1|2|4|8 pins one kernel.
+qwen_ks ?= max
+ifeq ($(qwen_ks),max)
+qwen_ks_def := GEMM_KS_PREFER_MAX 1
+else ifeq ($(qwen_ks),score)
+qwen_ks_def := GEMM_KS_PREFER_MAX 0
+else
+qwen_ks_def := KERNEL_SIZE $(qwen_ks)
+endif
 qwen-gate-up/data/qwen_shape.h: FORCE
 	@mkdir -p $(@D)
 	@{ \
@@ -134,7 +163,10 @@ qwen-gate-up/data/qwen_shape.h: FORCE
 	  echo '#define QWEN_KT $(qwen_kt)        // reduction rows of W per streamed tile'; \
 	  echo '#define QWEN_CHECK $(qwen_check)'; \
 	  echo '#define QWEN_INIT $(qwen_init)'; \
+	  echo '#define QWEN_DMA_CORE $(qwen_dma_core)u'; \
+	  echo '#define QWEN_PRELOAD $(qwen_preload)'; \
 	  echo '#define QWEN_REPEATS $(qwen_repeats)'; \
+	  echo '#define $(qwen_ks_def)'; \
 	  echo '#endif'; \
 	} > $@.tmp
 	@if cmp -s $@.tmp $@; then rm -f $@.tmp; else mv $@.tmp $@; fi
@@ -150,8 +182,22 @@ qwen-gate-up/data/qwen_hash.h: qwen-gate-up/data/qwen_shape.h \
 		qwen-gate-up/script/gen_hash.c -o $(@D)/gen_hash
 	$(@D)/gen_hash > $@
 
+# The operand images and the stub that places them in L2. Written on the host: an
+# initialised C array of this many elements would never finish compiling, so the
+# assembler .incbin's the raw images instead.
+qwen-gate-up/data/qwen_operands.S: qwen-gate-up/data/qwen_shape.h \
+	qwen-gate-up/qwen_layout.h qwen-gate-up/qwen_pattern.h \
+	qwen-gate-up/script/gen_operands.c
+	@mkdir -p $(@D)
+	$(HOST_CC) -O2 -I$(RUNTIME_DIR) -Iqwen-gate-up $(DEFINES) \
+		qwen-gate-up/script/gen_operands.c -o $(@D)/gen_operands
+	$(@D)/gen_operands $(@D)
+
+qwen-gate-up/data/qwen_operands.S.o: qwen-gate-up/data/qwen_operands.S
+	$(RISCV_CC) $(RISCV_CCFLAGS) -c $< -o $@
+
 qwen-gate-up/main.c.o: qwen-gate-up/data/qwen_shape.h qwen-gate-up/data/qwen_hash.h \
-	qwen-gate-up/qwen_layout.h \
+	qwen-gate-up/qwen_layout.h qwen-gate-up/qwen_pattern.h \
 	qwen-gate-up/kernel/qwen-fmatmul.c qwen-gate-up/kernel/qwen-fmatmul.h
 
 GEMM_APPS := $(patsubst $(APPS_DIR)/%/script/matmul.json,%,$(wildcard $(APPS_DIR)/*/script/matmul.json))

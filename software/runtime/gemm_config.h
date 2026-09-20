@@ -3,11 +3,14 @@
 #ifndef GEMM_CONFIG_H
 #define GEMM_CONFIG_H
 
-// Shared work partition for the FP16/FP32 burst-merge applications. Select
-// among legal kernels by A/B sharing imbalance, then burst eligibility, then
-// larger KS. The tie-breaker tests potential short-burst eligibility; actual
-// addresses, ROB capacity and tile crossings are checked by the runtime tuner.
-// This is a static policy, not a measured performance optimum.
+// Shared work partition for the FP16/FP32 burst-merge applications. Two
+// policies: with GEMM_KS_PREFER_MAX the largest legal kernel wins (maximum
+// in-core operand reuse); otherwise legal kernels are ranked by A/B sharing
+// imbalance, then burst eligibility, then larger KS. The tie-breaker tests
+// potential short-burst eligibility; actual addresses, ROB capacity and tile
+// crossings are checked by the runtime tuner. Either way this is a static
+// policy, not a measured performance optimum. KERNEL_SIZE defined by the caller
+// overrides both.
 #if NUM_GROUPS < 1 || NUM_CORES < NUM_GROUPS || NUM_CORES % NUM_GROUPS != 0
 #error "GEMM requires an integral, nonempty core count per group"
 #endif
@@ -72,6 +75,23 @@
   ? 2 * GEMM_IMBALANCE(k) + (GEMM_LOAD_BYTES(k) < 8 || GEMM_LOAD_BYTES(k) % 4 != 0) : 1000000)
 
 #ifndef KERNEL_SIZE
+#if defined(GEMM_KS_PREFER_MAX) && GEMM_KS_PREFER_MAX
+// Largest legal kernel: keep the operand reuse inside the core instead of asking
+// the memory system for it. GEMM_LMUL(k) pins k*LMUL at 16 for k >= 2, so one
+// iteration always computes 512 fp16 FMACs while loading only 512/k elements of
+// B -- arithmetic intensity is proportional to k. A larger k also lowers
+// GEMM_SHARE_B, which takes the group-MSHR merge (and its hold window) off the
+// critical path rather than depending on it to deliver the same reuse.
+#if GEMM_LEGAL(8)
+#define KERNEL_SIZE 8
+#elif GEMM_LEGAL(4)
+#define KERNEL_SIZE 4
+#elif GEMM_LEGAL(2)
+#define KERNEL_SIZE 2
+#else
+#define KERNEL_SIZE 1
+#endif
+#else
 #if GEMM_SCORE(8) <= GEMM_SCORE(4) && \
     GEMM_SCORE(8) <= GEMM_SCORE(2) && GEMM_SCORE(8) <= GEMM_SCORE(1)
 #define KERNEL_SIZE 8
@@ -81,6 +101,7 @@
 #define KERNEL_SIZE 2
 #else
 #define KERNEL_SIZE 1
+#endif
 #endif
 #endif
 #if KERNEL_SIZE != 1 && KERNEL_SIZE != 2 && \

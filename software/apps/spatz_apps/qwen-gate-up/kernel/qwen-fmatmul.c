@@ -87,11 +87,38 @@
 // burst-eligible: the first is a stripe-contained 64 B (one 16-word burst), the
 // second starts 64 B-aligned and may cross freely.
 #define QWEN_STRIPE_ELEMS ((unsigned int)(GEMM_BURST_TILE_WORDS * 4 / sizeof(elem_t)))
+#if QWEN_SPAN_ALIGN >= 8
+// Every span starts 16-byte aligned, so a load may cross stripe boundaries and is
+// still burst-eligible: the VLSU splits it into 16-word requests. Take the whole
+// vector rather than stopping at one stripe -- eight bursts instead of one.
+//
+// The cap is a CONSTANT, so every core emits the same number of vectors whatever
+// its start offset. GBAR_PLOOP needs that uniform arrival count.
+// What the hardware and the burst rule allow, whichever is smaller:
+//   - the vector itself: VLEN * LMUL bits, and GEMM_LMUL is m8 at KERNEL_SIZE 1
+//   - the burst path: gemm_burst.h rejects a load beyond ROB_DEPTH * LANES words
+// At KERNEL_SIZE 1 both are 256 elements, i.e. 512 B, i.e. eight 16-word bursts.
+#define QWEN_VL_HW ((VLEN) * GEMM_LMUL(KERNEL_SIZE) / (8u * GEMM_ELEM_BYTES))
+#define QWEN_VL_BURST \
+  ((GEMM_BURST_ROB_DEPTH) * (GEMM_BURST_LANES) * 4u / GEMM_ELEM_BYTES)
+#define QWEN_VL_MAX \
+  ((QWEN_VL_HW) < (QWEN_VL_BURST) ? (unsigned int)(QWEN_VL_HW) \
+                                  : (unsigned int)(QWEN_VL_BURST))
+static inline unsigned int qwen_burst_vl(unsigned int p, unsigned int p_end) {
+  const unsigned int left = p_end - p;
+  (void)p;
+  return (left > QWEN_VL_MAX) ? QWEN_VL_MAX : left;
+}
+#else
+// 8-byte spans: a load that crossed a stripe would not be 16-byte aligned and the
+// whole thing would fall back to the single-word path, so stay inside the stripe.
+// Capping UNCONDITIONALLY keeps the vector count uniform across cores.
 static inline unsigned int qwen_burst_vl(unsigned int p, unsigned int p_end) {
   const unsigned int left = p_end - p;
   const unsigned int to_stripe_end = QWEN_STRIPE_ELEMS - (p % QWEN_STRIPE_ELEMS);
   return (left > to_stripe_end) ? to_stripe_end : left;
 }
+#endif
 
 // ---- Group barrier (memory-mapped, general-purpose structs) ----------------
 // The HW barrier uses the separate group-control aperture; SRAM is unaffected.

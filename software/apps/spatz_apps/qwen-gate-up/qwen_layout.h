@@ -7,6 +7,47 @@
 #define QWEN_LAYOUT_H
 
 #include "data/qwen_shape.h"
+#include "gemm_config.h"  // KERNEL_SIZE, GEMM_PBLOCKS
+#include "gemm_burst.h"   // GEMM_BURST_* geometry
+
+#define QWEN_B GEMM_M
+#define QWEN_K GEMM_N
+#define QWEN_P GEMM_P
+
+// ---- Stored width, and why it is padded ------------------------------------
+//
+// Elements in one 64-byte tile bank stripe (32 at fp16).
+#define QWEN_STRIPE_E ((GEMM_BURST_TILE_WORDS * 4) / GEMM_ELEM_BYTES)
+//
+// docs/qwen3_8_27b/tile_contained_burst_hash.md: a vector load bursts only if it
+// is stripe-contained from a 4-byte-aligned start. Given the kernel's stripe cap
+// (qwen_burst_vl), it is enough that every core's column span is a multiple of 4
+// elements -- then no emitted vector is ever below the burst floor or oddly
+// aligned. script/test_burst_vl.py checks this against the runtime's own
+// eligibility predicate.
+//
+// So the STORED width is P rounded up until the per-core span divides by 4. At
+// 4x4 B=1 nothing is padded; at 8x8 B=1 the span would be 17 and 74% of the
+// weight bytes would take the single-word path, so it is rounded to 20 for +17.6%
+// traffic. The [QWEN] line prints what the padding cost.
+#define QWEN_PBLOCKS GEMM_PBLOCKS(KERNEL_SIZE)
+// Column spans in elements. 8 elements is 16 bytes, which is what lets a vector
+// load cross stripe boundaries and still burst (gemm_burst.h:41): the VLSU then
+// splits it into 16-word requests instead of falling back to single words. That
+// doubles the vector length we can use and the requests in flight per core.
+//
+// B=1 keeps 8-byte spans: LDP is 17408 = 17 x 1024, so every batch from 2 up gets
+// 16-byte spans for free, while B=1 has 256 column blocks and would round LDP up
+// to 18432 -- 5.9% more weight traffic on the one shape that is already
+// bandwidth-bound with all 16 banks engaged.
+#define QWEN_SPAN_ALIGN 4
+#define QWEN_PAD_UNIT                                     \
+  (((QWEN_PBLOCKS) * (QWEN_SPAN_ALIGN)) > (QWEN_STRIPE_E) \
+       ? ((QWEN_PBLOCKS) * (QWEN_SPAN_ALIGN))             \
+       : (QWEN_STRIPE_E))
+#define QWEN_LDP \
+  ((((QWEN_P) + (QWEN_PAD_UNIT)-1) / (QWEN_PAD_UNIT)) * (QWEN_PAD_UNIT))
+
 
 // How far a buffer must move to land on the next group of the word-interleaved
 // L1. Same derivation as arch.ld.c and the kernel's gbar_base().
