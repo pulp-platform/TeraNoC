@@ -485,6 +485,9 @@ vlog_defs += -DSPATZ_TRACE=$(spatz_trace)
 # --------------------------
 # Spatz Core Settings
 # --------------------------
+# 0: software fences dependent scalar/accelerator accesses; 1: legacy automatic ordering.
+en_scalar_accel_mem_ordering ?= 0
+vlog_defs += -DEN_SCALAR_ACCEL_MEM_ORDERING=$(en_scalar_accel_mem_ordering)
 # Use Spatz?
 vlog_defs += -DRVV=$(spatz)
 # 32b or 64b?

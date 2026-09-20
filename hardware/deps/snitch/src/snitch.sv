@@ -22,6 +22,8 @@ module snitch
   parameter bit          RVM       = 1,   // Enable IntegerMmultiplication & Division Extension
 
   parameter bit          RVV       = 0,   // Enable Vector Extension
+  // When disabled, software must fence dependent scalar/accelerator memory accesses.
+  parameter bit EnScalarAccelMemOrdering = 0,
   parameter bit          XFVEC     = 0,
   parameter bit          XFDOTP    = 0,
   parameter bit          XFAUX     = 0,
@@ -2840,7 +2842,11 @@ module snitch
   logic [2:0] acc_mem_str_cnt_q, acc_mem_str_cnt_d;
   `FFAR(acc_mem_str_cnt_q, acc_mem_str_cnt_d, '0, clk_i, rst_i)
 
-  assign acc_mem_stall = (is_store && acc_mem_cnt_q != '0) || (is_load && acc_mem_str_cnt_q != 0) || acc_mem_cnt_q == '1;
+  // Always retain counter capacity protection and completion tracking for explicit fences.
+  assign acc_mem_stall = (acc_mem_cnt_q == '1) ||
+      (EnScalarAccelMemOrdering &&
+       ((is_store && (acc_mem_cnt_q != '0)) ||
+        (is_load && (acc_mem_str_cnt_q != '0))));
 
   always_comb begin
     acc_mem_cnt_d = acc_mem_cnt_q;

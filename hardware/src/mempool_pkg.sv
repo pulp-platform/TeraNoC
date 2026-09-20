@@ -30,6 +30,9 @@ package mempool_pkg;
   localparam integer unsigned AxiLiteDataWidth        = 32;
 
   // Extension support
+  // Software orders dependent scalar/accelerator accesses unless explicitly enabled.
+  localparam bit EnScalarAccelMemOrdering =
+      `ifdef EN_SCALAR_ACCEL_MEM_ORDERING `EN_SCALAR_ACCEL_MEM_ORDERING `else 0 `endif;
   localparam bit RVV        = `ifdef RVV `RVV `else 0 `endif;
   localparam bit RVF        = `ifdef RVF `RVF `else 0 `endif;
   // RVD is not supported for MemPool family

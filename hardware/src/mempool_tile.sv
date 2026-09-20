@@ -261,6 +261,7 @@ module mempool_tile
         .RVE                  ( 0                   ),
         .RVM                  ( 1                   ),
         .RVV                  ( RVV                 ),
+        .EnScalarAccelMemOrdering ( EnScalarAccelMemOrdering ),
         .XFVEC                ( XFVEC               ),
         .XFDOTP               ( XFDOTP              ),
         .XFAUX                ( XFAUX               ),
