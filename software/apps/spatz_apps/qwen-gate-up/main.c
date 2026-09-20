@@ -562,12 +562,16 @@ int main(void) {
   mempool_stop_benchmark();
   const uint32_t timer = (mempool_get_timer() - t0) / (uint32_t)QWEN_REPEATS;
 
-#if MSHR_RUNTIME_CFG && QWEN_CHECK
-  // Bypass the MSHR for everything after the measured region. The verify below is
-  // one core walking the output with scalar halfword loads, so each entry it
-  // allocates gets 2 subscribers against a target of 16 and waits out
-  // serve_timeout. That costs no measured time, but it lands in the same
-  // cumulative counters and makes a correctly tuned MSHR look mistuned.
+#if MSHR_RUNTIME_CFG
+  // Bypass the MSHR for everything after the measured region -- in EVERY build, not
+  // just a checking one. Both epilogues are a single core walking memory with scalar
+  // loads that no other core shares: the verify reads the output, and a perf build's
+  // deferred report reads all NUM_CORES qwen_fmac_core slots plus the two [SPOT]
+  // words. Each such entry gets one subscriber against a target of 16 and waits out
+  // the full hold window, so 258 of them at 256 cores camp their banks and every
+  // request hashing there retries -- measured as 258 resp_hold_timeouts and 910k
+  // bank-full retries in group 0 alone. It costs no measured time, but it lands in
+  // the same cumulative counters and makes a correctly tuned MSHR look mistuned.
   if (core_gid == QWEN_GROUP_HELPER)
     mshr_cfg_write(mshr_cfg_my_group(), mshr_cfg_peer_tile(), MSHR_CSR_ENABLE, 0);
   // Every group has to be disabled before the verify below starts issuing remote
