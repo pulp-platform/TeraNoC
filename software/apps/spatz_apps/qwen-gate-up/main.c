@@ -280,6 +280,29 @@ static uint32_t qwen_log_barrier(uint32_t step, uint32_t core_id) {
   return 0;
 }
 
+// Log barrier carrying the DMA handoff: the FIRST core to arrive absorbs 
+// the outstanding transfer's wait while the rest are still finishing compute,
+// so the DMA latency hides under the arrival skew instead of sitting between
+// two rendezvous. Returns the barrier address to the ONE core that closes it,
+// 0 to everyone else.
+static uint32_t qwen_dma_log_barrier(uint32_t step, uint32_t core_id,
+                                     uint32_t dma_pending) {
+  uint32_t *bar = (uint32_t *)(((core_id / step) * step +
+                                (step >> QWEN_LOG2_RADIX) - 1) *
+                                   SEQ_MEM_SIZE +
+                               4);
+  uint32_t val = __atomic_fetch_add(bar, 1, __ATOMIC_RELAXED);
+  if (val == (uint32_t)(QWEN_RADIX - 1)) {
+    if (step == (uint32_t)NUM_CORES) return (uint32_t)bar;  // last stage
+    __atomic_store_n(bar, 0, __ATOMIC_RELAXED);
+    return qwen_dma_log_barrier(step << QWEN_LOG2_RADIX, core_id, dma_pending);
+  }
+  // First arrival on the first stage word (cores 0..RADIX-1 share it).
+  if (dma_pending && val == 0 && bar == (uint32_t *)(uintptr_t)4) dma_wait();
+  mempool_wfi();
+  return 0;
+}
+
 static inline void qwen_barrier(uint32_t core_id) {
   uint32_t bar = qwen_log_barrier(QWEN_RADIX, core_id);
   if (bar) {
@@ -340,13 +363,19 @@ static void qwen_project(uint32_t stage, uint32_t cid, const elem_t *x,
                 QWEN_K, accum);
 #endif
 
-    qwen_barrier(cid);  // every reader has left this slot
-    if (cid == (uint32_t)QWEN_DMA_CORE) {
-      if (step + 1u < (uint32_t)QWEN_STEPS) dma_wait();            // tile step+1 landed
-      if (step + 2u < (uint32_t)QWEN_STEPS)
-        qwen_refill(slot, stage, step + 2u);                       // reuse the free slot
+    const uint32_t pending = (step + 1u < (uint32_t)QWEN_STEPS);
+    uint32_t bar = qwen_dma_log_barrier(QWEN_RADIX, cid, pending);
+    if (bar) {
+      // Guarantee, not the optimistic early wait: the frontend has ONE
+      // {src,dst,len} register set, so the previous transfer must be complete
+      // before another is programmed. A no-op when the first arriver already waited.
+      if (pending) dma_wait();
+      if (step + 2u < (uint32_t)QWEN_STEPS) qwen_refill(slot, stage, step + 2u);
+      __atomic_store_n((uint32_t *)bar, 0, __ATOMIC_RELAXED);
+      __sync_synchronize();
+      wake_up_all();
+      mempool_wfi();  // clear our own trigger, as the plain barrier does
     }
-    qwen_barrier(cid);  // the next tile is resident
   }
 }
 
