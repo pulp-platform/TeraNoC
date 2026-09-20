@@ -220,6 +220,18 @@ static inline void gbar_sync(uint32_t a) {
   gbar_arrive(a);         // arrive: held load to the barrier struct
   gbar_wait_snitch();     // wait for the held lw to return (the pair has rendezvoused)
 }
+// Full-DRAIN rendezvous. gbar_sync above only guarantees a core's requests were
+// ISSUED, which is right when the point is to launch a cohort together. It is NOT
+// enough to change MSHR configuration: requests that are issued but not yet answered
+// still own resident entries, so a CFG_ENABLE flip would land while the MSHR is
+// occupied and those entries would drain under the old setting. `fence` waits for
+// this core's Spatz VLSU and integer-LSU RESPONSES, so once the group releases every
+// core's memory transactions have completed and the group MSHR is empty.
+static inline void gbar_sync_drain(uint32_t a) {
+  gbar_wait_both();       // fence: drain my vector + scalar memory ops (responses, not issue)
+  gbar_arrive(a);         // arrive: held load to the barrier struct
+  gbar_wait_snitch();     // wait for the held lw to return (the group has rendezvoused)
+}
 #endif
 // Per-STEP / per-PAIR macros. These stay gated on GROUP_BARRIER ALONE (not the helper
 // gate above): their call sites reference the pair address `gbar`, which is only declared
@@ -284,12 +296,24 @@ static inline void qwen_mshr_enable(uint32_t on) {
 #ifndef QWEN_CBYPASS_BARRIERS
 #define QWEN_CBYPASS_BARRIERS 4
 #endif
-#if QWEN_CBYPASS_BARRIERS >= 4
-#define QWEN_CBYPASS_ENTER(a) do { gbar_sync(a); qwen_mshr_enable(0u); gbar_sync(a); } while (0)
-#define QWEN_CBYPASS_EXIT(a)  do { gbar_sync(a); qwen_mshr_enable(1u); gbar_sync(a); } while (0)
+// The FIRST barrier of each edge drains: the MSHR must be empty before CFG_ENABLE
+// moves, or entries allocated under the old setting are still resident across the
+// flip. The SECOND only has to publish the new setting, so issue-order is enough.
+// QWEN_CBYPASS_DRAIN=0 reverts both to the issue-only barrier for A/B.
+#ifndef QWEN_CBYPASS_DRAIN
+#define QWEN_CBYPASS_DRAIN 1
+#endif
+#if QWEN_CBYPASS_DRAIN
+#define QWEN_CBYPASS_FENCE(a) gbar_sync_drain(a)
 #else
-#define QWEN_CBYPASS_ENTER(a) do { gbar_sync(a); qwen_mshr_enable(0u); } while (0)
-#define QWEN_CBYPASS_EXIT(a)  do { gbar_sync(a); qwen_mshr_enable(1u); } while (0)
+#define QWEN_CBYPASS_FENCE(a) gbar_sync(a)
+#endif
+#if QWEN_CBYPASS_BARRIERS >= 4
+#define QWEN_CBYPASS_ENTER(a) do { QWEN_CBYPASS_FENCE(a); qwen_mshr_enable(0u); gbar_sync(a); } while (0)
+#define QWEN_CBYPASS_EXIT(a)  do { QWEN_CBYPASS_FENCE(a); qwen_mshr_enable(1u); gbar_sync(a); } while (0)
+#else
+#define QWEN_CBYPASS_ENTER(a) do { QWEN_CBYPASS_FENCE(a); qwen_mshr_enable(0u); } while (0)
+#define QWEN_CBYPASS_EXIT(a)  do { QWEN_CBYPASS_FENCE(a); qwen_mshr_enable(1u); } while (0)
 #endif
 #else
 #define QWEN_CBYPASS_ENTER(a) ((void)0)
