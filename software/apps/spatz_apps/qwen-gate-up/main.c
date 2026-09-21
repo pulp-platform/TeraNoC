@@ -488,10 +488,13 @@ int main(void) {
   qwen_fill_operands(cid, num_cores);
   mempool_barrier(num_cores);  // every core has written its share of the operands
 #endif
-  if (cid == (uint32_t)QWEN_DMA_CORE)
-    for (uint32_t r = 0; r < (uint32_t)QWEN_X_REPLICAS; ++r)
-      dma_memcpy_blocking(qwen_x + r * (uint32_t)QWEN_X_STRIDE_E, qwen_x_l2,
-                          (size_t)(QWEN_B * QWEN_K) * GEMM_ELEM_BYTES);
+  if (cid == (uint32_t)QWEN_DMA_CORE) {
+    for (uint32_t r = 0; r < (uint32_t)QWEN_X_REPLICAS; ++r) {
+      dma_memcpy_nonblocking(qwen_x + r * (uint32_t)QWEN_X_STRIDE_E, qwen_x_l2,
+                            (size_t)(QWEN_B * QWEN_K) * GEMM_ELEM_BYTES);
+      if (r % 2 == 1u) dma_wait();
+    }
+  }
 #if GBAR_PLOOP
   // Independent of the copy above, so it shares that copy's rendezvous.
   if (is_core_active && core_gid == QWEN_GROUP_HELPER) {
