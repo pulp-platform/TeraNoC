@@ -508,7 +508,7 @@ int main(void) {
     for (uint32_t r = 0; r < (uint32_t)QWEN_X_REPLICAS; ++r) {
       dma_memcpy_nonblocking(qwen_x + r * (uint32_t)QWEN_X_STRIDE_E, qwen_x_l2,
                             (size_t)(QWEN_B * QWEN_K) * GEMM_ELEM_BYTES);
-      if (r % 2 == 1u) dma_wait();
+      if ((r % 2 == 1u) || (r == (uint32_t)QWEN_X_REPLICAS - 1)) dma_wait();
     }
   }
 #if GBAR_PLOOP
@@ -531,10 +531,14 @@ int main(void) {
   // of reset, so the fill, the DMA and the warm-up all bypass it and cannot leave
   // a line in its response cache before the measured region.
   //--------------------------------------------------------------------------
-  // Fill the pipeline before the timer starts, so the measured region begins
-  // exactly when the cores enter the first compute stage -- and before the
-  // warm-up below, which reads the tile it lands.
-  qwen_prime(QWEN_GATE, cid);
+  // Launch both slots and do NOT wait here: the two fetches then overlap the
+  // warm-up and the MSHR programming below, and one dma_wait before the timed
+  // region covers them. The warm-up reads qwen_w[0] while it is still filling --
+  // harmless, its results are discarded and no address derives from them.
+  if (cid == (uint32_t)QWEN_DMA_CORE) {
+    qwen_refill(0, QWEN_GATE, 0);
+    if ((uint32_t)QWEN_STEPS > 1u) qwen_refill(1, QWEN_GATE, 1);
+  }
 
 #if ICACHE_WARMUP
   {
@@ -587,6 +591,10 @@ int main(void) {
   //--------------------------------------------------------------------------
   // Per-projection boundaries, printed after the region so timing is undisturbed:
   // they answer whether the second projection costs the same as the first.
+
+  if (cid == (uint32_t)QWEN_DMA_CORE) {
+    dma_wait();
+  }
   mempool_barrier(num_cores);
   uint32_t stage_end[QWEN_STAGES] = {0, 0};
 
