@@ -535,7 +535,6 @@ int main(void) {
   // exactly when the cores enter the first compute stage -- and before the
   // warm-up below, which reads the tile it lands.
   qwen_prime(QWEN_GATE, cid);
-  mempool_barrier(num_cores);
 
 #if ICACHE_WARMUP
   {
@@ -554,7 +553,6 @@ int main(void) {
                 QWEN_K, 0, 0u);
 #endif
   }
-  mempool_barrier(num_cores);
 #endif
 
 #if MSHR_RUNTIME_CFG
@@ -589,6 +587,7 @@ int main(void) {
   //--------------------------------------------------------------------------
   // Per-projection boundaries, printed after the region so timing is undisturbed:
   // they answer whether the second projection costs the same as the first.
+  mempool_barrier(num_cores);
   uint32_t stage_end[QWEN_STAGES] = {0, 0};
 
   const uint32_t t0 = mempool_get_timer();
