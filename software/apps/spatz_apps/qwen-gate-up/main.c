@@ -351,16 +351,32 @@ static void qwen_project(uint32_t stage, uint32_t cid, const elem_t *x,
     const uint32_t accum = (step != 0);
 #if KERNEL_SIZE == 1
     matmul_1xVL(c, a, qwen_w[slot], m_start, m_end, QWEN_KT, QWEN_LDP, p_start, p_end,
-                QWEN_K, accum);
+                QWEN_K, accum,
+                (step & 1u)
+                  | ((step != 0u) ? 2u : 0u)
+                  | ((step + 1u < (uint32_t)QWEN_STEPS) ? 4u : 0u));
 #elif KERNEL_SIZE == 2
     matmul_2xVL(c, a, qwen_w[slot], m_start, m_end, QWEN_KT, QWEN_LDP, p_start, p_end,
-                QWEN_K, accum);
+                QWEN_K, accum,
+                (step & 1u)
+                  | ((step != 0u) ? 2u : 0u)
+                  | ((step + 1u < (uint32_t)QWEN_STEPS) ? 4u : 0u));
 #elif KERNEL_SIZE == 4
     matmul_4xVL(c, a, qwen_w[slot], m_start, m_end, QWEN_KT, QWEN_LDP, p_start, p_end,
-                QWEN_K, accum);
+                QWEN_K, accum,
+                (step & 1u)
+                  | ((step != 0u) ? 2u : 0u)
+                  | ((step + 1u < (uint32_t)QWEN_STEPS) ? 4u : 0u));
 #else
+    // Alternate the column-block direction per K tile so the block this tile ends
+    // on is the one the next tile starts on: its accumulators stay in v0..v14 and
+    // neither the store nor the reload happens. Not across projections -- the last
+    // tile has no successor, so it stores everything.
     matmul_8xVL(c, a, qwen_w[slot], m_start, m_end, QWEN_KT, QWEN_LDP, p_start, p_end,
-                QWEN_K, accum);
+                QWEN_K, accum,
+                (step & 1u)
+                  | ((step != 0u) ? 2u : 0u)
+                  | ((step + 1u < (uint32_t)QWEN_STEPS) ? 4u : 0u));
 #endif
 
     const uint32_t pending = (step + 1u < (uint32_t)QWEN_STEPS);
@@ -526,16 +542,16 @@ int main(void) {
     const uint32_t warm = (QWEN_KT < 6u) ? (uint32_t)QWEN_KT : 6u;
 #if KERNEL_SIZE == 1
     matmul_1xVL(qwen_c[0], x_use, qwen_w[0], m_start, m_end, warm, QWEN_LDP, p_start, p_end,
-                QWEN_K, 0);
+                QWEN_K, 0, 0u);
 #elif KERNEL_SIZE == 2
     matmul_2xVL(qwen_c[0], x_use, qwen_w[0], m_start, m_end, warm, QWEN_LDP, p_start, p_end,
-                QWEN_K, 0);
+                QWEN_K, 0, 0u);
 #elif KERNEL_SIZE == 4
     matmul_4xVL(qwen_c[0], x_use, qwen_w[0], m_start, m_end, warm, QWEN_LDP, p_start, p_end,
-                QWEN_K, 0);
+                QWEN_K, 0, 0u);
 #else
     matmul_8xVL(qwen_c[0], x_use, qwen_w[0], m_start, m_end, warm, QWEN_LDP, p_start, p_end,
-                QWEN_K, 0);
+                QWEN_K, 0, 0u);
 #endif
   }
   mempool_barrier(num_cores);

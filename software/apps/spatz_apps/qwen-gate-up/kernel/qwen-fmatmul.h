@@ -58,18 +58,21 @@ void matmul_2xVL(elem_t *c, const elem_t *a, const elem_t *b,
                  const unsigned int m_start, const unsigned int m_end,
                  const unsigned int N, const unsigned int P,
                  const unsigned int p_start, const unsigned int p_end,
-                 const unsigned int lda, const unsigned int accum);
+                 const unsigned int lda, const unsigned int accum,
+                 const unsigned int zz);
 KERNEL_ATTR
 void matmul_4xVL(elem_t *c, const elem_t *a, const elem_t *b,
                  const unsigned int m_start, const unsigned int m_end,
                  const unsigned int N, const unsigned int P,
                  const unsigned int p_start, const unsigned int p_end,
-                 const unsigned int lda, const unsigned int accum);
+                 const unsigned int lda, const unsigned int accum,
+                 const unsigned int zz);
 KERNEL_ATTR
 void matmul_8xVL(elem_t *c, const elem_t *a, const elem_t *b,
                  const unsigned int m_start, const unsigned int m_end,
                  const unsigned int N, const unsigned int P,
                  const unsigned int p_start, const unsigned int p_end,
-                 const unsigned int lda, const unsigned int accum);
+                 const unsigned int lda, const unsigned int accum,
+                 const unsigned int zz);
 
 #endif

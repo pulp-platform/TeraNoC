@@ -262,13 +262,16 @@ static inline void gbar_sync_drain(uint32_t a) {
 #define GBAR_SYNC_PLOOP(a) ((void)0)
 #endif
 
-// ---- MSHR bypass around the C-accumulator reload ---------------------------
-// 0 = off (the reload allocates MSHR entries, as before). 1 = disable the group
-// MSHR for the reload window only. Needs GBAR_PLOOP for the rendezvous and
-// MSHR_RUNTIME_CFG for the CSR.
-// Default: on exactly where it pays. The reload only hurts when the burst class is
-// actually merging, i.e. GEMM_SHARE_B >= 2; at share 1 the hold window is already
-// zeroed, entries retire immediately and the rendezvous would be pure cost (~10%).
+// ---- Zig-zag column-block order --------------------------------------------
+// Walk the column blocks forward on even K tiles and backward on odd ones. The
+// LAST block of one tile is then the FIRST block of the next, so that block's
+// accumulators can stay in the vector registers across the tile boundary and its
+// store and its reload both disappear -- half of each over the projection.
+// Needs a uniform block width to walk backwards, i.e. the wide qwen_burst_vl path
+// where every block is VL_MAX except the last.
+#ifndef QWEN_ZIGZAG
+#define QWEN_ZIGZAG (QWEN_SPAN_ALIGN >= 8)
+#endif
 #ifndef QWEN_CBYPASS
 #define QWEN_CBYPASS (GEMM_SHARE_B(KERNEL_SIZE) >= 2)
 #endif
@@ -339,7 +342,8 @@ void matmul_8xVL(elem_t *c, const elem_t *a, const elem_t *b,
                  const unsigned int m_start, const unsigned int m_end,
                  const unsigned int N, const unsigned int P,
                  const unsigned int p_start, const unsigned int p_end,
-                 const unsigned int lda, const unsigned int accum) {
+                 const unsigned int lda, const unsigned int accum,
+                 const unsigned int zz) {
 #if GROUP_BARRIER
   // This core's pair-struct = (within-group tile) % 8; arrive address precomputed.
   uint32_t bhid; asm volatile("csrr %0, mhartid" : "=r"(bhid));
@@ -348,8 +352,29 @@ void matmul_8xVL(elem_t *c, const elem_t *a, const elem_t *b,
 #if GBAR_PLOOP
   const uint32_t gbar_pl = gbar_base(GBAR_PLOOP_STRUCT);
 #endif
+  // zz: bit0 walk the blocks backwards, bit1 the first block arrives already
+  // accumulated in v0..v14, bit2 leave the last block in v0..v14 for the next
+  // call. zz == 0 is the plain forward, load-and-store-everything behaviour.
+  const unsigned int zz_rev  = (zz >> 0) & 1u;
+  const unsigned int zz_cin  = (zz >> 1) & 1u;
+  const unsigned int zz_cout = (zz >> 2) & 1u;
+#if QWEN_ZIGZAG
+  const unsigned int blk_w = (unsigned int)QWEN_VL_MAX;
+  const unsigned int nblk  = (p_end - p_start + blk_w - 1u) / blk_w;
+  for (unsigned int i = 0; i < nblk; ++i) {
+    const unsigned int blk       = zz_rev ? (nblk - 1u - i) : i;
+    const unsigned int p         = p_start + blk * blk_w;
+    const unsigned int avail     = p_end - p;
+    const unsigned int want      = (avail < blk_w) ? avail : blk_w;
+    const unsigned int blk_first = (i == 0u);
+    const unsigned int blk_last  = (i + 1u == nblk);
+#else
   unsigned int p = p_start;
   while (p < p_end) {
+    const unsigned int want      = qwen_burst_vl(p, p_end);
+    const unsigned int blk_first = (p == p_start);
+    const unsigned int blk_last  = (p + want >= p_end);
+#endif
     // ---- Per-column-block group rendezvous ----------------------------------
     // Re-align every core of the group at the start of this column block, so the
     // cores that share a B/W line issue their loads inside the MSHR's merge window.
@@ -375,7 +400,7 @@ void matmul_8xVL(elem_t *c, const elem_t *a, const elem_t *b,
     size_t gvl;
     asm volatile("vsetvli %[gvl], %[vl], e16, m2, ta, ma"
                  : [gvl] "=r"(gvl)
-                 : [vl] "r"(qwen_burst_vl(p, p_end)));
+                 : [vl] "r"(want));
 
     const elem_t *b_ = b + p;
     elem_t *c_ = c + p;
@@ -419,7 +444,9 @@ void matmul_8xVL(elem_t *c, const elem_t *a, const elem_t *b,
       // needs its own rendezvous: gbar_sync guarantees a core's prior requests
       // are ISSUED, so after the release the writer may flip the CSR, and after
       // the next release every core sees the new setting.
-      if (accum) {
+      // A carried block already holds its partial sums in v0..v14 from the
+      // previous K tile, so it needs neither the reload nor the zeroing.
+      if (accum && !(blk_first && zz_cin)) {
         QWEN_CBYPASS_ENTER(gbar_pl);
         elem_t *c_ld = c__;
         asm volatile("vle16.v v0, (%0);" ::"r"(c_ld));
@@ -439,7 +466,7 @@ void matmul_8xVL(elem_t *c, const elem_t *a, const elem_t *b,
         asm volatile("vle16.v v14, (%0);" ::"r"(c_ld));
         (void)c_ld;
         QWEN_CBYPASS_EXIT(gbar_pl);
-      } else {
+      } else if (!accum) {
         asm volatile("vmv.v.i v0, 0");
         asm volatile("vmv.v.i v2, 0");
         asm volatile("vmv.v.i v4, 0");
@@ -560,33 +587,47 @@ void matmul_8xVL(elem_t *c, const elem_t *a, const elem_t *b,
         t7 = *a__;
       }
 
-      // Final accumulate + store
-      asm volatile("vfmacc.vf v0, %0, v20" ::"f"(t0));
-      asm volatile("vse16.v v0, (%0);" ::"r"(c__));
-      c__ += P;
-      asm volatile("vfmacc.vf v2, %0, v20" ::"f"(t1));
-      asm volatile("vse16.v v2, (%0);" ::"r"(c__));
-      c__ += P;
-      asm volatile("vfmacc.vf v4, %0, v20" ::"f"(t2));
-      asm volatile("vse16.v v4, (%0);" ::"r"(c__));
-      c__ += P;
-      asm volatile("vfmacc.vf v6, %0, v20" ::"f"(t3));
-      asm volatile("vse16.v v6, (%0);" ::"r"(c__));
-      c__ += P;
-      asm volatile("vfmacc.vf v8, %0, v20" ::"f"(t4));
-      asm volatile("vse16.v v8, (%0);" ::"r"(c__));
-      c__ += P;
-      asm volatile("vfmacc.vf v10, %0, v20" ::"f"(t5));
-      asm volatile("vse16.v v10, (%0);" ::"r"(c__));
-      c__ += P;
-      asm volatile("vfmacc.vf v12, %0, v20" ::"f"(t6));
-      asm volatile("vse16.v v12, (%0);" ::"r"(c__));
-      c__ += P;
-      asm volatile("vfmacc.vf v14, %0, v20" ::"f"(t7));
-      asm volatile("vse16.v v14, (%0);" ::"r"(c__));
+      // Final accumulate, then store -- unless the next K tile will carry this
+      // block on in v0..v14, in which case the store is what we are saving.
+      if (!(blk_last && zz_cout)) {
+        asm volatile("vfmacc.vf v0, %0, v20" ::"f"(t0));
+        asm volatile("vse16.v v0, (%0);" ::"r"(c__));
+        c__ += P;
+        asm volatile("vfmacc.vf v2, %0, v20" ::"f"(t1));
+        asm volatile("vse16.v v2, (%0);" ::"r"(c__));
+        c__ += P;
+        asm volatile("vfmacc.vf v4, %0, v20" ::"f"(t2));
+        asm volatile("vse16.v v4, (%0);" ::"r"(c__));
+        c__ += P;
+        asm volatile("vfmacc.vf v6, %0, v20" ::"f"(t3));
+        asm volatile("vse16.v v6, (%0);" ::"r"(c__));
+        c__ += P;
+        asm volatile("vfmacc.vf v8, %0, v20" ::"f"(t4));
+        asm volatile("vse16.v v8, (%0);" ::"r"(c__));
+        c__ += P;
+        asm volatile("vfmacc.vf v10, %0, v20" ::"f"(t5));
+        asm volatile("vse16.v v10, (%0);" ::"r"(c__));
+        c__ += P;
+        asm volatile("vfmacc.vf v12, %0, v20" ::"f"(t6));
+        asm volatile("vse16.v v12, (%0);" ::"r"(c__));
+        c__ += P;
+        asm volatile("vfmacc.vf v14, %0, v20" ::"f"(t7));
+        asm volatile("vse16.v v14, (%0);" ::"r"(c__));
+      } else {
+        asm volatile("vfmacc.vf v0, %0, v20" ::"f"(t0));
+        asm volatile("vfmacc.vf v2, %0, v20" ::"f"(t1));
+        asm volatile("vfmacc.vf v4, %0, v20" ::"f"(t2));
+        asm volatile("vfmacc.vf v6, %0, v20" ::"f"(t3));
+        asm volatile("vfmacc.vf v8, %0, v20" ::"f"(t4));
+        asm volatile("vfmacc.vf v10, %0, v20" ::"f"(t5));
+        asm volatile("vfmacc.vf v12, %0, v20" ::"f"(t6));
+        asm volatile("vfmacc.vf v14, %0, v20" ::"f"(t7));
+      }
     }
 
+#if !QWEN_ZIGZAG
     p += gvl;
+#endif
   }
 }
 
@@ -598,13 +639,35 @@ void matmul_4xVL(elem_t *c, const elem_t *a, const elem_t *b,
                  const unsigned int m_start, const unsigned int m_end,
                  const unsigned int N, const unsigned int P,
                  const unsigned int p_start, const unsigned int p_end,
-                 const unsigned int lda, const unsigned int accum) {
+                 const unsigned int lda, const unsigned int accum,
+                 const unsigned int zz) {
 #if GBAR_PLOOP
   const uint32_t gbar_pl = gbar_base(GBAR_PLOOP_STRUCT);
 #endif
 
+  // zz: bit0 walk the blocks backwards, bit1 the first block arrives already
+  // accumulated, bit2 leave the last block in the accumulators for the next call.
+  // zz == 0 is the plain forward, load-and-store-everything behaviour.
+  const unsigned int zz_rev  = (zz >> 0) & 1u;
+  const unsigned int zz_cin  = (zz >> 1) & 1u;
+  const unsigned int zz_cout = (zz >> 2) & 1u;
+#if QWEN_ZIGZAG
+  const unsigned int blk_w = (unsigned int)QWEN_VL_MAX;
+  const unsigned int nblk  = (p_end - p_start + blk_w - 1u) / blk_w;
+  for (unsigned int i = 0; i < nblk; ++i) {
+    const unsigned int blk       = zz_rev ? (nblk - 1u - i) : i;
+    const unsigned int p         = p_start + blk * blk_w;
+    const unsigned int avail     = p_end - p;
+    const unsigned int want      = (avail < blk_w) ? avail : blk_w;
+    const unsigned int blk_first = (i == 0u);
+    const unsigned int blk_last  = (i + 1u == nblk);
+#else
   unsigned int p = p_start;
   while (p < p_end) {
+    const unsigned int want      = qwen_burst_vl(p, p_end);
+    const unsigned int blk_first = (p == p_start);
+    const unsigned int blk_last  = (p + want >= p_end);
+#endif
     // ---- Per-column-block group rendezvous ----------------------------------
     // Re-align every core of the group at the start of this column block, so the
     // cores that share a B/W line issue their loads inside the MSHR's merge window.
@@ -624,7 +687,7 @@ void matmul_4xVL(elem_t *c, const elem_t *a, const elem_t *b,
     size_t gvl;
     asm volatile("vsetvli %[gvl], %[vl], e16, m4, ta, ma"
                  : [gvl] "=r"(gvl)
-                 : [vl] "r"(qwen_burst_vl(p, p_end)));
+                 : [vl] "r"(want));
 
     const elem_t *b_ = b + p;
     elem_t *c_ = c + p;
@@ -661,7 +724,9 @@ void matmul_4xVL(elem_t *c, const elem_t *a, const elem_t *b,
       // needs its own rendezvous: gbar_sync guarantees a core's prior requests
       // are ISSUED, so after the release the writer may flip the CSR, and after
       // the next release every core sees the new setting.
-      if (accum) {
+      // A carried block already holds its partial sums, so it needs neither the
+      // reload nor the zeroing.
+      if (accum && !(blk_first && zz_cin)) {
         QWEN_CBYPASS_ENTER(gbar_pl);
         elem_t *c_ld = c__;
         asm volatile("vle16.v v0, (%0);" ::"r"(c_ld));
@@ -673,7 +738,7 @@ void matmul_4xVL(elem_t *c, const elem_t *a, const elem_t *b,
         asm volatile("vle16.v v12, (%0);" ::"r"(c_ld));
         (void)c_ld;
         QWEN_CBYPASS_EXIT(gbar_pl);
-      } else {
+      } else if (!accum) {
         asm volatile("vmv.v.i v0, 0");
         asm volatile("vmv.v.i v4, 0");
         asm volatile("vmv.v.i v8, 0");
@@ -747,20 +812,31 @@ void matmul_4xVL(elem_t *c, const elem_t *a, const elem_t *b,
         t3 = *a__;
       }
 
-      asm volatile("vfmacc.vf v0, %0, v20" ::"f"(t0));
-      asm volatile("vse16.v v0, (%0);" ::"r"(c__));
-      c__ += P;
-      asm volatile("vfmacc.vf v4, %0, v20" ::"f"(t1));
-      asm volatile("vse16.v v4, (%0);" ::"r"(c__));
-      c__ += P;
-      asm volatile("vfmacc.vf v8, %0, v20" ::"f"(t2));
-      asm volatile("vse16.v v8, (%0);" ::"r"(c__));
-      c__ += P;
-      asm volatile("vfmacc.vf v12, %0, v20" ::"f"(t3));
-      asm volatile("vse16.v v12, (%0);" ::"r"(c__));
+      // Final accumulate, then store -- unless the next K tile will carry
+      // this block on in the accumulators.
+      if (!(blk_last && zz_cout)) {
+        asm volatile("vfmacc.vf v0, %0, v20" ::"f"(t0));
+        asm volatile("vse16.v v0, (%0);" ::"r"(c__));
+        c__ += P;
+        asm volatile("vfmacc.vf v4, %0, v20" ::"f"(t1));
+        asm volatile("vse16.v v4, (%0);" ::"r"(c__));
+        c__ += P;
+        asm volatile("vfmacc.vf v8, %0, v20" ::"f"(t2));
+        asm volatile("vse16.v v8, (%0);" ::"r"(c__));
+        c__ += P;
+        asm volatile("vfmacc.vf v12, %0, v20" ::"f"(t3));
+        asm volatile("vse16.v v12, (%0);" ::"r"(c__));
+      } else {
+        asm volatile("vfmacc.vf v0, %0, v20" ::"f"(t0));
+        asm volatile("vfmacc.vf v4, %0, v20" ::"f"(t1));
+        asm volatile("vfmacc.vf v8, %0, v20" ::"f"(t2));
+        asm volatile("vfmacc.vf v12, %0, v20" ::"f"(t3));
+      }
     }
 
+#if !QWEN_ZIGZAG
     p += gvl;
+#endif
   }
 }
 
@@ -929,13 +1005,35 @@ void matmul_1xVL(elem_t *c, const elem_t *a, const elem_t *b,
                  const unsigned int m_start, const unsigned int m_end,
                  const unsigned int N, const unsigned int P,
                  const unsigned int p_start, const unsigned int p_end,
-                 const unsigned int lda, const unsigned int accum) {
+                 const unsigned int lda, const unsigned int accum,
+                 const unsigned int zz) {
 #if GBAR_PLOOP
   const uint32_t gbar_pl = gbar_base(GBAR_PLOOP_STRUCT);
 #endif
 
+  // zz: bit0 walk the blocks backwards, bit1 the first block arrives already
+  // accumulated, bit2 leave the last block in the accumulators for the next call.
+  // zz == 0 is the plain forward, load-and-store-everything behaviour.
+  const unsigned int zz_rev  = (zz >> 0) & 1u;
+  const unsigned int zz_cin  = (zz >> 1) & 1u;
+  const unsigned int zz_cout = (zz >> 2) & 1u;
+#if QWEN_ZIGZAG
+  const unsigned int blk_w = (unsigned int)QWEN_VL_MAX;
+  const unsigned int nblk  = (p_end - p_start + blk_w - 1u) / blk_w;
+  for (unsigned int i = 0; i < nblk; ++i) {
+    const unsigned int blk       = zz_rev ? (nblk - 1u - i) : i;
+    const unsigned int p         = p_start + blk * blk_w;
+    const unsigned int avail     = p_end - p;
+    const unsigned int want      = (avail < blk_w) ? avail : blk_w;
+    const unsigned int blk_first = (i == 0u);
+    const unsigned int blk_last  = (i + 1u == nblk);
+#else
   unsigned int p = p_start;
   while (p < p_end) {
+    const unsigned int want      = qwen_burst_vl(p, p_end);
+    const unsigned int blk_first = (p == p_start);
+    const unsigned int blk_last  = (p + want >= p_end);
+#endif
     // ---- Per-column-block group rendezvous ----------------------------------
     // Re-align every core of the group at the start of this column block, so the
     // cores that share a B/W line issue their loads inside the MSHR's merge window.
@@ -955,7 +1053,7 @@ void matmul_1xVL(elem_t *c, const elem_t *a, const elem_t *b,
     size_t gvl;
     asm volatile("vsetvli %[gvl], %[vl], e16, m8, ta, ma"
                  : [gvl] "=r"(gvl)
-                 : [vl] "r"(qwen_burst_vl(p, p_end)));
+                 : [vl] "r"(want));
 
     const elem_t *b_ = b + p;
     elem_t *c_ = c + p;
@@ -979,10 +1077,12 @@ void matmul_1xVL(elem_t *c, const elem_t *a, const elem_t *b,
       // accum != 0: continue the partial sums an earlier tile left in C.
       // The load mirrors the epilogue's store sequence exactly -- same registers,
       // same c__ walk -- so the two can never drift apart.
-      if (accum) {
+      // A carried block already holds its partial sums, so it needs neither the
+      // reload nor the zeroing.
+      if (accum && !(blk_first && zz_cin)) {
         elem_t *c_ld = c__;
         SPATZ_LD_ACC();
-      } else {
+      } else if (!accum) {
         asm volatile("vmv.v.i v0, 0");
       }
 
@@ -1054,6 +1154,9 @@ void matmul_1xVL(elem_t *c, const elem_t *a, const elem_t *b,
       asm volatile("vse16.v " REG ", (%0);" ::"r"(c__ + _off));                             \
     }                                                                                     \
   } while (0)
+      // Store -- unless the next K tile carries this block on in the
+      // accumulators, which is exactly what we are saving.
+      if (!(blk_last && zz_cout)) {
 #if   SPATZ_1XVL_STORE_LMUL == 8
       SPATZ_ST_CHUNK("v0", 0);
 #elif SPATZ_1XVL_STORE_LMUL == 4
@@ -1070,9 +1173,12 @@ void matmul_1xVL(elem_t *c, const elem_t *a, const elem_t *b,
 #if SPATZ_1XVL_STORE_LMUL != 8
       asm volatile("vsetvli zero, %0, e16, m8, ta, ma" ::"r"(gvl));   // restore the m8 view
 #endif
+      }
     }
 
+#if !QWEN_ZIGZAG
     p += gvl;
+#endif
   }
 }
 
@@ -1084,13 +1190,35 @@ void matmul_2xVL(elem_t *c, const elem_t *a, const elem_t *b,
                  const unsigned int m_start, const unsigned int m_end,
                  const unsigned int N, const unsigned int P,
                  const unsigned int p_start, const unsigned int p_end,
-                 const unsigned int lda, const unsigned int accum) {
+                 const unsigned int lda, const unsigned int accum,
+                 const unsigned int zz) {
 #if GBAR_PLOOP
   const uint32_t gbar_pl = gbar_base(GBAR_PLOOP_STRUCT);
 #endif
 
+  // zz: bit0 walk the blocks backwards, bit1 the first block arrives already
+  // accumulated, bit2 leave the last block in the accumulators for the next call.
+  // zz == 0 is the plain forward, load-and-store-everything behaviour.
+  const unsigned int zz_rev  = (zz >> 0) & 1u;
+  const unsigned int zz_cin  = (zz >> 1) & 1u;
+  const unsigned int zz_cout = (zz >> 2) & 1u;
+#if QWEN_ZIGZAG
+  const unsigned int blk_w = (unsigned int)QWEN_VL_MAX;
+  const unsigned int nblk  = (p_end - p_start + blk_w - 1u) / blk_w;
+  for (unsigned int i = 0; i < nblk; ++i) {
+    const unsigned int blk       = zz_rev ? (nblk - 1u - i) : i;
+    const unsigned int p         = p_start + blk * blk_w;
+    const unsigned int avail     = p_end - p;
+    const unsigned int want      = (avail < blk_w) ? avail : blk_w;
+    const unsigned int blk_first = (i == 0u);
+    const unsigned int blk_last  = (i + 1u == nblk);
+#else
   unsigned int p = p_start;
   while (p < p_end) {
+    const unsigned int want      = qwen_burst_vl(p, p_end);
+    const unsigned int blk_first = (p == p_start);
+    const unsigned int blk_last  = (p + want >= p_end);
+#endif
     // ---- Per-column-block group rendezvous ----------------------------------
     // Re-align every core of the group at the start of this column block, so the
     // cores that share a B/W line issue their loads inside the MSHR's merge window.
@@ -1110,7 +1238,7 @@ void matmul_2xVL(elem_t *c, const elem_t *a, const elem_t *b,
     size_t gvl;
     asm volatile("vsetvli %[gvl], %[vl], e16, m8, ta, ma"
                  : [gvl] "=r"(gvl)
-                 : [vl] "r"(qwen_burst_vl(p, p_end)));
+                 : [vl] "r"(want));
 
     const elem_t *b_ = b + p;
     elem_t *c_ = c + p;
@@ -1146,7 +1274,9 @@ void matmul_2xVL(elem_t *c, const elem_t *a, const elem_t *b,
       // needs its own rendezvous: gbar_sync guarantees a core's prior requests
       // are ISSUED, so after the release the writer may flip the CSR, and after
       // the next release every core sees the new setting.
-      if (accum) {
+      // A carried block already holds its partial sums, so it needs neither the
+      // reload nor the zeroing.
+      if (accum && !(blk_first && zz_cin)) {
         QWEN_CBYPASS_ENTER(gbar_pl);
         elem_t *c_ld = c__;
         asm volatile("vle16.v v0, (%0);" ::"r"(c_ld));
@@ -1154,7 +1284,7 @@ void matmul_2xVL(elem_t *c, const elem_t *a, const elem_t *b,
         asm volatile("vle16.v v8, (%0);" ::"r"(c_ld));
         (void)c_ld;
         QWEN_CBYPASS_EXIT(gbar_pl);
-      } else {
+      } else if (!accum) {
         asm volatile("vmv.v.i v0, 0");
         asm volatile("vmv.v.i v8, 0");
       }
@@ -1216,14 +1346,23 @@ void matmul_2xVL(elem_t *c, const elem_t *a, const elem_t *b,
         t1 = *a__;
       }
 
-      asm volatile("vfmacc.vf v0, %0, v24" ::"f"(t0));
-      asm volatile("vse16.v v0, (%0);" ::"r"(c__));
-      c__ += P;
-      asm volatile("vfmacc.vf v8, %0, v24" ::"f"(t1));
-      asm volatile("vse16.v v8, (%0);" ::"r"(c__));
+      // Final accumulate, then store -- unless the next K tile will carry
+      // this block on in the accumulators.
+      if (!(blk_last && zz_cout)) {
+        asm volatile("vfmacc.vf v0, %0, v24" ::"f"(t0));
+        asm volatile("vse16.v v0, (%0);" ::"r"(c__));
+        c__ += P;
+        asm volatile("vfmacc.vf v8, %0, v24" ::"f"(t1));
+        asm volatile("vse16.v v8, (%0);" ::"r"(c__));
+      } else {
+        asm volatile("vfmacc.vf v0, %0, v24" ::"f"(t0));
+        asm volatile("vfmacc.vf v8, %0, v24" ::"f"(t1));
+      }
     }
 
+#if !QWEN_ZIGZAG
     p += gvl;
+#endif
   }
 }
 
