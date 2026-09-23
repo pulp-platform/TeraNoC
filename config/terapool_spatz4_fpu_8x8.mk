@@ -19,7 +19,7 @@ num_x          ?= 8           # 4x4: 4
 
 # ---- L2 scaled with the mesh ----------------------------------------------------------------
 # 32 banks of 1 MiB. l2_size MUST be set here too: the base assigns it with `?=` to a literal, so
-# leaving it unset would take the 4x4's 16 MiB against this file's 32 banks.
+# leaving it unset would take the 4x4 simulation default of 512 MiB against this file's 32 banks.
 l2_banks       ?= 32          # 4x4: 16
 l2_size        ?= $(shell echo $$((1048576 * $(l2_banks))))
 

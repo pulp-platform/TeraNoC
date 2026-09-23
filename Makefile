@@ -284,11 +284,12 @@ FLOO_RT_GEN = $(ROOT_DIR)/hardware/scripts/gen_floo_route_tables.py
 FLOO_TURN_MODEL ?= shortest
 
 update-floonoc: $(FLOO_NOC)
-$(FLOO_NOC): install-floogen $(FLOO_CFG) $(FLOO_RT_GEN)
+$(FLOO_NOC): install-floogen $(FLOO_CFG) $(FLOO_RT_GEN) \
+             $(ROOT_DIR)/hardware/scripts/gen_perimeter_map.py $(ROOT_DIR)/config/$(config).mk
+	python3 $(ROOT_DIR)/hardware/scripts/gen_perimeter_map.py --num-x $(num_x) --num-y $$(( $(num_groups) / $(num_x) )) -o $(FLOO_GEN_OUTDIR) \
+	  --l2-size $(l2_size) --emit-yml $(FLOO_CFG)
 	floogen -c $(FLOO_CFG) -o $(FLOO_GEN_OUTDIR) --only-pkg
 	$(FLOOGEN_PYTHON) $(FLOO_RT_GEN) -c $(FLOO_CFG) -o $(FLOO_GEN_OUTDIR) --turn-model $(FLOO_TURN_MODEL)
-	python3 $(ROOT_DIR)/hardware/scripts/gen_perimeter_map.py --num-x $(num_x) --num-y $$(( $(num_groups) / $(num_x) )) -o $(FLOO_GEN_OUTDIR) \
-	  --emit-yml $(FLOO_CFG)
 
 #############################
 # Control-register file     #

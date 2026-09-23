@@ -1164,14 +1164,17 @@ module mempool_system
            "master index (NumAXIMasters = %0d). Regenerate the perimeter map for this mesh.",
            perimeter_map_pkg::PeriphHbmChannel, NumAXIMasters);
 
-  // The interleaver's bank field must land where the SAM expects it. The SAM gives each
-  // L2 channel 1 MB, so L2Size must be NumL2Banks * 1 MB; otherwise MSBConstantBits
-  // (= 32 - clog2(L2Size)) shifts the bank field and the upper channels become
-  // unreachable -- requests are issued, decode to the wrong endpoint, and never return.
-  if (L2Size != NumL2Banks * (1 << 20))
-    $error("[mempool_system] L2Size (%0d) must be NumL2Banks (%0d) * 1 MB = %0d, or the ",
-           "interleaver's bank field will not align with the SAM.",
-           L2Size, NumL2Banks, NumL2Banks * (1 << 20));
+  // The interleaver moves its bank field to the top of the L2 offset. Each generated SAM window
+  // must therefore cover exactly one bank and the windows must span the entire L2 range.
+  localparam int unsigned L2SamBankSize = Sam[Hbm0SamIdx].end_addr - Sam[Hbm0SamIdx].start_addr;
+  if (L2Size != NumL2Banks * L2SamBankSize)
+    $error("[mempool_system] L2Size (%0d) must equal %0d SAM banks * %0d bytes = %0d.",
+           L2Size, NumL2Banks, L2SamBankSize, NumL2Banks * L2SamBankSize);
+  for (genvar bank = 0; bank < NumL2Banks; bank++) begin : gen_l2_sam_check
+    if (Sam[bank].start_addr != L2MemoryBaseAddr + addr_t'(bank * L2SamBankSize) ||
+        Sam[bank].end_addr != L2MemoryBaseAddr + addr_t'((bank + 1) * L2SamBankSize))
+      $error("[mempool_system] L2 SAM bank %0d is outside its expected address window.", bank);
+  end
 
   localparam int unsigned GroupFieldLsb  = ByteOffset + $clog2(NumBanksPerTile)
                                                       + $clog2(NumTilesPerGroup);

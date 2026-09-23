@@ -626,7 +626,8 @@ axi_masters_per_group ?= 1
 dmas_per_group ?= 1 # Burst Length = 16
 
 # L2 Banks/Channels
-l2_size               ?= 16777216  # 1000000
+# 16 channels of 32 MiB each. FlooGen's HBM windows are generated from this total size.
+l2_size               ?= 536870912  # 512MB
 l2_banks              ?= 16
 # L2 interleave granularity, in 64 B beats.
 #

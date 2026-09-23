@@ -28,6 +28,9 @@ module axi_L2_interleaver
   localparam int unsigned MSBConstantBits = 32 - $clog2(L2Size);
   localparam int unsigned ScrambleBits    = (NumL2 == 1) ? 1 : $clog2(NumL2);
   localparam int unsigned ReminderBits    = AddrWidth - ScrambleBits - LSBConstantBits - MSBConstantBits;
+  localparam logic [AddrWidth-1:0] L2BaseAddr =
+    `ifdef L2_BASE `L2_BASE `else 32'h8000_0000 `endif;
+  localparam logic [AddrWidth-1:0] L2EndAddr = L2BaseAddr + AddrWidth'(L2Size);
 
   // Logic variables for address scrambling
   logic [NumAXIMasters-1:0][LSBConstantBits-1:0] aw_lsb_const;
@@ -63,14 +66,16 @@ module axi_L2_interleaver
       ar_reminder[i]      = axi_l2_req_interleaved_o[i].ar.addr[AddrWidth-MSBConstantBits-1 : ScrambleBits+LSBConstantBits];
 
       // AW Channel
-      if ((axi_l2_req_interleaved_o[i].aw.addr >= 32'h80000000) && (axi_l2_req_interleaved_o[i].aw.addr < 32'h90000000)) begin
+      if ((axi_l2_req_interleaved_o[i].aw.addr >= L2BaseAddr) &&
+          (axi_l2_req_interleaved_o[i].aw.addr < L2EndAddr)) begin
         aw_scramble_addr[i] = {aw_msb_const[i], aw_scramble[i], aw_reminder[i], aw_lsb_const[i]};
         // Assign scrambled address back to request
         axi_l2_req_interleaved_o[i].aw.addr = aw_scramble_addr[i];
       end
 
       // AR Channel
-      if ((axi_l2_req_interleaved_o[i].ar.addr >= 32'h80000000) && (axi_l2_req_interleaved_o[i].ar.addr < 32'h90000000)) begin
+      if ((axi_l2_req_interleaved_o[i].ar.addr >= L2BaseAddr) &&
+          (axi_l2_req_interleaved_o[i].ar.addr < L2EndAddr)) begin
         ar_scramble_addr[i] = {ar_msb_const[i], ar_scramble[i], ar_reminder[i], ar_lsb_const[i]};
         // Assign scrambled address back to request
         axi_l2_req_interleaved_o[i].ar.addr = ar_scramble_addr[i];

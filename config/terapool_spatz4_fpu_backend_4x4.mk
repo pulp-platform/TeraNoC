@@ -78,4 +78,7 @@ group_mshr_enable_stats      := 0
 # fields, not to go back to const-folding.
 group_mshr_cfg_runtime := 1
 
+# Keep the characterised 16 MiB backend SRAM geometry. The base simulation flavour uses 512 MiB.
+l2_size ?= 16777216
+
 include $(MEMPOOL_DIR)/config/terapool_spatz4_fpu.mk

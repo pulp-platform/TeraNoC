@@ -431,6 +431,8 @@ def main():
                     help="L2 channels (default: largest power of two <= perimeter capacity)")
     ap.add_argument("--emit-yml", metavar="FILE",
                     help="write the floo config with the derived HBM placement")
+    ap.add_argument("--l2-size", type=int,
+                    help="total L2 bytes; sets each generated HBM window to L2 size / channels")
     ap.add_argument("--periph-dir", default="South",
                     help="edge the periph router occupies at (0,0) (default South)")
     ap.add_argument("--route-algo", default="ID")
@@ -476,8 +478,19 @@ def main():
     periph_at = ((0, 0), pd)
 
     if args.emit_yml:
+        if args.l2_size is not None:
+            if args.l2_size <= 0 or args.l2_size % len(placement):
+                ap.error("--l2-size must be positive and divisible by the channel count")
+            if args.l2_size & (args.l2_size - 1):
+                ap.error("--l2-size must be a power of two for the RTL address interleaver")
+            if 0x8000_0000 + args.l2_size > 0xA000_0000:
+                ap.error("L2 would overlap the peripheral and boot ROM address range")
+        l2_chan_size = ((args.l2_size // len(placement)) if args.l2_size is not None
+                        else 0x0010_0000)
+        l2_chan_size_hex = f"0x{l2_chan_size:08x}"
+        l2_chan_size_hex = l2_chan_size_hex[:6] + "_" + l2_chan_size_hex[6:]
         txt = emit_yml(placement, nx, ny, periph_at,
-                       "0x8000_0000", "0x0010_0000", args.route_algo)
+                       "0x8000_0000", l2_chan_size_hex, args.route_algo)
         from pathlib import Path
         Path(args.emit_yml).write_text(txt)
         print(f"wrote {args.emit_yml}")
