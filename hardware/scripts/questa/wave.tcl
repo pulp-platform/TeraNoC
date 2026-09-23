@@ -138,7 +138,8 @@ for {set g 0} {$g < $NumGroups_noc} {incr g} {
   }
 
   # Master req/resp at MSHR boundary (tile → MSHR → NoC)
-  # These are the output ports of the group module
+  # These are the output ports of the group module. With group_mshr_split=1 the first index is the
+  # group NoC LANE {slice[2], k, slice[1:0]} (mempool_pkg::mshr_noc_lane), not the tile.
   add wave -noupdate -group $grp_label -group MSHR_Req ${base}/tcdm_master_req_valid
   add wave -noupdate -group $grp_label -group MSHR_Resp ${base}/tcdm_master_resp_valid
 
@@ -162,13 +163,9 @@ for {set g 0} {$g < $NumGroups_noc} {incr g} {
 # Every add is catch-wrapped: configs without a group MSHR, or signals
 # optimized away, are skipped rather than aborting the script.
 # ========================================================================
-proc add_group_mshr_wave {g NumX NumY} {
-    set gx [expr {$g / $NumX}]
-    set gy [expr {$g % $NumY}]
-    set m "sim:/mempool_tb/dut/i_mempool_cluster/gen_groups_x\[${gx}\]/gen_groups_y\[${gy}\]/gen_rtl_group/i_group/i_mempool_group/gen_group_mshr/i_group_mshr"
-    # Skip groups/configs without a group MSHR instance.
-    if {[catch {examine ${m}/mshr_q_valid}]} { return }
-    set L "MSHR_G${g}_X${gx}Y${gy}"
+# One MSHR core's signals under wave group L, from hierarchical path m. Shared by the legacy
+# single group MSHR and by each slice of the split MSHR (mempool_group_mshr_slice.sv).
+proc add_mshr_core_wave {m L} {
 
     # --- Occupancy / utilization ---
     # mshr_q_valid counts response-cache ways too, so use mshr_inuse_* for real MSHR
@@ -209,6 +206,71 @@ proc add_group_mshr_wave {g NumX NumY} {
     catch {add wave -noupdate -group $L -group Entries ${m}/mshr_q_valid}
     catch {add wave -noupdate -group $L -group Entries ${m}/mshr_q}
     catch {add wave -noupdate -group $L -group Entries ${m}/mshr_resp_inflight}
+
+    # --- Overflow pool: MshrOverflowNum extra UNBANKED entries (group_mshr_overflow_num, def 1) ---
+    # Deliberately a SECOND array, not a wider banked table. BankPublish asserts
+    # idx_width(MshrNum) == BankIdW + VictimPtrW (6 == 4+2 at 64 entries / 4 per bank), so one more
+    # banked entry fails elaboration; and mshr_id_t is idx_width(MshrNum) wide, so a pool tag cast
+    # through it would truncate onto banked entry 0. Pool tags run MshrNum+1 .. MshrNum+K.
+    #
+    # Because the pool is a separate array, NO scan widens automatically: every pass that walks the
+    # banked table needs its own pool arm, and a missing arm reads as "allocated but never drained"
+    # -- a clean compile and a hang. These waves are how the two failure classes are told apart:
+    # Pool_Grant says a decision landed, Pool_Entry says the state actually moved. In-flight with no
+    # state change is a dropped write (clock gate); state with no in-flight is a missed pool arm.
+    # The pool generate is elab'd away at MshrOverflowNum=0, so gate the block on a signal in it.
+    if {![catch {examine ${m}/gen_pool_reg/pool_ctl_en}]} {
+      # pool_q_valid counts ONLY pool entries -- unlike mshr_q_valid, which counts response-cache
+      # ways too, so the two are not comparable as occupancies.
+      catch {add wave -noupdate -group $L -group Pool_Entry ${m}/pool_q_valid}
+      catch {add wave -noupdate -group $L -group Pool_Entry ${m}/pool_q}
+      catch {add wave -noupdate -group $L -group Pool_Entry ${m}/pool_d_valid}
+      catch {add wave -noupdate -group $L -group Pool_Entry ${m}/pool_d}
+      # Clock-gate enables, the same three groups the banked registers use. A gate narrower than
+      # the pool's own next-state cone drops the write and leaves the previous occupant's
+      # self-consistent snapshot -- which every per-entry assertion still passes.
+      catch {add wave -noupdate -group $L -group Pool_Gate ${m}/gen_pool_reg/pool_ctl_en}
+      catch {add wave -noupdate -group $L -group Pool_Gate ${m}/gen_pool_reg/pool_id_en}
+      catch {add wave -noupdate -group $L -group Pool_Gate ${m}/gen_pool_reg/pool_rb_en}
+      # Allocation / merge grant, plus the free-entry pointer (one pool entry, so pool_free_id is
+      # always 0 -- it exists so the pool arbiter keeps the banked one's shape).
+      catch {add wave -noupdate -group $L -group Pool_Grant ${m}/pool_alloc_inflight}
+      catch {add wave -noupdate -group $L -group Pool_Grant ${m}/pool_merge_inflight}
+      catch {add wave -noupdate -group $L -group Pool_Grant ${m}/pool_st_merge_drain}
+      catch {add wave -noupdate -group $L -group Pool_Grant ${m}/pool_free_valid}
+      catch {add wave -noupdate -group $L -group Pool_Grant ${m}/pool_has_free}
+      catch {add wave -noupdate -group $L -group Pool_Grant -radix unsigned ${m}/pool_free_id}
+      catch {add wave -noupdate -group $L -group Pool_Grant ${m}/pool_free_oh}
+      catch {add wave -noupdate -group $L -group Pool_Grant ${m}/apb_v}
+      catch {add wave -noupdate -group $L -group Pool_Grant ${m}/apb_q_v}
+      catch {add wave -noupdate -group $L -group Pool_Grant -radix unsigned ${m}/apb_q_way}
+      catch {add wave -noupdate -group $L -group Pool_Grant ${m}/apb_q_len}
+      catch {add wave -noupdate -group $L -group Pool_Grant ${m}/mpb_v}
+      catch {add wave -noupdate -group $L -group Pool_Grant ${m}/mpb_q_v}
+      catch {add wave -noupdate -group $L -group Pool_Grant -radix unsigned ${m}/mpb_q_way}
+      # Per-lane outcome for this cycle, indexed [tile][port]: hit an existing pool entry, won a
+      # pool entry, and which one. req_hit_pool feeds req_hit_mshr, which is what keeps a pooled
+      # request from ALSO being an allocation candidate -- check it against Pool_Lane alloc_found.
+      catch {add wave -noupdate -group $L -group Pool_Lane ${m}/req_hit_pool}
+      catch {add wave -noupdate -group $L -group Pool_Lane ${m}/req_alloc_found_pool}
+      catch {add wave -noupdate -group $L -group Pool_Lane -radix unsigned ${m}/req_alloc_found_pool_id}
+    }
+
+    # --- Bank allocation cut (the pipeline-cut invariant suite) ---
+    # The arbiter's own view of which ways are taken, one cycle behind the grant (agb_q_* is just
+    # the registered agb_*). cut_alloc_target_free fires when a grant lands on a way that is
+    # already valid and not CACHED -- i.e. the free-way lookup and free_way_valid disagree. That is
+    # the assertion a pool run currently dies on ~400 cycles into the benchmark, so park these
+    # beside Pool_Grant: at the failure, find the cycle where agb_q_v[bank] is high while
+    # free_way_valid[way] is also high, and read agb_q_way to get the way that was taken twice.
+    catch {add wave -noupdate -group $L -group Alloc_Cut ${m}/free_way_valid}
+    catch {add wave -noupdate -group $L -group Alloc_Cut ${m}/alloc_inflight}
+    catch {add wave -noupdate -group $L -group Alloc_Cut ${m}/merge_inflight}
+    catch {add wave -noupdate -group $L -group Alloc_Cut ${m}/agb_v}
+    catch {add wave -noupdate -group $L -group Alloc_Cut ${m}/agb_q_v}
+    catch {add wave -noupdate -group $L -group Alloc_Cut -radix unsigned ${m}/agb_q_way}
+    catch {add wave -noupdate -group $L -group Alloc_Cut ${m}/bank_has_free}
+    catch {add wave -noupdate -group $L -group Alloc_Cut -radix unsigned ${m}/bank_free_id}
 
     # --- Boundary 1: tiles -> MSHR (request ingress) ---
     catch {add wave -noupdate -group $L -group ReqIn  ${m}/group_mshr_req_valid_i}
@@ -253,6 +315,59 @@ proc add_group_mshr_wave {g NumX NumY} {
     catch {add wave -noupdate -group $L -group Classify ${m}/resp_sel_valid}
     catch {add wave -noupdate -group $L -group Classify ${m}/resp_sel_mshr_id}
     catch {add wave -noupdate -group $L -group Classify ${m}/resp_sel_subreq_idx}
+}
+
+# Per group: the legacy instance (gen_group_mshr/i_group_mshr), or -- with group_mshr_split=1 --
+# the eight slice cores gen_group_mshr_split/gen_slice[m]/i_slice/i_core, labelled R0..R3 (row
+# slices, tiles 4k..4k+3) and C0..C3 (column slices, tiles k,k+4,k+8,k+12), plus each slice's
+# 4-lane NoC face (the request fold / response steer) under Slice.
+proc add_group_mshr_wave {g NumX NumY} {
+    set gx [expr {$g / $NumX}]
+    set gy [expr {$g % $NumY}]
+    set grp "sim:/mempool_tb/dut/i_mempool_cluster/gen_groups_x\[${gx}\]/gen_groups_y\[${gy}\]/gen_rtl_group/i_group/i_mempool_group"
+    set legacy "${grp}/gen_group_mshr/i_group_mshr"
+    if {![catch {examine ${legacy}/mshr_q_valid}]} {
+        add_mshr_core_wave $legacy "MSHR_G${g}_X${gx}Y${gy}"
+        return
+    }
+    # Group-level split logic: the class steer per tile port (to_col = 1 -> column slice), the
+    # row/column response arbiters, and the CSR that decides which family serves singles.
+    set S "MSHR_G${g}_X${gx}Y${gy}_Steer"
+    catch {add wave -noupdate -group $S ${grp}/mshr_cfg.steer_single_row}
+    catch {add wave -noupdate -group $S ${grp}/mshr_cfg.enable}
+    catch {add wave -noupdate -group $S ${grp}/gen_group_mshr_split/sl_busy}
+    catch {add wave -noupdate -group $S ${grp}/gen_group_mshr_split/cfg_bypass_single}
+    catch {add wave -noupdate -group $S ${grp}/gen_group_mshr_split/cfg_bypass_burst}
+    catch {add wave -noupdate -group $S -group ToSlice ${grp}/gen_group_mshr_split/sl_req_valid}
+    catch {add wave -noupdate -group $S -group ToSlice ${grp}/gen_group_mshr_split/sl_req_ready}
+    catch {add wave -noupdate -group $S -group FromSlice ${grp}/gen_group_mshr_split/sl_resp_valid}
+    catch {add wave -noupdate -group $S -group FromSlice ${grp}/gen_group_mshr_split/sl_resp_ready}
+    catch {add wave -noupdate -group $S -group NoCFace ${grp}/gen_group_mshr_split/sl_noc_req_valid}
+    catch {add wave -noupdate -group $S -group NoCFace ${grp}/gen_group_mshr_split/sl_noc_resp_valid}
+    for {set t 0} {$t < 16} {incr t} {
+        set st "${grp}/gen_group_mshr_split/gen_steer_t\[${t}\]"
+        catch {add wave -noupdate -group $S -group Tile${t} ${st}/gen_steer_r\[1\]/is_burst}
+        catch {add wave -noupdate -group $S -group Tile${t} ${st}/gen_steer_r\[1\]/to_col}
+        catch {add wave -noupdate -group $S -group Tile${t} ${st}/gen_steer_r\[2\]/is_burst}
+        catch {add wave -noupdate -group $S -group Tile${t} ${st}/gen_steer_r\[2\]/to_col}
+    }
+    for {set m 0} {$m < 8} {incr m} {
+        set sl "${grp}/gen_group_mshr_split/gen_slice\[${m}\]/i_slice"
+        if {[catch {examine ${sl}/i_core/mshr_q_valid}]} { continue }
+        set fam [expr {$m < 4 ? "R" : "C"}]
+        set L "MSHR_G${g}_X${gx}Y${gy}_${fam}[expr {$m % 4}]"
+        add_mshr_core_wave "${sl}/i_core" $L
+        catch {add wave -noupdate -group $L -group Slice ${sl}/noc_req_valid_o}
+        catch {add wave -noupdate -group $L -group Slice ${sl}/noc_req_ready_i}
+        catch {add wave -noupdate -group $L -group Slice ${sl}/noc_req_o}
+        catch {add wave -noupdate -group $L -group Slice ${sl}/noc_resp_valid_i}
+        catch {add wave -noupdate -group $L -group Slice ${sl}/noc_resp_ready_o}
+        catch {add wave -noupdate -group $L -group Slice ${sl}/noc_resp_i}
+        catch {add wave -noupdate -group $L -group Slice ${sl}/tile_req_valid_i}
+        catch {add wave -noupdate -group $L -group Slice ${sl}/tile_req_ready_o}
+        catch {add wave -noupdate -group $L -group Slice ${sl}/tile_resp_valid_o}
+        catch {add wave -noupdate -group $L -group Slice ${sl}/tile_resp_ready_i}
+    }
 }
 
 for {set g 0} {$g < $NumGroups_noc} {incr g} {
@@ -412,7 +527,10 @@ if {$NumGroups > 0 && $NumTilesPerGroup > 0 && $NumCoresPerTile > 0} {
 # sp-fmatmul-opt-burst-merge stuck cores (build_2), wedge order; first 6 = Group 12
 # hard-frozen deadlock cluster (tiles 9-14). See bottleneck_analysis/2026-06-11_sp_fmatmul_stuck_cores.md
 foreach global_core {0 8 1 9 2 10 3 11 4 12 5 13 6 14 7 15 \
-                      64 65 66 67 68 69 70 71 72 73 74 75 76 77 78 79} {
+                      48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63 \
+                      192 193 194 195 196 197 198 199 200 201 202 203 204 205 206 207 \
+                      128 129 130 131 132 133 134 135 136 137 138 139 140 141 142 143 \
+                      } {
     add_core_wave_by_global_id $global_core $NumGroups $NumTilesPerGroup $NumCoresPerTile $NumY $HasSpatz
 }
 

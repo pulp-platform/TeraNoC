@@ -294,9 +294,70 @@ package mempool_pkg;
   // instead of scanning all entries. Width must match mempool_group_mshr's MshrNum (driven by the
   // same GROUP_MSHR_NUM macro, defaulting to NumTilesPerGroup).
   localparam int unsigned MshrTagNum   = `ifdef GROUP_MSHR_NUM `GROUP_MSHR_NUM `else NumTilesPerGroup `endif;
+  localparam int unsigned MshrTagPoolNum =
+    `ifdef GROUP_MSHR_OVERFLOW_NUM `GROUP_MSHR_OVERFLOW_NUM `else 1 `endif;
+
+  // Disaggregated group MSHR (GROUP_MSHR_SPLIT=1): the one 32-lane group MSHR becomes EIGHT
+  // 8-lane slices, each attached to 4 tiles. Slice m < 4 is ROW R_m = tiles {4m..4m+3}; slice
+  // m >= 4 is COLUMN C_{m-4} = tiles {m-4 + 4a}. sp-fmatmul's contiguous tiles share B in the
+  // DECODE split and A in the PREFILL split (the strided tiles the other operand), so which
+  // family serves which class is the CSR steer_single_row, written by software from the split it
+  // runs. Any two tiles share exactly one slice, so the 4x4 GEMM split merges at full degree and
+  // every other power-of-two split merges at min(share, 4). A tile's request is steered by CLASS
+  // (single -> one family, burst -> the other; CSR steer_single_row picks which) and
+  // bypass traffic (stores, AMOs, disabled classes) by tile parity t[0]^t[2], so each slice carries
+  // bypass for exactly 2 of its 4 tiles -- 4 sources against its 4 NoC lanes, full rate.
+  // With GROUP_MSHR_NUM/OVERFLOW_NUM now PER SLICE (8+1 = 64+8 per group), the tag carries the
+  // slice id above the slice-local entry id so the group-level response crossbar can route by tag.
+  // Requires NumTilesPerGroup == 16 and two remote req/resp ports per tile.
+  localparam bit          MshrSplit      = `ifdef GROUP_MSHR_SPLIT `GROUP_MSHR_SPLIT `else 1'b0 `endif;
+  localparam int unsigned MshrNumSlices  = MshrSplit ? 8 : 1;
+  localparam int unsigned MshrSliceTiles = MshrSplit ? 4 : NumTilesPerGroup; // lane-tiles per slice
+  localparam int unsigned MshrSliceIdW   = 3;
   // +1 so tag value 0 is a reserved "no MSHR entry" sentinel (bypass / store / non-mergeable); a real
-  // entry id e is carried as (e+1). The response path uses this to tell MSHR-routed beats from bypass.
-  localparam int unsigned MshrTagWidth = idx_width(MshrTagNum + 1);
+  // entry id e is carried as (e+1) and a pool entry p as (MshrTagNum+1+p). The response path uses
+  // this to tell MSHR-routed beats from bypass. Local width covers the pool too (the legacy
+  // idx_width(MshrTagNum+1) only fit 64+8 by accident).
+  localparam int unsigned MshrTagLocalW = idx_width(MshrTagNum + MshrTagPoolNum + 1);
+  localparam int unsigned MshrTagWidth  = MshrSplit ? (MshrSliceIdW + MshrTagLocalW) : MshrTagLocalW;
+
+  // ---- Split-MSHR steering (pure functions of the tile index; see the block comment above) ----
+  // Slice that carries tile t's BYPASS traffic. t[0]^t[2] varies within every row AND every column
+  // (a row fixes t[3:2], a column fixes t[1:0]), so each slice gets exactly two bypass tiles.
+  function automatic logic [MshrSliceIdW-1:0] mshr_bypass_slice(input logic [3:0] t);
+    return (t[0] ^ t[2]) ? {1'b1, t[1:0]} : {1'b0, t[3:2]};
+  endfunction
+  // Row slice / column slice of tile t.
+  function automatic logic [MshrSliceIdW-1:0] mshr_row_slice(input logic [3:0] t);
+    return {1'b0, t[3:2]};
+  endfunction
+  function automatic logic [MshrSliceIdW-1:0] mshr_col_slice(input logic [3:0] t);
+    return {1'b1, t[1:0]};
+  endfunction
+  // Lane-local index (0..3) of tile t inside slice m.
+  function automatic logic [1:0] mshr_slice_local(input logic [MshrSliceIdW-1:0] m, input logic [3:0] t);
+    return m[2] ? t[3:2] : t[1:0];
+  endfunction
+  // Global tile of slice m's lane-local index l.
+  function automatic logic [3:0] mshr_slice_tile(input logic [MshrSliceIdW-1:0] m, input logic [1:0] l);
+    return m[2] ? {l, m[1:0]} : {m[1:0], l};
+  endfunction
+  // NoC lane (0..15, per port class) of slice m's output lane k (0..1). Chosen so the floo_remapper's
+  // Interleaved groups {i, i+4, i+8, i+12} pair R_k's two lanes with C_k's two lanes on each port,
+  // i.e. the (R_k, C_k) x port remap grouping, with no remapper change.
+  function automatic logic [3:0] mshr_noc_lane(input logic [MshrSliceIdW-1:0] m, input logic k);
+    return {m[2], k, m[1:0]};
+  endfunction
+  // Slice a returning response belongs to. The slice's lane fold stamps its id on EVERY request
+  // it emits -- a bypass carries {slice, 0}, an entry {slice, e+1} -- so a beat always returns to
+  // the slice that sent it (a bank-full bypass that left through a class slice comes back there,
+  // not through the tile's bypass slice), and the core sees the local tag once the id is stripped.
+  function automatic logic [MshrSliceIdW-1:0] mshr_resp_slice(input logic [MshrTagWidth-1:0] tag);
+    return tag[MshrTagWidth-1 -: MshrSliceIdW];
+  endfunction
+  function automatic logic [MshrTagLocalW-1:0] mshr_tag_local(input logic [MshrTagWidth-1:0] tag);
+    return tag[MshrTagLocalW-1:0];
+  endfunction
 
   typedef struct packed {
     meta_id_t meta_id;
@@ -314,12 +375,18 @@ package mempool_pkg;
     tcdm_addr_t tgt_addr;
     logic [BurstLenWidth-1:0] burst_len;
     logic [MshrTagWidth-1:0] mshr_tag; // Tier-b: MSHR entry id stamped at allocation
+    // Split MSHR: the source tile, stamped by the slice's lane fold. The NoC header's src_tile_id
+    // used to be the lane index; after the 8->4 fold a NoC lane no longer identifies a tile.
+    tile_group_id_t src_tile_id;
   } tcdm_master_req_t;
 
   typedef struct packed {
     tcdm_payload_t rdata;
     logic wen;               // Spatz Added
     logic [MshrTagWidth-1:0] mshr_tag; // Tier-b: echoed MSHR entry id for direct response routing
+    // Split MSHR: the requester tile (echoed hdr.tile_id), so a slice can steer a beat arriving on
+    // one of its 4 NoC lanes to the owner's tile lane.
+    tile_group_id_t tile_id;
   } tcdm_master_resp_t;
 
   typedef struct packed {
@@ -668,6 +735,8 @@ package mempool_pkg;
     `ifdef GROUP_MSHR_CACHE_TIMEOUT `GROUP_MSHR_CACHE_TIMEOUT `else 0 `endif;
   localparam integer unsigned MshrDefBankfullBp =
     `ifdef GROUP_MSHR_BANKFULL_BACKPRESSURE `GROUP_MSHR_BANKFULL_BACKPRESSURE `else 0 `endif;
+  localparam integer unsigned MshrDefSteerSingleRow =
+    `ifdef GROUP_MSHR_STEER_SINGLE_ROW `GROUP_MSHR_STEER_SINGLE_ROW `else 0 `endif;
   localparam integer unsigned MshrDefBankSelShift =
     `ifdef GROUP_MSHR_BANK_SHIFT `GROUP_MSHR_BANK_SHIFT `else 5 `endif;
   localparam integer unsigned MshrDefBankShiftSingle =
@@ -784,6 +853,11 @@ package mempool_pkg;
     // which is the outcome the bypass destroys. Bounded by serve_timeout: a held entry always
     // releases eventually, so a full bank cannot wedge a port permanently.
     logic                            bankfull_backpressure;
+    // Split MSHR class steering (MshrSplit only; inert otherwise). 0 = singles go to the COLUMN
+    // slice and bursts to the ROW slice (sp-fmatmul DECODE split: scalar-A sharers are the strided
+    // tiles). 1 = swapped (PREFILL split: A sharers are contiguous). Software derives it from the
+    // split -- the wrong value costs ~30x (every single waits out its hold window).
+    logic                            steer_single_row;
   } mshr_cfg_t;
 
   // CSR indices, mirrored by software/runtime/mshr_cfg.h -- keep the two in step.
@@ -799,6 +873,7 @@ package mempool_pkg;
   localparam integer unsigned MSHR_CSR_CACHE_REUSE_TARGET = 9;
   localparam integer unsigned MSHR_CSR_CACHE_TIMEOUT      = 10;
   localparam integer unsigned MSHR_CSR_BANKFULL_BP       = 11;
+  localparam integer unsigned MSHR_CSR_STEER_SINGLE_ROW  = 12; // split MSHR: which family serves singles
   localparam integer unsigned MSHR_CSR_STATUS             = 15;
 
   // CFG_STATUS sticky error bits. Software reads this after configuring; a set bit means the

@@ -293,6 +293,48 @@
       );
     chart("fpuChart", series);
     // Delivered DMA bandwidth per direction, as a fraction of the L2 ceiling.
+    // MSHR bank spread: what the address hash actually engages.
+    const mshrBanks = [...new Set(now("mshr_bank").map((r) => r.bank))].sort((a, b) => a - b);
+    if (mshrBanks.length) {
+      const perBank = (fi, field) => {
+        const rs = rows(fi, "mshr_bank");
+        return mshrBanks.map((b) => sum(rs.filter((r) => r.bank === b), field));
+      };
+      chart("mshrBankChart", [
+        {
+          name: "banks engaged",
+          values: visible.map((i) => perBank(i, "allocations").filter((v) => v > 0).length),
+        },
+        {
+          name: "banks with no free way",
+          color: "#b3261e",
+          values: visible.map((i) => perBank(i, "full_cycles").filter((v) => v > 0).length),
+        },
+      ]);
+      const alloc = perBank(selected, "allocations");
+      const full = perBank(selected, "full_cycles");
+      const total = alloc.reduce((a, v) => a + v, 0);
+      const mean = total / (mshrBanks.length || 1);
+      table(
+        "mshrBankTable",
+        ["Bank", "Allocations", "Full cycles", "Share of allocations"],
+        mshrBanks.map((b, n) => [
+          b,
+          num(alloc[n], 0),
+          num(full[n], 0),
+          total ? num((100 * alloc[n]) / total, 1) + "%" : "—",
+        ]).concat([[
+          "concentration",
+          num(total, 0),
+          num(full.reduce((a, v) => a + v, 0), 0),
+          mean ? num(Math.max(...alloc) / mean, 2) + "x mean" : "—",
+        ]]),
+      );
+    } else {
+      empty("mshrBankChart", "No MSHR bank records in this capture.");
+      empty("mshrBankTable", "");
+    }
+
     chart("axiChart", [
       { name: "AXI read (delivered)", color: "#2487a8", values: visible.map((i) => axiShare(i, "axi_read", "completed_bytes")) },
       { name: "AXI write (delivered)", color: "#a65fa2", values: visible.map((i) => axiShare(i, "axi_write", "completed_bytes")) },

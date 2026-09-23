@@ -30,6 +30,39 @@ typedef struct {
   uint32_t peak;
 } gemm_hash_score_t;
 
+// Which of the group's cores feed the bank set being scored. Legacy: all of them share one MSHR.
+// Split MSHR (MSHR_CFG_SPLIT): a class is served by ONE 4-tile slice with its own 2 banks, so the
+// competing set is that slice's 4 cores. Every slice of a family is a translate of slice 0
+// (row R_0 = cores {0,1,2,3}, column C_0 = {0,4,8,12}) and slice 0 always holds core 0, which
+// leads every cohort it belongs to, so scoring slice 0 of the class's family is exact.
+// Singles go to the row family for the PREFILL split and to the column family for DECODE
+// (MSHR_D_STEER_SINGLE_ROW); bursts to the other.
+// Self-sufficient when included without mshr_cfg.h (the host-side qwen-gate-up/script/gen_hash.c
+// does that): same definitions as mshr_cfg.h, guarded so the canonical ones win when present.
+#ifndef MSHR_CFG_SPLIT
+#define MSHR_CFG_SPLIT 0
+#endif
+#ifndef MSHR_SPLIT_TILES
+#define MSHR_SPLIT_TILES 4u
+#endif
+#ifndef MSHR_D_STEER_SINGLE_ROW
+#if defined(MATMUL_DECODE_SPLIT) && (MATMUL_DECODE_SPLIT)
+#define MSHR_D_STEER_SINGLE_ROW 0
+#else
+#define MSHR_D_STEER_SINGLE_ROW 1
+#endif
+#endif
+static inline uint32_t gemm_hash_core_in_set(uint32_t core, uint32_t burst) {
+#if MSHR_CFG_SPLIT
+  const uint32_t single_row = MSHR_D_STEER_SINGLE_ROW;
+  const uint32_t row = burst ? !single_row : single_row;
+  return row ? (core < MSHR_SPLIT_TILES) : ((core % MSHR_SPLIT_TILES) == 0);
+#else
+  (void)core; (void)burst;
+  return 1;
+#endif
+}
+
 static inline gemm_hash_score_t gemm_hash_evaluate(
     uint32_t a_base, uint32_t b_base, uint32_t group, uint32_t banks,
     uint32_t burst, uint32_t shift, uint32_t bits) {
@@ -43,6 +76,7 @@ static inline gemm_hash_score_t gemm_hash_evaluate(
     uint64_t occupied = 0;
     for (uint32_t core = 0; core < GEMM_CPG; ++core) {
       uint32_t row, col;
+      if (!gemm_hash_core_in_set(core, burst)) continue;
 #if MATMUL_DECODE_SPLIT
       const uint32_t cid = group * GEMM_CPG + core;
       row = (cid % GEMM_DECODE_ROWS(KERNEL_SIZE)) * KERNEL_SIZE;

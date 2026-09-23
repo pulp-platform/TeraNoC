@@ -38,6 +38,9 @@
 // ---- Hierarchy-path shorthands (genvar-indexed; constant in generate scope) --
 `define TR_TILE(G,T) dut.i_mempool_cluster.gen_groups_x[(G)/NumY].gen_groups_y[(G)%NumY].gen_rtl_group.i_group.i_mempool_group.gen_tiles[T].i_tile
 `define TR_MSHR(G)   dut.i_mempool_cluster.gen_groups_x[(G)/NumY].gen_groups_y[(G)%NumY].gen_rtl_group.i_group.i_mempool_group.gen_group_mshr.i_group_mshr
+// Disaggregated MSHR (mempool_pkg::MshrSplit): the core of slice M in group G. Its lane arrays are
+// [4 lane-tiles][port]; the global tile is mshr_slice_tile(M, lane).
+`define TR_MSHR_S(G,M) dut.i_mempool_cluster.gen_groups_x[(G)/NumY].gen_groups_y[(G)%NumY].gen_rtl_group.i_group.i_mempool_group.gen_group_mshr_split.gen_slice[M].i_slice.i_core
 `define TR_RTR(G,T)  dut.i_mempool_cluster.gen_groups_x[(G)/NumY].gen_groups_y[(G)%NumY].gen_rtl_group.i_group.gen_router_router_i[T]
 
 // ---- One CSV row. Guarded by `if (tracer_active)` at the call site. ----------
@@ -178,6 +181,67 @@ end
 //      Array index [t] is the requester tile within this group -> owner key
 //      (g, t, *.core_id, *.meta_id).
 // ===========================================================================
+if (MshrSplit) begin : gen_tr_mshr_split
+for (genvar g = 0; g < NumGroups; g++) begin : gen_tr_mshr_split_g
+  for (genvar m = 0; m < MshrNumSlices; m++) begin : gen_tr_mshr_m
+  for (genvar l = 0; l < MshrSliceTiles; l++) begin : gen_tr_mshr_l
+    // Global tile of this slice lane: row slice -> {m[1:0], l}, column slice -> {l, m[1:0]}.
+    localparam int t = (m >= 4) ? (l * 4 + (m % 4)) : ((m % 4) * 4 + l);
+    // ---- request ports (1..NumRemoteReqPortsPerTile-1) ----
+    for (genvar p = 1; p < NumRemoteReqPortsPerTile; p++) begin : gen_tr_mshr_rq
+      always @(posedge clk) begin : tr_mshr_req_blk
+        tcdm_master_req_t rq;
+        string fl;
+        if (tracer_active) begin
+          // ingress from tiles
+          if (`TR_MSHR_S(g,m).group_mshr_req_valid_i[l][p] && `TR_MSHR_S(g,m).group_mshr_req_ready_o[l][p]) begin
+            rq = `TR_MSHR_S(g,m).group_mshr_req_i[l][p];
+            fl = `TR_MSHR_S(g,m).req_merge_valid[l][p] ? "merge" :
+                 (`TR_MSHR_S(g,m).req_alloc_found[l][p] ? "alloc" : "fwd");
+            `TR_ROW("MSHR_REQ_IN", g, t, p, g, t, rq.wdata.core_id, rq.wdata.meta_id,
+                    rq.tgt_addr, rq.tgt_group_id, -1, -1, rq.wen, rq.burst_len,
+                    rq.wdata.amo, rq.wdata.data, -1, -1, fl);
+          end
+          // egress toward NoC
+          if (`TR_MSHR_S(g,m).mshr_noc_req_valid_o[l][p] && `TR_MSHR_S(g,m).mshr_noc_req_ready_i[l][p]) begin
+            rq = `TR_MSHR_S(g,m).mshr_noc_req_o[l][p];
+            `TR_ROW("MSHR_REQ_OUT", g, t, p, g, t, rq.wdata.core_id, rq.wdata.meta_id,
+                    rq.tgt_addr, rq.tgt_group_id, -1, -1, rq.wen, rq.burst_len,
+                    rq.wdata.amo, rq.wdata.data, -1, -1, "noc");
+          end
+        end
+      end
+    end
+    // ---- response ports (1..NumRemoteRespPortsPerTile-1) ----
+    for (genvar p = 1; p < NumRemoteRespPortsPerTile; p++) begin : gen_tr_mshr_rp
+      always @(posedge clk) begin : tr_mshr_rsp_blk
+        tcdm_master_resp_t rs;
+        string fl;
+        if (tracer_active) begin
+          // ingress from NoC
+          if (`TR_MSHR_S(g,m).mshr_noc_resp_valid_i[l][p] && `TR_MSHR_S(g,m).mshr_noc_resp_ready_o[l][p]) begin
+            rs = `TR_MSHR_S(g,m).mshr_noc_resp_i[l][p];
+            fl = `TR_MSHR_S(g,m).resp_is_mshr[l][p] ? "ismshr" : "bypass";
+            `TR_ROW("MSHR_RSP_IN", g, t, p, g, t, rs.rdata.core_id, rs.rdata.meta_id,
+                    32'h0, -1, -1, -1, rs.wen, 0, rs.rdata.amo, rs.rdata.data,
+                    `TR_MSHR_S(g,m).resp_mshr_id[l][p], -1, fl);
+          end
+          // egress toward tiles (multicast)
+          if (`TR_MSHR_S(g,m).group_mshr_resp_valid_o[l][p] && `TR_MSHR_S(g,m).group_mshr_resp_ready_i[l][p]) begin
+            rs = `TR_MSHR_S(g,m).group_mshr_resp_o[l][p];
+            fl = `TR_MSHR_S(g,m).resp_from_mshr[l][p] ? "frommshr" :
+                 (`TR_MSHR_S(g,m).resp_from_bypass[l][p] ? "bypass" : "drain");
+            `TR_ROW("MSHR_RSP_OUT", g, t, p, g, t, rs.rdata.core_id, rs.rdata.meta_id,
+                    32'h0, -1, -1, -1, rs.wen, 0, rs.rdata.amo, rs.rdata.data,
+                    `TR_MSHR_S(g,m).resp_sel_mshr_id[l][p], `TR_MSHR_S(g,m).resp_sel_subreq_idx[l][p], fl);
+          end
+        end
+      end
+    end
+  end
+  end
+end
+end else begin : gen_tr_mshr_legacy
 for (genvar g = 0; g < NumGroups; g++) begin : gen_tr_mshr_g
   for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_tr_mshr_t
     // ---- request ports (1..NumRemoteReqPortsPerTile-1) ----
@@ -232,6 +296,7 @@ for (genvar g = 0; g < NumGroups; g++) begin : gen_tr_mshr_g
       end
     end
   end
+end
 end
 
 // ===========================================================================

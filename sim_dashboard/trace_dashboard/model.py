@@ -6,7 +6,7 @@ import hashlib
 import math
 from collections import defaultdict
 
-KINDS = {"fpu", "mshr", "entry", "bank", "link", "work", "traffic", "stage", "pressure", "overall", "dma"}
+KINDS = {"fpu", "mshr", "entry", "bank", "link", "work", "traffic", "stage", "pressure", "overall", "dma", "mshr_bank"}
 ADDITIVE = {"busy", "capacity", "occupied", "occupied_single", "occupied_burst", "full", "hsk", "stall", "idle", "fmac", "cached", "held", "alloc", "release", "timeout", "timeout_single", "timeout_burst", "timeout_subs", "resp_hold_timeout", "cache_timeout", "bypass", "active", "overflow_alloc", "overflow_merge", "overflow_occupied"}
 
 
@@ -115,6 +115,15 @@ def validate(row):
   if row["kind"] in {"bank", "link"}:
     if row.get("hsk", 0)+row.get("stall", 0) > row["end"]-row["start"]:
       raise ValueError("handshake + stall exceeds single-port window")
+  if row['kind'] == 'mshr_bank':
+    if 'g' not in row or 'bank' not in row:
+      raise ValueError('MSHR bank records need a group and a bank')
+    for key in ('allocations', 'full_cycles'):
+      if key in row and (not isinstance(row[key], int) or isinstance(row[key], bool)
+                         or row[key] < 0):
+        raise ValueError(f'Invalid MSHR bank {key}')
+    if row.get('full_cycles', 0) > row['end'] - row['start']:
+      raise ValueError('MSHR bank full cycles exceed interval')
   if row['kind'] == 'dma':
     if row.get('scope') not in ('global', 'channel'):
       raise ValueError('DMA requires explicit global or channel scope')

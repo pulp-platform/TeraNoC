@@ -107,6 +107,11 @@ def main():
     p.add_argument('--vlen', type=int, default=512)
     p.add_argument('--elen', type=int, choices=(32,), default=32)
     p.add_argument('--split', choices=('decode', 'prefill'), default='decode')
+    # Disaggregated group MSHR (group_mshr_split=1): score the 4-tile slice that serves each class
+    # with ITS banks/entries (pass --banks 2 --entries 8). Steering defaults from the split
+    # (prefill: singles -> row slice, decode: singles -> column); override with --steer-single-row.
+    p.add_argument('--mshr-split', action='store_true')
+    p.add_argument('--steer-single-row', type=int, choices=(0, 1))
     p.add_argument('--group', type=int, default=0)
     p.add_argument('--current', nargs=3, type=int, default=[4, 4, 0])
     p.add_argument('--burst-model', choices=('aligned-v1', 'tile-contained-v1'), required=True)
@@ -129,6 +134,9 @@ def main():
                 burst_geometry=dict(tile_words=a.tile_words, max_words=a.max_burst,
                                     lanes=a.lanes, rob_depth=a.rob_depth),
                 hash=dict(kernel=a.ks, split=a.split, banks=a.banks, entries=a.entries,
+                          mshr_split=a.mshr_split,
+                          steer_single_row=(a.steer_single_row if a.steer_single_row is not None
+                                            else a.split == 'prefill'),
                           current=a.current, max_steps=a.sample_steps, a_base=a.a_base,
                           w_base=a.b_base if a.b_base is not None else a.M*a.N*a.elem_bytes))
     try:
@@ -139,6 +147,9 @@ def main():
         p.error(result['reason'])
     group = result['groups'][a.group]
     print(f"Group {a.group}: {a.burst_model}, B requests {group['request_counts']}")
+    if a.mshr_split:
+        print(f"Split MSHR: scoring slice 0 of each family over {a.banks} banks x "
+              f"{a.entries // a.banks} ways; singles -> {'row' if result['steer_single_row'] else 'column'} slice")
     print(result['note'])
     for label, key, current in [('Singles (A + scalar B)', 'singles', 'current_a'),
                                 ('Bursts (B)', 'weights', 'current_w')]:

@@ -161,18 +161,43 @@ tile_id_remap ?= 0
 # The real risk the old comment named IS valid and is handled below: at CfgRuntime=1 the config
 # file stops const-folding, so the backend flavours pin it back to 0 explicitly.
 group_mshr_cfg_runtime   ?= 1
-group_mshr_num           ?= 64
-# Ways (entries) per bank; banks = group_mshr_num / group_mshr_ways_per_bank. 16 entries / 2 ways
-# = 8 banks x 2 ways (user experiment). WARNING: 16 entries is HALF of the 32 concurrent request
-# slots (16 tiles x 2 remote ports) -- 32 entries already collapsed the matmul ~14x, so 16 is very
-# likely to collapse harder. Revert to 64 (16 banks x 4 ways) for the measured-safe design.
-group_mshr_ways_per_bank ?= 4
-# Unbanked overflow entries. Allocated ONLY when a request's hashed bank has no free way -- and that
-# test already includes the cache-reclaim pass, so a bank holding a reclaimable cached way is not
-# "full" and the pool stays free for the case it exists for: a cohort that holds every way of one
-# bank while the request which would complete it hashes to that same bank, which otherwise only ends
-# at the serve timeout. 0 removes the pool entirely (netlist identical to the design without it).
-group_mshr_overflow_num  ?= 1
+
+# ---- Group MSHR organisation: ONE switch, two knob sets -----------------------------------------
+# group_mshr_split = 1 (default since 2026-09-22): eight 4-tile SLICES per group, rows R_k = tiles
+#   4k..4k+3 and columns C_k = tiles k,k+4,k+8,k+12 (hardware/src/mempool_group_mshr_slice.sv,
+#   docs/mshr_split_design.md). A request is steered to its row or column slice by CLASS
+#   (single/burst; CSR 12 steer_single_row, written by software from the prefill/decode split) and
+#   bypass traffic by tile parity, so every slice has 4 NoC lanes and 8 tile lanes. Measured on
+#   512x128x128 fp32 prefill: 11,199 vs 12,374 legacy cycles (-9.5 %); qwen-gate-up B16: +1.1 %.
+# group_mshr_split = 0: the legacy single 32-lane group MSHR.
+# The entry knobs below are PER MSHR INSTANCE, so the two sets differ: 8+1 entries per slice is the
+# same 64+8 per group as the legacy module. Software reads the same variables (runtime.mk ->
+# MSHR_CFG_ENTRIES / MSHR_CFG_SPLIT), so selecting the switch here configures HW and SW together;
+# nothing has to be repeated on the make command line.
+group_mshr_split         ?= 1
+ifeq ($(strip $(group_mshr_split)),1)
+  # --- split: per SLICE ---
+  group_mshr_num           ?= 8    # entries per slice (8 slices -> 64 per group)
+  group_mshr_ways_per_bank ?= 4    # banks per slice = 8 / 4 = 2
+  group_mshr_overflow_num  ?= 1    # unbanked overflow entries per slice (8 per group)
+  # Reset value of CSR 12; software overwrites it from the split (1 = prefill, 0 = decode).
+  group_mshr_steer_single_row ?= 0
+else
+  # --- legacy: ONE module per group ---
+  group_mshr_num           ?= 64
+  # Ways (entries) per bank; banks = group_mshr_num / group_mshr_ways_per_bank. 16 entries / 2 ways
+  # = 8 banks x 2 ways (user experiment). WARNING: 16 entries is HALF of the 32 concurrent request
+  # slots (16 tiles x 2 remote ports) -- 32 entries already collapsed the matmul ~14x, so 16 is very
+  # likely to collapse harder. Revert to 64 (16 banks x 4 ways) for the measured-safe design.
+  group_mshr_ways_per_bank ?= 4
+  # Unbanked overflow entries. Allocated ONLY when a request's hashed bank has no free way -- and
+  # that test already includes the cache-reclaim pass, so a bank holding a reclaimable cached way is
+  # not "full" and the pool stays free for the case it exists for: a cohort that holds every way of
+  # one bank while the request which would complete it hashes to that same bank, which otherwise
+  # only ends at the serve timeout. 0 removes the pool entirely (netlist identical to the design
+  # without it).
+  group_mshr_overflow_num  ?= 8
+endif
 # Max sub-requests coalesced into one MSHR entry.
 # MUST be max(A-share, B-share), where A-share = split_p_count and B-share =
 # split_m_count. The two INVERT with M: at M<=256 A is the shared matrix, at

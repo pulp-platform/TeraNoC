@@ -20,7 +20,14 @@
 #include "gemm_burst.h"
 #include "gemm_hash.h"
 
-#define QWEN_HASH_SHIFT_MAX 8
+// Highest bank shift whose index bits [shift, shift+log2(banks)) still lie inside the mesh sweep
+// (word bits < log2(QWEN_MESH_SWEEP/4) = 12), so the score is exact on buffer offsets; clamped to
+// the RTL CSR range (mempool_group_mshr_cfg BankShiftMax = 10). Was a fixed 8, which is right only
+// for 16 banks (4 index bits): with the split MSHR's 2 banks it hid bits 9-11, and a qwen shape
+// whose X rows are 2560 words apart (K=5120 fp16) differ ONLY in bits 9 and 11 -- every shift the
+// chooser was allowed to try put all 8 concurrent row loads in one bank.
+#define QWEN_RTL_SHIFT_MAX 10u
+static uint32_t qwen_log2(uint32_t x) { uint32_t l = 0; while (x > 1u) { x >>= 1; ++l; } return l; }
 // What one core actually has outstanding, derived rather than assumed.
 //
 // A vector load is split into 16-word bursts (gemm_burst_next), 64 bytes apart.
@@ -37,6 +44,9 @@
 
 int main(void) {
   const uint32_t banks = (MSHR_CFG_ENTRIES) / (MSHR_CFG_WAYS);
+  const uint32_t sweep_bits = qwen_log2((uint32_t)(QWEN_MESH_SWEEP) / 4u);
+  const uint32_t shift_fit  = sweep_bits - qwen_log2(banks);
+  const uint32_t QWEN_HASH_SHIFT_MAX = shift_fit < QWEN_RTL_SHIFT_MAX ? shift_fit : QWEN_RTL_SHIFT_MAX;
 
   // What one group actually has outstanding, which is what the banks have to
   // hold: the distinct column blocks it owns -- cores sharing a block merge into
@@ -52,7 +62,13 @@ int main(void) {
   // but ROWS_PER_GROUP/KERNEL_SIZE in the prefill one, and deriving it here from
   // QWEN_B instead got both wrong once KERNEL_SIZE stopped being 1.
   const uint32_t share  = (uint32_t)GEMM_SHARE_B(KERNEL_SIZE);
-  const uint32_t blocks = (uint32_t)GEMM_CPG / (share ? share : 1u);
+  // Split group MSHR (MSHR_CFG_SPLIT): the burst class of one group is served by four 4-tile
+  // slices with their own banks, so what a bank set has outstanding is what ONE slice's 4 cores
+  // hold -- 4/min(share,4) distinct blocks -- not the whole group's GEMM_CPG/share.
+  const uint32_t cores_per_bankset = MSHR_CFG_SPLIT ? (uint32_t)MSHR_SPLIT_TILES
+                                                    : (uint32_t)GEMM_CPG;
+  const uint32_t share_in_set = (share < cores_per_bankset) ? share : cores_per_bankset;
+  const uint32_t blocks = cores_per_bankset / (share_in_set ? share_in_set : 1u);
   const uint32_t span   = (uint32_t)QWEN_LDP / (uint32_t)GEMM_PBLOCKS(KERNEL_SIZE);
   // One load covers min(span, VL_MAX) elements and splits into that many bursts;
   // its id cost then caps how many loads can overlap.
@@ -76,6 +92,9 @@ int main(void) {
          (unsigned)vl, (unsigned)subs, (unsigned)ids, (unsigned)inflight);
   // The sharing model the scores are built on, and the ceiling they can reach:
   // a group cannot occupy more banks than it has distinct addresses outstanding.
+  printf("// mshr_split=%u cores/bankset=%u steer_single_row=%u\n",
+         (unsigned)MSHR_CFG_SPLIT, (unsigned)cores_per_bankset,
+         (unsigned)MSHR_D_STEER_SINGLE_ROW);
   printf("// ks=%u share=%u blocks=%u -> %u distinct addrs/step, bank ceiling %u\n",
          (unsigned)KERNEL_SIZE, (unsigned)share, (unsigned)blocks,
          (unsigned)(blocks * subs),

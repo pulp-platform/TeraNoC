@@ -27,6 +27,7 @@ Group identity is `g = x * NumY + y`; tile and bank IDs are local to that group.
 | `work` | `g` | `fmac` completed scalar-equivalent FMACs; optional `workload_phase` identifies issuing region |
 | `mshr` | `g` | `occupied` entry-cycles, `capacity` entry-cycles, `entries`, `peak` entries, `full` cycles; optional timeout fields as on `entry`, as group totals; optional `overflow_alloc`, `overflow_merge`, `overflow_occupied` |
 | `entry` | `g`, `entry` | `occupied`, `capacity`, `cached`, `held` cycles; optional `state` at final sampled cycle; optional `timeout_single`, `timeout_burst`, `timeout_subs`, `resp_hold_timeout`, `cache_timeout` |
+| `mshr_bank` | `g`, `bank` | `allocations` observed entry-open edges in that hashed bank, `full_cycles` cycles with no free way |
 | `bank` | `g`, `t`, `bank` | `hsk` accepted accesses, `stall` valid-and-not-ready cycles |
 | `link` | `g`, `network`, `subnet`, `direction` | `hsk` accepted transfers, `stall` valid-and-not-ready cycles |
 | `traffic` | global | `mst_resp`, `slv_resp`: arrays of remote payload word counts per endpoint response port; `mst_req`, `slv_req`: accepted request counts per remote request port (optional in older traces) |

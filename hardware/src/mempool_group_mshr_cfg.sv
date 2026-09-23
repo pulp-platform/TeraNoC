@@ -38,6 +38,7 @@ module mempool_group_mshr_cfg
   parameter int unsigned DefCacheReuseTarget = 0,
   parameter int unsigned DefCacheTimeout     = 0,
   parameter int unsigned DefBankfullBp      = 0,
+  parameter int unsigned DefSteerSingleRow  = 0,
   // Legal ranges, enforced at runtime.
   parameter int unsigned MergeReqs           = 4,     // hold_subs upper bound
   parameter int unsigned HoldCntHwMax        = 2047,  // window/timeout upper bound
@@ -98,7 +99,8 @@ module mempool_group_mshr_cfg
       bank_burst_bits   : MshrCfgBurstBitsW'(DefBankBurstBits),
       cache_reuse_target: MshrCfgSubsW'(DefCacheReuseTarget),
       cache_timeout     : MshrCfgHoldCntW'(DefCacheTimeout),
-      bankfull_backpressure: (DefBankfullBp != 0)
+      bankfull_backpressure: (DefBankfullBp != 0),
+      steer_single_row  : (DefSteerSingleRow != 0)
     };
     assign status_o = '0;
     // Silence unused-input lint in this arm.
@@ -198,6 +200,10 @@ module mempool_group_mshr_cfg
           // is possible or needed, and it is safe while the MSHR is busy -- it only steers the
           // stall-vs-bypass decision for requests arriving after the write.
           IdxW'(MSHR_CSR_BANKFULL_BP)        : cfg_d.bankfull_backpressure = wr_data_i[0];
+          // Split-MSHR class steering. Only meaningful while the slices are empty (a class in
+          // flight would straddle two slices), so refuse it busy exactly like the bank hash.
+          IdxW'(MSHR_CSR_STEER_SINGLE_ROW)   : if (mshr_busy_i) status_d[MSHR_STATUS_BANK_BUSY] = 1'b1;
+                                               else             cfg_d.steer_single_row = wr_data_i[0];
           IdxW'(MSHR_CSR_STATUS)             : status_d = '0;   // write to 15 clears the sticky bits
           default                            : status_d[MSHR_STATUS_BAD_INDEX] = 1'b1;
         endcase
@@ -218,7 +224,8 @@ module mempool_group_mshr_cfg
           bank_burst_bits   : MshrCfgBurstBitsW'(DefBankBurstBits),
           cache_reuse_target: MshrCfgSubsW'(DefCacheReuseTarget),
           cache_timeout     : MshrCfgHoldCntW'(DefCacheTimeout),
-          bankfull_backpressure: (DefBankfullBp != 0)
+          bankfull_backpressure: (DefBankfullBp != 0),
+          steer_single_row  : (DefSteerSingleRow != 0)
         };
         status_q <= '0;
       end else begin

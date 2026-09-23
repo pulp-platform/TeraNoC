@@ -9,7 +9,17 @@ module mempool_group_mshr
   import cf_math_pkg::idx_width;
 #(
   parameter int NumGroups                 = 16,
+  // LANE tiles: how many tiles' remote ports this instance serves (4 per slice when the group MSHR
+  // is split, GROUP_MSHR_SPLIT). Sizes every [NumTilesPerGroup-1:0] lane array and sub_req.tile_id
+  // holds the lane-LOCAL index.
   parameter int NumTilesPerGroup          = 16,
+  // ADDRESS-GEOMETRY tiles: the tile field width inside tcdm_addr_t (the group's real tile count).
+  // Was conflated with the lane count above; a split slice has 4 lanes over a 16-tile address map.
+  parameter int NumAddrTiles              = NumTilesPerGroup,
+  // Split group MSHR: which slice family this core serves (mempool_group_mshr_slice sets it).
+  // 0 = not a slice (legacy single module), 1 = row slice, 2 = column slice. A slice's allocating
+  // traffic is ONE request class, chosen by the steer CSR (see gen_slice_bank below).
+  parameter int unsigned SliceFamily      = 0,
   parameter int NumRemoteReqPortsPerTile  = 2,
   parameter int NumRemoteRespPortsPerTile = 2,
 
@@ -330,6 +340,7 @@ module mempool_group_mshr
   logic [mempool_pkg::MshrCfgHoldCntW-1:0] cfg_cache_hold_ticks_src;
   logic [mempool_pkg::MshrCfgShiftW-1:0]   cfg_bank_shift_single, cfg_bank_shift_burst;
   logic                                    cfg_bank_burst_bits, cfg_mshr_enable;
+  logic                                    cfg_steer_single_row;
   // hold_subs == 1 means "this class does not merge -- bypass it".
   logic                                    cfg_bypass_single, cfg_bypass_burst;
 
@@ -349,7 +360,7 @@ module mempool_group_mshr
   localparam int unsigned RespBufPtrW      = idx_width(RespBufWords);
   localparam int unsigned MergeWordOffset  = (MshrMergeWords <= 1) ? 0 : $clog2(MshrMergeWords);
   localparam int unsigned BurstAlignBits  = (MaxBurstWords > 1) ? $clog2(MaxBurstWords) : 1;
-  localparam int unsigned TileIdBits       = idx_width(NumTilesPerGroup);
+  localparam int unsigned TileIdBits       = idx_width(NumAddrTiles); // address geometry, NOT lanes
   localparam int unsigned TcdmAddrNoTileW  = $bits(tcdm_addr_t) - TileIdBits;
   localparam int unsigned SpatzNumOutstandingLoads = snitch_pkg::NumIntOutstandingLoads;
   // Address-banking geometry: MshrBankNum banks of MshrWaysPerBank entries each.
@@ -371,6 +382,8 @@ module mempool_group_mshr
   // collapses at elaboration: at 0 these ARE the localparams and every downstream expression is
   // structurally what it was before the CSRs existed.
   assign cfg_mshr_enable        = mempool_pkg::MshrCfgRuntime ? cfg_i.enable : 1'b1;
+  assign cfg_steer_single_row   = mempool_pkg::MshrCfgRuntime ? cfg_i.steer_single_row
+                                                              : (mempool_pkg::MshrDefSteerSingleRow != 0);
   assign cfg_hold_subs_single   = mempool_pkg::MshrCfgRuntime ? cfg_i.hold_subs_single
                                                               : mempool_pkg::MshrCfgSubsW'(HoldSubsSingle);
   assign cfg_hold_subs_burst    = mempool_pkg::MshrCfgRuntime ? cfg_i.hold_subs_burst
@@ -451,10 +464,14 @@ module mempool_group_mshr
         b = word_addr_single[sh_single +: BankIdW];
       end else if (!burst_bits) begin
         b = word_addr_burst[sh_burst +: BankIdW];
+      end else if (BankIdW == 1) begin
+        // Two banks (a split slice: 8 entries / 4 ways): the one intra-load bit IS the bank bit.
+        // Written as its own arm because the general form below would slice a zero-width gap field.
+        b = BankIdW'(word_addr_burst[BurstAlignBits +: 1]);
       end else begin
         // ONE intra-load bit: the high BankIdW-1 bits from the p-slice gap at sh_burst, plus the
         // bit just above the burst boundary.
-        b = { word_addr_burst[sh_burst +: BankIdW - 1],
+        b = { word_addr_burst[sh_burst +: ((BankIdW > 1) ? BankIdW - 1 : 1)],
               word_addr_burst[BurstAlignBits +: 1] };
       end
     end else if (BankHash == 0) begin
@@ -1692,10 +1709,102 @@ module mempool_group_mshr
     end
   endgenerate
 
+  // ---------------------------------------------------------------------------------------------
+  // Split-slice bank select (SliceFamily != 0, 2 banks, field-select hash).
+  //
+  // A slice's ALLOCATING traffic is a single request class: the group's steer demux sends the
+  // single class to one family and the burst class to the other (mempool_group.sv), and anything of
+  // the other class that reaches this slice is bypass traffic that never allocates (asserted below,
+  // slice_class_only). So the bank does not need a per-request class select: the slice's class is a
+  // function of the steer CSR and the family, and so is its shift. That shift is decoded ONCE per
+  // slice into a one-hot over the legal CSR range [4, 10] (mempool_group_mshr_cfg BankShiftMin/
+  // Max), and each lane's bank bit is a 7-input AND-OR on its linear word address -- no per-lane
+  // barrel, no second-class hash, no req_is_single mux on the bank or its one-hot.
+  //
+  // Every request of the slice -- stores and bypassed loads included -- banks with the slice's
+  // class, so a draining-entry or store cache-hit lookup looks in the bank where this slice's
+  // entries for that address actually live. (The legacy hash banks a store like a single even when
+  // the entry is a burst.)
+  //
+  // bank_burst_bits=1 at one bank bit selects word bit BurstAlignBits, i.e. it IS shift 4 -- folded
+  // into the same one-hot. The CSR write path refuses shift/steer changes while any entry is live,
+  // so the one-hot is stable whenever an entry exists.
+  // ---------------------------------------------------------------------------------------------
+  localparam bit          SliceBank1 = (SliceFamily != 0) && (BankIdW == 1) && (BankHash == 3);
+  localparam int unsigned SliceShMin = 4;
+  localparam int unsigned SliceShMax = 10;
+  logic                                   slice_serves_single;
+  logic [mempool_pkg::MshrCfgShiftW-1:0]  slice_shift;
+  logic [SliceShMax-SliceShMin:0]         slice_shift_oh;
+
+  function automatic logic [WordAddrW-1:0] mshr_word_addr(input tcdm_addr_t key, input group_id_t grp);
+    // The linear word address, as mshr_bank_of reconstructs it: put the group field back above tile.
+    return { key[$bits(tcdm_addr_t)-1 : TileIdBits + BankInTileW],
+             grp[GroupBits-1:0],
+             key[TileIdBits-1:0],
+             key[TileIdBits +: BankInTileW] };
+  endfunction
+
+  if (SliceBank1) begin : gen_slice_bank
+    if (SliceShMax >= WordAddrW)
+      $error("[mempool_group_mshr] slice bank select needs word-address bit %0d (width %0d).",
+             SliceShMax, WordAddrW);
+    assign slice_serves_single = (SliceFamily == 1) ? cfg_steer_single_row : !cfg_steer_single_row;
+    assign slice_shift = slice_serves_single ? cfg_bank_shift_single
+                       : (cfg_bank_burst_bits ? mempool_pkg::MshrCfgShiftW'(BurstAlignBits)
+                                              : cfg_bank_shift_burst);
+    for (genvar sh = 0; sh <= SliceShMax - SliceShMin; sh++) begin : gen_slice_shift_oh
+      assign slice_shift_oh[sh] = (slice_shift == mempool_pkg::MshrCfgShiftW'(SliceShMin + sh));
+    end
+`ifndef TARGET_SYNTHESIS
+    slice_shift_in_range: assert property (@(posedge clk_i) disable iff (!rst_ni)
+        $onehot(slice_shift_oh))
+      else $error("[mempool_group_mshr] g=%0d slice family %0d: bank shift %0d outside [%0d,%0d]",
+                  group_id_i, SliceFamily, slice_shift, SliceShMin, SliceShMax);
+`endif
+  end else begin : gen_no_slice_bank
+    assign slice_serves_single = 1'b0;
+    assign slice_shift         = '0;
+    assign slice_shift_oh      = '0;
+  end
+
   // address-banking replaces the O(ports^2) same-cycle leader/follower coalescing.
   generate
     for (genvar tile_i = 0; tile_i < NumTilesPerGroup; tile_i++) begin : gen_req_bank_tile
       for (genvar port_i = 1; port_i < NumRemoteReqPortsPerTile; port_i++) begin : gen_req_bank_port
+       if (SliceBank1) begin : gen_slice
+        // One bit: the slice's class key (identical nets at MshrMergeWords=1), one-hot select.
+        logic [WordAddrW-1:0] wa;
+        assign wa = mshr_word_addr(slice_serves_single ? req_addr_key_single[tile_i][port_i]
+                                                       : req_addr_key_burst[tile_i][port_i],
+                                   req_in[tile_i][port_i].tgt_group_id);
+        assign req_bank[tile_i][port_i]   = BankIdW'(|(wa[SliceShMax:SliceShMin] & slice_shift_oh));
+        assign req_bank_s[tile_i][port_i] = req_bank[tile_i][port_i];
+        assign req_bank_b[tile_i][port_i] = req_bank[tile_i][port_i];
+`ifndef TARGET_SYNTHESIS
+        // Same function as the general hash evaluated for the slice's class.
+        assign req_bank_ref[tile_i][port_i] =
+            mshr_bank_of(req_addr_key[tile_i][port_i], req_addr_key_burst[tile_i][port_i],
+                         req_addr_key_single[tile_i][port_i], req_in[tile_i][port_i].tgt_group_id,
+                         slice_serves_single,
+                         cfg_bank_shift_single, cfg_bank_shift_burst, cfg_bank_burst_bits);
+        req_bank_split_equiv: assert property(
+          @(posedge clk_i) disable iff (!rst_ni)
+            req_in_valid[tile_i][port_i] |->
+              (req_bank[tile_i][port_i] == req_bank_ref[tile_i][port_i]))
+          else $fatal(1, "tile %0d port %0d: slice bank %0d != general hash %0d",
+                      tile_i, port_i, req_bank[tile_i][port_i], req_bank_ref[tile_i][port_i]);
+        // The invariant the whole simplification rests on: nothing of the other class allocates.
+        slice_class_only: assert property(
+          @(posedge clk_i) disable iff (!rst_ni)
+            (req_in_valid[tile_i][port_i] && req_can_merge[tile_i][port_i]) |->
+              (req_is_single[tile_i][port_i] == slice_serves_single))
+          else $fatal(1, "g=%0d slice family %0d tile %0d port %0d: mergeable %s request in a %s slice",
+                      group_id_i, SliceFamily, tile_i, port_i,
+                      req_is_single[tile_i][port_i] ? "single" : "burst",
+                      slice_serves_single ? "single" : "burst");
+`endif
+       end else begin : gen_general
         // Type comes from the CLAMPED req_is_single, not req_len_raw: a store or a
         // AMO is forced to req_len=1 and must bank like a single (see BankSelShift*).
         // Compare-then-mux: the hash runs for both classes in parallel and req_is_single picks the
@@ -1730,6 +1839,7 @@ module mempool_group_mshr
           else $fatal(1, "tile %0d port %0d: split bank hash %0d != muxed-key %0d",
                       tile_i, port_i, req_bank[tile_i][port_i], req_bank_ref[tile_i][port_i]);
 `endif
+       end
       end
     end
   endgenerate
@@ -1888,9 +1998,12 @@ module mempool_group_mshr
         for (genvar bank_i = 0; bank_i < MshrBankNum; bank_i++) begin : gen_req_fwd_eq
           // decode(mux(a,b)) == mux(decode(a),decode(b)): the 16-way decode moves ahead of the
           // class select so req_is_single picks one BIT rather than an index to compare.
-          assign req_bank_oh[tile_i][port_i][bank_i] = req_is_single[tile_i][port_i]
-              ? (req_bank_s[tile_i][port_i] == BankIdW'(bank_i))
-              : (req_bank_b[tile_i][port_i] == BankIdW'(bank_i));
+          // A split slice has one class, so its one-hot is a straight decode of req_bank.
+          assign req_bank_oh[tile_i][port_i][bank_i] = SliceBank1
+              ? (req_bank[tile_i][port_i] == BankIdW'(bank_i))
+              : (req_is_single[tile_i][port_i]
+                   ? (req_bank_s[tile_i][port_i] == BankIdW'(bank_i))
+                   : (req_bank_b[tile_i][port_i] == BankIdW'(bank_i)));
           assign req_fwd_eq[tile_i][port_i][bank_i] =
               agb_q_v[bank_i] &&
               (agb_q_addr[bank_i] == req_addr_key[tile_i][port_i]) &&
@@ -2863,8 +2976,14 @@ module mempool_group_mshr
   logic [MshrCntW-1:0] occ_inuse_max;
   logic [MshrCntW-1:0] occ_cached_max;
   logic [31:0]         occ_full_cyc;
+  // Per-BANK occupancy sum over the window. The array-wide figures above cannot show a hash that
+  // parks every concurrent request in one bank of a two-bank slice (the qwen K=5120 case: all
+  // eight X rows of a core differed only in address bits 9 and 11, the chooser was capped at 8).
+  logic [MshrBankNum-1:0][63:0] occ_bank_sum;
+  string               occ_bank_str;
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
+      occ_bank_sum   <= '0;
       occ_cyc        <= '0;
       occ_win_cyc    <= '0;
       occ_valid_sum  <= '0;
@@ -2876,15 +2995,23 @@ module mempool_group_mshr
       occ_cyc        <= occ_cyc + 64'd1;
       occ_win_cyc    <= occ_win_cyc + 32'd1;
       occ_valid_sum  <= occ_valid_sum + 64'(mshr_valid_cnt_dbg);
+      for (int b = 0; b < MshrBankNum; b++)
+        occ_bank_sum[b] <= occ_bank_sum[b] + 64'($countones(mshr_q_valid[b*MshrWaysPerBank +: MshrWaysPerBank]));
       if (mshr_valid_cnt_dbg  > occ_valid_max)  occ_valid_max  <= mshr_valid_cnt_dbg;
       if (mshr_inuse_cnt_dbg  > occ_inuse_max)  occ_inuse_max  <= mshr_inuse_cnt_dbg;
       if (mshr_cached_cnt_dbg > occ_cached_max) occ_cached_max <= mshr_cached_cnt_dbg;
       if (mshr_valid_cnt_dbg == MshrCntW'(MshrNum)) occ_full_cyc <= occ_full_cyc + 32'd1;
       if ((occ_win_cyc != 32'd0) && ((occ_win_cyc % StatsPeriod) == 0)) begin
-        $display("[MSHRU] cyc=%0d g=%0d win=%0d valid_avg_x100=%0d valid_max=%0d inuse_max=%0d cached_max=%0d full_cyc=%0d entries=%0d",
+        // bank_avg_x100 is LAST so positional readers of the older fields are unaffected.
+        occ_bank_str = "";
+        for (int b = 0; b < MshrBankNum; b++)
+          occ_bank_str = $sformatf("%s%s%0d", occ_bank_str, (b == 0) ? "" : ",",
+                                   (occ_bank_sum[b] * 64'd100) / 64'(occ_win_cyc));
+        $display("[MSHRU] cyc=%0d g=%0d win=%0d valid_avg_x100=%0d valid_max=%0d inuse_max=%0d cached_max=%0d full_cyc=%0d entries=%0d bank_avg_x100=%s",
                  occ_cyc, group_id_i, occ_win_cyc,
                  (occ_valid_sum * 64'd100) / 64'(occ_win_cyc),
-                 occ_valid_max, occ_inuse_max, occ_cached_max, occ_full_cyc, MshrNum);
+                 occ_valid_max, occ_inuse_max, occ_cached_max, occ_full_cyc, MshrNum, occ_bank_str);
+        occ_bank_sum   <= '0;
         occ_win_cyc    <= '0;
         occ_valid_sum  <= '0;
         occ_valid_max  <= '0;
@@ -3080,13 +3207,24 @@ module mempool_group_mshr
     localparam int unsigned BpMetaN = 2**$bits(meta_id_t);
     integer bp_out_cnt [NumTilesPerGroup][BpCoreN][BpMetaN];
     longint bp_cyc, bp_fwd, bp_rsp, bp_orphan;
+    logic   bp_en_q;
 
     // Was a scan of bypass_track_q, which the deleted table's else-arm tied to '0 -- so this
     // folded into its one consumer, so the probe's intent stays legible.
+    //
+    // The probe describes the bypass path of a CONFIGURED MSHR, so its accounting runs only while
+    // cfg_mshr_enable is set. With the MSHR off every request bypasses by construction
+    // (cfg_bypass_single/burst, :405), so "a response with no outstanding forward" is not a
+    // finding -- and it fired on every beat of every bypassed BURST, because the forward side (1)
+    // counts single-beat requests only. That is the whole init / DMA / I$-warm-up phase, plus any
+    // kernel that switches the MSHR off before its verify (qwen-gate-up does), and it buried the
+    // transcript. At MshrCfgRuntime=0 cfg_mshr_enable folds to 1 and this gate disappears.
+    // Arming the MSHR starts a fresh epoch: the table is cleared, so a request forwarded while the
+    // MSHR was off can never be reported as an orphan by the response that arrives after.
 
     always @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
-        bp_cyc = 0; bp_fwd = 0; bp_rsp = 0; bp_orphan = 0;
+        bp_cyc = 0; bp_fwd = 0; bp_rsp = 0; bp_orphan = 0; bp_en_q = 1'b0;
         for (int t = 0; t < NumTilesPerGroup; t++) begin
           for (int c = 0; c < BpCoreN; c++) begin
             for (int m = 0; m < BpMetaN; m++) bp_out_cnt[t][c][m] = 0;
@@ -3094,6 +3232,15 @@ module mempool_group_mshr
         end
       end else begin
         bp_cyc = bp_cyc + 1;
+        if (cfg_mshr_enable && !bp_en_q) begin : bp_arm
+          for (int t = 0; t < NumTilesPerGroup; t++) begin
+            for (int c = 0; c < BpCoreN; c++) begin
+              for (int m = 0; m < BpMetaN; m++) bp_out_cnt[t][c][m] = 0;
+            end
+          end
+        end
+        bp_en_q = cfg_mshr_enable;
+        if (cfg_mshr_enable) begin : bp_account
         // (1) single-beat requests leaving the group without an entry.
         for (int t = 0; t < NumTilesPerGroup; t++) begin
           for (int p = 1; p < NumRemoteReqPortsPerTile; p++) begin
@@ -3124,6 +3271,7 @@ module mempool_group_mshr
             end
           end
         end
+        end : bp_account
         // (3) periodic summary.
         if ((StatsPeriod != 0) && ((bp_cyc % StatsPeriod) == 0)) begin
           $display("[BYP] cyc=%0d g=%0d fwd=%0d rsp=%0d orphan=%0d",
@@ -6605,32 +6753,37 @@ module mempool_group_mshr
   `endif
 
   // The gate must never swallow a write.
+  // 4-state compare, deliberately. A response can legitimately carry X data (an uninitialised
+  // memory read), and with `==` the held-value case then evaluates to X rather than 1, so
+  // `en || (d == q)` is X and the property FAILS while the gate did exactly the right thing --
+  // it reported a dropped resp_buf write on a slot nothing wrote. `===` keeps the real check:
+  // identical X on both sides means nothing was lost, while a real value against X still fires.
 `ifndef VERILATOR
 `ifndef TARGET_SYNTHESIS
   for (genvar e = 0; e < MshrNum; e++) begin : gen_mshr_gate_checks
     mshr_gate_ident_no_lost_write: assert property(
       @(posedge clk_i) disable iff (!rst_ni)
         mshr_id_en[e] ||
-        ((mshr_d[e].base_addr    == mshr_q[e].base_addr) &&
-         (mshr_d[e].tgt_group_id == mshr_q[e].tgt_group_id) &&
-         (mshr_d[e].burst_len    == mshr_q[e].burst_len)))
+        ((mshr_d[e].base_addr    === mshr_q[e].base_addr) &&
+         (mshr_d[e].tgt_group_id === mshr_q[e].tgt_group_id) &&
+         (mshr_d[e].burst_len    === mshr_q[e].burst_len)))
       else $fatal(1, "MSHR clock gate dropped an identity write: entry=%0d", e);
 
     for (genvar s = 0; s < MshrMergeReqs; s++) begin : gen_mshr_gate_sub_checks
       mshr_gate_sub_no_lost_write: assert property(
         @(posedge clk_i) disable iff (!rst_ni)
           mshr_id_en[e] ||
-          ((mshr_d[e].sub_reqs[s].tile_id      == mshr_q[e].sub_reqs[s].tile_id) &&
-           (mshr_d[e].sub_reqs[s].port_id      == mshr_q[e].sub_reqs[s].port_id) &&
-           (mshr_d[e].sub_reqs[s].core_id      == mshr_q[e].sub_reqs[s].core_id) &&
-           (mshr_d[e].sub_reqs[s].meta_id_base == mshr_q[e].sub_reqs[s].meta_id_base)))
+          ((mshr_d[e].sub_reqs[s].tile_id      === mshr_q[e].sub_reqs[s].tile_id) &&
+           (mshr_d[e].sub_reqs[s].port_id      === mshr_q[e].sub_reqs[s].port_id) &&
+           (mshr_d[e].sub_reqs[s].core_id      === mshr_q[e].sub_reqs[s].core_id) &&
+           (mshr_d[e].sub_reqs[s].meta_id_base === mshr_q[e].sub_reqs[s].meta_id_base)))
         else $fatal(1, "MSHR clock gate dropped a sub-request write: entry=%0d slot=%0d", e, s);
     end
 
     for (genvar b = 0; b < RespBufWords; b++) begin : gen_mshr_gate_rb_checks
       mshr_gate_rb_no_lost_write: assert property(
         @(posedge clk_i) disable iff (!rst_ni)
-          mshr_rb_en[e][b] || (mshr_d[e].resp_buf[b] == mshr_q[e].resp_buf[b]))
+          mshr_rb_en[e][b] || (mshr_d[e].resp_buf[b] === mshr_q[e].resp_buf[b]))
         else $fatal(1, "MSHR clock gate dropped a resp_buf write: entry=%0d slot=%0d", e, b);
     end
 
@@ -6639,7 +6792,7 @@ module mempool_group_mshr
     mshr_gate_ctl_no_lost_write: assert property(
       @(posedge clk_i) disable iff (!rst_ni)
         mshr_ctl_en[e] || mshr_id_en[e] || (|mshr_rb_en[e]) ||
-        (mshr_d[e] == mshr_q[e]))
+        (mshr_d[e] === mshr_q[e]))
       else $fatal(1, "MSHR clock gate dropped a control write: entry=%0d", e);
   end
 `endif

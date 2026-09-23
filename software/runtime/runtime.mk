@@ -162,6 +162,8 @@ DEFINES += -DGEMM_BURST_ROB_DEPTH=$(if $(spatz_vlsu_rob_depth),$(spatz_vlsu_rob_
 DEFINES += -DGEMM_BURST_ENABLED=$(if $(spatz_vlsu_burst),$(spatz_vlsu_burst),1)
 DEFINES += -DMSHR_CFG_HASH_MODE=$(if $(group_mshr_bank_hash),$(group_mshr_bank_hash),0)
 DEFINES += -DMSHR_MERGE_REQS=$(if $(group_mshr_merge_reqs),$(group_mshr_merge_reqs),4)
+# Disaggregated group MSHR: caps every derived merge target at the 4 tiles of a slice.
+DEFINES += -DMSHR_CFG_SPLIT=$(if $(group_mshr_split),$(group_mshr_split),0)
 DEFINES += -DNUM_GROUP_BARRIERS=$(shell awk 'BEGIN{print $(num_cores)/$(num_groups)}')
 # Per-build extra defines (app/kernel A/B knobs), e.g.
 #   make <app> config=<cfg> EXTRA_DEFINES="-DGBAR_PLOOP=1 -DKERNEL_SIZE=4"

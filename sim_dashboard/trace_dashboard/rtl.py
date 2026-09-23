@@ -15,6 +15,7 @@ def channels(value):
 def parse_transcript(path, period=1000, bounds=None):
   records, info = RecordCollector(bounds), {"warnings": [], "source": str(path)}
   last = {}
+  mshru_by_key = {}   # (g, end, win) -> the group's mshr row, for folding split-MSHR slices
   with open(path, errors="replace") as stream:
     for number, line in enumerate(stream, 1):
       if "[DASHBOARD_META]" in line:
@@ -46,6 +47,10 @@ def parse_transcript(path, period=1000, bounds=None):
       if "cyc" not in f:
         continue
       end = int(f["cyc"])
+      # Reset-time counter prints establish a baseline, not an elapsed window.
+      # In particular MSHRG emits cyc=0 even when interval telemetry is enabled.
+      if end == 0:
+        continue
       phase = "bench" if body.startswith("bench") else "pre" if body.startswith("pre") else "unknown"
       base = {"end": end, "start": max(0, end-period),
               "phase": phase, "source_line": number}
@@ -63,11 +68,27 @@ def parse_transcript(path, period=1000, bounds=None):
           records.append(dict(base, kind="overall", util=float(f["util"].rstrip("%"))))
         elif kind == "MSHRU":
           win, g = int(f["win"]), int(f["g"])
-          records.append(dict(base, kind="mshr", g=g, start=end-win,
-                              occupied=float(f["valid_avg_x100"])*win/100,
-                              capacity=int(f["entries"])*win,
-                              peak=int(f["valid_max"]), full=int(f["full_cyc"]),
-                              entries=int(f["entries"]), origin="legacy"))
+          row = dict(base, kind="mshr", g=g, start=end-win,
+                     occupied=float(f["valid_avg_x100"])*win/100,
+                     capacity=int(f["entries"])*win,
+                     peak=int(f["valid_max"]), full=int(f["full_cyc"]),
+                     entries=int(f["entries"]), origin="legacy")
+          # Split group MSHR (GROUP_MSHR_SPLIT): each of the group's eight slices prints its own
+          # MSHRU line with the same g and window. Fold them into ONE group record -- occupancy,
+          # capacity, full cycles and entry count add; the peak is the largest slice peak (a
+          # per-slice figure: the slices do not share entries). Without this the model raises
+          # "Duplicate record" on every split transcript.
+          key = (g, end, win)
+          prior = mshru_by_key.get(key)
+          if prior is None:
+            mshru_by_key[key] = row
+            records.append(row)
+          else:
+            for k in ("occupied", "capacity", "full", "entries"):
+              prior[k] += row[k]
+            prior["peak"] = max(prior["peak"], row["peak"])
+            prior["slices"] = prior.get("slices", 1) + 1
+            info["mshr_slices"] = max(info.get("mshr_slices", 1), prior["slices"])
         elif kind == "MSHRG":
           for g, (timeout, bypass) in enumerate(zip(f["timeout"].split(","), f["bypass"].split(","))):
             records.append(dict(base, kind="pressure", g=g,

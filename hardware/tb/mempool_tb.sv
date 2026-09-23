@@ -364,9 +364,20 @@ module mempool_tb;
   for (genvar g = 0; g < NumGroups; g++) begin: gen_trace_force
     localparam int gx = g / NumY;
     localparam int gy = g % NumY;
-    initial begin
-      force dut.i_mempool_cluster.gen_groups_x[gx].gen_groups_y[gy].gen_rtl_group.i_group
-            .i_mempool_group.gen_group_mshr.i_group_mshr.csr_trace_any_i = csr_trace_any_global;
+    if (MshrSplit) begin : gen_split
+      // Disaggregated MSHR: one core per slice, all eight gated by the same global trace enable.
+      for (genvar m = 0; m < MshrNumSlices; m++) begin : gen_slice
+        initial begin
+          force dut.i_mempool_cluster.gen_groups_x[gx].gen_groups_y[gy].gen_rtl_group.i_group
+                .i_mempool_group.gen_group_mshr_split.gen_slice[m].i_slice.i_core.csr_trace_any_i
+                = csr_trace_any_global;
+        end
+      end
+    end else begin : gen_legacy
+      initial begin
+        force dut.i_mempool_cluster.gen_groups_x[gx].gen_groups_y[gy].gen_rtl_group.i_group
+              .i_mempool_group.gen_group_mshr.i_group_mshr.csr_trace_any_i = csr_trace_any_global;
+      end
     end
   end: gen_trace_force
 

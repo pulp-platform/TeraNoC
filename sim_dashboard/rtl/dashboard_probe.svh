@@ -10,17 +10,23 @@
 `define SD_GROUP(G) dut.i_mempool_cluster.gen_groups_x[(G)/NumY].gen_groups_y[(G)%NumY].gen_rtl_group.i_group
 `define SD_MEM(G) `SD_GROUP(G).i_mempool_group
 `define SD_MSHR(G) `SD_MEM(G).gen_group_mshr.i_group_mshr
+// Disaggregated MSHR (mempool_pkg::MshrSplit): the core of slice M. Group entry e lives in slice
+// e/SD_EL at local index e%SD_EL, so the group view stays one flat [SD_E] array.
+`define SD_MSHR_S(G,M) `SD_MEM(G).gen_group_mshr_split.gen_slice[M].i_slice.i_core
 `define SD_TILE(G,T) `SD_MEM(G).gen_tiles[T].i_tile
 `define SD_VFU(G,T,C) `SD_TILE(G,T).gen_cores[C].gen_mempool_cc.riscv_core.i_spatz.i_vfu
 
 localparam int SD_C = NumTilesPerGroup * NumCoresPerTile;
-localparam int SD_E = `ifdef GROUP_MSHR_NUM `GROUP_MSHR_NUM `else NumTilesPerGroup `endif;
+// Entries PER MSHR CORE (one core per group, or one per slice when split) and per group.
+localparam int SD_EL = `ifdef GROUP_MSHR_NUM `GROUP_MSHR_NUM `else NumTilesPerGroup `endif;
+localparam int SD_E = SD_EL * MshrNumSlices;
 localparam int SD_W = `ifdef GROUP_MSHR_WAYS_PER_BANK `GROUP_MSHR_WAYS_PER_BANK `else 4 `endif;
 // Overflow-pool size. Mirrors the RTL parameter's own `ifdef default, and is reported even when the
 // pool is absent: 0 says "this build has no pool", where an absent field would be indistinguishable
 // from a trace taken before the pool existed.
 localparam int SD_OV = `ifdef GROUP_MSHR_OVERFLOW_NUM `GROUP_MSHR_OVERFLOW_NUM `else 1 `endif;
-localparam int SD_P = (SD_OV > 0) ? SD_OV : 0;
+localparam int SD_PL = (SD_OV > 0) ? SD_OV : 0;   // per core
+localparam int SD_P = SD_PL * MshrNumSlices;       // per group
 localparam int SD_PA = (SD_P > 0) ? SD_P : 1;
 logic sd_pv[NumGroups][SD_PA], sd_pcached[NumGroups][SD_PA], sd_pheld[NumGroups][SD_PA];
 logic [2:0] sd_pstate[NumGroups][SD_PA];
@@ -53,6 +59,13 @@ int unsigned sd_subs[NumGroups][SD_E];
 logic sd_rht[NumGroups][SD_E], sd_cto[NumGroups][SD_E];
 int unsigned sd_single_target[NumGroups], sd_burst_target[NumGroups];
 logic [2:0] sd_state[NumGroups][SD_E];
+// Bank occupancy the hash produces. SD_B banks of SD_W ways; an entry's bank is
+// its index divided by the ways, which is how the allocator lays them out.
+localparam int SD_BL = SD_EL / SD_W;   // banks per core
+localparam int SD_B = SD_E / SD_W;     // banks per group
+longint unsigned sd_mba[NumGroups][SD_B], sd_mfull_cycles[NumGroups][SD_B];
+logic sd_bank_free[NumGroups][SD_B];
+logic sd_valid_last[NumGroups][SD_E];   // to catch the cycle an entry is opened
 logic sd_bv[NumGroups][NumTilesPerGroup][NumBanksPerTile];
 logic sd_br[NumGroups][NumTilesPerGroup][NumBanksPerTile];
 logic sd_lv[2][NumGroups][SD_NS][4], sd_lr[2][NumGroups][SD_NS][4];
@@ -62,8 +75,13 @@ logic sd_mrv[NumGroups][NumTilesPerGroup][SD_RP], sd_mrr[NumGroups][NumTilesPerG
 logic sd_srv[NumGroups][NumTilesPerGroup][SD_RP], sd_srr[NumGroups][NumTilesPerGroup][SD_RP];
 
 for (genvar g=0; g<NumGroups; g++) begin : gen_dashboard_group
-  assign sd_single_target[g] = int'(`SD_MSHR(g).cfg_hold_subs_single);
-  assign sd_burst_target[g] = int'(`SD_MSHR(g).cfg_hold_subs_burst);
+  if (MshrSplit) begin : gen_target_split   // one CSR file per group: slice 0 speaks for all
+    assign sd_single_target[g] = int'(`SD_MSHR_S(g,0).cfg_hold_subs_single);
+    assign sd_burst_target[g] = int'(`SD_MSHR_S(g,0).cfg_hold_subs_burst);
+  end else begin : gen_target_legacy
+    assign sd_single_target[g] = int'(`SD_MSHR(g).cfg_hold_subs_single);
+    assign sd_burst_target[g] = int'(`SD_MSHR(g).cfg_hold_subs_burst);
+  end
   for (genvar t=0; t<NumTilesPerGroup; t++) begin : gen_tile
     for (genvar c=0; c<NumCoresPerTile; c++) begin : gen_core
       localparam int I=t*NumCoresPerTile+c;
@@ -97,7 +115,37 @@ for (genvar g=0; g<NumGroups; g++) begin : gen_dashboard_group
       assign sd_srr[g][t][p] = `SD_TILE(g,t).tcdm_slave_resp_ready_i[p+1];
     end
   end
+  for (genvar b=0; b<SD_B; b++) begin : gen_mshr_bank
+`ifndef TARGET_SYNTHESIS
+    if (MshrSplit) begin : gen_split
+      assign sd_bank_free[g][b] = `SD_MSHR_S(g,b/SD_BL).bank_has_free[b%SD_BL];
+    end else begin : gen_legacy
+      assign sd_bank_free[g][b] = `SD_MSHR(g).bank_has_free[b];
+    end
+`else
+    assign sd_bank_free[g][b] = 1'b1;
+`endif
+  end
   for (genvar e=0; e<SD_E; e++) begin : gen_entry
+    if (MshrSplit) begin : gen_split
+    localparam int M = e / SD_EL;
+    localparam int L = e % SD_EL;
+    assign sd_single[g][e] = (`SD_MSHR_S(g,M).mshr_q[L].burst_len == 1);
+    assign sd_valid[g][e] = `SD_MSHR_S(g,M).mshr_q_valid[L];
+    assign sd_state[g][e] = `SD_MSHR_S(g,M).mshr_q[L].state;
+    assign sd_held[g][e] = sd_valid[g][e] && sd_state[g][e]==1 && !`SD_MSHR_S(g,M).mshr_q[L].issued;
+`ifndef TARGET_SYNTHESIS
+    assign sd_to[g][e] = `SD_MSHR_S(g,M).mshr_issue_timeout_dbg[L];
+    assign sd_subs[g][e] = int'(`SD_MSHR_S(g,M).mshr_q[L].sub_reqs_num);
+    assign sd_rht[g][e] = `SD_MSHR_S(g,M).mshr_resp_hold_timeout_dbg[L];
+    assign sd_cto[g][e] = `SD_MSHR_S(g,M).mshr_cache_timeout_dbg[L];
+`else
+    assign sd_to[g][e] = 1'b0;
+    assign sd_subs[g][e] = 0;
+    assign sd_rht[g][e] = 1'b0;
+    assign sd_cto[g][e] = 1'b0;
+`endif
+    end else begin : gen_legacy
     assign sd_single[g][e] = (`SD_MSHR(g).mshr_q[e].burst_len == 1);
     assign sd_valid[g][e] = `SD_MSHR(g).mshr_q_valid[e];
     assign sd_state[g][e] = `SD_MSHR(g).mshr_q[e].state;
@@ -115,10 +163,22 @@ for (genvar g=0; g<NumGroups; g++) begin : gen_dashboard_group
     assign sd_rht[g][e] = 1'b0;
     assign sd_cto[g][e] = 1'b0;
 `endif
+    end
   end
   // Pool entries, sampled through the same per-entry shape. Guarded on SD_P, so a pool-less build
   // generates no reference to them at all.
   for (genvar p=0; p<SD_P; p++) begin : gen_pool_entry
+    if (MshrSplit) begin : gen_split
+    localparam int M = p / SD_PL;
+    localparam int L = p % SD_PL;
+    assign sd_pv[g][p]      = `SD_MSHR_S(g,M).pool_q_valid[L];
+    assign sd_pstate[g][p]  = `SD_MSHR_S(g,M).pool_q[L].state;
+    assign sd_psubn[g][p]   = int'(`SD_MSHR_S(g,M).pool_q[L].sub_reqs_num);
+    assign sd_pheld[g][p]   = sd_pv[g][p] && (sd_pstate[g][p]==1) && !`SD_MSHR_S(g,M).pool_q[L].issued;
+    assign sd_pcached[g][p] = sd_pv[g][p] && (sd_pstate[g][p]==3);
+    assign sd_prht[g][p]     = `SD_MSHR_S(g,M).pool_resp_hold_timeout_dbg[L];
+    assign sd_pcto[g][p]     = `SD_MSHR_S(g,M).pool_cache_timeout_dbg[L];
+    end else begin : gen_legacy
     assign sd_pv[g][p]      = `SD_MSHR(g).pool_q_valid[p];
     assign sd_pstate[g][p]  = `SD_MSHR(g).pool_q[p].state;
     assign sd_psubn[g][p]   = int'(`SD_MSHR(g).pool_q[p].sub_reqs_num);
@@ -126,6 +186,7 @@ for (genvar g=0; g<NumGroups; g++) begin : gen_dashboard_group
     assign sd_pcached[g][p] = sd_pv[g][p] && (sd_pstate[g][p]==3);
     assign sd_prht[g][p]     = `SD_MSHR(g).pool_resp_hold_timeout_dbg[p];
     assign sd_pcto[g][p]     = `SD_MSHR(g).pool_cache_timeout_dbg[p];
+    end
   end
   for (genvar n=0; n<2; n++) begin : gen_network
     for (genvar s=0; s<SD_NS; s++) begin : gen_subnet
@@ -221,6 +282,8 @@ task automatic sd_clear();
   foreach(sd_palloc[g]) begin sd_palloc[g]=0; sd_pmerge[g]=0; end
   foreach(sd_erhp[g,p]) begin sd_erhp[g][p]=0; sd_ectp[g][p]=0; end
   foreach(sd_bh[g,t,b]) begin sd_bh[g][t][b]=0; sd_bs[g][t][b]=0; end
+  foreach(sd_mba[g,b]) begin sd_mba[g][b]=0; sd_mfull_cycles[g][b]=0; end
+  // sd_valid_last is an allocation edge detector. Keep it across window boundaries.
   foreach(sd_lh[n,g,s,d]) begin sd_lh[n][g][s][d]=0; sd_ls[n][g][s][d]=0; end
   foreach(sd_mreq[p]) begin sd_mreq[p]=0; sd_sreq[p]=0; end
   foreach(sd_mresp[p]) begin sd_mresp[p]=0; sd_sresp[p]=0; end
@@ -257,6 +320,8 @@ task automatic sd_flush();
       $fwrite(sd_fd,"{\"kind\":\"fpu\",\"start\":%0d,\"end\":%0d,\"phase\":\"%s\",\"g\":%0d,\"busy\":%0d,\"capacity\":%0d}\n",sd_start,sd_cycle,ph,g,sd_busy_sum[g],win*SD_C*`N_FPU);
       $fwrite(sd_fd,"{\"kind\":\"work\",\"workload_phase\":\"bench\",\"start\":%0d,\"end\":%0d,\"phase\":\"%s\",\"g\":%0d,\"fmac\":%0d}\n",sd_start,sd_cycle,ph,g,sd_fmac[g]);
       $fwrite(sd_fd,"{\"kind\":\"mshr\",\"start\":%0d,\"end\":%0d,\"phase\":\"%s\",\"g\":%0d,\"occupied\":%0d,\"capacity\":%0d,\"entries\":%0d,\"peak\":%0d,\"full\":%0d,\"occupied_single\":%0d,\"occupied_burst\":%0d,\"single_merge_target\":%0d,\"burst_merge_target\":%0d,\"timeout_single\":%0d,\"timeout_burst\":%0d,\"timeout_subs\":%0d,\"resp_hold_timeout\":%0d,\"cache_timeout\":%0d,\"overflow_alloc\":%0d,\"overflow_merge\":%0d,\"overflow_occupied\":%0d}\n",sd_start,sd_cycle,ph,g,occupied,win*SD_E,SD_E,sd_peak[g],sd_full[g],single_occupied,burst_occupied,sd_single_target[g],sd_burst_target[g],to_s,to_b,to_subs,rh_to,ct_to,sd_palloc[g],sd_pmerge[g],pool_occupied);
+      for(int b=0;b<SD_B;b++)
+        $fwrite(sd_fd,"{\"kind\":\"mshr_bank\",\"start\":%0d,\"end\":%0d,\"phase\":\"%s\",\"g\":%0d,\"bank\":%0d,\"allocations\":%0d,\"full_cycles\":%0d}\n",sd_start,sd_cycle,ph,g,b,sd_mba[g][b],sd_mfull_cycles[g][b]);
       if(sd_banks) for(int t=0;t<NumTilesPerGroup;t++) for(int b=0;b<NumBanksPerTile;b++)
         $fwrite(sd_fd,"{\"kind\":\"bank\",\"start\":%0d,\"end\":%0d,\"phase\":\"%s\",\"g\":%0d,\"t\":%0d,\"bank\":%0d,\"hsk\":%0d,\"stall\":%0d}\n",sd_start,sd_cycle,ph,g,t,b,sd_bh[g][t][b],sd_bs[g][t][b]);
       if(sd_links) for(int n=0;n<2;n++) for(int s=0;s<NumTilesPerGroup*(n==0?SD_RQ:SD_RP);s++)
@@ -284,6 +349,7 @@ always @(posedge clk) begin : dashboard_sample
       sd_clear(); sd_cycle=0; sd_start=0; sd_phase=0;
       foreach(sd_pending[g,c,i]) begin sd_pending[g][c][i]=0; sd_pending_bench[g][c][i]=0; end
       foreach(sd_pv_last[g,p]) begin sd_pv_last[g][p]=0; sd_psubn_last[g][p]=0; sd_pstate_s[g][p]=0; end
+      foreach(sd_valid_last[g,e]) sd_valid_last[g][e]=1'b0;
     end else begin
       if(sd_phase != csr_trace_any_global) begin
         sd_flush(); sd_phase=csr_trace_any_global;
@@ -340,6 +406,10 @@ always @(posedge clk) begin : dashboard_sample
           sd_pv_last[g][p]    = sd_pv[g][p];
           sd_psubn_last[g][p] = sd_psubn[g][p];
         end
+        for(int b=0;b<SD_B;b++) if(!sd_bank_free[g][b]) sd_mfull_cycles[g][b]++;
+        for(int e=0;e<SD_E;e++)
+          if(sd_valid[g][e] && !sd_valid_last[g][e]) sd_mba[g][e/SD_W]++;
+        for(int e=0;e<SD_E;e++) sd_valid_last[g][e] = sd_valid[g][e];
         for(int t=0;t<NumTilesPerGroup;t++) begin
           if(sd_banks) for(int b=0;b<NumBanksPerTile;b++) if(sd_bv[g][t][b]) begin
             if(sd_br[g][t][b]) sd_bh[g][t][b]++; else sd_bs[g][t][b]++;
@@ -369,6 +439,7 @@ end
 `undef SD_GROUP
 `undef SD_MEM
 `undef SD_MSHR
+`undef SD_MSHR_S
 `undef SD_TILE
 `undef SD_VFU
 `endif

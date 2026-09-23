@@ -378,6 +378,18 @@ group_mshr_overflow_num ?=
 ifneq ($(strip $(group_mshr_overflow_num)),)
   vlog_defs += -DGROUP_MSHR_OVERFLOW_NUM=$(group_mshr_overflow_num)
 endif
+# Disaggregated group MSHR: 0 = one 32-lane module per group (legacy), 1 = eight 4-tile slices
+# (mempool_group_mshr_slice.sv). With 1, group_mshr_num / group_mshr_overflow_num are PER SLICE
+# (8 + 1 matches the legacy 64 + 8 per group). Requires 16 tiles per group.
+group_mshr_split ?=
+ifneq ($(strip $(group_mshr_split)),)
+  vlog_defs += -DGROUP_MSHR_SPLIT=$(group_mshr_split)
+endif
+# Split-MSHR class steering reset value (CSR 12): 0 = singles -> column slice, bursts -> row slice.
+group_mshr_steer_single_row ?=
+ifneq ($(strip $(group_mshr_steer_single_row)),)
+  vlog_defs += -DGROUP_MSHR_STEER_SINGLE_ROW=$(group_mshr_steer_single_row)
+endif
 # ParityDrain bypass-track depth. Unset = derived max(2, RobDepth/MaxBurstWords) -- bit-identical.
 # That bound is exact only while vl < RobDepth words; at vl == RobDepth (a 512 B load at ROB128)
 # one instruction fills the whole track and a back-to-back second overflows it, degrading the

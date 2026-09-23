@@ -17416,6 +17416,681 @@ failures, merge counters byte-identical (burst 75.0%, single 87.5%).
 pinned to the synthesis define set; synthesis and simulation now read the same Spatz revision
 (`e35712d`). Next is the full-group run, for measurement rather than closure.
 
+## 2026-09-15 19:25 — decode artifact inputs after the hardware/ cleanups
+
+**Purpose.** The GVSoC session reported removing 962 git-ignored entries (678 GiB) from `hardware/`.
+Check whether any input of `gen_hashfix_results_artifact.py` or the 8x8 scale-up dashboard was lost.
+
+**Result.** The GVSoC cleanup removed nothing these generators read. However, **44 pre-fix
+baseline run dirs are gone** (`wa8_sw_8x8_*` 26, `wc8_sw_8x8_*` 10, `wc4_sw_{4x4,8x8}_*` 8). The
+cleanup's audit TSV lists them as `missing`, not `deleted`. They were removed earlier the same
+day by interactive `rm -rf wc8_sw_8x8_fp*` / `wc4_sw_8x8_fp*` / `wc4_sw_4x4_fp*` / `wa8_sw_8x8_fp*`
+commands (see `~/.zsh_history`).
+
+I ran the generator's discovery step read-only (nothing written). On a regeneration, 35 arm classes
+would change. Only one shown number would disappear: `8x8_fp16_ks2_2x128x32768` = 6,493, the
+pre-fix `valid` baseline (shown count 80 -> 79). The other changes relabel corrected arms whose
+baseline never completed from `recovered` to `rerun` (their cycle counts are unchanged), and remove
+hidden `stale`/`noresult`/`livelocked` rows. 12 of the 44 had a cycle count and 5 had RH>1000
+livelock evidence.
+
+The 8x8 scale-up dashboard is unaffected: 2 of 248 `s8_*` transcripts are missing, neither is in
+the cleanup audit, and the page already carries such rows forward.
+
+**Implementation.** Before `/tmp` gets cleaned, copied the scrape cache (the only per-run copy
+left) to `docs/benchmarks/run_archive/hashfix_scrape_cache_20260915.json` and extracted the 44
+dirs to `docs/benchmarks/run_archive/lost_sw_baselines_20260915.tsv` (cyc, RH, util, resp_hold,
+cache_aged, issue, bankfull, timeout, with each transcript's last size and mtime).
+
+**Status.** The decode artifact has NOT been regenerated. Open question for the user: accept the
+drop, or have the generator fall back to the archived values for deleted baselines.
+
+## 2026-09-16 02:20 — dashboard probe: per-entry hold-window timeout attribution
+
+**Purpose.** The GVSoC session asked for per-MSHR-entry timeout counters to test a way-exhaustion
+hypothesis (a decode ELF running 9.7x slower with all expiries in one group). Per-group counters
+cannot attribute to a bank/way; entry ID can, since bank = entry / ways and way = entry % ways.
+
+**The freeze is not touched.** `mempool_group_mshr.sv` is frozen (`mshr-freeze-20260912`) and a peer
+cannot lift that. No RTL change was needed: the signals already exist, and `instrument.py` never
+edits repo RTL -- it writes a patched COPY of `hardware/tb/mempool_tb.sv` into
+`sim_dashboard/generated/` with the probe appended. The change is confined to the probe include.
+
+**Implementation.** `sim_dashboard/rtl/dashboard_probe.svh`: sample `mshr_issue_timeout_dbg[e]` (the
+d-side hold-window release pulse) and `mshr_q[e].sub_reqs_num`, classify by `burst_len`, and emit
+`timeout_single`, `timeout_burst`, `timeout_subs` on both the `entry` and `mshr` records. Reads are
+guarded by `ifndef TARGET_SYNTHESIS`, matching the region the declarations live in
+(`mempool_group_mshr.sv:2160`). `SCHEMA.md:27-28` already reserved the first two names; `timeout_subs`
+is new and is the GVSoC session's to document, as that file is dirty in their working tree.
+
+`tests/probe_tb.sv` gained `mshr_issue_timeout_dbg` and a `sub_reqs_num` struct field, with two
+one-cycle pulses placed so one is sampled while entry zero is single and one after it becomes a
+burst.
+
+**Result.** `tests/run_probe.py --backend vcs` compiles and runs. 341 records, **0 validation
+failures** against `trace_dashboard.model.validate`, and the totals are exactly the predicted
+4 groups x (single 1, burst 1, subs 6) = 4 / 4 / 24, with the per-entry sums equal to the per-group
+totals.
+
+**Semantics, checked rather than assumed.** The pulse is the same transition the existing stats view
+counts as `hold_release: timeout_single/timeout_burst` -- `mempool_group_mshr_stats.svh:86-97` sees
+it one cycle later off the q-side shadow, with the same `burst_len` and `hold_cnt==0` tests. So a
+window sum reproduces the transcript totals. Also, contrary to the request's premise, the
+response-side per-entry signals are NOT undriven: `mempool_group_mshr.sv:3018-3019` clears them and
+`:3755` / `:3789` set them.
+
+**Status.** Probe changed and unit-tested; not yet exercised on a real image. Existing campaign build
+dirs hold snapshot copies of the probe, so they must be re-instrumented and rebuilt to emit the new
+fields.
+
+## 2026-09-16 02:25 — dashboard probe: response-side expiries as separate fields
+
+**Purpose.** Follow-up from the GVSoC session: split the response-side deaths out of the issue-side
+hold-window counts, on both backends, so `timeout_single`/`timeout_burst` mean exactly the issue-side
+release classified by `burst_len`. They had folded the RESP_HOLD ageing into `timeout_single` on the
+GVSoC model and are correcting it there.
+
+**Implementation.** `sim_dashboard/rtl/dashboard_probe.svh`: sample `mshr_resp_hold_timeout_dbg[e]`
+and `mshr_cache_timeout_dbg[e]` and emit them as `resp_hold_timeout` and `cache_timeout` on both the
+`entry` and `mshr` records. `timeout_subs` deliberately still covers ONLY the issue-side expiries, as
+requested. `tests/probe_tb.sv` drives both new pulses on entry one, so they cannot be confused with
+the issue-side pulses on entry zero. Still no RTL change: the freeze on `mempool_group_mshr.sv`
+(`mshr-freeze-20260912`) is untouched.
+
+**Result.** `tests/run_probe.py --backend vcs`: 341 records, **0 validation failures**, totals exactly
+the predicted 4 groups x (single 1, burst 1, subs 6, resp_hold 1, cache 1) = 4 / 4 / 24 / 4 / 4, with
+per-entry sums equal to per-group totals. The entry-one records show `resp_hold_timeout` 1 and
+`cache_timeout` 1 with `timeout_subs` 0, confirming the two are separated.
+
+**Status.** Probe complete for this request and unit-tested; no image rebuilt, no sim launched. The
+GVSoC session documents all five field names in SCHEMA.md and keeps the frozen sweep-v1 images for
+its confirmation runs, building a separate instrumented image for the timeout investigation.
+
+## 2026-09-16 — group MSHR: unbanked overflow pool for per-bank way exhaustion (IN PROGRESS)
+
+**Purpose.** Break a measured per-bank circular wait. A decode arm (fp16, 4x4, KS=8, share_a=share_b=4)
+runs 223,675 cycles against 23,053 with identical traffic (mst_req 921,841, mst_resp 2,841,841, FMAC
+35,094,528 both), and the whole loss is hold-window timeouts in ONE group: timeout_single=163,
+timeout_burst=127 in group 2, zero elsewhere. Global fullness never triggers (full_cyc=0). Mechanism:
+within one inner loop the hash maps four burst lines to one bank; three cores allocate and hold,
+waiting for a fourth core's burst, whose own scalar load hashes to that same bank and finds no free
+way. With bankfull_backpressure=1 (shipping) that scalar stalls instead of bypassing, so the cohort
+can never complete and only serve_timeout ends it. Bypassing is not acceptable (a stranded peer
+times out later) and the window cannot be shortened, so the escape has to be hardware.
+
+**Design (user's, with his approval to implement in the main tree).** A pool of unbanked entries,
+allocated ONLY when the request's hashed bank has no free way. `bank_has_free` already includes the
+cache-reclaim pass, so a bank holding a reclaimable CACHED way is not full and the pool stays free
+for the case it exists for. A pool entry is a NORMAL entry -- same struct, same hold window, same
+response-cache participation, same merge capacity, both classes. It has its OWN allocation and merge
+port, so a bank-full miss does not re-contend for the bank's slot it is escaping.
+
+**Why out of band, not a wider table.** BankPublish (on in `config/terapool_spatz4_fpu.mk` and in the
+PnR define set) asserts `idx_width(MshrNum) == BankIdW + VictimPtrW`, 6 == 4+2 at 64/4. One extra
+entry in the flat space makes it 7 and fails elaboration. Independently, `mshr_id_t` is
+`idx_width(MshrNum)` = 6 bits and the response path casts the returning tag through it, so a pool tag
+in the flat space would truncate and alias onto entry 0. Pool entries therefore address the flit tag
+space ABOVE the table: tags 1..MshrNum banked, MshrNum+1..MshrNum+K pool. That fits because the tag
+field is `idx_width(MshrNum+1)` = 7 bits, holding 0..127 -- true because MshrNum is a power of two,
+not in general.
+
+**Implementation so far** (`hardware/src/mempool_group_mshr.sv`, +830 lines; parameter
+`MshrOverflowNum` default 1, knob `GROUP_MSHR_OVERFLOW_NUM` / `group_mshr_overflow_num`):
+parameter and derived widths; pool state arrays, write flags and clock-gate groups; staged records
+`apb_q_*`/`mpb_q_*` and their inflight/free twins; invalid-first free-entry lookup (no reclaim pass --
+evicting a CACHED pool entry would trade a live shared line for the entry the miss is escaping to);
+`pool_resp_slots`; `pool_retire_eligible`; `mshr_busy_o` extended (the CSR refuses a hash change while
+it is high); head-beat and ParityDrain drain operands; response-tag decode with a range test plus a
+`resp_seen` twin; the full request-side lookup (hit, drain, capacity, meta-overlap, in-flight
+forwarding, owner conflict) with pool hits folded into `req_hit_mshr`/`req_addr_hit_drain`/
+`req_meta_conflict`/`req_owner_inflight` so a pool hit can never also be an allocation candidate
+(the single-copy invariant); pool allocation and merge arbiters; the lane-loop arms (pool grant
+suppresses the bankfull stall, counts for hold-the-fetch, stamps the pool tag range, and does NOT
+advance a bank's victim pointer); allocation and merge apply with the deferred valid-set.
+
+**Since that checkpoint, also implemented:** pool response capture (want vector, two-lane grants,
+its own ready arm on the lane, beat scatter, resp_buf write, saturating count, RESP_HOLD-vs-DRAIN
+decision, `pool_st_post_cap`); pool entries offered to the drain selection with a pool drive arm and
+the ack scatter/clear; pool finalize (pop-count form) and pool clear apply; the pool replay/hold
+walker, which is REQUIRED rather than an optimisation because a pool entry is allocated with the same
+hold window, so its fetch is withheld and only the walker can issue it; the serve and cache-age-out
+timeout twins; pool AMO invalidate and cache self-invalidate (both with the merge veto); and a
+latent bug fixed in BOTH banked tag decodes -- they cast the tag through `mshr_id_t`, which is
+`idx_width(MshrNum)` wide, so a pool tag of MshrNum+1 truncated onto banked entry 0. Both decodes
+now carry an upper bound at MshrNum.
+
+**KNOWN GAPS -- do not treat this as finished:**
+1. `pool2_clr` is consumed but never set, i.e. a POOL entry's ParityDrain SECOND slot is never
+   acknowledged. A burst pool entry that arms `beat2` can therefore fail to complete that beat.
+   Either the pool needs a second-slot drain arm or pool entries must be excluded from PD2.
+2. The probe does not yet emit the pool contract: `meta.mshr_overflow_entries`, pool entries as
+   per-entry records at ids >= mshr_entries, and `overflow_alloc` / `overflow_merge` /
+   `overflow_occupied` on the mshr record. `SD_OV` is declared in the probe but not emitted.
+3. No pool assertion twins. The banked `mshr_entry_in_its_bank` iterates `mshr_q` only, so it does
+   not false-fail on a pool entry -- and, equally, nothing asserts the pool's own invariants,
+   above all the single-copy rule the design depends on.
+4. A store to a line resident in the pool does not force-drain it (`pool_st_force_drain` is
+   constant zero, documented at its declaration). Correct but less prompt.
+
+**NOT VERIFIED.** The file has never been compiled, elaborated or simulated in this state -- not even
+a syntax check: verible cannot parse it (macro environment), and the only real gate is a full
+`make compile`. Treat every line added here as unverified until that runs.
+
+**Debug log, and a tool worth keeping.** The file went from 52 vlog errors to 1 to 0. All 51 were mine
+and all were declaration-before-use: two signals I never declared at all, and the pool request-side
+block sitting after the banked hit reductions that consume it (`req_hit_pool`,
+`req_owner_inflight_pool`, `pool_retire_eligible`, and the combinational `apb_*`/`mpb_*` records,
+which I had declared only in their `_q` forms). Fixed by moving one declaration block to before
+first use.
+
+The LAST error was different and worth recording, because it looked like anything but a typo: vlog
+reported `syntax error, unexpected '\''` at a line of PRISTINE banked code I had never meant to
+touch. The cause was that one of my edits retyped that line and turned `!= '0)` into `!= '0')` -- a
+stray trailing apostrophe after the literal, because the original writes the comparison without a
+closing parenthesis before the `'0`. It is the only such string in the file; a
+`grep -nE "'[01]'"` finds it and pristine has zero.
+
+**Fast iteration recipe** (2 seconds instead of a ~10-minute recompile, and the thing that made this
+findable): re-analyse the single file against an existing build's library with the exact define set,
+```bash
+INC=""; for d in include deps/common_cells/include deps/reqrsp_interface/include deps/axi/include \
+        generated deps/tech_cells_generic/include; do INC="$INC +incdir+$PWD/$d"; done
+DEF=$(sed 's/^-D/+define+/' defs.txt | tr '\n' ' ')   # defs from the compile log's bender line
+questa-2023.4-zr vlog -incr -sv -work build_ovf/work $INC $DEF src/mempool_group_mshr.sv
+```
+Control it first: the same command on `git show HEAD:` of the file must report 0 errors, or the
+define set is wrong and every result after that is fiction. Note vlog takes `+define+`, not `-D`
+(`-D` is rejected as an invalid option), and zsh will not word-split an unquoted `$DEF` -- run it
+under bash.
+
+**Two more "allocated but never drained" bugs, found by auditing every MshrNum-bounded loop.** The
+GVSoC session's post-mortem checklist for this failure mode is "the allocator can reach the pool but
+some other pass cannot", and applying it mechanically to `for (... < MshrNum)` turned up two real
+ones that a clean compile and a clean elaboration both pass:
+
+1. **The hold-the-fetch countdown had no pool arm.** That loop is the ONLY pass that decrements a
+   held entry's `hold_cnt`. A pool entry is allocated with the same hold window, so its counter would
+   have stayed frozen at its initial value; the replay walker releases a held fetch when the window
+   expires OR the subscriber target is met, so the entry would have waited for subscribers that
+   stopped arriving, never fetched, and hung. Fixed with the pool twin.
+2. **The AMO RESP_HOLD force-drain had no pool arm.** A pool entry held in RESP_HOLD across an AMO
+   would have delivered the pre-AMO word to its subscribers. Fixed with the pool twin.
+
+The same audit cleared the rest: drain operands, drain selection, allocation and merge apply, capture,
+AMO-invalidate, self-invalidate, finalize, clear-apply, the three timeout passes and the replay
+walker all have pool arms; the MshrNum loops with no arm are simulation-only diagnostics
+(`mshr_inuse_dbg`), the store byte-merge path, and the parity second slot, which is documented as
+deliberately off for pool entries.
+
+**Probe: pool fields done and tested.** `sim_dashboard/rtl/dashboard_probe.svh` now emits the full
+agreed contract -- `meta.mshr_overflow_entries` (emitted even at K=0, so a pool-less build is
+distinguishable from a pre-probe trace), pool entries as ordinary per-entry records at ids
+`SD_E .. SD_E+SD_P-1`, and `overflow_alloc` / `overflow_merge` / `overflow_occupied` on the mshr
+record. Two bugs the stub test caught, both worth recording because they are the kind that produce
+plausible numbers rather than failures:
+
+* `overflow_occupied` never accumulated -- the accumulator was cleared and summed into a different
+  variable than the one emitted, so it read 0 while the per-entry records were non-zero.
+* The alloc/merge edge detectors were reset by the per-window clear, so every window boundary
+  re-reported a resident pool entry as a fresh allocation AND hid any merge inside it (the
+  rising-`sub_reqs_num` arm is only reachable once the entry already reads valid). `_last` trackers
+  now persist across windows and reset only with the rest of the state.
+
+Verified by `tests/run_probe.py --backend vcs` with the stub extended to drive a pool entry: alloc 4,
+merge 4, occupied 8 across 4 groups, per-entry occupancy summing to the group total, 0 validation
+failures against `trace_dashboard.model.validate`. Pool records deliberately omit
+`occupied_single`/`occupied_burst`: the schema requires those to sum to `occupied` when present, and
+emitting zeros would fail that check rather than inform it.
+
+**Assertions added** (all inside the existing `ifndef TARGET_SYNTHESIS` / `ifndef VERILATOR`
+region): pool allocation targets a non-resident entry, one pool allocation per cycle,
+`mshr_busy_o` covers pool state, no pool allocation in a `MshrOverflowNum = 0` build, and every
+stamped `mshr_tag` falls in the banked range 1..MshrNum or the pool range MshrNum+1..MshrNum+K.
+
+Deliberately NOT asserted, and this is worth stating because a reader would expect it: "a line is
+never resident both in a banked way and in the pool". That property is FALSE by design in this
+module -- a same-address pair is legal whenever the two requests differ in `burst_len`, which is why
+`req_hit_way` carries a burst_len compare and `no_late_join_burst` lets a refused request allocate its
+own entry. Such an assertion would fire on the banked table's own documented behaviour. The real
+guarantee is narrower (a pool HIT is never an allocation candidate) and is structural.
+
+**Runs switched to VCS (QuestaSim abandoned mid-flight).** All four arms are now VCS from ONE shared
+source revision: `build_vcs_on` (`-DGROUP_MSHR_OVERFLOW_NUM=1`) and `build_vcs_off` (`=0`), both with
+`vcs_jobs=12 group_mshr_merge_reqs=16 snitch_trace=0 vcs_config="-ignore initializer_driver_checks"`.
+Verified by reading the generated `compilevcs.sh` rather than assuming: the pool define, MERGE_REQS=16
+(elaboration-only, so a wrong value silently measures a different design) and SNITCH_TRACE=0 all
+landed, and the `MSHR cfg:` banner diffed field-for-field identical between the two images.
+
+Runs: `vcsrun_fast_on` (fast ffnup ELF), `vcsrun_slow_on` (slow ffnup, the 223,675-cycle arm),
+`vcsrun_slow_off` (same ELF, pool off -- the control) and `vcsrun_gdn_on` (dec_gdnab_b001_a128).
+Separate run directories, so no transcript collisions; `snitch_trace=0` matters because the share is
+at 94%.
+
+**Status: IN PROGRESS, UNVERIFIED.** The probe field/SCHEMA contract was agreed with the GVSoC
+session, which is implementing the same mechanism in its model; it will not re-instrument the frozen
+sweep-v1 images.
+
+## 2026-09-16 — pool: X-propagation defect in the MshrOverflowNum=0 path (found by the new assertion)
+
+**What happened.** The first pool-OFF VCS run died at cycle 2 with
+`pool allocation recorded in a build with MshrOverflowNum = 0` -- one of the assertions added in
+this same pass. It was not a false positive.
+
+**Root cause.** `gen_pool_arb_tie` (the `PoolNum = 0` arm of the pool arbiter) drove the candidate
+and grant vectors but NOT the staged record or its valid bit. `apb_v` / `mpb_v` were therefore
+undriven at `MshrOverflowNum = 0`, which is X in simulation and registers into `apb_q_v` /
+`mpb_q_v`. `mshr_busy_o` ORs both of those, so the X reaches the CSR interlock that refuses a
+bank-hash change while entries are resident -- undefined behaviour on the very path a pool-less
+build is supposed to be identical to.
+
+**Why this matters beyond the control run.** Every `MshrOverflowNum = 0` build of this RTL had it,
+including the QuestaSim control that had been running. It also means the pool-OFF arm was NOT a
+valid control: an X in the interlock can perturb behaviour, so a cycle-number comparison against it
+would have been meaningless.
+
+**Fix.** The tie-off arm now drives the full `apb_*` / `mpb_*` record and both valid bits to zero.
+Re-verified: fast vlog check clean (0 errors, 35 warnings, same as pristine), and both VCS images
+rebuilt from the single fixed revision so the A/B is one source state.
+
+**Note for the K=0 equivalence claim.** "0 generates the pool away, netlist identical to the design
+without it" is still the intent, and it now holds for the staged-record path as well; the assertion
+that caught this (`pool_absent_never_allocates`) plus `pool_busy_covers` stay in as the regression
+guard, since neither the compiler nor elaboration flagged anything.
+
+## 2026-09-16 — pool: req_out_use dropped every pool-allocated request (the benchmark-start failure)
+
+**Symptom.** Both pool-ON VCS runs ended ~340 cycles into the benchmark; the pool-OFF control ran
+straight through. One died on the banked `cut_alloc_target_free` ("allocated over a live non-CACHED
+entry"), the other on the FP-LSU `invalid_resp_id`.
+
+**Localization.** The two slow runs were BIT-IDENTICAL through the entire pre phase -- same `[FPU]`
+series, same `[MSHRG]` series, sampled every 1000 cycles -- and diverged exactly at benchmark start,
+i.e. the first time the pool is used under load. That ruled out boot, fill and I$-warmup entirely.
+(The `[BYP ORPHAN]` probe that floods both transcripts with ~196k lines starts at the identical cycle
+in the control and discriminates nothing.)
+
+**Root cause.** `req_out_use` -- the term that drives the request to the NoC -- did not know about
+the pool grant. For a pool-granted lane, `req_alloc_found=0` and `bank_has_free=0` BY DEFINITION
+(the pool is only used when the bank is full), so its else-arm reduced to `cfg_bankfull_bp` = 1 and
+`req_out_use` came out 0, giving `req_out_valid = 0`. The lane loop still consumed the request
+(`req_in_ready = 1`), so EVERY pool allocation silently dropped its request: the entry was allocated,
+its fetch never left, and its cohort desynchronised. `replay_fire` had the same omission, so a pool
+grant also took the wrong replay arm.
+
+**Fix.** Both expressions now treat a pool grant as a banked grant:
+`(req_alloc_found || req_alloc_found_pool)` selects the hold-window arm in `req_out_use` and the a1
+arm in `replay_fire`. Checked for the two hold-window cases: window != 0 withholds the fetch and lets
+the pool replay walker issue it; window == 0 drives the fetch immediately and leaves `replay_fire` at
+0 so nothing overdrives the lane.
+
+**Second fix, metrics not hardware.** `req_bankfull_bypass_dbg` counted a pool grant as a bank-full
+BYPASS. A pool allocation and a bypass mean opposite things, and `bankfull_bypass` is one of the
+counters the A/B is read from, so leaving it would have corrupted the measurement.
+
+**Audited for the same omission.** Every remaining use of the banked `req_alloc_found` was checked
+against the pool: the stall arm, the hold-the-fetch condition, the tag stamp, the victim-RR guard
+(correctly banked-only) and the bypass counter all handled. Both VCS images were then rebuilt from
+the single fixed revision and all four runs restarted, rather than reusing the still-healthy control
+-- the K=0 edits are provably no-ops, but the tie-off branch is exactly where the earlier X bug hid.
+
+## 2026-09-16 — pool: two more counters mis-classified a pooled request
+
+**Context.** The GVSoC session generalised the drive-term bug better than I had: it is not only the
+term that decides emission, it is every COUNTER whose branch a pooled request now takes. A pooled
+request walks a branch that used to mean "the bank was full and the request lost" -- deny, bypass,
+stall -- and any statistic hanging off it silently changes meaning, because the arithmetic stays
+valid while the semantics move. Same shape as the K=0 X and as their dashboard binning entry ids
+into banks.
+
+**Found and fixed, both in `mempool_group_mshr_stats.svh` (simulation-only, no hardware):**
+
+1. `stat_req_mshr_overflow` -- "the request could not get an entry". A pool-granted request fell to
+   the else-arm and was counted as an overflow when it HAD got an entry, and was absent from
+   `stat_req_alloc` entirely. Both grants now select the alloc arm.
+2. `bank_ovf_hist` / `rc_bank_ovf_inc` -- the per-bank histogram printed in the root-cause dump. A
+   pool grant incremented the OVERFLOW bin of its hashed bank while being an allocation. It now bins
+   as a per-bank allocation, still under the hashed bank: "this bank's request was resolved" is the
+   informative part and the mechanism is separately countable.
+
+**Deliberately NOT changed: `stat_req_bypass`.** Its pre-existing definition is "the request did not
+merge" -- it already counts banked allocations too -- and a pooled request also did not merge, so it
+remains consistent. Redefining it would have been the same error in the other direction, silently
+changing a metric that existing analyses read.
+
+**Caveat recorded rather than implied.** The four A/B runs in flight were built from the revision
+BEFORE these two counter fixes. They are simulation-only and cannot affect cycles, and the counters
+the A/B actually reads (cycles, `mshr_timeout`, `bankfull_bypass`) are unaffected -- `bankfull_bypass`
+lives in the RTL and already carries its fix. So the cycle comparison stands; `mshr_overflow` and
+`bank_ovf_hist` from those particular runs do not.
+
+### Correction: the blast radius of the bank_ovf_hist mis-classification
+
+I stated, in messages to the GVSoC session and to the user, that `bank_ovf_hist` is what their
+per-bank inner-loop concurrency analysis is built on. **That is wrong.** They checked and it is not:
+that panel is a STATIC model that runs the configured hash over modelled operand addresses and never
+reads an RTL counter, so the histogram cannot contaminate it and fixing the histogram would not have
+changed it. Their observed-occupancy panel bins per-entry telemetry by entry id, which is the
+id-to-bank inference they fixed separately. Correcting the record here because the worklog is the
+durable artefact and that claim would otherwise survive in it.
+
+The actual consumers of `bank_ovf_hist` / `bank_alloc_hist`, grepped repo-wide:
+
+- the stats include itself (producer and transcript dump) -- no analysis script reads it;
+- `docs/benchmarks/gvsoc_probe/README.md:340`, where "`bank_ovf_hist` all zeros" is cited as positive
+  evidence against a congestion explanation, alongside `bank_alloc_hist` uniform at 62 per bank.
+
+So the blast radius is the root-cause dump and the human evidence chain built on it, not any
+automated per-bank panel. Worth noting for the record that the fix changes what those two dumps will
+show on a pool-on arm: a pool allocation now lands in `bank_alloc_hist` rather than `bank_ovf_hist`,
+which is the correct direction but does alter a trail that has been quoted as evidence before.
+
+## 2026-09-16 — pool: replay walker could hijack a lane carrying a fresh request
+
+**Retraction first.** Mid-diagnosis I doubted that the pool caused the benchmark-start failure, because
+the pool-ON transcript came out BIT-IDENTICAL before and after the `req_out_use` fix. The control then
+settled it: `slow_off` (pool OFF) passed cycle 305,690 -- where the pool-ON build dies -- and kept
+running. So the failure IS pool-specific after all, and the bit-identical result had a different
+explanation, below.
+
+**Why the `req_out_use` fix was a no-op here.** It only changes the hold-window == 0 case. With a
+non-zero hold window -- which is what this build runs -- the expression evaluates to 0 both before and
+after the fix, because 0 is the CORRECT value (the fetch is deliberately withheld and the replay
+walker issues it later). So that fix is still right for the case it addresses, but it was not this
+failure.
+
+**The real bug.** The pool replay's guard was `if (!replay_fire[t][p])`. The banked walker's
+availability rule is stricter: it fires only when `replay_lane_stall || (req_can_merge && arb_hold_nz)`
+(the a1 arm). `replay_fire` is 0 for a lane carrying a fresh, ACCEPTED request that is driving its own
+fetch this cycle -- so the pool replay entered, drove `req_out`, and replaced that request's fetch with
+the replay's. The fresh request's own fetch never left (its banked entry stayed WAIT_RESP) while a pool
+fetch was emitted in its place, desynchronising request and response bookkeeping -- which is what
+tripped `cut_alloc_target_free` and, in the other arm, the FP-LSU `invalid_resp_id`.
+
+**Fix.** A new `replay_lane_avail` exposes the walker's own availability term, and the pool replay
+requires `!replay_fire && replay_lane_avail`. Verified against the three lane cases: a stalled lane and
+a hold-the-fetch lane remain available (replays can use them, as the banked walker does); a lane
+driving a fresh accepted fetch does not.
+
+**Control retained deliberately.** Only the pool-ON image was rebuilt and only the pool-ON runs
+restarted; `slow_off` was left running, healthy past 306,000. The new signal feeds only the pool replay
+loop, which has zero iterations at `PoolNum = 0`, so the pool-OFF binary is behaviourally unchanged.
+That is a stronger claim than the earlier K=0 argument, which failed because it concerned code that
+DOES run at K=0 -- worth stating explicitly since I have already been wrong once about this.
+
+## 2026-09-16 — pool: hitting a pool entry was a DEADLOCK (the actual benchmark-start failure)
+
+**Found at last, and it explains why three earlier fixes changed nothing.** The lane loop accepts a
+merge only through `req_merge_valid`, which knows about banked hits and nothing else. A request that
+hits a POOL entry therefore had:
+
+- `req_hit_mshr = 1` -- the pool hit is folded in, which correctly blocks allocation; and
+- `req_merge_valid = 0` -- pool merges were recorded by the pool arbiter but never accepted by the lane.
+
+So it could not merge AND could not allocate, fell through to the STALL/ALLOCATE/BYPASS chain, and
+**stalled forever**. The pool arbiter had already recorded the merge and added the subscriber, while
+the requestor was never told ready -- a deadlock plus a desync, which is what tripped the banked
+`cut_alloc_target_free` and the FP-LSU `invalid_resp_id`.
+
+**This is why the earlier fixes did not move the failure.** The lane never got past this arm, so the
+drive term, the replay availability and the counters were all downstream of a door that never opened.
+Three fixes, each correct for the case it addresses, and the failure reproduced at the identical
+simulation time for all of them. That was the clue: a failure whose timestamp does not move when you
+change the code is not in the code you are changing.
+
+**Fix.** `req_merge_pool_ready` (the twin of `req_merge_ready`, taken from the pool arbiter's grant)
+plus a lane-loop arm that accepts a pool merge exactly as a banked one. `replay_lane_stall` also
+learned about pool merges, since a lane doing a pool merge is consumed and therefore available for a
+replay, exactly as with a banked merge.
+
+**Control completed, but NOT certified.** `slow_off` (pool OFF) finished with
+`The execution took 224242 cycles.` The pre-pool frozen-image reference for this arm is 223,675, so
+the control is +567 cycles (+0.25%) away from it. **The certification test as I designed it is
+invalid**: the frozen image was built from an OLDER RTL revision, so that gap is revision drift, not
+a pool effect, and I cannot use it to prove `MshrOverflowNum = 0` equals the pre-pool design. The
+build diff does confirm the two images differ only in the pool define
+(`+define+GROUP_MSHR_OVERFLOW_NUM`), which is the comparison that actually matters here.
+
+## 2026-09-16 — pool: FOUR missing next-state defaults, and the assertion that failed on an X
+
+**Symptom.** The pool arm died ~1,400 cycles into the benchmark on an EXISTING assertion,
+`no_alloc_while_resp_landing` (mempool_group_mshr.sv:6347, group (2,1), tile 6 port 2):
+"MSHR allocated a second entry while a same-address entry was draining/receiving". Correlated
+exactly with the pool: the tile-6 pool entry filled its cohort 34 cycles earlier, and
+`bankfull_bypass=+0` in BOTH arms, so the pool is admitting requests the control simply stalls.
+
+**The misleading part.** The assertion's four terms are mutually exclusive BY CONSTRUCTION:
+`req_alloc_cand` excludes `req_addr_hit_drain` (2222), `alloc_cand_flat = req_in_valid &&
+req_alloc_cand` (2315) is the arbiter's only candidate source, and `bank_win_oh = win_oh_p &&
+alloc_yield_p` (2411) feeds `req_alloc_found`. I traced every link twice and could not find a path
+where all four are 1. That was the clue I should have taken sooner: **a logically impossible
+failure means the terms are not 1, they are X.**
+
+**How it was found.** Instrumented the assertion's `else` branch to print every term with `%b`, so
+an X shows as `x` instead of being invisible in a `!` test. One 35-minute rerun to the failure point:
+
+    [NOALLOC g=9 cyc=50349] t=6 p=2  valid=0 ready=1 alloc_found=0 hit_drain=0
+    pool_q[0]: state=X base_addr=91a2 ... subs=X
+
+`valid=0` -- the conjunction is 0 and the property should PASS. It failed on the X. A caveat worth
+recording: this cost one wasted 6-second test because `| head -2` INSIDE a `timeout`-wrapped pipeline
+block-buffers and gets killed before flushing, which prints nothing and looks exactly like a broken
+filter.
+
+**Root cause.** The big `always_comb` (3851) carries a Defaults section holding
+`mshr_d = mshr_q;`, `mshr_wr_all = '0;`, `mshr_id_we = '0;`, `mshr_rb_we = '0;` -- and the pool got
+`pool_d_valid` but **none of the corresponding four**. Each pool signal is assigned only inside the
+pool branches (alloc / merge / capture), so in any cycle running none of them it is unassigned, and
+an unassigned `always_comb` variable is X, not 0. The pool then uses that X as a real control value:
+
+| missing default | consequence |
+|---|---|
+| `pool_d = pool_q` | `pool_ctl_en[p]` is HIGH whenever the entry is valid, so the whole record (state, sub_reqs_num, ...) loads X every idle cycle |
+| `pool_wr_all = '0` | `pool_id_en[p] = pool_wr_all[p] \| pool_id_we[p]` -- identity registers (base_addr, tgt, burst_len, sub_reqs) load X |
+| `pool_id_we = '0` | same enable |
+| `pool_rb_we = '0` | `pool_rb_en[p][b] = pool_wr_all[p] \| pool_rb_we[p][b]` -- response buffer load X |
+
+Two telemetry-only twins (`pool_resp_hold_timeout_dbg`, `pool_cache_timeout_dbg`) were missing their
+defaults too; an X pulse there is a false timeout report, so they were added as well.
+
+**Why it looked intermittent.** The pool worked while its alloc and merge events landed
+back-to-back and died when a cohort took an idle cycle between merges. Measured: generations 1 and 2
+of 3 were clean, generation 3 had a 65-cycle gap between the subs=2 and subs=3 merges, and that is
+the one that latched the X. This is the FOURTH instance today of the same class --
+a pass or a default that knows only the banked table. The pool is a separate array, so nothing
+widens automatically, including the Defaults section.
+
+**Status.** Fix applied 2026-09-16; instrumented rebuild + rerun in flight. Only the pool-ON image
+was rebuilt: every signal involved is pool-only and tied off at `PoolNum = 0`, so the pool-OFF image
+is behaviourally unchanged and the running control stays valid. The `[NOALLOC]` and `[POOLDBG]`
+diagnostics are TEMPORARY and must be removed before any commit.
+
+## 2026-09-16 — pool: the X fix worked, and exposed a mis-routed pool response
+
+**The X fix landed.** Rerun `vcsrun_on4`: `Fatal:` at 50,071 with **`[NOALLOC]` never printing** --
+`no_alloc_while_resp_landing` is gone. Caveat: the run dies at 50,071, *before* the 50,353 cycle
+where that assertion fired, so it is cleared by absence-of-evidence only; a run that reaches 50,353
+clean is still owed.
+
+**The new failure is deeper and more informative**, and it is in Snitch, not the MSHR:
+
+    deps/snitch/src/snitch_lsu.sv:248   group (1,3) = g7, cyc 50,071
+    Fatal: Response ID does not match with valid metadata.
+      Offending '(!(id_table_pop & id_available_q[resp_id]))'
+
+A response reached a core carrying an id it never issued -- a mis-tagged pool response.
+
+**Root cause: the response FORWARD branch was guarded on the wrong term.** The banked
+classification at 4521 bounds the tag at `MshrNum` (that bound is what stops a pool tag truncating
+onto banked entry 0), so a pool-tagged response has `resp_is_mshr = 0`. The bypass forward at 4551
+was guarded only by `!resp_is_mshr`, so a pool beat was **captured into the pool by its own ready arm
+AND forwarded to the requester in the same cycle** -- `resp_out = resp_in` with the raw MSHR tag
+still in the flit, no retag.
+
+I had already written the pool ready arm and its comment says, of exactly this failure mode:
+"Without it the lane would fall through to the bypass branch below and the beat would be forwarded
+to the requester instead of buffered -- correct-looking, and wrong". I fixed the READY and missed the
+FORWARD. The ready arm fixes what the lane *accepts*; it cannot fix what the lane *emits*.
+
+**Fix (two lines).** Guard the bypass forward with `!psn_v` as well as `!resp_is_mshr`, and make the
+bypass ready arm `else if (!psn_v)` so every lane has exactly one `resp_in_ready` assignment --
+previously the pool lane was assigned twice and correctness rested on the pool arm happening to come
+later in the always_comb. Order-independent now.
+
+**Consequence for the diagnostics.** `[BYP ORPHAN]` ("bypass response with no outstanding forward for
+this key") is no longer a red herring on pool runs: a forwarded pool beat with no forward record is
+precisely this bug, so its presence/absence is now a signal, not noise.
+
+**Status.** Fix applied 2026-09-16; rerun `vcsrun_on5` in flight, watching for a fatal at 50,071, a
+reappearance of `[NOALLOC]`, or a clean pass through 62,000.
+
+### 2026-09-16 (later) — correction: the defaults fix was NECESSARY BUT NOT SUFFICIENT
+
+`vcsrun_on5` (both fixes in) died at cyc 50,079 on `no_alloc_while_resp_landing` again, and the
+`[NOALLOC]` diagnostic printed: **`pool_q[0]: state=X ... subs=X` — the X is still there.** So the
+four missing defaults were a real defect and are retained, but they are **not** the root cause of the
+X, and the earlier entry above overstates it. What the two fixes did buy: on4 died at 50,071 on the
+Snitch FP-LSU `invalid_resp_id`, on5 died at 50,079 on the MSHR assertion — so the response-forward
+guard cleared the FP-LSU failure, and the layers are peeling one at a time.
+
+New narrowing from the on5 dump: the **identity** fields (gated by `pool_id_en`) are defined while the
+**ctl** fields (gated by `pool_ctl_en = pool_q_valid | pool_alloc_inflight`) are X. The entry is
+valid for the whole 49,983→50,079 window, so `pool_ctl_en` is high every cycle and `pool_d[0].state`
+must have been X at some point in it — yet every writer of `pool_d[p].state` assigns an enum
+constant. The X enters by a route not yet identified.
+
+**Work handed over at this point** (user instruction: stand down on the RTL). Another session took it,
+and its review is `docs/overflow_pool_rtl_review_20260916.md` — it preserves and credits both fixes
+above, found further acceptance/lifecycle defects (pool allocation staging ignored final acceptance;
+pool replay marked issued without an egress handshake; pool capture beat offset and lane scratch
+index; pool drain clear masks; banked drain clear scattering a pool ack through the banked selected
+index), and removed the temporary `POOLDBG`/`NOALLOC` diagnostics.
+
+**Verified on that session's source**: `build_pool_review_20260916_194314/full_on` (pool ON, `=1`) ran
+to cyc 51,000 -- 900 cycles past my 50,079 failure -- with **zero** `no_alloc_while_resp_landing`
+hits and zero FP-LSU response-ID hits. The stronger signal is the group spread: my arms sat at
+`grp_min=52.3%(g10)` at cyc 50,000 while that run reads `95.6%(g10)` then `94.5%(g2)` — the stalled
+group is gone, not merely the assertion. Not yet a complete pass: the benchmark runs to ~72,556.
+
+**Cleanup.** Removed my dead arms `vcsrun_on2/on3/on4/on5` (1.32 GB) and the stale build images
+`build_vcs_on`/`build_vcs_off` (1.75 GB). Kept `vcsrun_off2` (the completed control, 24,140 cycles)
+and `sim_dashboard/output/ovf_ab/`.
+
+## 2026-09-16 19:43 — overflow pool: correctness and PPA review started
+
+**Purpose:** user-requested review and fixes for the previous agent’s overflow-pool RTL, with backend timing discipline from the Claude RTL-PPA skill.
+
+**Implementation:** installed the requested skill at `/home/zexifu/.codex/skills/rtl-ppa/SKILL.md`; its previous copy and the initial RTL/config/stats snapshot are preserved under `hardware/build_pool_review_20260916_194314`. Independent response-lifecycle, PPA, and focused-test reviews are in progress; only the root agent edits the RTL. Existing simulation images/runs and shared software ELFs are untouched.
+
+**Result/status:** skill contents match the specified Claude source; RTL review and verification in progress. No timing or functional pass claimed.
+
+### Overflow pool review — first correctness repairs (verification pending)
+
+Qualified pool allocation by actual acceptance and replay by output readiness; restored pool burst beat offsets and capture lane indexing; defaulted capture payload and drain-clear vectors; prevented pool drain acknowledgments from clearing banked entries; permitted simultaneous pool capture and independent drain; restored merge/allocation contributions to post-capture state and the RESP_HOLD subscriber threshold. These changes address source-proven gaps; their relation to the full-chip failure remains to be verified. Snapshot: `hardware/build_pool_review_20260916_194314/correctness_first.sv`.
+
+### Overflow pool review — one-hot selection restructuring (verification pending)
+
+Replaced pool grant payload priority loops with one-hot masked OR reductions and independent stage-valid reductions; reused the banked allocation acceptance term. Replaced lane-indexed pool capture payload scattering with constant-entry one-hot gathering. Capture data is consumed only under the existing credit grants, so ungranted payload values are immaterial. No pipeline stage or arbitration policy changed. Snapshot: `hardware/build_pool_review_20260916_194314/onehot_first.sv`. Functional equivalence and backend assessment pending; no measured timing gain claimed.
+
+### Overflow pool review — causal assertions and idle defaults
+
+Added input-acceptance, replay-handshake, known-control-state, merge-preservation and one-hot grant assertions. The existing no-allocation-during-response assertion now covers both tables and prints sampled values. Added pool scratch defaults and a tag-capacity elaboration guard; removed temporary POOLDBG/NOALLOC logging and corrected its misleading missing-default explanation. Snapshot: `hardware/build_pool_review_20260916_194314/guarded_first.sv`; validation pending.
+
+### Overflow pool review — optional store-coherence paths restored
+
+Added the missing pool twins of CacheStoreUpdate (same highest-lane-per-byte priority and head-buffer write enable) and StoreForceDrain (same accepted-store guard and response/cacheability changes). Both generators are removed when their knobs are disabled, as in the shipping benchmark config. Correctness tests for enabled knobs are in progress. Removed the prior incorrect claim that omitting pool force-drain was always correct. Snapshot: `hardware/build_pool_review_20260916_194314/store_guarded.sv`.
+
+### Overflow pool review — coherence guards and request statistics
+
+Extended the disabled-store/AMO-coherence workload assertions to pool entries and added cached-data/count invariants. Corrected accepted pool merges being classified as bypass/overflow in total request statistics and the bank histogram; pool cache hits now contribute to cache-hit events. Banked occupancy metrics retain their existing denominator and scope. Verification of the statistics-enabled path is pending.
+
+### Overflow pool review — final snapshot and integration validation
+
+Completed pool cache event statistics (store/AMO/fill/self-invalidation), while keeping banked occupancy denominators unchanged. CAPARB now counts pool capture demand as well as pool capture grants. Fixed dashboard group overflow occupancy being zero unless `+dashboard_entries` was supplied; the deterministic probe produces identical, nonzero group metrics with and without that switch (`build_pool_review_20260916_194314/probe/result.txt`).
+
+The first final compile caught an undefined identifier in a new simulation assertion; replaced it with the actual request AMO field before validation. Immutable shipping candidate: `hardware/build_pool_review_20260916_194314/final_v2_source.sv`, SHA256 `ef42ca93196a2c99d6307ac1ab7e568b9b45d8b9b3094c63ccfdf148391cc485`. Stats SHA256: `b920a394976c7fa71b3ed3c61934db18d4f6f7efec84df78a1ff8841ada6e7ee`.
+
+Final directed matrices are running. Full-chip integration is building from a separate 532-file snapshot at `hardware/build_pool_review_20260916_194314/full_on`, using the existing private `dec_ffnup_b032_fp16_4x4_pc.elf` copied as `workload.elf`. Exact commands are in `commands.json` and `run.py`: frozen `compilevcs.sh`, then `vcs-2024.09-zr vcs -full64 -j12 mempool_tb -cc cc -cpp g++ -ld g++ mempool_vcs_dpi.so -ignore initializer_driver_checks -assert disable_cover -o mempool_simvopt`, then that image with `+PRELOAD=<private absolute path>/workload.elf -l transcript`. No shared simulator image, generated source, software binary, running job or vendored source was modified. Focused tests retain per-case `waves.vcd`; the optimized full-chip integration image has no added waveform instrumentation.
+
+Real Fusion Compiler analysis passes for pool counts zero and one, with the final synthesis-visible RTL. Earlier frozen one-hot snapshots remain in elaboration. Matched final correctness-only and optimized PPA inputs are prepared; no numerical timing improvement is claimed without matched post-placement results.
+
+### Overflow pool review — focused validation complete
+
+Final v2 passes **25 positive directed cases**: 10 real-interface handshake/control tests across pool counts 0/1/2 and 15 response/store/AMO/statistics cases. Three deliberately unsafe accesses with coherence disabled each trigger the exact expected DUT assertion. Original source negative controls reproduce allocation/backpressure, owner-inflight, replay, lane/beat capture, cross-table clear, reused-generation clear and cache-expiry merge failures. The selector algebra comparison passes 1.2 million vectors, and K1/K2 external handshakes match the correctness reference cycle-for-cycle. Tests and exact commands are documented in `hardware/scripts/burst_tests/overflow_pool/README.md`; source/command/log/wave artifacts are in the private review directory.
+
+Review findings and limits are recorded in `docs/overflow_pool_rtl_review_20260916.md` and linked at the top of the handover. A full-chip build and backend elaboration remain active. Pool drain remains one head at a time; dormant second-head logic is not claimed as supported. No application speedup, physical timing improvement, or overall feature signoff is implied by these unit passes.
+
+### 2026-09-16 20:19 — overflow-pool matched physical comparison launched
+
+**Purpose.** Measure the endpoint timing and area effect of the one-hot rewrites against an otherwise identical, fully corrected RTL reference. **Implementation.** Read-only export of historical `ooc_tenfix:mempool_group_mshr/initial_opto` produced a 343.995 x 343.92 um core with its rows, tracks and pin locations. A private copy changes only the 8988 placed pins to fixed status (DEF SHA256 `42f60555f3372ff96e86235bd2ac28330d807a11187611cb080704740e1364a9`). Both final-v2 arms source that frozen floorplan once before mapping and disable automatic floorplan resizing. The priority reference reverses only the six one-hot diff hunks; its SHA256 is `438e853740e5cb98fe1429ebc36fb27eeed214e86bb335617b9d5c5a3ffb98db`, and reapplying the patch reproduces final-v2 `ef42ca93...` byte-for-byte.
+
+The durable driver `hardware/build_pool_review_20260916_194314/ppa/run_fixed_pair.py` runs `fixed_final_v2_priority_k1` and then `fixed_final_v2_onehot_k1` sequentially. Each admission requires MemAvailable >=96 GiB and at least 21 free FE/BE/FP/NX FC licenses. The first arm launched with 128.08 GiB available; driver PID 4167145 and first-arm shell PID 4167151. Status/PIDs/commands are in `ppa/fixed_pair_status.json`; events are appended to `fixed_pair_events.jsonl`; every arm verifies its source, flow, SDC and shared floorplan hashes. No existing backend script, library, run or `chain_*` job was modified.
+
+**Result/status.** Final synthesis-visible RTL passes real FC analysis at K=0 and K=1, with zero errors and unchanged input hashes. Earlier one-hot K0/K1 elaborations remain active and have reported no errors so far. The new matched pair is running toward `initial_opto`; no physical timing improvement is claimed yet. Historical complete OOC sessions took 7.41–13.50 hours and about 26 GB peak memory, so the new runner budgets 40 GiB per arm and preserves shared headroom. Results will include WNS/TNS, endpoint population, logic area and buffer/Vt reports; the old summary's aggregate net-row count is labeled accurately rather than called one-path depth.
+
+## 2026-09-16 — matched overflow control and full-system specification refresh
+
+**Purpose:** answer whether the exact precomputed decode ELF demonstrates the overflow benefit, and provide a current full-system design document for discussion.
+
+**Implementation:** verified the requested ELF and running private ON copy have identical SHA256 `ec87b30869cbff597ae24fdd644efd44b457a70c4c9c04d60ed6e8a288b02839`. Created `hardware/build_pool_review_20260916_194314/full_off` from the frozen ON source/header/ELF snapshot, changing only `GROUP_MSHR_OVERFLOW_NUM=1` to `0` in all 35 analysis blocks. `full_ab_manifest.json` records byte-identity checks; private `full_off/run.py` builds and runs the control, leaving 20 VCS runtime seats free before simulation. Existing runs and shared software outputs are untouched.
+
+Updated the existing full-system reference `docs/teranoc_architecture.md` and companion `hardware/ARCHITECTURE.md` against the current compiled RTL/configuration. Added the current system counts, overflow-pool admission/lifecycle/tag contracts, timing-review status and comparison limitations. Corrected obsolete ROB128/ROB0-only and element-width-switch descriptions, timeout units (cycles converted to ticks), barrier word/address reservation, programmable barrier/broadcast/watchdog behavior, current custom fence semantics and the 8x8 address-field hazard. The older documents are preserved in the review directory's `docs_before_20260916/`.
+
+**Status:** ON is simulating, OFF is building; no matched application result yet. The 223675-cycle frozen campaign and the newer 24140-cycle OFF run are explicitly distinguished from a pool A/B. Documentation link and consistency checks are in progress; physical PPA comparison remains separately active.
+
+### Full-system document refresh — verified details and handoff status
+
+Documentation local links, code-fence balance and diff whitespace checks pass. The main narrative specification is `docs/teranoc_architecture.md`; the shorter source/debug map is `hardware/ARCHITECTURE.md`. Their current sections cover the system counts, separate TCDM/AXI networks and L2 perimeter channels, memory layout, MSHR/pool lifecycle, CSR controls, word-distributed VLSU, custom fence semantics and programmable broadcast barrier. Source/constant checks corrected stale line anchors and explicitly separate current defaults from historical measurements.
+
+Read the ELF symbol directly: `gemm_hash_table` at `0x800036a8` contains sixteen triples alternating `(5,7,1)` and `(5,6,1)`; it is not uniformly `(5,7,1)`. The historical log prints only group0. `elf_hash_table.json` preserves all decoded entries, and the handover now explains the scope of that print. Both matched arms use the same full ELF table. The original runtime-search/full-table equivalence is not newly established by this single-group log.
+
+At the final check, both matched OFF/ON builds had entered simulation: ON at cycle49000 with its first benchmark window, OFF at cycle31000 in initialization; neither had a fatal. Full application and physical PPA results remain pending. The reviewed RTL/statistics files still match the tested final-v2 hashes; this turn changes documentation and private validation artifacts only.
+
+## 2026-09-16 20:57 CEST — original ELF pool-OFF reproduction launched
+
+**Purpose:** test the user's hypothesis that the precomputed ELF's shorter startup changed benchmark contention and avoided the historical circular wait.
+
+**Implementation:** copied the exact requested `sim_dashboard/campaigns/gemm_qwen27b_opt/elfs/4x4/fp16/dec_ffnup_b032_fp16_4x4.elf` into `hardware/build_pool_review_20260916_194314/old_elf_off/workload.elf`; SHA256 `d3911a9139891d6189d17623dc520955b36e97277b8c30721b3dee3d6f64a08d`. Reused the frozen final-v2 `full_off/mempool_simvopt` with `GROUP_MSHR_OVERFLOW_NUM=0`, changing only the private preload path. Exact command: `/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC/hardware/build_pool_review_20260916_194314/full_off/mempool_simvopt +PRELOAD=/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC/hardware/build_pool_review_20260916_194314/old_elf_off/workload.elf -l transcript`, run from the `old_elf_off` directory. No compilation or shared-ELF writes. Its manifest hashes the simulator, linked design/DPI libraries, compile script, RTL/stats and ELF. The detached run-only driver checks these hashes and at least 21 free VCS runtime seats before launching; launcher PID 811237, simulator PID 811242. Existing simulations continue unchanged. Matching `old_elf_on` inputs/runner are prepared but not launched, pending OFF reproduction. This uses the existing optimized image and its telemetry/tracers; no new waveform instrumentation is present.
+
+**Evidence/status:** the old campaign enables MSHRs at cycle 305350, versus 48691 for the precomputed ELF. That supports testing startup sensitivity, but does not establish the mechanism. Corrected the handover's unsupported "same ELF"/RTL-only attribution and recorded the controlled experiment in `docs/teranoc_architecture.md` §8.3. Old-ELF OFF has entered simulation; no benchmark result yet. The new-ELF OFF/ON and physical PPA runs remain separate, active experiments.
+
+### 2026-09-16 21:11 CEST — original ELF pool-ON launched in parallel
+
+**Purpose:** user explicitly requested starting the original-ELF ON arm alongside OFF now. **Implementation:** launched the prepared `hardware/build_pool_review_20260916_194314/old_elf_on/run.py`, using frozen `full_on/mempool_simvopt` with `GROUP_MSHR_OVERFLOW_NUM=1` and its private `old_elf_on/workload.elf`. The ON/OFF ELF copies are byte-identical (SHA256 `d3911a9139891d6189d17623dc520955b36e97277b8c30721b3dee3d6f64a08d`). Exact simulator command is recorded in `old_elf_on/sim_command.json`: the absolute `full_on/mempool_simvopt` path with `+PRELOAD=<absolute old_elf_on/workload.elf> -l transcript`, run from `old_elf_on`. Input and linked-library hash verification passed; admission saw 78 free VCS runtime seats before launch, preserving the 20-seat reserve. Launcher PID 1123177; simulator PID 1123180. No running script, RTL or shared ELF changed.
+
+**Result/status:** verified the simulator's PID/cwd/command and log confirmation that it loaded the private original ELF. No startup fatal/error reported; original-ELF OFF remains running. Updated the handover and architecture experiment status to reflect parallel execution. Benchmark results remain pending.
+
+### 2026-09-17 01:25 CEST — completed precomputed-ELF dashboards generated
+
+**Purpose:** user requested simulation status and dashboards for finished runs. **Implementation:** invoked the maintained `sim_dashboard/generate.py` separately for `hardware/build_pool_review_20260916_194314/full_{on,off}/run.out`, with `--mesh 4x4 --shape 32x64x17408 --precision fp16 --peaks roofline/peaks/terapool_spatz4_fpu.json --complete`. Outputs are `sim_dashboard/output/overflow_pool_review_20260916/full_on_dashboard.html` and `full_off_dashboard.html`. Both generators exited zero and packaged 22584 records into nine detail blocks; HTML outputs exist and retain the generator's correctness-unknown assessment. No running simulation or script changed.
+
+**Result/status:** new-ELF ON/OFF simulations completed with exit zero and no fatal: ON 23482 benchmark cycles / 24066 UART cycles / 77.99% final FPU utilization; OFF 23556 / 24140 / 77.67%. Printed spot checks match, but this is not full numerical validation. Original-ELF OFF is still running at latest logged cycle 412000 with 248 timeout events summed from benchmark windows and latest FPU utilization 0%; original-ELF ON is still running at 326162 with zero logged benchmark timeout events. Both original run PIDs/cwds were independently verified; their final comparisons remain pending.
+
+### 2026-09-17 01:45 CEST — dashboard overview continuity and capture coverage
+
+**Purpose:** address user-reported broken overview lines and empty/unconfigured panels. **Implementation:** fixed `sim_dashboard/assets/full_timeline.js` so a point belonging only to another counter family no longer resets the current metric path. Connections still require overlapping/contiguous measured intervals and the same phase. Added full-run record counts to packaged metadata and a visible capture-coverage explanation for missing entry/bank/link/work telemetry and missing hash-model manifest. Regenerated both completed precomputed-ELF dashboards at their existing paths. No RTL, simulator, or running script changed.
+
+**Evidence/status:** actual logs contain stage/FPU/pressure/MSHR/overall/endpoint traffic records; they omit individual entry, per-bank, directional-link and FMAC-work records. Hash analysis lacks a verified workload/address-layout manifest; group-0 settings alone are insufficient. Browser checks on both HTMLs pass with no page errors and path segment counts matching actual measured coverage; FPU now has three phase segments and traffic one segment. MSHR logs have a real one-cycle gap between consecutive 2000-cycle windows (e.g. 0–2000, 2001–4001), so their gaps remain visible rather than inventing measurements. Eleven timeline/unified-CLI tests pass. Browser screenshots/audits are in `hardware/build_pool_review_20260916_194314/dashboard_render_review/`. Missing telemetry cannot be recovered from these logs; complete instrumentation requires a future private rebuild/run, not changes to current active runs.
+
+### 2026-09-17 02:05 CEST — MSHR reporting-seam visualization corrected
+
+**Purpose:** user reported occupancy still appeared discrete and asked why required dashboard data was absent. **Implementation:** confirmed the simulation-only occupancy logger resets `occ_win_cyc` on the report edge, producing 2000-cycle windows spaced by 2001 cycles. The overview MSHR path now joins gaps of at most one cycle visually, with an explicit caption; larger gaps and phase changes still break the path. Raw intervals, rates and counts remain unchanged. Regenerated both completed new-ELF dashboards.
+
+**Evidence/status:** browser verification confirms each dashboard has one continuous MSHR path across all 80 measured samples, with no page errors. Frozen testbench does not include `dashboard_probe.svh`; launch commands contain only PRELOAD/log options. These runs therefore have legacy transcript counters but no opt-in structured JSONL entry/bank/link/work capture. This was a validation setup omission, not missing counters recoverable by the HTML generator. Future complete dashboards need the private instrumented testbench plus dashboard_file/entries/banks/links launch options and a verified workload manifest. No running image or RTL changed.
+
+### 2026-09-17 02:42 CEST — final overflow audit and dashboard-probe requirement
+
+**Purpose:** user requested recording dashboard probes for future runs and a final RTL-PPA audit before staging for review. Added the concrete probe/JSONL/detail-capture requirement to AGENTS.md. The skill calls for delegated systematic enumeration; independent read-only request/PPA and lifecycle/clock-gate audits complement root source inspection. All four frozen full-system arms have completed: original ELF ON 23217 benchmark cycles, OFF 223675 (9.63x); 0 versus 290 benchmark timeout events, all OFF timeouts in group2. Every printed SPOT line matches across all four arms. Frozen hashes and results are recorded in completed_application_results.json. Generated the two completed original-ELF dashboards using existing legacy logs; they retain the missing-capture explanation.
+
+**Audit finding/change:** with CacheAmoInval enabled, a cached merge accepted before an AMO can apply during invalidation. Skipping retirement preserves its subscriber but previously left cacheable set, allowing the stale word to be cached again after the AMO. Added a narrow cached+inflight-merge case clearing cacheable in both pool and existing banked twins; idle cached entries still retire. This entire pass is disabled in the shipping CacheAmoInval=0 configuration and does not add a shipping critical-path cone. Snapshot final_v3_amo_source.sv. Focused reproducer and validation pending; no new pass or physical improvement claimed. Existing backend scripts/inputs remain frozen and unchanged.
+
+Final RTL audit: derive pool merge stage validity from the candidate reduction; retain accepted winner gating for allocations. Optional store/AMO coherence now recognizes a held response even when a staged merge starts draining it, and cached AMO merges clear cacheable while preserving accepted subscribers. Frozen final_v5_source.sv queued for focused validation; physical PPA remains pending.
+
+Optional coherence audit extends no-recache to already-draining/capturing responses: AMO persistently clears resident cacheable, accepted matching scalar stores clear draining cacheable without resetting pending beats. Frozen final_v6 created for targeted tests.
+
+Final-v6 validation complete: K0/1/2 handshake 10/10 pass with exact final-v2 TRACE/PASS identity; expanded response/coherence/stats 24/24 pass, six v5 negative controls fail as intended. Live/frozen RTL SHA c6e9eed8a8ac15534472fd91fc491dd2acd90268198b4fd5befb0e9d58745f2a. Focused RTL/config/stats/probe/test/review files staged for user review, no commit. Future full-system runs require dashboard probes (AGENTS.md). Matched backend pair still running; final-v6 endpoint arm queued behind it with validation/resource gates.
+
+User-authorized commit f127f114 (mempool_group_mshr: harden and optimize overflow pool): committed only the 13 staged files after staged/tested hash checks and confirming pool-disabled PASS. Physical PPA pending; unrelated working-tree changes preserved.
+
 ## 2026-09-17 04:05 — group MSHR overflow pool: pick off the payload enable and the banked clear
 
 **Purpose.** Keep the overflow pool out of two cones it widened: the staged allocation payload's
@@ -17456,3 +18131,148 @@ reference workload behind the 6993/6776/7089 figures). This gate used a private 
 
 **Status.** Committed. The `f127f114` reg->reg regression is separately confirmed by `bisB0` and is
 NOT from this change or from `e41ce910`.
+
+## 2026-09-22 01:40 — group MSHR: disaggregate into 8 four-tile slices (GROUP_MSHR_SPLIT)
+
+**Purpose.** The single 32-lane group MSHR sits at the group centre with 32 tile ports in and 32
+router lanes out, on top of the crossbars already there; the 500 MHz placement put 81 % of the
+violating endpoints in it. Split it into eight slices of 4 tiles so each is small, edge-placeable
+and 8-in/4-out. Sharing pattern (user): sp-fmatmul's B-sharers are contiguous tiles (rows
+`4k..4k+3`) and A-sharers strided (columns `k, k+4, k+8, k+12`), so a row slice R_k and a column
+slice C_k cover both at full degree for the 4/4 split and at min(share,4) otherwise. Decisions:
+steer by request CLASS only (single vs burst; CSR picks which family serves singles), banked slices
+(8 entries / 2 banks + 1 overflow each = 64+8 per group, as before), no emulation step.
+
+**Implementation.** `mempool_pkg.sv`: `MshrSplit` (macro `GROUP_MSHR_SPLIT`), tag =
+`{slice[2:0], local}` (7 b, unchanged width), steering functions (`mshr_bypass_slice` =
+`t[0]^t[2]` picks row/column so every slice carries bypass for exactly 2 of its 4 tiles -- 4 bypass
+sources against 4 NoC lanes, full rate), `mshr_noc_lane(m,k) = {m[2],k,m[1:0]}` so the existing
+`floo_remapper` Interleaved groups `{i,i+4,i+8,i+12}` become (R_k, C_k) x port with no remapper
+change; new `src_tile_id` on `tcdm_master_req_t` and `tile_id` on `tcdm_master_resp_t` (a NoC lane
+no longer identifies a tile); CSR 12 `steer_single_row`. `mempool_group_mshr.sv`: new
+`NumAddrTiles` separates address geometry (16) from lane tiles (4) -- `TileIdBits` was the only
+conflation. New `mempool_group_mshr_slice.sv`: the unmodified core over 4 lane-tiles plus an 8->4
+request fold (RR per port between local tiles {2k,2k+1}; stamps src tile and slice id) and a 4->8
+response steer (1:2 demux on the low local bit; strips the slice id). `mempool_group.sv`: 32
+class-steer demuxes (store/AMO/disabled class -> bypass slice), 32 per-tile-port response RR
+arbiters, 8 slices, NoC-lane placement, `mshr_busy` = OR. `mempool_group_floonoc_wrapper.sv`:
+header `src_tile_id` from the struct, response crossbar select = `mshr_noc_lane(slice,
+local[1])` with slice = tag field or bypass slice of the source tile. Knobs `group_mshr_split`,
+`group_mshr_steer_single_row`; legacy path untouched at split=0.
+
+**Result.** Elaborates on Questa and VCS (terapool_spatz4_fpu, split=1, num=8, overflow=1; one
+fix needed: the 1-bit `bank_burst_bits` hash arm sliced a zero-width gap field at 2 banks).
+`sp-mshr-burst-test` on the split VCS image: **EOC retval 0 = all 9 phases PASS** (the verdict IS
+the retval; the printf line is compiled out by default -- README is stale). Zero
+`resp_lane_matches_tile` / `resp_slice_matches_tag` assertion hits. Two transcript artefacts
+worth knowing: (1) `[BYP ORPHAN]` floods in g=0 -- pre-existing probe defect, it counts only
+single-beat forwards but checks every bypassed beat, so a bypassed burst always "orphans"
+(build_2/3/4 legacy runs carry 92k-2.7M of them); (2) `[CMS]` reports ~224 STILL_INFLIGHT +
+orphan/dup_alloc per group-0 tile on port 1 despite the pass -- group-0 P1 bases are intra-group
+(the memo says intra-group bursts return by initiator index, retagged at the tile), legacy
+control arm running to confirm it is test-specific. The first cut routed tagless (bypass)
+responses to the tile's bypass slice; replaced by stamping the slice id on EVERY request so a
+response always returns to the slice that forwarded it (keeps the bypass probe exact, drops the
+tile-parity dependence from the wrapper). TB: five probe files bind to `gen_group_mshr.i_group_mshr`
+by name and now carry split/legacy generate branches (`docs/mshr_split_design.md` 9).
+Fleet: `split1` (burst_test PASS, gemm 512x128x128 running) and `legacy1` controls (same HEAD).
+
+**GEMM result (fleet, VCS, same HEAD, 512x128x128 fp32 prefill, share 4/4):** legacy **12,374**
+benchmark cycles / 75.35 % util; split **11,199** / 79.70 % -- **-9.5 % cycles** (kernel counter
+12,775 -> 11,599, -9.2 %; `[SPOT]` words identical), retval 0 both,
+0 mshr_timeout / bank-full bypass / RH-stuck on both, 0 slice assertion hits. First split arm ran
+>400k cycles at 0.1 % util: the class->family orientation was derived from the DECODE split
+(row = B-sharers) but PREFILL is the opposite (`main.c:530-535`, p-slice fastest -> A-sharers
+contiguous). Fixed in software: `steer_single_row` = 1 for prefill / 0 for decode
+(`MSHR_D_STEER_SINGLE_ROW`, `mshr_cfg_derive`). Silent and ~30x -- documented in
+`docs/mshr_split_design.md` 2.
+
+**Tooling (same day, user asked):** runtime hash search (`gemm_hash.h`) and the shared
+`hash_explore` model / `mshr_bank_hash_explore.py --mshr-split` now score each class on the
+4-core slice that owns it over the slice's 2 banks (compile-time defaults 7/4 already reach both
+banks 4/4 within a cohort); dashboard reader folds the 8 per-slice `[MSHRU]` lines per group
+(was `Duplicate record`), `generate.py` verified on both transcripts; `wave.tcl` /
+`add_group_mshr.tcl` dispatch legacy vs 8 labelled slice cores (R0-3/C0-3). Legacy SW `.text`
+unchanged. Details `docs/mshr_split_design.md` 9a.
+
+**qwen-gate-up (user asked; B=16 K=160 P=16384 KT=16, decode split, W share 2 / X share 8):**
+steering follows the split automatically (same `MATMUL_DECODE_SPLIT` / `MSHR_CFG_DERIVED_INIT`
+path); its host-side `script/gen_hash.c` now scores one slice's 4 cores (`gemm_hash.h` made
+self-sufficient without `mshr_cfg.h`), giving `QWEN_HASH_BANKS 2`, `{4,4,0}`. Fleet VCS, same
+HEAD: legacy **80,559** cycles vs split **81,467** (+1.1 %) -- X is shared by 8 cores, so a 4-tile
+slice merges it 4:1 instead of 8:1; W (share 2) is unaffected. Both `mshr_timeout=0`, split 0
+slice-assertion hits. Note the `[MSHR] ... shift=7/6/1` line prints core 0's local cfg, not the
+helper core's CSR write (pre-existing; the CSR got the host values). Build command = the usual one
+plus `group_mshr_split=1 group_mshr_num=8 group_mshr_overflow_num=1`.
+
+**Config (user asked):** `terapool_spatz4_fpu.mk` now ships `group_mshr_split ?= 1` with the two
+per-instance knob sets under one `ifeq` (split: num 8 / ways 4 / overflow 1 per slice; legacy: 64 /
+4 / 8). Software reads the same variables via runtime.mk, verified: plain
+`make <app> config=terapool_spatz4_fpu` -> `MSHR_CFG_SPLIT=1 MSHR_CFG_ENTRIES=8`; `_8x8` flavour
+inherits; `mempool_spatz4_fpu` stays 0/16. `wave.tcl` gained a `MSHR_G<g>_Steer` group (CSR bit,
+per-tile is_burst/to_col, slice handshakes).
+
+**Fix while answering a question about the knob (same day):** `group_mshr_steer_single_row` was
+INERT on both sides -- `mempool_group.sv` never passed `.DefSteerSingleRow` to the CSR file (so the
+reset stayed 0 whatever the knob said), and the SW `-DMSHR_CFG_STEER_SINGLE_ROW` had no consumer
+since the init macro takes the derived `MSHR_D_STEER_SINGLE_ROW`. Wired the parameter, deleted the
+dead SW define. No measurement is affected: every run programs CSR 12 explicitly via
+`mshr_cfg_apply_group`, which is the path the -9.5 % and the qwen numbers went through.
+
+**`[BYP ORPHAN]` silenced when the MSHR is off (user asked).** `gen_bypass_probe`'s accounting is
+now gated on `cfg_mshr_enable`; arming the MSHR clears the tracking table. Verified on the rebuilt
+VCS split image with the same ELF: **2,771 -> 0** orphan lines, retval 0, end time identical
+(38,554 ns). Remaining source (bypassed bursts while ENABLED) documented, not fixed.
+
+**Finding while verifying it: `sp-mshr-burst-test` never enables the MSHR.** It contains zero
+`mshr_cfg_*` calls, and at the shipped `group_mshr_cfg_runtime=1` the CSR `enable` resets to 0
+("DEFAULT BYPASSED", mempool_group_mshr_cfg.sv:216), so the directed MSHR regression has been
+running fully bypassed -- which is why `[MSHRU] valid_max=0` and why the probe logged an orphan per
+bypassed burst beat. `[BYP] fwd=0` for the whole run is the proof. So that test validates the
+split's steering / lane fold / response demux / arbiters / tag routing, NOT merging; merging is
+covered by the GEMM (-9.5 %) and qwen arms, which do program the CSRs. Same for
+`vector-burst-test`. Not changed -- flagged for the user.
+
+**Status.** Done and validated; split is the shipped default. Next: OOC synthesis of one slice
+(doc 10 has the elaborate line).
+
+## 2026-09-22 22:30 — split MSHR: one-bit per-slice bank select; qwen hash cap derived from banks
+
+**Purpose.** User saw in the waveform that qwen K=5120 (`..._b16_k5120_p16384_kt160`) used only 1
+of the 2 banks of the column (scalar) slices, and asked for a simpler hash for the split design.
+
+**Root cause (SW).** `qwen-gate-up/script/gen_hash.c` hard-coded `QWEN_HASH_SHIFT_MAX 8` -- correct
+for 16 banks (4 index bits must sit below word bit 12), wrong for 2 banks. At K=5120 fp16 a core's 8
+concurrent X rows are 2560 words (0xA00) apart and differ only in address bits 9 and 11, so every
+allowed shift (4..8) put all 8 in one bank; the chooser returned 4. Cap now derived:
+`min(log2(MESH_SWEEP/4) - log2(banks), 10)` -> 10 split / 8 legacy (legacy output identical). K=5120
+now gets `{9,4,0}` in all 16 groups; K=160 keeps 4 (80-word stride, bit 4 is right there).
+
+**RTL simplification (user's proposal, refined).** One bank bit, yes -- but NOT a fixed bit: the
+right bit is the lowest set bit of the concurrent-address stride, shape-dependent (bit 4 at K=160,
+bit 9 at K=5120). What the split does remove is the per-request CLASS dependence: a slice allocates
+only one class (steer demux), so `mempool_group_mshr` (`SliceFamily` param from the slice) decodes
+one shift per slice from the CSRs into a 7-bit one-hot over [4,10] (`bank_burst_bits` folds to
+shift 4), and each lane's bank is a 7-input AND-OR on its word address. Gone from the lane path: the
+second-class hash, the burst-bits arm, the `req_is_single` mux on the bank and on its one-hot.
+All requests of a slice bank with the slice class, so draining/store-hit lookups search where the
+slice's entry actually lives. New assertions `slice_class_only`, `req_bank_split_equiv` (vs the
+general hash for the slice class), `slice_shift_in_range`. Only for 2-bank slices with hash mode 3.
+
+**Telemetry.** `[MSHRU]` gains a trailing `bank_avg_x100=` (per-bank occupancy x100 per window) so
+a one-bank hash is visible in any transcript.
+
+**Result (fleet VCS, batch `hash1`).**
+- qwen K=5120 **before** (user ELF, single shift 4): group-0 column slices `bank_avg_x100=400,0`
+  (bank 0 pinned at 4/4 ways, bank 1 never used), the rest idle; **1.13 % cumulative FPU util over
+  114k benchmark cycles**, 1,609 hold timeouts, 52 `RH STUCK` -- the cohort-holds-every-way
+  livelock, not a slowdown.
+- qwen K=5120 **after** (shift 9): every active slice uses both banks (`195,206`, `215,286`, ...);
+  **~99 % steady-state util, 89 % cumulative at 60k**.
+- Regression on the new RTL, both **identical** to pre-change: GEMM 512x128x128 11,199 benchmark
+  cycles / 9,139,776 busy lane-cycles / same SPOT words / EOC 417,190 ns; qwen K=160 81,467
+  (gate 40,755 / up 40,692). Zero assertion hits (`slice_class_only`, `req_bank_split_equiv`,
+  `slice_shift_in_range`).
+
+**Status.** Done. The two K=5120 arms are still running (before: livelocked; after: ~2.5 M cycles
+to completion).

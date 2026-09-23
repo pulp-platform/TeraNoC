@@ -57,6 +57,7 @@ sources:
   - hardware/src/mempool_group_mshr_free_way.sv
   - hardware/src/mempool_group_mshr_req_decode.sv
   - hardware/src/mempool_group_mshr.sv
+  - hardware/src/mempool_group_mshr_slice.sv
   - hardware/src/mempool_group_barrier.sv
   - hardware/src/mempool_group.sv
   - hardware/generated/floo_terapool_noc_pkg.sv

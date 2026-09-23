@@ -86,25 +86,23 @@ generate
           .gen_groups_x[gx].gen_groups_y[gy].gen_rtl_group.i_group
           .i_mempool_group.gen_tiles[t].i_tile.tcdm_master_req_ready_i[p+1];
 
-        // REQ_MSHR_IN (tile -> mshr)
+        // REQ_MSHR_IN (tile -> mshr). Tapped at the GROUP wires, which are the MSHR's own port
+        // nets in the legacy build and the steer-demux inputs in the split build (index = tile).
         assign bp_v[BP_REQ_MSHR_IN][g][t][p] = dut.i_mempool_cluster
           .gen_groups_x[gx].gen_groups_y[gy].gen_rtl_group.i_group
-          .i_mempool_group.gen_group_mshr.i_group_mshr
-          .group_mshr_req_valid_i[t][p+1];
+          .i_mempool_group.tcdm_master_req_valid[p+1][t];
         assign bp_r[BP_REQ_MSHR_IN][g][t][p] = dut.i_mempool_cluster
           .gen_groups_x[gx].gen_groups_y[gy].gen_rtl_group.i_group
-          .i_mempool_group.gen_group_mshr.i_group_mshr
-          .group_mshr_req_ready_o[t][p+1];
+          .i_mempool_group.tcdm_master_req_ready[p+1][t];
 
-        // REQ_MSHR_OUT (mshr -> noc)
+        // REQ_MSHR_OUT (mshr -> noc). Split build: index t is the NoC LANE (mshr_noc_lane), not
+        // the tile.
         assign bp_v[BP_REQ_MSHR_OUT][g][t][p] = dut.i_mempool_cluster
           .gen_groups_x[gx].gen_groups_y[gy].gen_rtl_group.i_group
-          .i_mempool_group.gen_group_mshr.i_group_mshr
-          .mshr_noc_req_valid_o[t][p+1];
+          .i_mempool_group.tcdm_master_req_valid_o[t][p+1];
         assign bp_r[BP_REQ_MSHR_OUT][g][t][p] = dut.i_mempool_cluster
           .gen_groups_x[gx].gen_groups_y[gy].gen_rtl_group.i_group
-          .i_mempool_group.gen_group_mshr.i_group_mshr
-          .mshr_noc_req_ready_i[t][p+1];
+          .i_mempool_group.tcdm_master_req_ready_i[t][p+1];
 
         // REQ_SLAVE_IN (remote req arriving at destination tile)
         assign bp_v[BP_REQ_SLAVE_IN][g][t][p] = dut.i_mempool_cluster
@@ -125,25 +123,21 @@ generate
           .gen_groups_x[gx].gen_groups_y[gy].gen_rtl_group.i_group
           .i_mempool_group.gen_tiles[t].i_tile.tcdm_slave_resp_ready_i[p+1];
 
-        // RESP_MSHR_IN (noc -> mshr)
+        // RESP_MSHR_IN (noc -> mshr). Group wires; split build: index t is the NoC lane.
         assign bp_v[BP_RESP_MSHR_IN][g][t][p] = dut.i_mempool_cluster
           .gen_groups_x[gx].gen_groups_y[gy].gen_rtl_group.i_group
-          .i_mempool_group.gen_group_mshr.i_group_mshr
-          .mshr_noc_resp_valid_i[t][p+1];
+          .i_mempool_group.tcdm_master_resp_valid_i[t][p+1];
         assign bp_r[BP_RESP_MSHR_IN][g][t][p] = dut.i_mempool_cluster
           .gen_groups_x[gx].gen_groups_y[gy].gen_rtl_group.i_group
-          .i_mempool_group.gen_group_mshr.i_group_mshr
-          .mshr_noc_resp_ready_o[t][p+1];
+          .i_mempool_group.tcdm_master_resp_ready_o[t][p+1];
 
-        // RESP_MSHR_OUT (mshr -> tile)
+        // RESP_MSHR_OUT (mshr -> tile). Group wires; split build: after the row/column arbiter.
         assign bp_v[BP_RESP_MSHR_OUT][g][t][p] = dut.i_mempool_cluster
           .gen_groups_x[gx].gen_groups_y[gy].gen_rtl_group.i_group
-          .i_mempool_group.gen_group_mshr.i_group_mshr
-          .group_mshr_resp_valid_o[t][p+1];
+          .i_mempool_group.tcdm_master_resp_valid[p+1][t];
         assign bp_r[BP_RESP_MSHR_OUT][g][t][p] = dut.i_mempool_cluster
           .gen_groups_x[gx].gen_groups_y[gy].gen_rtl_group.i_group
-          .i_mempool_group.gen_group_mshr.i_group_mshr
-          .group_mshr_resp_ready_i[t][p+1];
+          .i_mempool_group.tcdm_master_resp_ready[p+1][t];
 
         // RESP_TILE_BACK (resp delivered back to source tile's core)
         assign bp_v[BP_RESP_TILE_BACK][g][t][p] = dut.i_mempool_cluster

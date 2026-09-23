@@ -19,12 +19,9 @@ if {[catch {set NumY [examine -radix dec mempool_pkg::NumY]}]} {
 }
 if {[catch {expr {$NumX + 0}}] || [catch {expr {$NumY + 0}}]} { set NumX 1; set NumY 1 }
 
-proc add_group_mshr_wave {g NumX NumY} {
-    set gx [expr {$g / $NumX}]
-    set gy [expr {$g % $NumY}]
-    set m "sim:/mempool_tb/dut/i_mempool_cluster/gen_groups_x\[${gx}\]/gen_groups_y\[${gy}\]/gen_rtl_group/i_group/i_mempool_group/gen_group_mshr/i_group_mshr"
-    if {[catch {examine ${m}/mshr_q_valid}]} { return 0 }
-    set L "MSHR_G${g}_X${gx}Y${gy}"
+# One MSHR core's signals under wave group L, from hierarchical path m. Shared by the legacy
+# single group MSHR and by each slice of the split MSHR (mempool_group_mshr_slice.sv).
+proc add_mshr_core_wave {m L} {
 
     # Occupancy / utilization: mshr_q_valid counts response-cache ways too, so use
     # mshr_inuse_* for real MSHR utilization. mshr_held_* is the subset whose fetch is
@@ -105,6 +102,59 @@ proc add_group_mshr_wave {g NumX NumY} {
     catch {add wave -noupdate -group $L -group Classify ${m}/resp_sel_mshr_id}
     catch {add wave -noupdate -group $L -group Classify ${m}/resp_sel_subreq_idx}
     return 1
+}
+
+# Per group: the legacy instance (gen_group_mshr/i_group_mshr), or -- with group_mshr_split=1 --
+# the eight slice cores gen_group_mshr_split/gen_slice[m]/i_slice/i_core, labelled R0..R3 (row
+# slices, tiles 4k..4k+3) and C0..C3 (column slices, tiles k,k+4,k+8,k+12), plus each slice's
+# 4-lane NoC face (the request fold / response steer) under Slice.
+proc add_group_mshr_wave {g NumX NumY} {
+    set gx [expr {$g / $NumX}]
+    set gy [expr {$g % $NumY}]
+    set grp "sim:/mempool_tb/dut/i_mempool_cluster/gen_groups_x\[${gx}\]/gen_groups_y\[${gy}\]/gen_rtl_group/i_group/i_mempool_group"
+    set legacy "${grp}/gen_group_mshr/i_group_mshr"
+    if {![catch {examine ${legacy}/mshr_q_valid}]} {
+        add_mshr_core_wave $legacy "MSHR_G${g}_X${gx}Y${gy}"
+        return
+    }
+    # Group-level split logic: the class steer per tile port (to_col = 1 -> column slice), the
+    # row/column response arbiters, and the CSR that decides which family serves singles.
+    set S "MSHR_G${g}_X${gx}Y${gy}_Steer"
+    catch {add wave -noupdate -group $S ${grp}/mshr_cfg.steer_single_row}
+    catch {add wave -noupdate -group $S ${grp}/mshr_cfg.enable}
+    catch {add wave -noupdate -group $S ${grp}/gen_group_mshr_split/sl_busy}
+    catch {add wave -noupdate -group $S ${grp}/gen_group_mshr_split/cfg_bypass_single}
+    catch {add wave -noupdate -group $S ${grp}/gen_group_mshr_split/cfg_bypass_burst}
+    catch {add wave -noupdate -group $S -group ToSlice ${grp}/gen_group_mshr_split/sl_req_valid}
+    catch {add wave -noupdate -group $S -group ToSlice ${grp}/gen_group_mshr_split/sl_req_ready}
+    catch {add wave -noupdate -group $S -group FromSlice ${grp}/gen_group_mshr_split/sl_resp_valid}
+    catch {add wave -noupdate -group $S -group FromSlice ${grp}/gen_group_mshr_split/sl_resp_ready}
+    catch {add wave -noupdate -group $S -group NoCFace ${grp}/gen_group_mshr_split/sl_noc_req_valid}
+    catch {add wave -noupdate -group $S -group NoCFace ${grp}/gen_group_mshr_split/sl_noc_resp_valid}
+    for {set t 0} {$t < 16} {incr t} {
+        set st "${grp}/gen_group_mshr_split/gen_steer_t\[${t}\]"
+        catch {add wave -noupdate -group $S -group Tile${t} ${st}/gen_steer_r\[1\]/is_burst}
+        catch {add wave -noupdate -group $S -group Tile${t} ${st}/gen_steer_r\[1\]/to_col}
+        catch {add wave -noupdate -group $S -group Tile${t} ${st}/gen_steer_r\[2\]/is_burst}
+        catch {add wave -noupdate -group $S -group Tile${t} ${st}/gen_steer_r\[2\]/to_col}
+    }
+    for {set m 0} {$m < 8} {incr m} {
+        set sl "${grp}/gen_group_mshr_split/gen_slice\[${m}\]/i_slice"
+        if {[catch {examine ${sl}/i_core/mshr_q_valid}]} { continue }
+        set fam [expr {$m < 4 ? "R" : "C"}]
+        set L "MSHR_G${g}_X${gx}Y${gy}_${fam}[expr {$m % 4}]"
+        add_mshr_core_wave "${sl}/i_core" $L
+        catch {add wave -noupdate -group $L -group Slice ${sl}/noc_req_valid_o}
+        catch {add wave -noupdate -group $L -group Slice ${sl}/noc_req_ready_i}
+        catch {add wave -noupdate -group $L -group Slice ${sl}/noc_req_o}
+        catch {add wave -noupdate -group $L -group Slice ${sl}/noc_resp_valid_i}
+        catch {add wave -noupdate -group $L -group Slice ${sl}/noc_resp_ready_o}
+        catch {add wave -noupdate -group $L -group Slice ${sl}/noc_resp_i}
+        catch {add wave -noupdate -group $L -group Slice ${sl}/tile_req_valid_i}
+        catch {add wave -noupdate -group $L -group Slice ${sl}/tile_req_ready_o}
+        catch {add wave -noupdate -group $L -group Slice ${sl}/tile_resp_valid_o}
+        catch {add wave -noupdate -group $L -group Slice ${sl}/tile_resp_ready_i}
+    }
 }
 
 # Optional first arg = a single group id; otherwise add all groups.

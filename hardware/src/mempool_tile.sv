@@ -1251,6 +1251,8 @@ module mempool_tile
       assign remote_req_interco_raw[idx].wdata.core_id = idx[idx_width(NumCoresPerTile*NumDataPortsPerCore)-1:0];
       // Tier-b: the tile does not set the MSHR tag; the group MSHR stamps it at allocation.
       assign remote_req_interco_raw[idx].mshr_tag = '0;
+      // Split MSHR: the slice's lane fold stamps the source tile; the tile leaves it 0.
+      assign remote_req_interco_raw[idx].src_tile_id = '0;
 
       // The wen of the req
       assign remote_req_interco_wen   [idx] = remote_req_interco[idx].wen;

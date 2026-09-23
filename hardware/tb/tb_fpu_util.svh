@@ -85,12 +85,34 @@
   generate
     for (genvar gx = 0; gx < NumX; gx++) begin : gen_fu_mshr_gx
       for (genvar gy = 0; gy < NumY; gy++) begin : gen_fu_mshr_gy
-        assign fu_mshr_timeout[NumY*gx+gy] =
-          dut.i_mempool_cluster.gen_groups_x[gx].gen_groups_y[gy]
-             .gen_rtl_group.i_group.i_mempool_group.gen_group_mshr.i_group_mshr.mshr_issue_timeout_cnt_dbg;
-        assign fu_bankfull_byp[NumY*gx+gy] =
-          dut.i_mempool_cluster.gen_groups_x[gx].gen_groups_y[gy]
-             .gen_rtl_group.i_group.i_mempool_group.gen_group_mshr.i_group_mshr.req_bankfull_bypass_cnt_dbg;
+        if (MshrSplit) begin : gen_split
+          // Disaggregated MSHR: the group figure is the sum over its eight slice cores.
+          logic [31:0] to_s [MshrNumSlices];
+          logic [31:0] bf_s [MshrNumSlices];
+          for (genvar m = 0; m < MshrNumSlices; m++) begin : gen_slice
+            assign to_s[m] = dut.i_mempool_cluster.gen_groups_x[gx].gen_groups_y[gy]
+               .gen_rtl_group.i_group.i_mempool_group.gen_group_mshr_split.gen_slice[m].i_slice.i_core
+               .mshr_issue_timeout_cnt_dbg;
+            assign bf_s[m] = dut.i_mempool_cluster.gen_groups_x[gx].gen_groups_y[gy]
+               .gen_rtl_group.i_group.i_mempool_group.gen_group_mshr_split.gen_slice[m].i_slice.i_core
+               .req_bankfull_bypass_cnt_dbg;
+          end
+          always_comb begin
+            fu_mshr_timeout[NumY*gx+gy] = '0;
+            fu_bankfull_byp[NumY*gx+gy] = '0;
+            for (int m = 0; m < MshrNumSlices; m++) begin
+              fu_mshr_timeout[NumY*gx+gy] += to_s[m];
+              fu_bankfull_byp[NumY*gx+gy] += bf_s[m];
+            end
+          end
+        end else begin : gen_legacy
+          assign fu_mshr_timeout[NumY*gx+gy] =
+            dut.i_mempool_cluster.gen_groups_x[gx].gen_groups_y[gy]
+               .gen_rtl_group.i_group.i_mempool_group.gen_group_mshr.i_group_mshr.mshr_issue_timeout_cnt_dbg;
+          assign fu_bankfull_byp[NumY*gx+gy] =
+            dut.i_mempool_cluster.gen_groups_x[gx].gen_groups_y[gy]
+               .gen_rtl_group.i_group.i_mempool_group.gen_group_mshr.i_group_mshr.req_bankfull_bypass_cnt_dbg;
+        end
       end
     end
   endgenerate
@@ -574,9 +596,17 @@
   generate
     for (genvar gx = 0; gx < NumX; gx++) begin : gen_fu_mshren_gx
       for (genvar gy = 0; gy < NumY; gy++) begin : gen_fu_mshren_gy
-        assign fu_mshr_en[NumY*gx+gy] =
-          dut.i_mempool_cluster.gen_groups_x[gx].gen_groups_y[gy]
-             .gen_rtl_group.i_group.i_mempool_group.gen_group_mshr.i_group_mshr.cfg_mshr_enable;
+        if (MshrSplit) begin : gen_split
+          // One CSR file feeds every slice, so slice 0 speaks for the group.
+          assign fu_mshr_en[NumY*gx+gy] =
+            dut.i_mempool_cluster.gen_groups_x[gx].gen_groups_y[gy]
+               .gen_rtl_group.i_group.i_mempool_group.gen_group_mshr_split.gen_slice[0].i_slice.i_core
+               .cfg_mshr_enable;
+        end else begin : gen_legacy
+          assign fu_mshr_en[NumY*gx+gy] =
+            dut.i_mempool_cluster.gen_groups_x[gx].gen_groups_y[gy]
+               .gen_rtl_group.i_group.i_mempool_group.gen_group_mshr.i_group_mshr.cfg_mshr_enable;
+        end
       end
     end
   endgenerate

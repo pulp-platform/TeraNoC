@@ -29,7 +29,23 @@
 #define MSHR_CSR_CACHE_REUSE_TARGET 9   // 0 = legacy: self-invalidate at hold_subs_*
 #define MSHR_CSR_CACHE_TIMEOUT     10   // 0 = legacy: cache phase re-arms from serve_timeout
 #define MSHR_CSR_BANKFULL_BP       11   // 0 = legacy: bank-full mergeable miss BYPASSES the MSHR
+#define MSHR_CSR_STEER_SINGLE_ROW  12   // split MSHR: 0 = singles -> column slice, bursts -> row
 #define MSHR_CSR_STATUS            15   // read: sticky errors; write: clear
+
+// Disaggregated group MSHR (hardware group_mshr_split=1): a group's MSHR is eight 4-tile slices,
+// so a class can merge among at most 4 tiles however large the group-wide sharing degree is.
+// MSHR_MERGE_CAP is the per-class ceiling every derived target below is clamped to; the hardware
+// still accepts up to MSHR_MERGE_REQS, but a target above 4 could never assemble and would wait
+// out every hold window (the 8x8 RH-livelock signature).
+#ifndef MSHR_CFG_SPLIT
+#define MSHR_CFG_SPLIT 0
+#endif
+#define MSHR_SPLIT_TILES 4u
+#if MSHR_CFG_SPLIT
+#define MSHR_MERGE_CAP ((int)MSHR_MERGE_REQS < (int)MSHR_SPLIT_TILES ? (int)MSHR_MERGE_REQS : (int)MSHR_SPLIT_TILES)
+#else
+#define MSHR_MERGE_CAP ((int)MSHR_MERGE_REQS)
+#endif
 
 // ---- CFG_STATUS sticky bits. Non-zero means the config in effect is NOT the one requested. -----
 #define MSHR_STATUS_BANK_BUSY    (1u << 0)  // bank-hash write refused: MSHR was not empty
@@ -71,6 +87,10 @@ typedef struct {
   /// subscribing, so a later member's fresh entry waits out serve_timeout for requesters that no
   /// longer exist. See WORKLOG 2026-08-21.
   uint32_t bankfull_backpressure;
+  /// Split MSHR class steering (CSR 12; ignored by an unsplit build). 0 = singles to the column
+  /// slice and bursts to the row slice -- the sp-fmatmul pattern (scalar A shared by strided
+  /// tiles, burst B by contiguous ones). 1 = swapped.
+  uint32_t steer_single_row;
 } mshr_cfg_t;
 
 /// The group this core belongs to.
@@ -138,6 +158,9 @@ static inline uint32_t mshr_cfg_apply_group(const mshr_cfg_t *c) {
   mshr_cfg_write(g, tile, MSHR_CSR_CACHE_REUSE_TARGET,c->cache_reuse_target);
   mshr_cfg_write(g, tile, MSHR_CSR_CACHE_TIMEOUT,     c->cache_timeout);
   mshr_cfg_write(g, tile, MSHR_CSR_BANKFULL_BP,      c->bankfull_backpressure);
+#if MSHR_CFG_SPLIT
+  mshr_cfg_write(g, tile, MSHR_CSR_STEER_SINGLE_ROW, c->steer_single_row);
+#endif
 
   mshr_cfg_write(g, tile, MSHR_CSR_ENABLE, 1);          // arm last
   __asm__ volatile("fence" ::: "memory");
@@ -283,9 +306,16 @@ static inline int mshr_cfg_derive(uint32_t M, uint32_t N, uint32_t P,
     if (sh_b < burst_floor)    sh_b = burst_floor;
     if (sh_b > MSHR_SHIFT_MAX) sh_b = MSHR_SHIFT_MAX;
 
+  // Split MSHR class steering follows the SPLIT, not the shape. Prefill puts the p-slice
+  // (burst B) fastest in core_gid, so contiguous tiles share A (scalar singles) and strided
+  // tiles share B: singles -> ROW slice. Decode puts the row chunk fastest, so it is the other
+  // way round: singles -> COLUMN. Getting this wrong does not error -- every single load lands
+  // in a slice with no partner and waits out the hold window (measured: 512x128x128 prefill
+  // ran >400k benchmark cycles at 0.1% util against 12.4k legacy).
+  c->steer_single_row = decode ? 0u : 1u;
 #ifdef MSHR_MERGE_REQS
-  c->hold_subs_single = subs_a < MSHR_MERGE_REQS ? subs_a : MSHR_MERGE_REQS;
-  c->hold_subs_burst = subs_b < MSHR_MERGE_REQS ? subs_b : MSHR_MERGE_REQS;
+  c->hold_subs_single = subs_a < (uint32_t)MSHR_MERGE_CAP ? subs_a : (uint32_t)MSHR_MERGE_CAP;
+  c->hold_subs_burst = subs_b < (uint32_t)MSHR_MERGE_CAP ? subs_b : (uint32_t)MSHR_MERGE_CAP;
 #else
   c->hold_subs_single = subs_a;
   c->hold_subs_burst = subs_b;
@@ -361,6 +391,7 @@ static inline int mshr_cfg_derive(uint32_t M, uint32_t N, uint32_t P,
 # define MSHR_D_ACTIVE_CORES NUM_CORES
 #endif
 #if defined(MATMUL_DECODE_SPLIT) && (MATMUL_DECODE_SPLIT)
+#  define MSHR_D_STEER_SINGLE_ROW 0   /* decode: singles -> column slice */
 #  define MSHR_D_CPG_   ((int)NUM_CORES / (int)NUM_GROUPS)
 #  define MSHR_D_NROW   ((int)GEMM_M / (int)MSHR_KERNEL_SIZE)          /* row chunks */
 #  define MSHR_D_NPB    (MSHR_D_ACTIVE_CORES / MSHR_D_NROW)                 /* p blocks, machine-wide */
@@ -370,6 +401,7 @@ static inline int mshr_cfg_derive(uint32_t M, uint32_t N, uint32_t P,
 #  define MSHR_D_SHR_A  (MSHR_D_CPG_ / MSHR_D_SHR_B)
 #  define MSHR_D_PGAP   MSHR_D_NPB
 #else
+#  define MSHR_D_STEER_SINGLE_ROW 1   /* prefill: singles -> row slice */
 #  define MSHR_D_CPG_   ((int)NUM_CORES / (int)NUM_GROUPS)
 #  define MSHR_D_ROWS   (((int)GEMM_M / MSHR_D_ACTIVE_GROUPS) / (int)MSHR_KERNEL_SIZE)
 #  define MSHR_D_SHR_B  ((MSHR_D_ROWS < MSHR_D_CPG_) ? MSHR_D_ROWS : MSHR_D_CPG_)
@@ -408,12 +440,14 @@ enum {
   // mshr_cfg_check_splits(), which compares this derivation against the split the kernel actually
   // creates. The clamp guarantees hardware gets a legal value; the runtime check guarantees it is
   // the RIGHT legal value. Neither substitutes for the other.
+  // MSHR_MERGE_CAP, not MSHR_MERGE_REQS: on a split build a slice holds 4 tiles, so a class
+  // target above 4 is unreachable even though the CSR range check would accept it.
   MSHR_D_HOLD_SUBS_SINGLE = (MSHR_D_HOLD_SUBS_SINGLE_RAW < 1) ? 1
-                          : ((MSHR_D_HOLD_SUBS_SINGLE_RAW > (int)MSHR_MERGE_REQS)
-                               ? (int)MSHR_MERGE_REQS : MSHR_D_HOLD_SUBS_SINGLE_RAW),
+                          : ((MSHR_D_HOLD_SUBS_SINGLE_RAW > MSHR_MERGE_CAP)
+                               ? MSHR_MERGE_CAP : MSHR_D_HOLD_SUBS_SINGLE_RAW),
   MSHR_D_HOLD_SUBS_BURST  = (MSHR_D_HOLD_SUBS_BURST_RAW < 1) ? 1
-                          : ((MSHR_D_HOLD_SUBS_BURST_RAW > (int)MSHR_MERGE_REQS)
-                               ? (int)MSHR_MERGE_REQS : MSHR_D_HOLD_SUBS_BURST_RAW),
+                          : ((MSHR_D_HOLD_SUBS_BURST_RAW > MSHR_MERGE_CAP)
+                               ? MSHR_MERGE_CAP : MSHR_D_HOLD_SUBS_BURST_RAW),
 
   // HOLD WINDOWS are a hybrid: the SHAPE decides whether a class may be held at all, the macro
   // supplies how long. A share degree below 2 means no second requester for that class can ever
@@ -572,6 +606,9 @@ static inline int mshr_cfg_check_splits(uint32_t share_w, uint32_t share_a, uint
                             : MSHR_D_CACHE_REUSE_TARGET,       \
     .cache_timeout      = (GEMM_ELEM_BYTES == 2)         \
                             ? MSHR_CFG_CACHE_TIMEOUT : 0,      \
+    /* Split MSHR: singles -> row slice for the PREFILL split (A-sharers are contiguous tiles),
+       -> column slice for DECODE (row chunk varies fastest). See mshr_cfg_derive. */ \
+    .steer_single_row   = MSHR_D_STEER_SINGLE_ROW,       \
     /* Bank-full backpressure. Taken straight from the build knob rather than derived: it is a
        policy bit, not a shape-dependent magnitude, and it is the direct counterpart to the
        reuse target -- a resident-longer cache is exactly what makes banks sit full, so an arm

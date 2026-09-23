@@ -229,6 +229,12 @@ Cores/tile = 1 (Spatz flavors) means one Snitch+Spatz core complex per tile; the
 - `noc_port_hash` (bitmask): bit0=req-port hash, bit1=resp temporal round-robin, bit2=resp spatial round-robin. `7`=all on.
 - `noc_router_remap_group_size`, `tile_id_remap`, `noc_router_{input,output}_fifo_dep` (raise fifo depth first when router backpressure stalls appear).
 - **`group_mshr_*`** (the actively-developed `mempool_group_mshr.sv` burst-merger): `group_mshr_num` (peak outstanding bursts — too small → sim deadlock), `group_mshr_merge_reqs`, `group_mshr_enable_single`, `group_mshr_enable_stats`, `group_mshr_stats_period`, `group_merge_profiling`.
+  **`group_mshr_split`** (terapool default **1**) replaces the one 32-lane MSHR with eight 4-tile slices
+  (`mempool_group_mshr_slice.sv`, `docs/mshr_split_design.md`); with it `group_mshr_num` /
+  `group_mshr_overflow_num` are **per slice** (`8` / `1` = the legacy 64+8); the config's `ifeq`
+  block selects the right set for HW and SW together, so pass `group_mshr_split=0` (and nothing
+  else) to get the legacy MSHR — on BOTH the RTL and the app make line. Five TB probe files bind
+  to the MSHR by hierarchical path and carry a split/legacy generate branch each.
 
 ## Architecture
 

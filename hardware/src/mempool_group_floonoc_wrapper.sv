@@ -279,7 +279,7 @@ if (NocRouterRemapping == 1 || NocRouterRemapping == 3) begin: gen_req_remapping
           hdr: floo_tcdm_req_meta_t'{
             meta_id : tcdm_master_req[i][j+(1)].wdata.meta_id,                      // For Register File
             core_id : tcdm_master_req[i][j+(1)].wdata.core_id,                      // For Core
-            src_tile_id : i,                                                        // For Crossbar when response back
+            src_tile_id : MshrSplit ? tcdm_master_req[i][j+(1)].src_tile_id : tile_group_id_t'(i), // For Crossbar when response back (split MSHR: lane != tile)
             src_id: group_xy_id_t'({group_id_i, 1'b0}),                             // For NoC Router when response back
             dst_id: group_xy_id_t'({tcdm_master_req[i][j+(1)].tgt_group_id, 1'b0}), // For NoC Router when request send
             tgt_addr: tcdm_master_req[i][j+(1)].tgt_addr,                           // For Crossbar when request send (bank rows per Group)
@@ -304,7 +304,7 @@ if (NocRouterRemapping == 1 || NocRouterRemapping == 3) begin: gen_req_remapping
         hdr: floo_tcdm_req_meta_t'{
           meta_id : tcdm_master_req[i][j].wdata.meta_id,                      // For Register File
           core_id : tcdm_master_req[i][j].wdata.core_id,                      // For Core
-          src_tile_id : i,                                                    // For Crossbar when response back
+          src_tile_id : MshrSplit ? tcdm_master_req[i][j].src_tile_id : tile_group_id_t'(i), // For Crossbar when response back (split MSHR: lane != tile)
           src_id: group_xy_id_t'({group_id_i, 1'b0}),                         // For NoC Router when response back
           dst_id: group_xy_id_t'({tcdm_master_req[i][j].tgt_group_id, 1'b0}), // For NoC Router when request send
           tgt_addr: tcdm_master_req[i][j].tgt_addr,                           // For Crossbar when request send (bank rows per Group)
@@ -362,7 +362,7 @@ end else begin: gen_req_remapping_bypass
           hdr: floo_tcdm_req_meta_t'{
             meta_id : tcdm_master_req[i][j+(1)].wdata.meta_id,                      // For Register File
             core_id : tcdm_master_req[i][j+(1)].wdata.core_id,                      // For Core
-            src_tile_id : i,                                                        // For Crossbar when response back
+            src_tile_id : MshrSplit ? tcdm_master_req[i][j+(1)].src_tile_id : tile_group_id_t'(i), // For Crossbar when response back (split MSHR: lane != tile)
             src_id: group_xy_id_t'({group_id_i, 1'b0}),                             // For NoC Router when response back
             dst_id: group_xy_id_t'({tcdm_master_req[i][j+(1)].tgt_group_id, 1'b0}), // For NoC Router when request send
             tgt_addr: tcdm_master_req[i][j+(1)].tgt_addr,                           // For Crossbar when request send (bank rows per Group)
@@ -387,7 +387,7 @@ end else begin: gen_req_remapping_bypass
         hdr: floo_tcdm_req_meta_t'{
           meta_id : tcdm_master_req[i][j].wdata.meta_id,                      // For Register File
           core_id : tcdm_master_req[i][j].wdata.core_id,                      // For Core
-          src_tile_id : i,                                                    // For Crossbar when response back
+          src_tile_id : MshrSplit ? tcdm_master_req[i][j].src_tile_id : tile_group_id_t'(i), // For Crossbar when response back (split MSHR: lane != tile)
           src_id: group_xy_id_t'({group_id_i, 1'b0}),                         // For NoC Router when response back
           dst_id: group_xy_id_t'({tcdm_master_req[i][j].tgt_group_id, 1'b0}), // For NoC Router when request send
           tgt_addr: tcdm_master_req[i][j].tgt_addr,                           // For Crossbar when request send (bank rows per Group)
@@ -666,7 +666,18 @@ if (NumTilesPerGroup == 1) begin
 end else begin
   for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_resp_sel_tgt_tile_i
     for (genvar j = 1; j < NumRemoteRespPortsPerTile; j++) begin : gen_resp_sel_tgt_tile_j
-      assign resp_tile_sel[i][j] = floo_tcdm_resp_from_router[i][j].hdr.tile_id;
+      if (MshrSplit) begin : gen_sel_slice
+        // Split MSHR: a group lane is (slice, k), not a tile. The slice is the tag's slice field
+        // (stamped on every request, bypass included); k is the high bit of the tile's
+        // slice-local index (the slice's own demux completes it with the low bit).
+        logic [MshrSliceIdW-1:0] slice;
+        logic [1:0]              local_idx;
+        assign slice     = mshr_resp_slice(floo_tcdm_resp_from_router[i][j].hdr.mshr_tag);
+        assign local_idx = mshr_slice_local(slice, 4'(floo_tcdm_resp_from_router[i][j].hdr.tile_id));
+        assign resp_tile_sel[i][j] = tile_group_id_t'(mshr_noc_lane(slice, local_idx[1]));
+      end else begin : gen_sel_tile
+        assign resp_tile_sel[i][j] = floo_tcdm_resp_from_router[i][j].hdr.tile_id;
+      end
     end : gen_resp_sel_tgt_tile_j
   end : gen_resp_sel_tgt_tile_i
 end
@@ -730,7 +741,8 @@ for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_router_resp_to_master_
         data    : floo_tcdm_resp_from_router_after_xbar[i][j].payload.data
       },
       wen  : floo_tcdm_resp_from_router_after_xbar[i][j].payload.wen,
-      mshr_tag: floo_tcdm_resp_from_router_after_xbar[i][j].hdr.mshr_tag // Tier-b: deliver echoed MSHR id to MSHR resp ingress
+      mshr_tag: floo_tcdm_resp_from_router_after_xbar[i][j].hdr.mshr_tag, // Tier-b: deliver echoed MSHR id to MSHR resp ingress
+      tile_id : floo_tcdm_resp_from_router_after_xbar[i][j].hdr.tile_id   // split MSHR: slice-local steer
     };
     assign tcdm_master_resp_valid[i][j] = floo_tcdm_resp_from_router_after_xbar_valid[i][j];
     assign floo_tcdm_resp_from_router_after_xbar_ready[i][j] = tcdm_master_resp_ready[i][j];

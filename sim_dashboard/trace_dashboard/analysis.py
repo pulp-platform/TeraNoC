@@ -134,6 +134,20 @@ def hash_explore(meta):
       any(not isinstance(base, int) or base < 0 or base % 4 for base in a_bases)):
     raise ValueError("Hash A bases require one word-aligned byte address per group")
   sample_steps = [s*(N-1)//max(1, args.N-1) for s in range(args.N)]
+  # Disaggregated group MSHR (hash.mshr_split): a class is served by ONE 4-tile slice with its own
+  # `banks` banks, so only that slice's cores compete for them. Every slice of a family is a
+  # translate of slice 0 (row = cores {0..3}, column = {0,4,8,12}) and slice 0 holds core 0, which
+  # leads every cohort it belongs to, so slice 0 of each family is scored. Singles go to the row
+  # family for the prefill split and the column family for decode (hash.steer_single_row
+  # overrides); bursts to the other. `banks`/`entries` are then PER SLICE (2 / 8).
+  mshr_split = bool(h.get("mshr_split", False))
+  slice_tiles = int(h.get("slice_tiles", 4))
+  steer_single_row = bool(h.get("steer_single_row", h["split"] == "prefill"))
+  def in_class_set(c, burst):
+    if not mshr_split:
+      return True
+    row = (not steer_single_row) if burst else steer_single_row
+    return (c < slice_tiles) if row else (c % slice_tiles == 0)
   results = []
   any_burst = False
   for group in range(args.groups):
@@ -156,11 +170,15 @@ def hash_explore(meta):
       for step in sample_steps:
         address = h.get("w_base", g.a_words*4) + (step*b_cols+p0)*g.elem_bytes
         for word, count in requests(address, load_bytes, profile=profile, **geometry):
-          target = W if count > 1 else B_single
+          burst = count > 1
+          if not in_class_set(c, burst):
+            continue        # this core's request of this class lives in another slice
+          target = W if burst else B_single
           target.append((step, word))
-      for b in range(m0, min(m0+g.ks, M)):
-        for step in sample_steps:
-          A.append((step, a_base//4+(b*N+step)*g.elem_bytes//4))
+      if in_class_set(c, False):
+        for b in range(m0, min(m0+g.ks, M)):
+          for step in sample_steps:
+            A.append((step, a_base//4+(b*N+step)*g.elem_bytes//4))
     # Subscribers share the same MSHR entry. Score distinct request starts,
     # preserving the common reduction-step sampling for both request classes.
     A, W, B_single = sorted(set(A)), sorted(set(W)), sorted(set(B_single))
@@ -222,5 +240,6 @@ def hash_explore(meta):
         current_w=score(W, current[1], current[2]) if current else None))
   return dict(available=True, groups=results, active_groups=args.groups, mesh_groups=mesh_groups,
               banks=banks, entries=h["entries"], overflow_entries=h.get("overflow_entries", 0),
+              mshr_split=mshr_split, steer_single_row=steer_single_row if mshr_split else None,
               burst_model=profile, burst_eligible=any_burst, sampled_steps=args.N, total_steps=N,
               source=str(path), note=h.get("input_status", "")+" Single-class scores include A and scalar B requests; burst scores include burst B requests. First microtile, unmasked unit-stride loads, vstart=0; modeled simultaneous k-steps; best bank spread among supplied legal settings, not a predicted speedup. Addresses/partition are assumptions unless captured from the run.")

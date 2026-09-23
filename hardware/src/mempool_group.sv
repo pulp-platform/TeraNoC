@@ -302,6 +302,7 @@ module mempool_group
     // tile's own local tie-offs, mempool_tile.sv:1201/1207), but leaving it undriven puts an X on
     // a struct that crosses into the tile.
     assign tcdm_master_resp[0][t].mshr_tag    = '0;
+    assign tcdm_master_resp[0][t].tile_id     = '0; // split-MSHR steer field; local path never steers
     assign master_local_resp_ready[t]         = tcdm_master_resp_ready[0][t] & ~bar_rel_vec[t];
     assign bar_rel_ready[t]                   = tcdm_master_resp_ready[0][t];
     assign tcdm_slave_req_valid[0][t]         = slave_local_req_valid[t];
@@ -558,16 +559,23 @@ module mempool_group
   logic              [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1] group_mshr_resp_valid;
   logic              [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1] group_mshr_resp_ready;
 
+  // The group MSHR is either ONE 32-lane module wired 1:1 between the tiles and the NoC lanes
+  // (legacy, below) or EIGHT 4-tile slices with per-tile steering (MshrSplit, gen_group_mshr_split
+  // at the end of this file). The slave (target-side) ports are the same in both.
+  localparam bit SplitMshr = EnableGroupMshr && MshrSplit;
+
   // Sort the remote ports by tile
   for (genvar r = 1; r < NumRemoteReqPortsPerTile; r++) begin: gen_remote_interface_connection_req
     for (genvar t = 0; t < NumTilesPerGroup; t++) begin: gen_remote_connections_req
-      // master req
-      assign group_mshr_req_valid[t][r]     = tcdm_master_req_valid[r][t];
-      assign group_mshr_req[t][r]           = tcdm_master_req[r][t];
-      assign tcdm_master_req_ready[r][t]    = group_mshr_req_ready[t][r];
-      assign tcdm_master_req_valid_o[t][r]  = mshr_noc_req_valid[t][r];
-      assign tcdm_master_req_o[t][r]        = mshr_noc_req[t][r];
-      assign mshr_noc_req_ready[t][r]       = tcdm_master_req_ready_i[t][r];
+      if (!SplitMshr) begin : gen_master_lanes
+        // master req
+        assign group_mshr_req_valid[t][r]     = tcdm_master_req_valid[r][t];
+        assign group_mshr_req[t][r]           = tcdm_master_req[r][t];
+        assign tcdm_master_req_ready[r][t]    = group_mshr_req_ready[t][r];
+        assign tcdm_master_req_valid_o[t][r]  = mshr_noc_req_valid[t][r];
+        assign tcdm_master_req_o[t][r]        = mshr_noc_req[t][r];
+        assign mshr_noc_req_ready[t][r]       = tcdm_master_req_ready_i[t][r];
+      end
       // slave req
       assign tcdm_slave_req[r][t]           = tcdm_slave_req_i[t][r];
       assign tcdm_slave_req_valid[r][t]     = tcdm_slave_req_valid_i[t][r];
@@ -577,13 +585,15 @@ module mempool_group
 
   for (genvar r = 1; r < NumRemoteRespPortsPerTile; r++) begin: gen_remote_interface_connection_resp
     for (genvar t = 0; t < NumTilesPerGroup; t++) begin: gen_remote_connections_resp
-      // master resp
-      assign mshr_noc_resp[t][r]            = tcdm_master_resp_i[t][r];
-      assign mshr_noc_resp_valid[t][r]      = tcdm_master_resp_valid_i[t][r];
-      assign tcdm_master_resp_ready_o[t][r] = mshr_noc_resp_ready[t][r];
-      assign tcdm_master_resp[r][t]         = group_mshr_resp[t][r];
-      assign tcdm_master_resp_valid[r][t]   = group_mshr_resp_valid[t][r];
-      assign group_mshr_resp_ready[t][r]    = tcdm_master_resp_ready[r][t];
+      if (!SplitMshr) begin : gen_master_lanes
+        // master resp
+        assign mshr_noc_resp[t][r]            = tcdm_master_resp_i[t][r];
+        assign mshr_noc_resp_valid[t][r]      = tcdm_master_resp_valid_i[t][r];
+        assign tcdm_master_resp_ready_o[t][r] = mshr_noc_resp_ready[t][r];
+        assign tcdm_master_resp[r][t]         = group_mshr_resp[t][r];
+        assign tcdm_master_resp_valid[r][t]   = group_mshr_resp_valid[t][r];
+        assign group_mshr_resp_ready[t][r]    = tcdm_master_resp_ready[r][t];
+      end
       // slave resp
       assign tcdm_slave_resp_o[t][r]        = tcdm_slave_resp[r][t];
       assign tcdm_slave_resp_valid_o[t][r]  = tcdm_slave_resp_valid[r][t];
@@ -923,6 +933,7 @@ module mempool_group
     .DefCacheReuseTarget      (MshrDefCacheReuseTarget),
     .DefCacheTimeout          (MshrDefCacheTimeout    ),
     .DefBankfullBp            (MshrDefBankfullBp      ),
+    .DefSteerSingleRow        (MshrDefSteerSingleRow  ),
     // WIRE THE BOUND. Without this the module keeps its own default of 2047 and silently DROPS
     // every CSR write above it -- which is what made the 4095 campaign run at 2047 while looking
     // configured. The elaboration check at mshr_cfg.sv:122 only catches a width/bound mismatch,
@@ -945,7 +956,169 @@ module mempool_group
     .status_o    (mshr_cfg_status  )
   );
 
-  if (EnableGroupMshr) begin : gen_group_mshr
+  if (SplitMshr) begin : gen_group_mshr_split
+    // ------------------------------------------------------------------------------------------
+    // Disaggregated group MSHR: 8 slices of 4 tiles (mempool_pkg.sv, "Disaggregated group MSHR").
+    //   slice m < 4 : row    R_m     = tiles {4m .. 4m+3}, lane-local index = t[1:0]
+    //   slice m >= 4: column C_{m-4} = tiles {m-4 + 4a},   lane-local index = t[3:2]
+    // Tile t's port r is demuxed to its row or column slice by request CLASS; bypass traffic goes
+    // to mshr_bypass_slice(t). Each slice's 4 NoC lanes land at mshr_noc_lane(m, k) so the
+    // wrapper's remapper groups pair R_k with C_k per port. Each tile response port arbitrates its
+    // row and column slice.
+    // ------------------------------------------------------------------------------------------
+    localparam int unsigned NS = MshrNumSlices;   // 8
+    localparam int unsigned LT = MshrSliceTiles;  // 4
+    localparam int unsigned NL = LT / 2;          // 2 NoC lanes per port class per slice
+    // Whether the elaborated MSHR merges singles at all; a class the core cannot merge is bypass
+    // traffic for steering purposes (mirrors req_can_merge_single in mempool_group_mshr_req_decode).
+    localparam bit SplitSingleMerge =
+      `ifdef GROUP_MSHR_ENABLE_SINGLE `GROUP_MSHR_ENABLE_SINGLE `else 1'b0 `endif;
+
+    tcdm_master_req_t  [NS-1:0][LT-1:0][NumRemoteReqPortsPerTile-1:1]  sl_req;
+    logic              [NS-1:0][LT-1:0][NumRemoteReqPortsPerTile-1:1]  sl_req_valid;
+    logic              [NS-1:0][LT-1:0][NumRemoteReqPortsPerTile-1:1]  sl_req_ready;
+    tcdm_master_req_t  [NS-1:0][NL-1:0][NumRemoteReqPortsPerTile-1:1]  sl_noc_req;
+    logic              [NS-1:0][NL-1:0][NumRemoteReqPortsPerTile-1:1]  sl_noc_req_valid;
+    logic              [NS-1:0][NL-1:0][NumRemoteReqPortsPerTile-1:1]  sl_noc_req_ready;
+    tcdm_master_resp_t [NS-1:0][NL-1:0][NumRemoteRespPortsPerTile-1:1] sl_noc_resp;
+    logic              [NS-1:0][NL-1:0][NumRemoteRespPortsPerTile-1:1] sl_noc_resp_valid;
+    logic              [NS-1:0][NL-1:0][NumRemoteRespPortsPerTile-1:1] sl_noc_resp_ready;
+    tcdm_master_resp_t [NS-1:0][LT-1:0][NumRemoteRespPortsPerTile-1:1] sl_resp;
+    logic              [NS-1:0][LT-1:0][NumRemoteRespPortsPerTile-1:1] sl_resp_valid;
+    logic              [NS-1:0][LT-1:0][NumRemoteRespPortsPerTile-1:1] sl_resp_ready;
+    logic              [NS-1:0]                                        sl_busy;
+
+    // Class bypass decisions, shared by all 32 steer demuxes (same terms as the core's
+    // cfg_bypass_single / cfg_bypass_burst).
+    logic cfg_bypass_single, cfg_bypass_burst;
+    assign cfg_bypass_single = !mshr_cfg.enable || !SplitSingleMerge ||
+                               (mshr_cfg.hold_subs_single == MshrCfgSubsW'(1));
+    assign cfg_bypass_burst  = !mshr_cfg.enable ||
+                               (mshr_cfg.hold_subs_burst  == MshrCfgSubsW'(1));
+    assign mshr_busy = |sl_busy;
+
+    // ---- Tile request steer: (t, r) -> row slice lane or column slice lane -------------------
+    for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_steer_t
+      localparam int unsigned Row = t / 4;                     // mshr_row_slice(t)
+      localparam int unsigned Col = 4 + (t % 4);               // mshr_col_slice(t)
+      localparam int unsigned Lr  = t % 4;                     // local index in Row
+      localparam int unsigned Lc  = t / 4;                     // local index in Col
+      localparam bit          BypCol = ((t % 2) ^ ((t / 4) % 2)); // mshr_bypass_slice(t) is Col
+      initial begin
+        if (Row != mshr_row_slice(4'(t)) || Col != mshr_col_slice(4'(t)) ||
+            (BypCol ? Col : Row) != mshr_bypass_slice(4'(t)) ||
+            Lr != mshr_slice_local(3'(Row), 4'(t)) || Lc != mshr_slice_local(3'(Col), 4'(t)))
+          $error("[mempool_group] split-MSHR steer constants for tile %0d disagree with mempool_pkg", t);
+      end
+
+      for (genvar r = 1; r < NumRemoteReqPortsPerTile; r++) begin : gen_steer_r
+        logic is_load, is_burst, to_col;
+        logic [1:0] demux_valid, demux_ready;
+
+        assign is_load  = (tcdm_master_req[r][t].wdata.amo == '0) && !tcdm_master_req[r][t].wen;
+        // Same class rule as mempool_group_mshr_req_decode: a load of >= 2 words is a burst.
+        assign is_burst = is_load && (|tcdm_master_req[r][t].burst_len[BurstLenWidth-1:1]);
+        always_comb begin
+          if (!is_load)                          to_col = BypCol;                    // store / AMO
+          else if (is_burst)                     to_col = cfg_bypass_burst  ? BypCol :  mshr_cfg.steer_single_row;
+          else                                   to_col = cfg_bypass_single ? BypCol : !mshr_cfg.steer_single_row;
+        end
+
+        stream_demux #(
+          .N_OUP (2)
+        ) i_req_steer (
+          .inp_valid_i (tcdm_master_req_valid[r][t]),
+          .inp_ready_o (tcdm_master_req_ready[r][t]),
+          .oup_sel_i   (to_col                     ),
+          .oup_valid_o (demux_valid                ),
+          .oup_ready_i (demux_ready                )
+        );
+        assign sl_req[Row][Lr][r]       = tcdm_master_req[r][t];
+        assign sl_req_valid[Row][Lr][r] = demux_valid[0];
+        assign demux_ready[0]           = sl_req_ready[Row][Lr][r];
+        assign sl_req[Col][Lc][r]       = tcdm_master_req[r][t];
+        assign sl_req_valid[Col][Lc][r] = demux_valid[1];
+        assign demux_ready[1]           = sl_req_ready[Col][Lc][r];
+      end
+
+      // ---- Tile response arbiter: row slice lane vs column slice lane -------------------------
+      for (genvar r = 1; r < NumRemoteRespPortsPerTile; r++) begin : gen_resp_arb_r
+        rr_arb_tree #(
+          .NumIn     (2                 ),
+          .DataType  (tcdm_master_resp_t),
+          .ExtPrio   (1'b0              ),
+          .AxiVldRdy (1'b1              ),
+          .LockIn    (1'b1              )
+        ) i_resp_arb (
+          .clk_i   (clk_i                                              ),
+          .rst_ni  (rst_ni                                             ),
+          .flush_i (1'b0                                               ),
+          .rr_i    ('0                                                 ),
+          .req_i   ({sl_resp_valid[Col][Lc][r], sl_resp_valid[Row][Lr][r]}),
+          .gnt_o   ({sl_resp_ready[Col][Lc][r], sl_resp_ready[Row][Lr][r]}),
+          .data_i  ({sl_resp[Col][Lc][r],       sl_resp[Row][Lr][r]}      ),
+          .req_o   (tcdm_master_resp_valid[r][t]                       ),
+          .gnt_i   (tcdm_master_resp_ready[r][t]                       ),
+          .data_o  (tcdm_master_resp[r][t]                             ),
+          .idx_o   (/* unused */                                       )
+        );
+      end
+    end
+
+    // ---- NoC face: slice (m, k) <-> group lane mshr_noc_lane(m, k) = {m[2], k, m[1:0]} --------
+    for (genvar m = 0; m < NS; m++) begin : gen_noc_m
+      for (genvar k = 0; k < NL; k++) begin : gen_noc_k
+        localparam int unsigned Lane = ((m / 4) * 8) + (k * 4) + (m % 4);
+        initial begin
+          if (Lane != mshr_noc_lane(3'(m), 1'(k)))
+            $error("[mempool_group] split-MSHR NoC lane for slice %0d lane %0d disagrees with mempool_pkg", m, k);
+        end
+        for (genvar r = 1; r < NumRemoteReqPortsPerTile; r++) begin : gen_noc_req_r
+          assign tcdm_master_req_o[Lane][r]       = sl_noc_req[m][k][r];
+          assign tcdm_master_req_valid_o[Lane][r] = sl_noc_req_valid[m][k][r];
+          assign sl_noc_req_ready[m][k][r]        = tcdm_master_req_ready_i[Lane][r];
+        end
+        for (genvar r = 1; r < NumRemoteRespPortsPerTile; r++) begin : gen_noc_resp_r
+          assign sl_noc_resp[m][k][r]              = tcdm_master_resp_i[Lane][r];
+          assign sl_noc_resp_valid[m][k][r]        = tcdm_master_resp_valid_i[Lane][r];
+          assign tcdm_master_resp_ready_o[Lane][r] = sl_noc_resp_ready[m][k][r];
+        end
+      end
+    end
+
+    // ---- The slices ---------------------------------------------------------------------------
+    for (genvar m = 0; m < NS; m++) begin : gen_slice
+      mempool_group_mshr_slice #(
+        .NumGroups                (NumGroups                ),
+        .NumTilesPerGroup         (NumTilesPerGroup         ),
+        .NumRemoteReqPortsPerTile (NumRemoteReqPortsPerTile ),
+        .NumRemoteRespPortsPerTile(NumRemoteRespPortsPerTile),
+        .SliceId                  (m                        )
+      ) i_slice (
+        .clk_i             (clk_i                ),
+        .rst_ni            (rst_ni               ),
+        .testmode_i        (testmode_i           ),
+        .scan_enable_i     (scan_enable_i        ),
+        .scan_data_i       (scan_data_i          ),
+        .scan_data_o       (/* Unconnected */    ),
+        .group_id_i        (group_id_i           ),
+        .tile_req_i        (sl_req[m]            ),
+        .tile_req_valid_i  (sl_req_valid[m]      ),
+        .tile_req_ready_o  (sl_req_ready[m]      ),
+        .noc_req_o         (sl_noc_req[m]        ),
+        .noc_req_valid_o   (sl_noc_req_valid[m]  ),
+        .noc_req_ready_i   (sl_noc_req_ready[m]  ),
+        .noc_resp_i        (sl_noc_resp[m]       ),
+        .noc_resp_valid_i  (sl_noc_resp_valid[m] ),
+        .noc_resp_ready_o  (sl_noc_resp_ready[m] ),
+        .tile_resp_o       (sl_resp[m]           ),
+        .tile_resp_valid_o (sl_resp_valid[m]     ),
+        .tile_resp_ready_i (sl_resp_ready[m]     ),
+        .cfg_i             (mshr_cfg             ),
+        .mshr_busy_o       (sl_busy[m]           )
+      );
+    end
+  end else if (EnableGroupMshr) begin : gen_group_mshr
     mempool_group_mshr #(
       .NumGroups                (NumGroups                ),
       .NumTilesPerGroup         (NumTilesPerGroup         ),
