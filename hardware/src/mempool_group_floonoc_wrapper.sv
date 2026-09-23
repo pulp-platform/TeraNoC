@@ -581,10 +581,24 @@ end : gen_router_req_to_slave_req_i
 // -------------------------------------------------------------------- //
 if (NocRouterRemapping == 2 || NocRouterRemapping == 3) begin: gen_resp_remapping
 
-  floo_tcdm_resp_t [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1] floo_tcdm_resp_to_remapper_raw;
+  // Each response port has its own remapper. Keep adjacent tiles in each group:
+  // {0,1,2,3}, {4,5,6,7}, ...; interleaving would change the tile groups.
+  localparam bit RespRemapInterleaved = 1'b0;
+  floo_tcdm_resp_t [NumRemoteRespPortsPerTile-1:1][NumTilesPerGroup-1:0] floo_tcdm_resp_to_remapper_raw;
+  logic            [NumRemoteRespPortsPerTile-1:1][NumTilesPerGroup-1:0] floo_tcdm_resp_to_remapper_valid;
+  logic            [NumRemoteRespPortsPerTile-1:1][NumTilesPerGroup-1:0] floo_tcdm_resp_to_remapper_ready;
+  floo_tcdm_resp_t [NumRemoteRespPortsPerTile-1:1][NumTilesPerGroup-1:0] floo_tcdm_resp_from_remapper;
+  logic            [NumRemoteRespPortsPerTile-1:1][NumTilesPerGroup-1:0] floo_tcdm_resp_from_remapper_valid;
+  logic            [NumRemoteRespPortsPerTile-1:1][NumTilesPerGroup-1:0] floo_tcdm_resp_from_remapper_ready;
+
+  initial begin
+    if (RespRemapInterleaved || (NumTilesPerGroup % RouterRemapGroupSize) != 0)
+      $error("[mempool_group_floonoc_wrapper] response remap requires contiguous tile groups within each port.");
+  end
+
   for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_slave_resp_to_remapper_resp_i
     for (genvar j = 1; j < NumRemoteRespPortsPerTile; j++) begin : gen_slave_resp_to_remapper_resp_j
-      assign floo_tcdm_resp_to_remapper_raw[i][j] = floo_tcdm_resp_t'{
+      assign floo_tcdm_resp_to_remapper_raw[j][i] = floo_tcdm_resp_t'{
         payload: floo_tcdm_resp_payload_t'{
           amo  : tcdm_slave_resp[i][j].rdata.amo,
           data : tcdm_slave_resp[i][j].rdata.data,
@@ -600,25 +614,32 @@ if (NocRouterRemapping == 2 || NocRouterRemapping == 3) begin: gen_resp_remappin
           mshr_tag: tcdm_slave_resp[i][j].mshr_tag                                // Tier-b: echo MSHR entry id
         }
       };
+      assign floo_tcdm_resp_to_remapper_valid[j][i] = tcdm_slave_resp_valid[i][j];
+      assign tcdm_slave_resp_ready[i][j] = floo_tcdm_resp_to_remapper_ready[j][i];
+      assign floo_tcdm_resp_to_router[i][j] = floo_tcdm_resp_from_remapper[j][i];
+      assign floo_tcdm_resp_to_router_valid[i][j] = floo_tcdm_resp_from_remapper_valid[j][i];
+      assign floo_tcdm_resp_from_remapper_ready[j][i] = floo_tcdm_resp_to_router_ready[i][j];
     end : gen_slave_resp_to_remapper_resp_j
   end : gen_slave_resp_to_remapper_resp_i
 
-  floo_remapper #(
-    .NumInp      (NumTilesPerGroup * (NumRemoteRespPortsPerTile - 1)),
-    .NumOut      (NumTilesPerGroup * (NumRemoteRespPortsPerTile - 1)),
-    .payload_t   (floo_tcdm_resp_t                                  ),
-    .GroupSize   (RouterRemapGroupSize                              ),
-    .Interleaved (1'b1                                              )
-  ) i_floo_tcdm_resp_remapper (
-    .clk_i        (clk_i                                            ),
-    .rst_ni       (rst_ni                                           ),
-    .inp_data_i   (floo_tcdm_resp_to_remapper_raw                   ),
-    .inp_valid_i  (tcdm_slave_resp_valid                            ),
-    .inp_ready_o  (tcdm_slave_resp_ready                            ),
-    .oup_data_o   (floo_tcdm_resp_to_router                         ),
-    .oup_valid_o  (floo_tcdm_resp_to_router_valid                   ),
-    .oup_ready_i  (floo_tcdm_resp_to_router_ready                   )
-  );
+  for (genvar j = 1; j < NumRemoteRespPortsPerTile; j++) begin: gen_resp_remapper_port
+    floo_remapper #(
+      .NumInp      (NumTilesPerGroup      ),
+      .NumOut      (NumTilesPerGroup      ),
+      .payload_t   (floo_tcdm_resp_t     ),
+      .GroupSize   (RouterRemapGroupSize ),
+      .Interleaved (RespRemapInterleaved )
+    ) i_floo_tcdm_resp_remapper (
+      .clk_i        (clk_i                                   ),
+      .rst_ni       (rst_ni                                  ),
+      .inp_data_i   (floo_tcdm_resp_to_remapper_raw[j]       ),
+      .inp_valid_i  (floo_tcdm_resp_to_remapper_valid[j]     ),
+      .inp_ready_o  (floo_tcdm_resp_to_remapper_ready[j]     ),
+      .oup_data_o   (floo_tcdm_resp_from_remapper[j]         ),
+      .oup_valid_o  (floo_tcdm_resp_from_remapper_valid[j]   ),
+      .oup_ready_i  (floo_tcdm_resp_from_remapper_ready[j]   )
+    );
+  end: gen_resp_remapper_port
 
 end else begin: gen_resp_remapping_bypass
   for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_slave_resp_to_router_resp_i
