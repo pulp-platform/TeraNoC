@@ -17,6 +17,10 @@ tags
 # Python
 **.idea
 venv
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
 # Visual Studio Code
 .vscode
 *.code-workspace
@@ -28,6 +32,17 @@ venv
 *.pdf
 logs/
 work/
+
+# Local tool state and dependency checkouts. Project-authored skills stay visible.
+/.claude/scheduled_tasks.lock
+/.claude/skills/skills-lock.json
+/.claude/skills/memory-*/
+/.claude/worktrees/
+/.restore/
+/Bender.local
+/working_dir/
+/20??-??-??-??????-this-session-*.txt
+/socket:*
 
 # Write-once transcript vault: local recovery copies of completed 8x8 transcripts.
 # Regenerable from hardware/s8_*/transcript; ~0.4 GB and not review material.
@@ -49,3 +64,42 @@ software/apps/spatz_apps/sp-fmatmul-opt-burst-merge/script/matmul.json
 software/apps/spatz_apps/sp-fmatmul-opt-burst-merge/data/data_gemm.h
 software/apps/spatz_apps/sp-fmatmul-opt-burst-merge-fp16/script/matmul.json
 software/apps/spatz_apps/sp-fmatmul-opt-burst-merge-fp16/data/data_gemm.h
+
+# --- build/run artifacts under hardware/ (added 2026-09-04) ---
+# ELFs now live in hardware/elf/ instead of directly under hardware/.
+hardware/elf/
+hardware/*.elf
+hardware/elf_*/*.elf
+hardware/build_*/
+hardware/vbuild*/
+hardware/vcsrun*/
+
+# Simulator and compiler output at any depth.
+transcript
+modelsim.ini
+ucli.key
+*.wlf
+*.vcd
+*.dasm
+*.log
+*.log.gz
+*.log.zst
+
+# --- generated per-shape GEMM data (7.8 GiB of history before this) ---
+*/data/data_gemm.h
+*/script/matmul.json
+
+# --- regenerated dashboards and harvested evidence ---
+docs/benchmarks/8x8_scaleup/group_util.json
+docs/benchmarks/8x8_scaleup/results.tsv
+docs/benchmarks/decode_progress.json
+docs/benchmarks/run_archive/*_scrape_cache_*.json
+software/tests/gemm_config/output/
+paper/**/*.aux
+paper/**/*.bbl
+paper/**/*.blg
+paper/**/*.fdb_latexmk
+paper/**/*.fls
+paper/**/*.out
+*.transcript
+*.transcript.zst

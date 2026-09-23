@@ -10,4 +10,7 @@ fpnew/
 fpu_div_sqrt_mvp/
 register_interface/
 tech_cells_generic/
+riscv-dbg/
+spatz/
+/*.lock
 .teranoc_deps

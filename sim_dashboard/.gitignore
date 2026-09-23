@@ -20,3 +20,26 @@ audits/**/audit.log
 audits/**/enum
 audits/**/fixed_*.log
 audits/**/ucli.key
+
+# Campaign run products copy complete source trees and build records per arm.
+# Keep each campaign's scripts, manifests, and notes visible at its top level.
+campaigns/*/build_*/
+campaigns/*/build_records/
+campaigns/*/source_snapshot/
+campaigns/*/incomplete_snapshot*/
+campaigns/*/rtl_snapshot/
+campaigns/*/elfs/
+campaigns/*/runs/
+campaigns/*/gathered/
+campaigns/*/decode_*/
+campaigns/*/prefill_*/
+campaigns/*/before_*/
+campaigns/*/after_*/
+campaigns/*/superseded/
+campaigns/*/spatz/
+campaigns/*/vcs/
+campaigns/*/source/
+campaigns/*/reference_v1_metrics/
+campaigns/*/fp32_build_checks/
+campaigns/*/duplicate_incident_ledger_backup/
+campaigns/*/.floogen_env/
