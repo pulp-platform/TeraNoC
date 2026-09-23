@@ -309,7 +309,8 @@ package mempool_pkg;
   // bypass for exactly 2 of its 4 tiles -- 4 sources against its 4 NoC lanes, full rate.
   // With GROUP_MSHR_NUM/OVERFLOW_NUM now PER SLICE (8+1 = 64+8 per group), the tag carries the
   // slice id above the slice-local entry id so the group-level response crossbar can route by tag.
-  // Requires NumTilesPerGroup == 16 and two remote req/resp ports per tile.
+  // Requires NumTilesPerGroup == 16. Each remote request/response port gets its own pair of
+  // slice NoC lanes; the fold geometry does not depend on the number of ports.
   localparam bit          MshrSplit      = `ifdef GROUP_MSHR_SPLIT `GROUP_MSHR_SPLIT `else 1'b0 `endif;
   localparam int unsigned MshrNumSlices  = MshrSplit ? 8 : 1;
   localparam int unsigned MshrSliceTiles = MshrSplit ? 4 : NumTilesPerGroup; // lane-tiles per slice

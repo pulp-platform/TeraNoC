@@ -120,8 +120,11 @@ module mempool_group_mshr
   output logic                                                                            mshr_busy_o
 );
 
-  localparam int unsigned RespPortIdW      = idx_width(NumRemoteRespPortsPerTile);
-  localparam int unsigned ReqPortIdW       = idx_width(NumRemoteReqPortsPerTile);
+  // Subscriber and replay state retain the request port until a response is routed. Size that
+  // identity for both sides: a request port above the response count must not be truncated.
+  localparam int unsigned PortIdW = idx_width(
+      (NumRemoteReqPortsPerTile > NumRemoteRespPortsPerTile) ?
+      NumRemoteReqPortsPerTile : NumRemoteRespPortsPerTile);
   // ParityDrain (TwinROB0 receive): beats of one multi-beat entry drained per cycle.
   localparam int unsigned DrainBeatsPerEntry =
     `ifdef GROUP_MSHR_DRAIN_BEATS `GROUP_MSHR_DRAIN_BEATS
@@ -510,7 +513,7 @@ module mempool_group_mshr
   typedef struct packed {
     logic           valid;
     tile_group_id_t tile_id;
-    logic [RespPortIdW-1:0] port_id;
+    logic [PortIdW-1:0] port_id;
     tile_core_id_t  core_id;
     // Base meta_id of this requester. Per-beat, the drain emits
     // (meta_id_base + beat/BurstLanes) on (core_id + beat%BurstLanes) -- see BurstLanes.
@@ -650,9 +653,10 @@ module mempool_group_mshr
   localparam int unsigned PoolNum  = (MshrOverflowNum > 0) ? MshrOverflowNum : 0;
   localparam int unsigned PoolArr  = (PoolNum > 0) ? PoolNum : 1;
   localparam int unsigned PoolIdxW = idx_width(PoolArr);
+  // A split slice appends its ID above the local tag. Its entries must fit below that slice field.
   if ((MshrOverflowNum < 0) ||
-      ((64'(MshrNum) + 64'(PoolNum)) >= (64'b1 << MshrTagWidth)))
-    $error("[mempool_group_mshr] banked and pool entries exceed the nonzero NoC tag range.");
+      ((64'(MshrNum) + 64'(PoolNum)) >= (64'b1 << MshrTagLocalW)))
+    $error("[mempool_group_mshr] banked and pool entries exceed the local NoC tag range.");
   mempool_group_mshr_t [PoolArr-1:0]                                           pool_d;
   mempool_group_mshr_t [PoolArr-1:0]                                           pool_q;
   logic                [PoolArr-1:0]                                           pool_d_valid;
@@ -852,13 +856,13 @@ module mempool_group_mshr
   group_id_t                                 apb_grp;
   logic [BurstLenWidth-1:0]                  apb_len;
   tile_group_id_t                            apb_tile;
-  logic [RespPortIdW-1:0]                    apb_port;
+  logic [PortIdW-1:0]                    apb_port;
   tile_core_id_t                             apb_core;
   meta_id_t                                  apb_meta;
   logic                                      mpb_v;
   logic [PoolIdxW-1:0]                       mpb_way;
   tile_group_id_t                            mpb_tile;
-  logic [RespPortIdW-1:0]                    mpb_port;
+  logic [PortIdW-1:0]                    mpb_port;
   tile_core_id_t                             mpb_core;
   meta_id_t                                  mpb_meta;
   logic [PoolArr-1:0]                        pool_cand;
@@ -889,7 +893,7 @@ module mempool_group_mshr
   logic [PoolArr-1:0]                        pool_replay_ready;
   logic [PoolArr-1:0]                        pool_replay_issue;
   tile_group_id_t [PoolArr-1:0]              pool_replay_own_t;
-  logic [PoolArr-1:0][RespPortIdW-1:0]       pool_replay_own_p;
+  logic [PoolArr-1:0][PortIdW-1:0]       pool_replay_own_p;
   logic [PoolIdxW-1:0]                       pool_replay_win;
   logic                                      pool_replay_any;
   logic      [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]
@@ -946,13 +950,13 @@ module mempool_group_mshr
   group_id_t [MshrBankNum-1:0]               agb_q_grp;
   logic [MshrBankNum-1:0][BurstLenWidth-1:0] agb_q_len;
   tile_group_id_t [MshrBankNum-1:0]          agb_q_tile;
-  logic [MshrBankNum-1:0][RespPortIdW-1:0]   agb_q_port;
+  logic [MshrBankNum-1:0][PortIdW-1:0]   agb_q_port;
   tile_core_id_t [MshrBankNum-1:0]           agb_q_core;
   meta_id_t [MshrBankNum-1:0]                agb_q_meta;
   logic [MshrBankNum-1:0]                    mgb_q_v;
   logic [MshrBankNum-1:0][VictimPtrW-1:0]    mgb_q_way;
   tile_group_id_t [MshrBankNum-1:0]          mgb_q_tile;
-  logic [MshrBankNum-1:0][RespPortIdW-1:0]   mgb_q_port;
+  logic [MshrBankNum-1:0][PortIdW-1:0]   mgb_q_port;
   tile_core_id_t [MshrBankNum-1:0]           mgb_q_core;
   meta_id_t [MshrBankNum-1:0]                mgb_q_meta;
 
@@ -965,13 +969,13 @@ module mempool_group_mshr
   group_id_t                                 apb_q_grp;
   logic [BurstLenWidth-1:0]                  apb_q_len;
   tile_group_id_t                            apb_q_tile;
-  logic [RespPortIdW-1:0]                    apb_q_port;
+  logic [PortIdW-1:0]                    apb_q_port;
   tile_core_id_t                             apb_q_core;
   meta_id_t                                  apb_q_meta;
   logic                                      mpb_q_v;
   logic [PoolIdxW-1:0]                       mpb_q_way;
   tile_group_id_t                            mpb_q_tile;
-  logic [RespPortIdW-1:0]                    mpb_q_port;
+  logic [PortIdW-1:0]                    mpb_q_port;
   tile_core_id_t                             mpb_q_core;
   meta_id_t                                  mpb_q_meta;
   /// Per-pool-entry views of those records -- the twins of alloc_inflight / merge_inflight. The way
@@ -1263,7 +1267,7 @@ module mempool_group_mshr
   // Per-lane parallel first-match for the hold-the-fetch replay.
   logic [MshrNum-1:0]                                        replay_ready;    // hold-done + eligible
   tile_group_id_t [MshrNum-1:0]                              replay_own_t;
-  logic [MshrNum-1:0][RespPortIdW-1:0]                       replay_own_p;
+  logic [MshrNum-1:0][PortIdW-1:0]                       replay_own_p;
   logic [MshrNum-1:0]                                        replay_rr_mask;
   logic [MshrNum-1:0]                                        replay_cand, replay_hi, replay_lo, replay_win_oh;
   // The winner's payload, packed. Selecting ONE wide vector per lane costs MshrNum masked ORs
@@ -1430,15 +1434,15 @@ module mempool_group_mshr
 
   // Map a recorded request port ID to a legal response port ID [1..NumRemoteRespPortsPerTile-1].
   // When req/resp port counts differ, this keeps routing deterministic.
-  function automatic logic [RespPortIdW-1:0] map_resp_port_id(input logic [RespPortIdW-1:0] req_port_id);
-    logic [RespPortIdW-1:0] mapped_port;
+  function automatic logic [PortIdW-1:0] map_resp_port_id(input logic [PortIdW-1:0] req_port_id);
+    logic [PortIdW-1:0] mapped_port;
     if (NumRemoteRespPortsPerTile <= 2) begin
-      mapped_port = RespPortIdW'(1);
-    end else if (req_port_id < RespPortIdW'(1)) begin
-      mapped_port = RespPortIdW'(1);
+      mapped_port = PortIdW'(1);
+    end else if (req_port_id < PortIdW'(1)) begin
+      mapped_port = PortIdW'(1);
     end else begin
-      mapped_port = RespPortIdW'(((req_port_id - RespPortIdW'(1)) %
-                                  RespPortIdW'(NumRemoteRespPortsPerTile - 1)) + RespPortIdW'(1));
+      mapped_port = PortIdW'(((req_port_id - PortIdW'(1)) %
+                                  PortIdW'(NumRemoteRespPortsPerTile - 1)) + PortIdW'(1));
     end
     map_resp_port_id = mapped_port;
   endfunction
@@ -2625,8 +2629,8 @@ module mempool_group_mshr
                         & req_len[t][p];
             apb_tile |= {$bits(tile_group_id_t){pool_alloc_win_oh[t * NumReqPortsActive + p - 1]}}
                         & tile_group_id_t'(t);
-            apb_port |= {RespPortIdW{pool_alloc_win_oh[t * NumReqPortsActive + p - 1]}}
-                        & RespPortIdW'(p);
+            apb_port |= {PortIdW{pool_alloc_win_oh[t * NumReqPortsActive + p - 1]}}
+                        & PortIdW'(p);
             apb_core |= {$bits(tile_core_id_t){pool_alloc_win_oh[t * NumReqPortsActive + p - 1]}}
                         & req_in[t][p].wdata.core_id;
             apb_meta |= {$bits(meta_id_t){pool_alloc_win_oh[t * NumReqPortsActive + p - 1]}}
@@ -2635,8 +2639,8 @@ module mempool_group_mshr
                         & req_hit_pool_sel_id[t][p];
             mpb_tile |= {$bits(tile_group_id_t){pool_merge_win_oh[t * NumReqPortsActive + p - 1]}}
                         & tile_group_id_t'(t);
-            mpb_port |= {RespPortIdW{pool_merge_win_oh[t * NumReqPortsActive + p - 1]}}
-                        & RespPortIdW'(p);
+            mpb_port |= {PortIdW{pool_merge_win_oh[t * NumReqPortsActive + p - 1]}}
+                        & PortIdW'(p);
             mpb_core |= {$bits(tile_core_id_t){pool_merge_win_oh[t * NumReqPortsActive + p - 1]}}
                         & req_in[t][p].wdata.core_id;
             mpb_meta |= {$bits(meta_id_t){pool_merge_win_oh[t * NumReqPortsActive + p - 1]}}
@@ -3408,8 +3412,8 @@ module mempool_group_mshr
   // lanes; here they are MshrWaysPerBank:1 and evaluated once.
   logic           [MshrBankNum-1:0][MshrMergeReqs-1:0]                  pub_sub_ready;
   tile_group_id_t [MshrBankNum-1:0][MshrMergeReqs-1:0]                  pub_sub_tile;
-  logic           [MshrBankNum-1:0][MshrMergeReqs-1:0][RespPortIdW-1:0] pub_sub_port;
-  logic           [MshrBankNum-1:0][MshrMergeReqs-1:0][RespPortIdW-1:0] pub_sub_map;
+  logic           [MshrBankNum-1:0][MshrMergeReqs-1:0][PortIdW-1:0] pub_sub_port;
+  logic           [MshrBankNum-1:0][MshrMergeReqs-1:0][PortIdW-1:0] pub_sub_map;
   /// Per-bank scan temporaries: the sub-request terms that do not involve the response port, and
   /// the port test for the ParityDrain arm, where the port is the same for every sub-request.
   logic           [MshrMergeReqs-1:0]                                   pub_sub_ok;
@@ -3456,10 +3460,10 @@ module mempool_group_mshr
   logic [MshrNum-1:0]                                         drain_ent_ok;
   logic [MshrNum-1:0][MshrMergeReqs-1:0]                      drain_sub_ready;
   tile_group_id_t [MshrNum-1:0][MshrMergeReqs-1:0]            drain_sub_tile;
-  logic [MshrNum-1:0][MshrMergeReqs-1:0][RespPortIdW-1:0]     drain_sub_port;
+  logic [MshrNum-1:0][MshrMergeReqs-1:0][PortIdW-1:0]     drain_sub_port;
   // The requester's own mapped port, without the ParityDrain override. The published-row scan
   // tests the two arms separately, so it needs the un-muxed form.
-  logic [MshrNum-1:0][MshrMergeReqs-1:0][RespPortIdW-1:0]     drain_sub_map;
+  logic [MshrNum-1:0][MshrMergeReqs-1:0][PortIdW-1:0]     drain_sub_map;
   // Head-beat DRIVE operands, hoisted per entry (applied to the head beat).
   // The drive read mshr_d[resp_sel_mshr_id[t][p]] directly -- a full-entry MshrNum:1 STRUCT mux per
   // lane, 32 of them, plus a second MshrNum:1 for the nested resp_buf_rd_ptr and a burst_len
@@ -3514,7 +3518,7 @@ module mempool_group_mshr
         // consumer is a single uniform compare.
         drain_sub_map[e][s]   = map_resp_port_id(mshr_q[e].sub_reqs[s].port_id);
         drain_sub_port[e][s]  = (PD2 && (mshr_q[e].burst_len != BurstLenWidth'(1)))
-                              ? (RespPortIdW'(1) + RespPortIdW'(drv_beat_off[e][0]))
+                              ? (PortIdW'(1) + PortIdW'(drv_beat_off[e][0]))
                               : drain_sub_map[e][s];
         // Second-slot (ParityDrain) eligibility, hoisted for the drain2 scan further down.
       end
@@ -3525,7 +3529,7 @@ module mempool_group_mshr
   logic [MshrNum-1:0]                                         drain2_ent_ok;
   logic [MshrNum-1:0][MshrMergeReqs-1:0]                      drain2_sub_ready;
   tile_group_id_t [MshrNum-1:0][MshrMergeReqs-1:0]            drain2_sub_tile;
-  logic [MshrNum-1:0][RespPortIdW-1:0]                        drain2_sub_port;
+  logic [MshrNum-1:0][PortIdW-1:0]                        drain2_sub_port;
 
   /// Second-slot (ParityDrain) drain scan: the head-beat test one buffer slot further on.
   /// Register-sourced, so the second drive never waits on this cycle's capture. PD2 folds into
@@ -3549,7 +3553,7 @@ module mempool_group_mshr
       assign drain2_beat_off[e]   = drain2_scan_ent[e].resp_buf[drain2_rd_ptr[e]].beat_off;
       assign drv2_data[e]         = drain2_scan_ent[e].resp_buf[drain2_rd_ptr[e]].data;
       // Both beats of an entry share one parity port, so this is per-entry, not per-sub-request.
-      assign drain2_sub_port[e]   = RespPortIdW'(1) + RespPortIdW'(drain2_beat_off[e][0]);
+      assign drain2_sub_port[e]   = PortIdW'(1) + PortIdW'(drain2_beat_off[e][0]);
 
       for (genvar s = 0; s < MshrMergeReqs; s++) begin : gen_drain2_sub
         assign drain2_sub_ready[e][s] = drain2_ent_ok[e]                     &&
@@ -3572,8 +3576,8 @@ module mempool_group_mshr
   logic [PoolArr-1:0]                                          pool_drain_ent_ok;
   logic [PoolArr-1:0][MshrMergeReqs-1:0]                       pool_drain_sub_ready;
   tile_group_id_t [PoolArr-1:0][MshrMergeReqs-1:0]             pool_drain_sub_tile;
-  logic [PoolArr-1:0][MshrMergeReqs-1:0][RespPortIdW-1:0]      pool_drain_sub_port;
-  logic [PoolArr-1:0][MshrMergeReqs-1:0][RespPortIdW-1:0]      pool_drain_sub_map;
+  logic [PoolArr-1:0][MshrMergeReqs-1:0][PortIdW-1:0]      pool_drain_sub_port;
+  logic [PoolArr-1:0][MshrMergeReqs-1:0][PortIdW-1:0]      pool_drain_sub_map;
   data_t [PoolArr-1:0]                                         pool_drv_data;
   tile_core_id_t [PoolArr-1:0][MshrMergeReqs-1:0]              pool_drv_sub_core;
   meta_id_t [PoolArr-1:0][MshrMergeReqs-1:0]                   pool_drv_sub_meta;
@@ -3582,7 +3586,7 @@ module mempool_group_mshr
   logic [PoolArr-1:0]                                          pool_drain2_ent_ok;
   logic [PoolArr-1:0][MshrMergeReqs-1:0]                       pool_drain2_sub_ready;
   tile_group_id_t [PoolArr-1:0][MshrMergeReqs-1:0]             pool_drain2_sub_tile;
-  logic [PoolArr-1:0][RespPortIdW-1:0]                         pool_drain2_sub_port;
+  logic [PoolArr-1:0][PortIdW-1:0]                         pool_drain2_sub_port;
   logic [PoolArr-1:0][RespBufPtrW-1:0]                         pool_drain2_rd_ptr;
   logic [PoolArr-1:0][BurstLenWidth-1:0]                       pool_drain2_beat_off;
   data_t [PoolArr-1:0]                                         pool_drv2_data;
@@ -3609,7 +3613,7 @@ module mempool_group_mshr
           assign pool_drain_sub_map[p][s]   = map_resp_port_id(pool_q[p].sub_reqs[s].port_id);
           assign pool_drain_sub_port[p][s]  =
               (PD2 && (pool_q[p].burst_len != BurstLenWidth'(1)))
-                ? (RespPortIdW'(1) + RespPortIdW'(pool_drv_beat_off[p][0]))
+                ? (PortIdW'(1) + PortIdW'(pool_drv_beat_off[p][0]))
                 : pool_drain_sub_map[p][s];
         end
         // Second slot (ParityDrain): the head-beat test one buffer slot further on.
@@ -3626,7 +3630,7 @@ module mempool_group_mshr
         assign pool_drain2_beat_off[p] = pool_q[p].resp_buf[pool_drain2_rd_ptr[p]].beat_off;
         assign pool_drv2_data[p]       = pool_q[p].resp_buf[pool_drain2_rd_ptr[p]].data;
         // Both beats share one parity port, so this is per entry, not per sub-request.
-        assign pool_drain2_sub_port[p] = RespPortIdW'(1) + RespPortIdW'(pool_drain2_beat_off[p][0]);
+        assign pool_drain2_sub_port[p] = PortIdW'(1) + PortIdW'(pool_drain2_beat_off[p][0]);
         for (genvar s = 0; s < MshrMergeReqs; s++) begin : gen_pool_drain2_sub
           assign pool_drain2_sub_ready[p][s] = pool_drain2_ent_ok[p] &&
                                                pool_q[p].sub_reqs[s].valid &&
@@ -3688,7 +3692,7 @@ module mempool_group_mshr
   logic [MshrBankNum-1:0]                    mgb_v;
   logic [MshrBankNum-1:0][VictimPtrW-1:0]    mgb_way;
   tile_group_id_t [MshrBankNum-1:0]          mgb_tile;
-  logic [MshrBankNum-1:0][RespPortIdW-1:0]   mgb_port;
+  logic [MshrBankNum-1:0][PortIdW-1:0]   mgb_port;
   tile_core_id_t [MshrBankNum-1:0]           mgb_core;
   meta_id_t [MshrBankNum-1:0]                mgb_meta;
   // Per-bank allocation apply. The guarantee is stated at the
@@ -3724,7 +3728,7 @@ module mempool_group_mshr
   group_id_t [MshrBankNum-1:0]               agb_grp;
   logic [MshrBankNum-1:0][BurstLenWidth-1:0] agb_len;
   tile_group_id_t [MshrBankNum-1:0]          agb_tile;
-  logic [MshrBankNum-1:0][RespPortIdW-1:0]   agb_port;
+  logic [MshrBankNum-1:0][PortIdW-1:0]   agb_port;
   tile_core_id_t [MshrBankNum-1:0]           agb_core;
   meta_id_t [MshrBankNum-1:0]                agb_meta;
   logic [MergeRankW-1:0]                     mgb_slot;   // recomputed from mshr_q
@@ -3752,7 +3756,7 @@ module mempool_group_mshr
   group_id_t [NumAllocSlots-1:0]                arb_grp;
   logic [NumAllocSlots-1:0][BurstLenWidth-1:0]  arb_len;
   tile_group_id_t [NumAllocSlots-1:0]           arb_tile;
-  logic [NumAllocSlots-1:0][RespPortIdW-1:0]    arb_port;
+  logic [NumAllocSlots-1:0][PortIdW-1:0]    arb_port;
   tile_core_id_t [NumAllocSlots-1:0]            arb_core;
   meta_id_t [NumAllocSlots-1:0]                 arb_meta;
   logic [NumAllocSlots-1:0][VictimPtrW-1:0]     arb_awy, arb_mwy;
@@ -3779,7 +3783,7 @@ module mempool_group_mshr
         assign arb_grp   [Sl] = req_in[t][p].tgt_group_id;
         assign arb_len   [Sl] = req_len[t][p];
         assign arb_tile  [Sl] = tile_group_id_t'(t);
-        assign arb_port  [Sl] = RespPortIdW'(p);
+        assign arb_port  [Sl] = PortIdW'(p);
         assign arb_core  [Sl] = req_in[t][p].wdata.core_id;
         assign arb_meta  [Sl] = req_in[t][p].wdata.meta_id;
         // The way of an absolute entry id: a bit slice only when ways is a power of two.
@@ -3852,12 +3856,12 @@ module mempool_group_mshr
           agb_grp [b] |= {$bits(group_id_t) {bank_win_oh[b][s]}} & arb_grp [s];
           agb_len [b] |= {BurstLenWidth   {bank_win_oh[b][s]}} & arb_len [s];
           agb_tile[b] |= {$bits(tile_group_id_t){bank_win_oh[b][s]}} & arb_tile[s];
-          agb_port[b] |= {RespPortIdW     {bank_win_oh[b][s]}} & arb_port[s];
+          agb_port[b] |= {PortIdW     {bank_win_oh[b][s]}} & arb_port[s];
           agb_core[b] |= {$bits(tile_core_id_t){bank_win_oh[b][s]}} & arb_core[s];
           agb_meta[b] |= {$bits(meta_id_t) {bank_win_oh[b][s]}} & arb_meta[s];
           mgb_way [b] |= {VictimPtrW      {bank_merge_win_oh[b][s]}} & arb_mwy [s];
           mgb_tile[b] |= {$bits(tile_group_id_t){bank_merge_win_oh[b][s]}} & arb_tile[s];
-          mgb_port[b] |= {RespPortIdW     {bank_merge_win_oh[b][s]}} & arb_port[s];
+          mgb_port[b] |= {PortIdW     {bank_merge_win_oh[b][s]}} & arb_port[s];
           mgb_core[b] |= {$bits(tile_core_id_t){bank_merge_win_oh[b][s]}} & arb_core[s];
           mgb_meta[b] |= {$bits(meta_id_t) {bank_merge_win_oh[b][s]}} & arb_meta[s];
         end
@@ -3928,7 +3932,7 @@ module mempool_group_mshr
         for (genvar re = 0; re < MshrNum; re++) begin : gen_replay_cand
           assign replay_cand_l[rt][rp][re] =
               replay_ready[re] && (replay_own_t[re] == tile_group_id_t'(rt)) &&
-              (replay_own_p[re] == RespPortIdW'(rp));
+              (replay_own_p[re] == PortIdW'(rp));
         end
         assign replay_hi_l[rt][rp] = replay_cand_l[rt][rp] &  replay_rr_mask;
         assign replay_lo_l[rt][rp] = replay_cand_l[rt][rp] & ~replay_rr_mask;
@@ -4505,7 +4509,7 @@ module mempool_group_mshr
             for (int q = 0; q < PoolNum; q++) begin
               if (!pool_replay_any && pool_replay_ready[q] &&
                   (pool_replay_own_t[q] == tile_group_id_t'(t)) &&
-                  (pool_replay_own_p[q] == RespPortIdW'(p))) begin
+                  (pool_replay_own_p[q] == PortIdW'(p))) begin
                 pool_replay_any     = 1'b1;
                 pool_replay_win     = PoolIdxW'(q);
                 pool_replay_issue[q] = 1'b1;
@@ -5412,8 +5416,8 @@ module mempool_group_mshr
                 // A burst entry drains on the parity pin of its head beat, the same port for every
                 // sub-request, so the port term leaves the reduce and meets it as one AND. It is
                 // also a single bit of beat_off against a constant port, not an add and a compare.
-                pub_parity_ok = (RespPortIdW'(1) + RespPortIdW'(pub_drv_beat_off[b][0])) ==
-                                port_i[RespPortIdW-1:0];
+                pub_parity_ok = (PortIdW'(1) + PortIdW'(pub_drv_beat_off[b][0])) ==
+                                port_i[PortIdW-1:0];
                 for (int s = 0; s < MshrMergeReqs; s++) begin
                   pub_sub_ok[s] = bank_pub_v[b] && pub_sub_ready[b][s] &&
                                   (pub_sub_tile[b][s] == tile_group_id_t'(tile_i));
@@ -5426,7 +5430,7 @@ module mempool_group_mshr
                 end else begin
                   for (int s = 0; s < MshrMergeReqs; s++) begin
                     bank_sub_cand[b][s] = pub_sub_ok[s] &&
-                                          (pub_sub_map[b][s] == port_i[RespPortIdW-1:0]);
+                                          (pub_sub_map[b][s] == port_i[PortIdW-1:0]);
                   end
                   bank_cand[b] = |bank_sub_cand[b];
                 end
@@ -5436,7 +5440,7 @@ module mempool_group_mshr
                 for (int s = 0; s < MshrMergeReqs; s++) begin
                   if (drain_sub_ready[e][s] &&
                       (drain_sub_tile[e][s] == tile_group_id_t'(tile_i)) &&
-                      (drain_sub_port[e][s] == port_i[RespPortIdW-1:0])) begin
+                      (drain_sub_port[e][s] == port_i[PortIdW-1:0])) begin
                     drain_ent_cand[e] = 1'b1;
                   end
                 end
@@ -5504,7 +5508,7 @@ module mempool_group_mshr
                 for (int s = 0; s < MshrMergeReqs; s++) begin
                   if (drain_sub_ready[drain_win_e][s] &&
                       (drain_sub_tile[drain_win_e][s] == tile_group_id_t'(tile_i)) &&
-                      (drain_sub_port[drain_win_e][s] == port_i[RespPortIdW-1:0])) begin
+                      (drain_sub_port[drain_win_e][s] == port_i[PortIdW-1:0])) begin
                     drain_sub_cand[s] = 1'b1;
                   end
                 end
@@ -5547,7 +5551,7 @@ module mempool_group_mshr
                 for (int s = 0; s < MshrMergeReqs; s++) begin
                   if (pool_drain_sub_ready[p][s] &&
                       (pool_drain_sub_tile[p][s] == tile_group_id_t'(tile_i)) &&
-                      (pool_drain_sub_port[p][s] == port_i[RespPortIdW-1:0])) begin
+                      (pool_drain_sub_port[p][s] == port_i[PortIdW-1:0])) begin
                     pool_sub_cand_map[p][s] = 1'b1;
                   end
                 end
@@ -5769,7 +5773,7 @@ module mempool_group_mshr
                         (drain2_sub_tile[b * MshrWaysPerBank + int'(drain2_pub_w[b])][s] ==
                          tile_group_id_t'(tile_i)) &&
                         (drain2_sub_port[b * MshrWaysPerBank + int'(drain2_pub_w[b])] ==
-                         port_i[RespPortIdW-1:0])) begin
+                         port_i[PortIdW-1:0])) begin
                       drain2_bank_sub_cand[b][s] = 1'b1;
                       drain2_bank_cand[b]        = 1'b1;
                     end
@@ -5781,7 +5785,7 @@ module mempool_group_mshr
                   for (int s = 0; s < MshrMergeReqs; s++) begin
                     if (drain2_sub_ready[e][s] &&
                         (drain2_sub_tile[e][s] == tile_group_id_t'(tile_i)) &&
-                        (drain2_sub_port[e] == port_i[RespPortIdW-1:0])) begin
+                        (drain2_sub_port[e] == port_i[PortIdW-1:0])) begin
                       drain2_cand[e] = 1'b1;
                     end
                   end
@@ -5842,7 +5846,7 @@ module mempool_group_mshr
                          : (drain2_sub_ready[drain2_mshr_i][drain2_s] &&
                             (drain2_sub_tile[drain2_mshr_i][drain2_s] ==
                              tile_group_id_t'(tile_i)) &&
-                            (drain2_sub_port[drain2_mshr_i] == port_i[RespPortIdW-1:0])))) begin
+                            (drain2_sub_port[drain2_mshr_i] == port_i[PortIdW-1:0])))) begin
                     resp_sel2_valid[tile_i][port_i]      = 1'b1;
                     resp_sel2_mshr_id[tile_i][port_i]    = mshr_id_t'(drain2_mshr_i);
                     resp_sel2_subreq_idx[tile_i][port_i] = drain2_s;   // already SubIdxW wide

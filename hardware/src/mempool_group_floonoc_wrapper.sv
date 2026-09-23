@@ -447,8 +447,14 @@ generate
   end : gen_floo_tcdm_req_from_router_interleaved_i
 endgenerate
 
-// For now, only support 1 narrow + 1 wide, or all wide
+// The narrow-channel permutation below is defined for one narrow and one wide port in each
+// four-tile remap group. Reject other shapes before its fixed indices can miswire a channel.
 `ifdef USE_NARROW_REQ_CHANNEL
+  initial begin
+    if (NumNarrowRemoteReqPortsPerTile != 1 || NumWideRemoteReqPortsPerTile != 1 ||
+        RouterRemapGroupSize != 4 || (NumTilesPerGroup % RouterRemapGroupSize) != 0)
+      $error("[mempool_group_floonoc_wrapper] narrow remap needs 1 narrow, 1 wide, group size 4.");
+  end
   generate
     for(genvar i = 0; i < NumTilesPerGroup/RouterRemapGroupSize; i++) begin
       assign floo_tcdm_req_from_router[0+i*RouterRemapGroupSize][0+1] = floo_tcdm_req_from_router_interleaved[0+i*RouterRemapGroupSize][0+1];
