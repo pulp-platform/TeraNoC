@@ -52,6 +52,7 @@ generate
     localparam int start_idx  = g * GroupSize;
 
     sel_oup_t [GroupSize-1:0] sel_q, sel_d;
+    logic group_valid;
 
     always_ff @(posedge clk_i or negedge rst_ni) begin : p_sel_regs
       if(!rst_ni) begin
@@ -61,11 +62,14 @@ generate
         for(int i = (GroupSize / 2); i < GroupSize; i++) begin : gen_sel_odd
           sel_q[i] <= (i * 2 - GroupSize + 1);
         end
-      end else begin
+      end else if (group_valid) begin
         sel_q <= sel_d;
       end
     end
 
+    // Advance the entire permutation together when this group has traffic. An idle group keeps
+    // its phase, so periodic requests cannot repeatedly sample the same phase across idle cycles.
+    // Use valid rather than handshake: a stalled request can try another router input next cycle.
     assign sel_d = {sel_q[0], sel_q[GroupSize-1:1]};
 
     if (Interleaved == 1'b1) begin : gen_interleaved_remap
@@ -75,6 +79,7 @@ generate
       logic     [GroupSize-1:0] inp_ready_intlv;
       logic     [GroupSize-1:0] oup_valid_intlv;
       logic     [GroupSize-1:0] oup_ready_intlv;
+      assign group_valid = |inp_valid_intlv;
       for (genvar i = 0; i < GroupSize; i++) begin : gen_intlv
         assign inp_data_intlv[i]   = inp_data_i[g + i * NumGroup];
         assign inp_valid_intlv[i]  = inp_valid_i[g + i * NumGroup];
@@ -105,6 +110,7 @@ generate
         .ready_i(oup_ready_intlv)
       );
     end else begin: gen_non_interleaved_remap
+      assign group_valid = |inp_valid_i[start_idx +: GroupSize];
       stream_xbar #(
         .NumInp(GroupSize),
         .NumOut(GroupSize),
