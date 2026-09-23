@@ -966,27 +966,27 @@ module mempool_group
     // wrapper's remapper groups pair R_k with C_k per port. Each tile response port arbitrates its
     // row and column slice.
     // ------------------------------------------------------------------------------------------
-    localparam int unsigned NS = MshrNumSlices;   // 8
-    localparam int unsigned LT = MshrSliceTiles;  // 4
-    localparam int unsigned NL = LT / 2;          // 2 NoC lanes per port class per slice
+    localparam int unsigned NumSlices           = MshrNumSlices;          // 8
+    localparam int unsigned NumTilesPerSlice    = MshrSliceTiles;         // 4
+    localparam int unsigned NumNocLanesPerSlice = NumTilesPerSlice / 2;   // 2 per port class
     // Whether the elaborated MSHR merges singles at all; a class the core cannot merge is bypass
     // traffic for steering purposes (mirrors req_can_merge_single in mempool_group_mshr_req_decode).
     localparam bit SplitSingleMerge =
       `ifdef GROUP_MSHR_ENABLE_SINGLE `GROUP_MSHR_ENABLE_SINGLE `else 1'b0 `endif;
 
-    tcdm_master_req_t  [NS-1:0][LT-1:0][NumRemoteReqPortsPerTile-1:1]  sl_req;
-    logic              [NS-1:0][LT-1:0][NumRemoteReqPortsPerTile-1:1]  sl_req_valid;
-    logic              [NS-1:0][LT-1:0][NumRemoteReqPortsPerTile-1:1]  sl_req_ready;
-    tcdm_master_req_t  [NS-1:0][NL-1:0][NumRemoteReqPortsPerTile-1:1]  sl_noc_req;
-    logic              [NS-1:0][NL-1:0][NumRemoteReqPortsPerTile-1:1]  sl_noc_req_valid;
-    logic              [NS-1:0][NL-1:0][NumRemoteReqPortsPerTile-1:1]  sl_noc_req_ready;
-    tcdm_master_resp_t [NS-1:0][NL-1:0][NumRemoteRespPortsPerTile-1:1] sl_noc_resp;
-    logic              [NS-1:0][NL-1:0][NumRemoteRespPortsPerTile-1:1] sl_noc_resp_valid;
-    logic              [NS-1:0][NL-1:0][NumRemoteRespPortsPerTile-1:1] sl_noc_resp_ready;
-    tcdm_master_resp_t [NS-1:0][LT-1:0][NumRemoteRespPortsPerTile-1:1] sl_resp;
-    logic              [NS-1:0][LT-1:0][NumRemoteRespPortsPerTile-1:1] sl_resp_valid;
-    logic              [NS-1:0][LT-1:0][NumRemoteRespPortsPerTile-1:1] sl_resp_ready;
-    logic              [NS-1:0]                                        sl_busy;
+    tcdm_master_req_t  [NumSlices-1:0][NumTilesPerSlice-1:0][NumRemoteReqPortsPerTile-1:1]  sl_req;
+    logic              [NumSlices-1:0][NumTilesPerSlice-1:0][NumRemoteReqPortsPerTile-1:1]  sl_req_valid;
+    logic              [NumSlices-1:0][NumTilesPerSlice-1:0][NumRemoteReqPortsPerTile-1:1]  sl_req_ready;
+    tcdm_master_req_t  [NumSlices-1:0][NumNocLanesPerSlice-1:0][NumRemoteReqPortsPerTile-1:1]  sl_noc_req;
+    logic              [NumSlices-1:0][NumNocLanesPerSlice-1:0][NumRemoteReqPortsPerTile-1:1]  sl_noc_req_valid;
+    logic              [NumSlices-1:0][NumNocLanesPerSlice-1:0][NumRemoteReqPortsPerTile-1:1]  sl_noc_req_ready;
+    tcdm_master_resp_t [NumSlices-1:0][NumNocLanesPerSlice-1:0][NumRemoteRespPortsPerTile-1:1] sl_noc_resp;
+    logic              [NumSlices-1:0][NumNocLanesPerSlice-1:0][NumRemoteRespPortsPerTile-1:1] sl_noc_resp_valid;
+    logic              [NumSlices-1:0][NumNocLanesPerSlice-1:0][NumRemoteRespPortsPerTile-1:1] sl_noc_resp_ready;
+    tcdm_master_resp_t [NumSlices-1:0][NumTilesPerSlice-1:0][NumRemoteRespPortsPerTile-1:1] sl_resp;
+    logic              [NumSlices-1:0][NumTilesPerSlice-1:0][NumRemoteRespPortsPerTile-1:1] sl_resp_valid;
+    logic              [NumSlices-1:0][NumTilesPerSlice-1:0][NumRemoteRespPortsPerTile-1:1] sl_resp_ready;
+    logic              [NumSlices-1:0]                                 sl_busy;
 
     // Class bypass decisions, shared by all 32 steer demuxes (same terms as the core's
     // cfg_bypass_single / cfg_bypass_burst).
@@ -1066,8 +1066,8 @@ module mempool_group
     end
 
     // ---- NoC face: slice (m, k) <-> group lane mshr_noc_lane(m, k) = {m[2], k, m[1:0]} --------
-    for (genvar m = 0; m < NS; m++) begin : gen_noc_m
-      for (genvar k = 0; k < NL; k++) begin : gen_noc_k
+    for (genvar m = 0; m < NumSlices; m++) begin : gen_noc_m
+      for (genvar k = 0; k < NumNocLanesPerSlice; k++) begin : gen_noc_k
         localparam int unsigned Lane = ((m / 4) * 8) + (k * 4) + (m % 4);
         initial begin
           if (Lane != mshr_noc_lane(3'(m), 1'(k)))
@@ -1087,7 +1087,7 @@ module mempool_group
     end
 
     // ---- The slices ---------------------------------------------------------------------------
-    for (genvar m = 0; m < NS; m++) begin : gen_slice
+    for (genvar m = 0; m < NumSlices; m++) begin : gen_slice
       mempool_group_mshr_slice #(
         .NumGroups                (NumGroups                ),
         .NumTilesPerGroup         (NumTilesPerGroup         ),
