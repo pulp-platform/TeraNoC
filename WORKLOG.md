@@ -18276,3 +18276,20 @@ a one-bank hash is visible in any transcript.
 
 **Status.** Done. The two K=5120 arms are still running (before: livelocked; after: ~2.5 M cycles
 to completion).
+
+## 2026-09-24 02:03 — split MSHR: one resp_in spill per NoC lane
+
+**Purpose.** A slice registered responses per core lane (8 per slice) although its NoC face has 4
+lanes.
+
+**Implementation.** `mempool_group_mshr_slice`: a `spill_register` per NoC lane ahead of the 1:2
+response demux; the core is elaborated with `SpillRespIn = 0`; the demux select, tag strip and the
+two lane/tag assertions read the registered beat. Not cycle-identical: a NoC lane now buffers 2
+beats in total instead of 2 per core lane. `req_out` stays per core lane: the replay walkers raise
+`req_out_valid` only while `req_out_ready` is high (`:3795`->`:4489`, `:4506`->`:4519`), so a
+spill behind the fold's `rr_arb_tree` would close a combinational loop.
+
+**Result.** 32 fewer spill registers per group (~1,760 um2 at the `t12_64` per-spill area). Sim
+A/B against HEAD on `hardware/rin_fp32_512x128x128.elf`: pending.
+
+**Status.** Committed; validation pending.

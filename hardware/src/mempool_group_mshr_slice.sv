@@ -97,7 +97,8 @@ module mempool_group_mshr_slice
     .NumAddrTiles             (NumTilesPerGroup         ),
     .SliceFamily              ((SliceId < 4) ? 1 : 2    ),
     .NumRemoteReqPortsPerTile (NumRemoteReqPortsPerTile ),
-    .NumRemoteRespPortsPerTile(NumRemoteRespPortsPerTile)
+    .NumRemoteRespPortsPerTile(NumRemoteRespPortsPerTile),
+    .SpillRespIn              (1'b0                     )   // registered per NoC lane below
   ) i_core (
     .clk_i                    (clk_i               ),
     .rst_ni                   (rst_ni              ),
@@ -166,49 +167,66 @@ module mempool_group_mshr_slice
   // ---------------------------------------------------------------------------------------------
   // Response steer 4 -> 8: NoC lane (k, p) -> local tile {2k, 2k+1} by tile_id's low local bit
   // ---------------------------------------------------------------------------------------------
+  // One resp_in spill per NoC lane, replacing the core's per-lane ones.
+  tcdm_master_resp_t [NocLanes-1:0][NumRemoteRespPortsPerTile-1:1]      noc_resp_q;
+  logic              [NocLanes-1:0][NumRemoteRespPortsPerTile-1:1]      noc_resp_q_valid;
+  logic              [NocLanes-1:0][NumRemoteRespPortsPerTile-1:1]      noc_resp_q_ready;
+  logic              [NocLanes-1:0][NumRemoteRespPortsPerTile-1:1][1:0] resp_local_idx;
+  tcdm_master_resp_t [NocLanes-1:0][NumRemoteRespPortsPerTile-1:1]      resp_local;
+  logic              [NocLanes-1:0][NumRemoteRespPortsPerTile-1:1][1:0] resp_demux_valid;
+  logic              [NocLanes-1:0][NumRemoteRespPortsPerTile-1:1][1:0] resp_demux_ready;
+
   for (genvar k = 0; k < NocLanes; k++) begin : gen_steer_k
     for (genvar p = 1; p < NumRemoteRespPortsPerTile; p++) begin : gen_steer_p
-      logic [1:0]        local_idx;
-      tcdm_master_resp_t resp_local;
-      logic [1:0]        demux_valid;
-      logic [1:0]        demux_ready;
+      spill_register #(
+        .T(tcdm_master_resp_t)
+      ) i_spill_resp_in (
+        .clk_i   (clk_i                 ),
+        .rst_ni  (rst_ni                ),
+        .valid_i (noc_resp_valid_i[k][p]),
+        .ready_o (noc_resp_ready_o[k][p]),
+        .data_i  (noc_resp_i[k][p]      ),
+        .valid_o (noc_resp_q_valid[k][p]),
+        .ready_i (noc_resp_q_ready[k][p]),
+        .data_o  (noc_resp_q[k][p]      )
+      );
 
-      assign local_idx = mshr_slice_local(Slice, 4'(noc_resp_i[k][p].tile_id));
+      assign resp_local_idx[k][p] = mshr_slice_local(Slice, 4'(noc_resp_q[k][p].tile_id));
 
       // Strip the slice id: the core compares the tag against its own MshrNum/PoolNum bounds.
       always_comb begin
-        resp_local          = noc_resp_i[k][p];
-        resp_local.mshr_tag = MshrTagWidth'(mshr_tag_local(noc_resp_i[k][p].mshr_tag));
+        resp_local[k][p]          = noc_resp_q[k][p];
+        resp_local[k][p].mshr_tag = MshrTagWidth'(mshr_tag_local(noc_resp_q[k][p].mshr_tag));
       end
 
       stream_demux #(
         .N_OUP (2)
       ) i_resp_steer (
-        .inp_valid_i (noc_resp_valid_i[k][p]),
-        .inp_ready_o (noc_resp_ready_o[k][p]),
-        .oup_sel_i   (local_idx[0]          ),
-        .oup_valid_o (demux_valid           ),
-        .oup_ready_i (demux_ready           )
+        .inp_valid_i (noc_resp_q_valid[k][p]    ),
+        .inp_ready_o (noc_resp_q_ready[k][p]    ),
+        .oup_sel_i   (resp_local_idx[k][p][0]   ),
+        .oup_valid_o (resp_demux_valid[k][p]    ),
+        .oup_ready_i (resp_demux_ready[k][p]    )
       );
 
       for (genvar j = 0; j < 2; j++) begin : gen_steer_j
-        assign core_noc_resp[2*k+j][p]       = resp_local;
-        assign core_noc_resp_valid[2*k+j][p] = demux_valid[j];
-        assign demux_ready[j]                = core_noc_resp_ready[2*k+j][p];
+        assign core_noc_resp[2*k+j][p]       = resp_local[k][p];
+        assign core_noc_resp_valid[2*k+j][p] = resp_demux_valid[k][p][j];
+        assign resp_demux_ready[k][p][j]     = core_noc_resp_ready[2*k+j][p];
       end
 
 `ifndef TARGET_SYNTHESIS
       // The group-level crossbar routes on {slice, local[1]}; a beat on lane k whose tile disagrees
       // was mis-routed upstream and would be delivered to the wrong tile.
       resp_lane_matches_tile: assert property (@(posedge clk_i) disable iff (!rst_ni)
-          noc_resp_valid_i[k][p] |-> (local_idx[1] == k[0]))
+          noc_resp_q_valid[k][p] |-> (resp_local_idx[k][p][1] == k[0]))
         else $error("[mempool_group_mshr_slice] g=%0d slice=%0d lane=%0d port=%0d: response for tile %0d (local %0d) on the wrong NoC lane",
-                    group_id_i, SliceId, k, p, noc_resp_i[k][p].tile_id, local_idx);
+                    group_id_i, SliceId, k, p, noc_resp_q[k][p].tile_id, resp_local_idx[k][p]);
       resp_slice_matches_tag: assert property (@(posedge clk_i) disable iff (!rst_ni)
-          noc_resp_valid_i[k][p] |->
-            (mshr_resp_slice(noc_resp_i[k][p].mshr_tag) == Slice))
+          noc_resp_q_valid[k][p] |->
+            (mshr_resp_slice(noc_resp_q[k][p].mshr_tag) == Slice))
         else $error("[mempool_group_mshr_slice] g=%0d slice=%0d lane=%0d port=%0d: response tag 0x%0h for tile %0d belongs to another slice",
-                    group_id_i, SliceId, k, p, noc_resp_i[k][p].mshr_tag, noc_resp_i[k][p].tile_id);
+                    group_id_i, SliceId, k, p, noc_resp_q[k][p].mshr_tag, noc_resp_q[k][p].tile_id);
 `endif
     end
   end
