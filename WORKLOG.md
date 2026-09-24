@@ -18293,3 +18293,63 @@ spill behind the fold's `rr_arb_tree` would close a combinational loop.
 A/B against HEAD on `hardware/rin_fp32_512x128x128.elf`: pending.
 
 **Status.** Committed; validation pending.
+
+## 2026-09-24 04:30 — qwen-gate-up: P-strip tiling for large batch (B >= 128)
+
+**Purpose.** At K=5120 P=16384 the gate+up outputs (`2 x B x P x 2` B) no longer fit L1 beyond
+B=64, so B=128/256/512 did not build.
+
+**Implementation.** The output columns are cut into strips of `QWEN_PT`; each strip runs the full
+gate and up K loops, then `fence` + barrier + DMA of both output strips to L2 (`qwen_out_l2`), and
+the next strip reuses the L1 buffers. No cross-core reduction (each core still owns its block and
+the whole K loop). `W` is stored strip-major in L2 (`[stage][strip][K][PT]`, `gen_operands.c
+write_w_bin`) and the output strip-major (`[stage][strip][B][PT]`), so every DMA stays one
+contiguous job -- the single-descriptor DMA frontend is unchanged. `qwen_layout.h`: `QWEN_L1_FOR`,
+`QWEN_PT_OK`, `QWEN_PT_AUTO` (widest of LDP/1..64 that fits); kernel/C row stride = `QWEN_PT`.
+Make knobs `qwen_pt=auto|n`, `qwen_split=auto|decode|prefill`. `gen_hash.c` span/burst stride use
+`QWEN_PT`. Check builds verify strip by strip, all cores in parallel, first mismatch reported with
+its global column. With one strip the code path, layouts and ELF behaviour are the old ones.
+
+**Result.** Builds (8x8, K=5120 P=16384 KT=160, 0 warnings): B=16/32/64 -> 1 strip; B=128 -> PT 8192,
+2 strips, 10.4 MiB L1; B=256 -> PT 8192, 2 strips, 15.6 MiB; B=512 -> PT 4096, 4 strips.
+
+RTL (VCS `build_split_vcs`, batch `strip1-20260924-041939-954e`, results in `hardware/strip1_*`):
+
+| arm | shape | split | strips | cycles | check |
+|---|---|---|---:|---:|---|
+| t3 | B32 K64 P8192 KT32, preload | decode | 1 | 35,302 | success |
+| t1 | same, `qwen_pt=4096` | decode | 2 | 28,272 | success |
+| t2 | B32 K64 P16384 KT32, device fill | decode | 4 | 56,564 | success |
+| t5 | B128 K128 P4096 KT32, `qwen_pt=2048` | prefill | 2 | 118,472 | success |
+| t4 | B16 K160 P16384 KT16, perf | decode | 1 | 80,380 | - |
+| t4_base | same, pre-change ELF | decode | 1 | 81,467 | - |
+
+t4_base reproduces the earlier 81,467 exactly; the 1-strip path is -1.3 %. t1 (2 strips) beating
+t3 (1 strip) on the same shape is one pair, mechanism not investigated. Both t4 arms finish the
+benchmark and then never print `[SPOT]` -- the epilogue wedge predates this change (the baseline
+ELF does it too). t5 prints 8.6 M `[BYP ORPHAN]` lines (89 MB transcript, 4 h wall): in prefill,
+bypassed bursts return 8 beats per counted forward in every slice, and the probe's forward side
+counts single-beat requests only -- a probe artefact (decode t1: fwd 1030 / rsp 1028; check
+passes). `[CMS]` burst accounting is off the same way on the 1-strip control t3.
+
+**Status.** Implemented and validated for correctness at 1/2/4 strips, decode and prefill. Open:
+the BYP-probe burst accounting (floods every prefill transcript), the perf-epilogue wedge.
+
+## 2026-09-24 19:10 — mempool_group_mshr: bypass probe accounts bursts and the arming edge
+
+**Purpose.** The `[BYP ORPHAN]` probe (sim-only, `GROUP_MSHR_BYPASS_PROBE`) printed 8.6 M lines on the
+prefill qwen check (t5, 89 MB transcript, 4 h wall) and ~250 on every decode run, all false.
+
+**Implementation.** Two probe defects, no datapath change:
+1. The forward side counted single-beat requests only (`req_len == 1`, decoded from `req_in`), but a
+   bypassed burst returns one response per beat in lane-law form (`core + b % BurstLanes`,
+   `meta + b / BurstLanes`). Every beat's key is now registered from `req_out`'s own `burst_len`
+   (stores and AMOs are one beat); `fwd` in the `[BYP]` summary now counts beats, like `rsp`.
+2. Accounting ran only while `cfg_mshr_enable` and the table was cleared on arming, so a request
+   forwarded just before the software armed the MSHR read as an orphan when its response came back
+   just after (all decode orphans sit at cycle 4-7k). Accounting now runs always; only the per-line
+   print stays gated on the enable, so an MSHR-off phase is still silent.
+
+**Result.** Image `hardware/build_split_vcs2` (same flags as `build_split_vcs`). Re-run of t5/t1: pending.
+
+**Status.** Implemented; validation pending.

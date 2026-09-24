@@ -3211,24 +3211,23 @@ module mempool_group_mshr
     localparam int unsigned BpMetaN = 2**$bits(meta_id_t);
     integer bp_out_cnt [NumTilesPerGroup][BpCoreN][BpMetaN];
     longint bp_cyc, bp_fwd, bp_rsp, bp_orphan;
-    logic   bp_en_q;
 
     // Was a scan of bypass_track_q, which the deleted table's else-arm tied to '0 -- so this
     // folded into its one consumer, so the probe's intent stays legible.
     //
-    // The probe describes the bypass path of a CONFIGURED MSHR, so its accounting runs only while
-    // cfg_mshr_enable is set. With the MSHR off every request bypasses by construction
-    // (cfg_bypass_single/burst, :405), so "a response with no outstanding forward" is not a
-    // finding -- and it fired on every beat of every bypassed BURST, because the forward side (1)
-    // counts single-beat requests only. That is the whole init / DMA / I$-warm-up phase, plus any
-    // kernel that switches the MSHR off before its verify (qwen-gate-up does), and it buried the
-    // transcript. At MshrCfgRuntime=0 cfg_mshr_enable folds to 1 and this gate disappears.
-    // Arming the MSHR starts a fresh epoch: the table is cleared, so a request forwarded while the
-    // MSHR was off can never be reported as an orphan by the response that arrives after.
+    // Accounting runs ALWAYS; only the per-orphan line is gated on cfg_mshr_enable, so a run with
+    // the MSHR off (init / DMA / I$ warm-up, or a kernel that switches it off before its verify,
+    // as qwen-gate-up does) stays quiet while the [BYP] summary still counts. At MshrCfgRuntime=0
+    // cfg_mshr_enable folds to 1.
+    //
+    // It used to account only while enabled, and clear the table on arming. That reported every
+    // request forwarded just BEFORE the software armed the MSHR as an orphan when its response
+    // came back just after -- ~250 lines at cycle ~4k on every decode qwen run. The gate existed
+    // because bursts could not be accounted; (1) now can, so the table is valid across the edge.
 
     always @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
-        bp_cyc = 0; bp_fwd = 0; bp_rsp = 0; bp_orphan = 0; bp_en_q = 1'b0;
+        bp_cyc = 0; bp_fwd = 0; bp_rsp = 0; bp_orphan = 0;
         for (int t = 0; t < NumTilesPerGroup; t++) begin
           for (int c = 0; c < BpCoreN; c++) begin
             for (int m = 0; m < BpMetaN; m++) bp_out_cnt[t][c][m] = 0;
@@ -3236,24 +3235,28 @@ module mempool_group_mshr
         end
       end else begin
         bp_cyc = bp_cyc + 1;
-        if (cfg_mshr_enable && !bp_en_q) begin : bp_arm
-          for (int t = 0; t < NumTilesPerGroup; t++) begin
-            for (int c = 0; c < BpCoreN; c++) begin
-              for (int m = 0; m < BpMetaN; m++) bp_out_cnt[t][c][m] = 0;
-            end
-          end
-        end
-        bp_en_q = cfg_mshr_enable;
-        if (cfg_mshr_enable) begin : bp_account
-        // (1) single-beat requests leaving the group without an entry.
+        // (1) requests leaving the group without an entry. A bypassed BURST returns one response
+        // per beat, each already in lane-law form (tcdm_burst_expander: beat b comes back as
+        // core_id + b % BurstLanes, meta_id + b / BurstLanes, both truncated to their field), so
+        // every beat's key is expected here. Counting only single-beat forwards made each bypassed
+        // burst report len-1 orphans: 8.6 M lines on a prefill qwen run. The length comes from
+        // req_out itself -- req_len decodes req_in, which a replay can hold a different request on
+        // -- and a store or an AMO is one beat whatever its burst_len (req_decode forces len 1).
         for (int t = 0; t < NumTilesPerGroup; t++) begin
           for (int p = 1; p < NumRemoteReqPortsPerTile; p++) begin
             if (req_out_valid[t][p] && req_out_ready[t][p] &&
-                (req_out[t][p].mshr_tag == '0) &&
-                (req_len[t][p] == BurstLenWidth'(1))) begin
-              bp_out_cnt[t][int'(req_out[t][p].wdata.core_id)]
-                        [int'(req_out[t][p].wdata.meta_id)] += 1;
-              bp_fwd = bp_fwd + 1;
+                (req_out[t][p].mshr_tag == '0)) begin : bp_fwd_one
+              automatic int beats =
+                  (req_out[t][p].wen || req_out[t][p].wdata.amo != '0 ||
+                   req_out[t][p].burst_len == '0) ? 1 : int'(req_out[t][p].burst_len);
+              for (int b = 0; b < beats; b++) begin
+                automatic tile_core_id_t bc =
+                    req_out[t][p].wdata.core_id + tile_core_id_t'(b % BurstLanes);
+                automatic meta_id_t      bm =
+                    req_out[t][p].wdata.meta_id + meta_id_t'(b / BurstLanes);
+                bp_out_cnt[t][int'(bc)][int'(bm)] += 1;
+              end
+              bp_fwd = bp_fwd + beats;
             end
           end
         end
@@ -3269,13 +3272,14 @@ module mempool_group_mshr
                 bp_out_cnt[t][bc][bm] -= 1;
               end else begin
                 bp_orphan = bp_orphan + 1;
-                $display("[BYP ORPHAN] cyc=%0d g=%0d t=%0d p=%0d core=%0d meta=%0d wen=%0b : bypass response with no outstanding forward for this key",
-                         bp_cyc, group_id_i, t, p, bc, bm, resp_out[t][p].wen);
+                if (cfg_mshr_enable) begin
+                  $display("[BYP ORPHAN] cyc=%0d g=%0d t=%0d p=%0d core=%0d meta=%0d wen=%0b : bypass response with no outstanding forward for this key",
+                           bp_cyc, group_id_i, t, p, bc, bm, resp_out[t][p].wen);
+                end
               end
             end
           end
         end
-        end : bp_account
         // (3) periodic summary.
         if ((StatsPeriod != 0) && ((bp_cyc % StatsPeriod) == 0)) begin
           $display("[BYP] cyc=%0d g=%0d fwd=%0d rsp=%0d orphan=%0d",

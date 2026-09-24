@@ -19,10 +19,17 @@
 // split, KERNEL_SIZE policy, MSHR tuning, group barrier and I$ warm-up are that
 // app's, because the per-tile problem is an L1-resident GEMM of [B]x[KT]x[P].
 //
-// W is stored row-major [K][QWEN_LDP], so a K tile is one contiguous slice: one
-// DMA, no packing, no tile index arithmetic. X is replicated across the mesh (see
-// qwen_layout.h) so no group is a hot spot for it. C stays in L1 as both
-// accumulator and output.
+// W is stored strip-major [strip][K][QWEN_PT] (row-major [K][QWEN_LDP] when there
+// is one strip), so a K tile of a strip is one contiguous slice: one DMA, no packing.
+// X is replicated across the mesh (see qwen_layout.h) so no group is a hot spot for
+// it. C is the accumulator in L1.
+//
+// Large batches: when the whole output no longer fits L1 (from B~128 at K=5120) it
+// is cut into QWEN_NSTRIPS column strips of QWEN_PT ("P strips", qwen_layout.h).
+// Each strip runs the complete gate and up K loops into the same L1 buffers, is
+// DMA'd out to qwen_out_l2 (strip-major [strip][B][PT]) and the next strip starts.
+// No cross-core reduction and no extra W traffic: a strip only narrows the columns.
+// With one strip nothing is written back and C stays in L1 as before.
 //
 // The L2 operands are .l2_bss: reserved, not stored in the ELF. QWEN_CHECK builds
 // fill them on the target with a pattern whose exact result is known and verify it
@@ -118,14 +125,13 @@ _Static_assert(QWEN_K <= 2048 && (QWEN_K & (QWEN_K - 1)) == 0,
 
 // Friendly early failure for an L1 budget the linker would otherwise report as a
 // bare region overflow. Approximate on purpose: the linker stays authoritative.
-#define QWEN_L1_BYTES ((NUM_CORES) * (N_FU) * (BANKING_FACTOR) * (L1_BANK_SIZE))
-#define QWEN_L1_USED                                                      \
-  (2 * (QWEN_KT) * (QWEN_LDP)*GEMM_ELEM_BYTES +      /* W double buffer */ \
-   2 * (QWEN_B) * (QWEN_LDP)*GEMM_ELEM_BYTES +       /* gate + up C     */ \
-   (QWEN_X_ELEMS)*GEMM_ELEM_BYTES +                  /* X (+ replicas)  */ \
-   (NUM_CORES) * (STACK_SIZE))
-_Static_assert(QWEN_L1_USED < QWEN_L1_BYTES,
-               "Buffers do not fit L1: lower QWEN_KT, lower the batch, or tile P");
+// The budget and the strip width are in qwen_layout.h ("P strips").
+_Static_assert(QWEN_PT > 0,
+               "No output-strip width fits L1 even at LDP/64: lower QWEN_KT (the W "
+               "double buffer) or the batch (X)");
+_Static_assert(QWEN_PT_OK(QWEN_PT),
+               "qwen_pt must be a whole number of pad units, divide LDP, leave every "
+               "core a column span of at least one vector load, and fit L1");
 
 //==============================================================================
 // Storage
@@ -146,8 +152,12 @@ static elem_t qwen_w_l2[QWEN_STAGES][QWEN_K * QWEN_LDP] QWEN_L2;
 static elem_t qwen_x_l2[QWEN_B * QWEN_K] QWEN_L2;
 #endif
 
-static elem_t qwen_w[2][QWEN_KT * QWEN_LDP] QWEN_L1;          // K-tile double buffer
-static elem_t qwen_c[QWEN_STAGES][QWEN_B * QWEN_LDP] QWEN_L1; // accumulator + output
+static elem_t qwen_w[2][QWEN_KT * QWEN_PT] QWEN_L1;           // K-tile double buffer
+static elem_t qwen_c[QWEN_STAGES][QWEN_B * QWEN_PT] QWEN_L1;  // accumulator, one strip
+#if QWEN_NSTRIPS > 1
+// Finished strips, strip-major [strip][B][PT]: each strip is one contiguous DMA.
+static elem_t qwen_out_l2[QWEN_STAGES][QWEN_B * QWEN_LDP] QWEN_L2;
+#endif
 // One copy of X per QWEN_X_GROUPS_PER_REPLICA groups; replica r starts at
 // r * QWEN_X_STRIDE_E so it lands on the first group of its neighbourhood.
 static elem_t qwen_x[QWEN_X_ELEMS] QWEN_L1;
@@ -156,6 +166,20 @@ static elem_t qwen_x[QWEN_X_ELEMS] QWEN_L1;
 // assignment comes from the real split rather than a second copy of the formula.
 static uint32_t qwen_fmac_core[NUM_CORES];
 
+
+#if !QWEN_CHECK
+// The finished output element (stage, b, p): the L1 accumulator with one strip,
+// the strip-major L2 copy with several. Only the perf build's fingerprint reads it;
+// a check build verifies strip by strip from L1 instead.
+static inline const uint16_t *qwen_out_at(uint32_t stage, uint32_t b, uint32_t p) {
+#if QWEN_NSTRIPS > 1
+  return (const uint16_t *)&qwen_out_l2[stage][(p / QWEN_PT) * (QWEN_B * QWEN_PT) +
+                                               b * QWEN_PT + (p % QWEN_PT)];
+#else
+  return (const uint16_t *)&qwen_c[stage][b * QWEN_PT + p];
+#endif
+}
+#endif
 
 //==============================================================================
 // Synthetic operands (QWEN_CHECK builds only)
@@ -199,7 +223,10 @@ static void qwen_fill_operands(uint32_t cid, uint32_t num_cores) {
   for (uint32_t s = 0; s < QWEN_STAGES; ++s) {
     uint32_t *w = (uint32_t *)qwen_w_l2[s];
     for (uint32_t i = cid; i < (uint32_t)(QWEN_K * QWEN_LDP) / 2u; i += num_cores) {
-      const uint32_t e = 2u * i, k = e / QWEN_LDP, col = e % QWEN_LDP;
+      // Strip-major: e walks [strip][k][c]. PT is even, so a pair never straddles a
+      // strip; with one strip this is the old row-major (k, col) decode.
+      const uint32_t e = 2u * i, strip = e / (QWEN_K * QWEN_PT), r = e % (QWEN_K * QWEN_PT);
+      const uint32_t k = r / QWEN_PT, col = strip * QWEN_PT + r % QWEN_PT;
       // Columns in [P, LDP) are alignment padding: never read by the kernel, and
       // zero so that a run that accidentally reads them is obviously wrong.
       const uint32_t lo = (col < (uint32_t)QWEN_P) ? qwen_w_bits(s, k, col) : 0u;
@@ -212,27 +239,30 @@ static void qwen_fill_operands(uint32_t cid, uint32_t num_cores) {
 #endif  // QWEN_FILL
 
 #if QWEN_CHECK
-// Integer compare of the whole output. Returns the number of wrong elements and
-// reports the first one. Both stages carry the same expected value.
-static uint32_t qwen_verify(uint32_t *first_p, uint16_t *got, uint16_t *want) {
-  uint32_t bad = 0;
-  for (uint32_t s = 0; s < QWEN_STAGES; ++s) {
-    const uint16_t *c = (const uint16_t *)qwen_c[s];
-    for (uint32_t b = 0; b < (uint32_t)QWEN_B; ++b)
-      for (uint32_t p = 0; p < (uint32_t)QWEN_P; ++p) {
-        const uint16_t e = qwen_expect_bits(s, b, p);
-        const uint16_t v = c[b * QWEN_LDP + p];
-        if (v != e) {
-          if (bad == 0) {
-            *first_p = p;
-            *got = v;
-            *want = e;
-          }
-          ++bad;
-        }
-      }
+// Integer compare of the whole output, one strip at a time, split across every core
+// (element i of the strip goes to core i % num_cores). With several strips the DMA
+// first brings the strip back from L2 into the L1 accumulator, so the check reads L1
+// and also covers the write-back and its strip-major layout. The first core to find a
+// wrong element records it. Both stages carry the same expected value.
+static volatile uint32_t qwen_bad, qwen_bad_s, qwen_bad_b, qwen_bad_p, qwen_bad_got,
+    qwen_bad_want;
+static void qwen_verify_strip(uint32_t strip, uint32_t cid, uint32_t num_cores) {
+  const uint32_t n = (uint32_t)(QWEN_STAGES * QWEN_B * QWEN_PT);
+  for (uint32_t i = cid; i < n; i += num_cores) {
+    const uint32_t s = i / (QWEN_B * QWEN_PT), r = i % (QWEN_B * QWEN_PT);
+    const uint32_t b = r / QWEN_PT, col = r % QWEN_PT;
+    const uint32_t p = strip * (uint32_t)QWEN_PT + col;
+    if (p >= (uint32_t)QWEN_P) continue;  // padding columns hold no result
+    const uint16_t e = qwen_expect_bits(s, b, p);
+    const uint16_t v = ((const uint16_t *)qwen_c[s])[b * QWEN_PT + col];
+    if (v != e && __atomic_fetch_add(&qwen_bad, 1u, __ATOMIC_RELAXED) == 0u) {
+      qwen_bad_s = s;
+      qwen_bad_b = b;
+      qwen_bad_p = p;
+      qwen_bad_got = v;
+      qwen_bad_want = e;
+    }
   }
-  return bad;
 }
 #endif  // QWEN_CHECK (verify)
 
@@ -313,31 +343,34 @@ static inline void qwen_barrier(uint32_t core_id) {
   }
 }
 
-// Launch the DMA that refills buffer slot `slot` with K tile `step` of `stage`.
+// Launch the DMA that refills buffer slot `slot` with K tile `step` of `strip` of
+// `stage`. Strip-major W makes that one contiguous KT x PT block.
 // Core 0 only; the caller has already barriered every reader off this slot.
-static void qwen_refill(uint32_t slot, uint32_t stage, uint32_t step) {
+static void qwen_refill(uint32_t slot, uint32_t stage, uint32_t strip, uint32_t step) {
   dma_memcpy_nonblocking(qwen_w[slot],
-                         qwen_w_l2[stage] + (uint32_t)step * (QWEN_KT * QWEN_LDP),
-                         (size_t)(QWEN_KT * QWEN_LDP) * GEMM_ELEM_BYTES);
+                         qwen_w_l2[stage] + strip * (uint32_t)(QWEN_K * QWEN_PT) +
+                             (uint32_t)step * (QWEN_KT * QWEN_PT),
+                         (size_t)(QWEN_KT * QWEN_PT) * GEMM_ELEM_BYTES);
 }
 
-// Prime the pipeline for one projection: tile 0 resident, tile 1 in flight.
-// Separate from the loop so the first projection's prime can sit outside the
+// Prime the pipeline for one projection of one strip: tile 0 resident, tile 1 in
+// flight. Separate from the loop so the very first prime can sit outside the
 // measured region -- a fill into an empty L1 has nothing to overlap with.
-static void qwen_prime(uint32_t stage, uint32_t cid) {
+static void qwen_prime(uint32_t stage, uint32_t strip, uint32_t cid) {
   if (cid != (uint32_t)QWEN_DMA_CORE) return;
-  qwen_refill(0, stage, 0);
+  qwen_refill(0, stage, strip, 0);
   dma_wait();
-  if ((uint32_t)QWEN_STEPS > 1u) qwen_refill(1, stage, 1);
+  if ((uint32_t)QWEN_STEPS > 1u) qwen_refill(1, stage, strip, 1);
 }
 
-// One projection: C[stage] = X . W[stage], reduced over all K tiles.
+// One projection of one strip: C[stage] = X . W[stage][strip], reduced over all K
+// tiles. C and the W buffers both have row stride QWEN_PT.
 //
 // Each iteration computes on the resident slot, then -- once every reader has left
 // it -- waits for the in-flight tile and launches the next into the slot just
 // freed. Exactly one transfer is outstanding: the global DMA frontend has one
 // {src,dst,len} register set, so a second launch would overwrite the first.
-static void qwen_project(uint32_t stage, uint32_t cid, const elem_t *x,
+static void qwen_project(uint32_t stage, uint32_t strip, uint32_t cid, const elem_t *x,
                          uint32_t m_start, uint32_t m_end,
                          uint32_t p_start, uint32_t p_end) {
   elem_t *c = qwen_c[stage];
@@ -350,19 +383,19 @@ static void qwen_project(uint32_t stage, uint32_t cid, const elem_t *x,
     const elem_t *a = x + (uint32_t)step * QWEN_KT;
     const uint32_t accum = (step != 0);
 #if KERNEL_SIZE == 1
-    matmul_1xVL(c, a, qwen_w[slot], m_start, m_end, QWEN_KT, QWEN_LDP, p_start, p_end,
+    matmul_1xVL(c, a, qwen_w[slot], m_start, m_end, QWEN_KT, QWEN_PT, p_start, p_end,
                 QWEN_K, accum,
                 (step & 1u)
                   | ((step != 0u) ? 2u : 0u)
                   | ((step + 1u < (uint32_t)QWEN_STEPS) ? 4u : 0u));
 #elif KERNEL_SIZE == 2
-    matmul_2xVL(c, a, qwen_w[slot], m_start, m_end, QWEN_KT, QWEN_LDP, p_start, p_end,
+    matmul_2xVL(c, a, qwen_w[slot], m_start, m_end, QWEN_KT, QWEN_PT, p_start, p_end,
                 QWEN_K, accum,
                 (step & 1u)
                   | ((step != 0u) ? 2u : 0u)
                   | ((step + 1u < (uint32_t)QWEN_STEPS) ? 4u : 0u));
 #elif KERNEL_SIZE == 4
-    matmul_4xVL(c, a, qwen_w[slot], m_start, m_end, QWEN_KT, QWEN_LDP, p_start, p_end,
+    matmul_4xVL(c, a, qwen_w[slot], m_start, m_end, QWEN_KT, QWEN_PT, p_start, p_end,
                 QWEN_K, accum,
                 (step & 1u)
                   | ((step != 0u) ? 2u : 0u)
@@ -372,7 +405,7 @@ static void qwen_project(uint32_t stage, uint32_t cid, const elem_t *x,
     // on is the one the next tile starts on: its accumulators stay in v0..v14 and
     // neither the store nor the reload happens. Not across projections -- the last
     // tile has no successor, so it stores everything.
-    matmul_8xVL(c, a, qwen_w[slot], m_start, m_end, QWEN_KT, QWEN_LDP, p_start, p_end,
+    matmul_8xVL(c, a, qwen_w[slot], m_start, m_end, QWEN_KT, QWEN_PT, p_start, p_end,
                 QWEN_K, accum,
                 (step & 1u)
                   | ((step != 0u) ? 2u : 0u)
@@ -386,7 +419,7 @@ static void qwen_project(uint32_t stage, uint32_t cid, const elem_t *x,
       // {src,dst,len} register set, so the previous transfer must be complete
       // before another is programmed. A no-op when the first arriver already waited.
       if (pending) dma_wait();
-      if (step + 2u < (uint32_t)QWEN_STEPS) qwen_refill(slot, stage, step + 2u);
+      if (step + 2u < (uint32_t)QWEN_STEPS) qwen_refill(slot, stage, strip, step + 2u);
       __atomic_store_n((uint32_t *)bar, 0, __ATOMIC_RELAXED);
       __sync_synchronize();
       wake_up_all();
@@ -394,6 +427,28 @@ static void qwen_project(uint32_t stage, uint32_t cid, const elem_t *x,
     }
   }
 }
+
+#if QWEN_NSTRIPS > 1
+// Move a finished strip of both outputs to L2 so the next strip can reuse the
+// buffers. The kernel ends on vector stores and the barrier is a scalar atomic, so
+// every core first FENCEs (a plain fence drains the Spatz VLSU too) -- otherwise the
+// DMA could read a C block whose last stores are still in flight. The DMA core then
+// copies both stages, one transfer at a time (the frontend holds one). The caller's
+// next prime + barrier keeps everyone off C until this is done; after the LAST strip
+// nothing follows, so it closes with its own barrier to keep the timer honest.
+static void qwen_writeback(uint32_t strip, uint32_t cid, uint32_t last) {
+  __asm__ volatile("fence" ::: "memory");
+  qwen_barrier(cid);
+  if (cid == (uint32_t)QWEN_DMA_CORE) {
+    for (uint32_t s = 0; s < QWEN_STAGES; ++s) {
+      dma_memcpy_nonblocking(qwen_out_l2[s] + strip * (uint32_t)(QWEN_B * QWEN_PT), qwen_c[s],
+                             (size_t)(QWEN_B * QWEN_PT) * GEMM_ELEM_BYTES);
+      dma_wait();
+    }
+  }
+  if (last) qwen_barrier(cid);
+}
+#endif
 
 //==============================================================================
 // main
@@ -432,15 +487,16 @@ int main(void) {
     const uint32_t n_p_blocks = active_cores / n_row_chunks;
     if (n_row_chunks == 0u || ((uint32_t)QWEN_B % kernel_size) != 0u) return -6;
     if (n_p_blocks == 0u || (active_cores % n_row_chunks) != 0u) return -7;
-    if (((uint32_t)QWEN_LDP % n_p_blocks) != 0u) return -5;
+    if (((uint32_t)QWEN_PT % n_p_blocks) != 0u) return -5;
     // row_chunk varies fastest so that cores sharing a column block are adjacent
     // core ids, i.e. in the same group, where the MSHR can merge their identical
     // W loads.
     const uint32_t row_chunk = cid % n_row_chunks;
     const uint32_t p_block = cid / n_row_chunks;
-    // The PADDED width, so every span is burst-friendly. The pad columns hold
-    // zeros and their results are never read.
-    const uint32_t p_span = (uint32_t)QWEN_LDP / n_p_blocks;
+    // Split ONE STRIP (the padded width when there is one strip), so every span is
+    // burst-friendly; each strip is split identically. The pad columns hold zeros
+    // and their results are never read.
+    const uint32_t p_span = (uint32_t)QWEN_PT / n_p_blocks;
     m_start = row_chunk * kernel_size;
     m_end = m_start + kernel_size;
     p_start = p_block * p_span;
@@ -459,9 +515,9 @@ int main(void) {
     if ((dim_group % kernel_size) != 0u || split_m_count == 0u) return -6;
     if (split_m_count < cores_per_group) {
       const uint32_t split_p_count = cores_per_group / split_m_count;
-      if (((uint32_t)QWEN_LDP % split_p_count) != 0u) return -5;
-      p_start = (uint32_t)QWEN_LDP / split_p_count * (core_gid % split_p_count);
-      p_end = (uint32_t)QWEN_LDP / split_p_count * ((core_gid % split_p_count) + 1);
+      if (((uint32_t)QWEN_PT % split_p_count) != 0u) return -5;
+      p_start = (uint32_t)QWEN_PT / split_p_count * (core_gid % split_p_count);
+      p_end = (uint32_t)QWEN_PT / split_p_count * ((core_gid % split_p_count) + 1);
       m_start = dim_group * gid + kernel_size * (core_gid / split_p_count);
       m_end = m_start + kernel_size;
       share_burst = (split_m_count < cores_per_group) ? split_m_count : cores_per_group;
@@ -469,7 +525,7 @@ int main(void) {
       pblocks = split_p_count;
     } else {
       p_start = 0;
-      p_end = (uint32_t)QWEN_LDP;
+      p_end = (uint32_t)QWEN_PT;
       m_start = dim_group * gid + (dim_group / cores_per_group) * core_gid;
       m_end = m_start + (dim_group / cores_per_group);
       share_burst = cores_per_group;
@@ -494,7 +550,7 @@ int main(void) {
   // per-group assignment the dashboard compares measured FMAC progress against.
   // Both projections and every repetition are included, and the padded width is
   // used because the padding columns are FMACs the machine really issues.
-  qwen_fmac_core[cid] = (p_end - p_start) * (m_end - m_start) *
+  qwen_fmac_core[cid] = (p_end - p_start) * (m_end - m_start) * (uint32_t)QWEN_NSTRIPS *
                         (uint32_t)QWEN_K * 2u * (uint32_t)QWEN_REPEATS;
 
   //--------------------------------------------------------------------------
@@ -536,24 +592,24 @@ int main(void) {
   // region covers them. The warm-up reads qwen_w[0] while it is still filling --
   // harmless, its results are discarded and no address derives from them.
   if (cid == (uint32_t)QWEN_DMA_CORE) {
-    qwen_refill(0, QWEN_GATE, 0);
-    if ((uint32_t)QWEN_STEPS > 1u) qwen_refill(1, QWEN_GATE, 1);
+    qwen_refill(0, QWEN_GATE, 0, 0);
+    if ((uint32_t)QWEN_STEPS > 1u) qwen_refill(1, QWEN_GATE, 0, 1);
   }
 
 #if ICACHE_WARMUP
   {
     const uint32_t warm = (QWEN_KT < 6u) ? (uint32_t)QWEN_KT : 6u;
 #if KERNEL_SIZE == 1
-    matmul_1xVL(qwen_c[0], x_use, qwen_w[0], m_start, m_end, warm, QWEN_LDP, p_start, p_end,
+    matmul_1xVL(qwen_c[0], x_use, qwen_w[0], m_start, m_end, warm, QWEN_PT, p_start, p_end,
                 QWEN_K, 0, 0u);
 #elif KERNEL_SIZE == 2
-    matmul_2xVL(qwen_c[0], x_use, qwen_w[0], m_start, m_end, warm, QWEN_LDP, p_start, p_end,
+    matmul_2xVL(qwen_c[0], x_use, qwen_w[0], m_start, m_end, warm, QWEN_PT, p_start, p_end,
                 QWEN_K, 0, 0u);
 #elif KERNEL_SIZE == 4
-    matmul_4xVL(qwen_c[0], x_use, qwen_w[0], m_start, m_end, warm, QWEN_LDP, p_start, p_end,
+    matmul_4xVL(qwen_c[0], x_use, qwen_w[0], m_start, m_end, warm, QWEN_PT, p_start, p_end,
                 QWEN_K, 0, 0u);
 #else
-    matmul_8xVL(qwen_c[0], x_use, qwen_w[0], m_start, m_end, warm, QWEN_LDP, p_start, p_end,
+    matmul_8xVL(qwen_c[0], x_use, qwen_w[0], m_start, m_end, warm, QWEN_PT, p_start, p_end,
                 QWEN_K, 0, 0u);
 #endif
   }
@@ -596,22 +652,42 @@ int main(void) {
     dma_wait();
   }
   mempool_barrier(num_cores);
-  uint32_t stage_end[QWEN_STAGES] = {0, 0};
+  // Cycles per stage over the last pass, summed over its strips. "up" includes the
+  // up prime; with several strips "gate" includes the next strip's gate prime and
+  // the write-back of the strip before it -- the pipeline restarts the strips cost.
+  uint32_t stage_cyc[QWEN_STAGES] = {0, 0};
 
   const uint32_t t0 = mempool_get_timer();
   mempool_start_benchmark();
   for (uint32_t rep = 0; rep < (uint32_t)QWEN_REPEATS; ++rep) {
-    qwen_project(QWEN_GATE, cid, x_use, m_start, m_end, p_start, p_end);
-    if (cid == 0) stage_end[QWEN_GATE] = mempool_get_timer();
-    // The up projection's own prime IS measured: by then L1 is warm and this is an
-    // ordinary pipeline restart, which a real FFN would pay too.
-    qwen_prime(QWEN_UP, cid);
-    qwen_barrier(cid);
-    qwen_project(QWEN_UP, cid, x_use, m_start, m_end, p_start, p_end);
-    if (cid == 0) stage_end[QWEN_UP] = mempool_get_timer();
-    if (rep + 1u < (uint32_t)QWEN_REPEATS) {
-      qwen_prime(QWEN_GATE, cid);
+    stage_cyc[QWEN_GATE] = stage_cyc[QWEN_UP] = 0;
+    uint32_t ts = (cid == 0) ? mempool_get_timer() : 0;
+    for (uint32_t strip = 0; strip < (uint32_t)QWEN_NSTRIPS; ++strip) {
+      qwen_project(QWEN_GATE, strip, cid, x_use, m_start, m_end, p_start, p_end);
+      if (cid == 0) {
+        const uint32_t t = mempool_get_timer();
+        stage_cyc[QWEN_GATE] += t - ts;
+        ts = t;
+      }
+      // The up projection's own prime IS measured: by then L1 is warm and this is an
+      // ordinary pipeline restart, which a real FFN would pay too.
+      qwen_prime(QWEN_UP, strip, cid);
       qwen_barrier(cid);
+      qwen_project(QWEN_UP, strip, cid, x_use, m_start, m_end, p_start, p_end);
+      if (cid == 0) {
+        const uint32_t t = mempool_get_timer();
+        stage_cyc[QWEN_UP] += t - ts;
+        ts = t;
+      }
+      const uint32_t last =
+          (rep + 1u == (uint32_t)QWEN_REPEATS) && (strip + 1u == (uint32_t)QWEN_NSTRIPS);
+#if QWEN_NSTRIPS > 1
+      qwen_writeback(strip, cid, last);
+#endif
+      if (!last) {
+        qwen_prime(QWEN_GATE, (strip + 1u) % (uint32_t)QWEN_NSTRIPS, cid);
+        qwen_barrier(cid);
+      }
     }
   }
   mempool_stop_benchmark();
@@ -640,12 +716,12 @@ int main(void) {
   //--------------------------------------------------------------------------
   if (cid == 0) {
     printf("[QWEN] B=%u K=%u P=%u ldp=%u (pad %u%%o) cols/core=%u kt=%u steps=%u "
-           "ks=%u decode=%u check=%u xrep=%u\n",
+           "ks=%u decode=%u check=%u xrep=%u pt=%u strips=%u\n",
            (unsigned)QWEN_B, (unsigned)QWEN_K, (unsigned)QWEN_P, (unsigned)QWEN_LDP,
            (unsigned)(1000u * (QWEN_LDP - QWEN_P) / QWEN_P),
            (unsigned)(p_end - p_start), (unsigned)QWEN_KT, (unsigned)QWEN_STEPS,
            (unsigned)kernel_size, (unsigned)MATMUL_DECODE_SPLIT, (unsigned)QWEN_CHECK,
-           (unsigned)QWEN_X_REPLICAS);
+           (unsigned)QWEN_X_REPLICAS, (unsigned)QWEN_PT, (unsigned)QWEN_NSTRIPS);
     // The dashboard reads the shape from this line, so --shape is not needed on
     // the generator command line. Gate and up are two independent B x K x P
     // projections; stacking them on M states the real FMAC count, 2*B*K*P.
@@ -704,8 +780,8 @@ int main(void) {
     printf("\n----- qwen gate/up (B=%u K=%u P=%u) -----\n", (unsigned)QWEN_B,
            (unsigned)QWEN_K, (unsigned)QWEN_P);
     printf("The execution took %u cycles.\n", timer);
-    printf("[QWEN] gate=%u up=%u cycles (last pass)\n",
-           stage_end[QWEN_GATE] - t0, stage_end[QWEN_UP] - stage_end[QWEN_GATE]);
+    printf("[QWEN] gate=%u up=%u cycles (last pass)\n", stage_cyc[QWEN_GATE],
+           stage_cyc[QWEN_UP]);
     printf("The performance is %u MAC/1000cycle (%u%%o of fp16 peak).\n",
            (unsigned)(macs * 1000ull / timer), (unsigned)(macs * 1000ull / peak));
   }
@@ -714,22 +790,35 @@ int main(void) {
   // STEP 5: the correctness check.
   //--------------------------------------------------------------------------
 #if QWEN_CHECK
+  if (cid == 0) qwen_bad = 0;
+  mempool_barrier(num_cores);
+  for (uint32_t strip = 0; strip < (uint32_t)QWEN_NSTRIPS; ++strip) {
+#if QWEN_NSTRIPS > 1
+    if (cid == (uint32_t)QWEN_DMA_CORE)
+      for (uint32_t s = 0; s < QWEN_STAGES; ++s)
+        dma_memcpy_blocking(qwen_c[s], qwen_out_l2[s] + strip * (uint32_t)(QWEN_B * QWEN_PT),
+                            (size_t)(QWEN_B * QWEN_PT) * GEMM_ELEM_BYTES);
+    mempool_barrier(num_cores);
+#endif
+    qwen_verify_strip(strip, cid, num_cores);
+    mempool_barrier(num_cores);
+  }
   if (cid == 0) {
-    uint32_t first_p = 0;
-    uint16_t got = 0, want = 0;
-    const uint32_t bad = qwen_verify(&first_p, &got, &want);
-    if (bad)
-      printf("FAIL: %u/%u elements wrong; first at p=%u got=0x%04x want=0x%04x\n",
-             (unsigned)bad, (unsigned)(QWEN_STAGES * QWEN_B * QWEN_P), (unsigned)first_p,
-             (unsigned)got, (unsigned)want);
+    if (qwen_bad)
+      printf("FAIL: %u/%u elements wrong; first at stage=%u b=%u p=%u got=0x%04x "
+             "want=0x%04x\n",
+             (unsigned)qwen_bad, (unsigned)(QWEN_STAGES * QWEN_B * QWEN_P),
+             (unsigned)qwen_bad_s, (unsigned)qwen_bad_b, (unsigned)qwen_bad_p,
+             (unsigned)qwen_bad_got, (unsigned)qwen_bad_want);
     else
       printf("success!\n");
   }
 #else
   // No golden without a check build: leave a fingerprint instead.
   if (cid == 0) {
-    const volatile uint32_t *g = (const volatile uint32_t *)qwen_c[QWEN_GATE];
-    const volatile uint32_t *u = (const volatile uint32_t *)qwen_c[QWEN_UP];
+    // C[0][0..3] of each stage, wherever the finished output lives.
+    const volatile uint32_t *g = (const volatile uint32_t *)qwen_out_at(QWEN_GATE, 0, 0);
+    const volatile uint32_t *u = (const volatile uint32_t *)qwen_out_at(QWEN_UP, 0, 0);
     printf("[SPOT] gate w0=%08x w1=%08x  up w0=%08x w1=%08x\n", g[0], g[1], u[0], u[1]);
   }
 #endif

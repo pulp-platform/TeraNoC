@@ -89,4 +89,47 @@
                          : (GEMM_M) * (GEMM_N))
 #define QWEN_X_REPLICA_OF(group) ((group) / (QWEN_X_GROUPS_PER_REPLICA))
 
+// ---- P strips: how the output is cut when it does not fit L1 ---------------------
+//
+// L1 holds the W double buffer, the gate and up outputs and X. The outputs are
+// 2*B*LDP elements, so they grow with the batch and are what runs out first: at
+// K=5120, KT=160 the whole output fits up to B=64 and not beyond.
+//
+// So the output columns are cut into strips of QWEN_PT columns. A strip is finished
+// completely -- every K tile of gate, then of up -- written out to L2, and then the
+// next strip reuses the same L1 buffers. Nothing is reduced across cores: each core
+// still owns a block of C and runs the whole K loop on it. Every W element belongs to
+// exactly one strip, so W is still read from L2 once, and X stays resident.
+//
+// W is stored STRIP-MAJOR in L2, [strip][K][PT], so the K tile of a strip is one
+// contiguous DMA exactly as before. The output goes to L2 strip-major too,
+// [strip][B][PT], which is also the order the down projection reads it in (it
+// reduces over P). With one strip both layouts are the old row-major ones.
+#define QWEN_L1_BYTES ((NUM_CORES) * (N_FU) * (BANKING_FACTOR) * (L1_BANK_SIZE))
+#define QWEN_L1_FIXED ((QWEN_X_ELEMS)*GEMM_ELEM_BYTES + (NUM_CORES) * (STACK_SIZE))
+#define QWEN_L1_FOR(pt)                                                  \
+  (2 * (QWEN_KT) * (pt)*GEMM_ELEM_BYTES +  /* W double buffer          */ \
+   2 * (QWEN_B) * (pt)*GEMM_ELEM_BYTES +   /* gate + up output strip   */ \
+   (QWEN_L1_FIXED))
+// A legal strip width: whole pad units (every core's span stays stripe-aligned),
+// an exact divisor of LDP, a per-core span at least as long as the vector load the
+// MSHR tuning assumes (GEMM_LOAD_BYTES), and fits L1.
+#define QWEN_PT_OK(pt)                                                         \
+  ((pt) > 0 && ((pt) % (QWEN_PAD_UNIT)) == 0 && ((QWEN_LDP) % (pt)) == 0 &&     \
+   ((pt) / (QWEN_PBLOCKS)) * GEMM_ELEM_BYTES >= GEMM_LOAD_BYTES(KERNEL_SIZE) && \
+   (QWEN_L1_FOR(pt)) < (QWEN_L1_BYTES))
+#define QWEN_PT_TRY(d, rest) \
+  ((((QWEN_LDP) % (d)) == 0 && QWEN_PT_OK((QWEN_LDP) / (d))) ? ((QWEN_LDP) / (d)) : (rest))
+// The widest strip that fits: fewest strip boundaries. 0 when nothing fits.
+#define QWEN_PT_AUTO                                                               \
+  QWEN_PT_TRY(1, QWEN_PT_TRY(2, QWEN_PT_TRY(4, QWEN_PT_TRY(8, QWEN_PT_TRY(16,       \
+      QWEN_PT_TRY(32, QWEN_PT_TRY(64, 0)))))))
+// qwen_pt=<n> on the make line pins the width; qwen_pt=auto (default) picks it.
+#if defined(QWEN_PT_REQ) && (QWEN_PT_REQ) > 0
+#define QWEN_PT (QWEN_PT_REQ)
+#else
+#define QWEN_PT (QWEN_PT_AUTO)
+#endif
+#define QWEN_NSTRIPS ((QWEN_PT) > 0 ? (QWEN_LDP) / (QWEN_PT) : 1)
+
 #endif

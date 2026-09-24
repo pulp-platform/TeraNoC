@@ -69,7 +69,9 @@ int main(void) {
                                                     : (uint32_t)GEMM_CPG;
   const uint32_t share_in_set = (share < cores_per_bankset) ? share : cores_per_bankset;
   const uint32_t blocks = cores_per_bankset / (share_in_set ? share_in_set : 1u);
-  const uint32_t span   = (uint32_t)QWEN_LDP / (uint32_t)GEMM_PBLOCKS(KERNEL_SIZE);
+  // Per-core columns of ONE STRIP, and the W buffer's row stride is the strip width
+  // (qwen_layout.h, "P strips"); both are LDP when there is one strip.
+  const uint32_t span   = (uint32_t)QWEN_PT / (uint32_t)GEMM_PBLOCKS(KERNEL_SIZE);
   // One load covers min(span, VL_MAX) elements and splits into that many bursts;
   // its id cost then caps how many loads can overlap.
   // Below 16-byte spans the kernel keeps the stripe cap, so a load is one burst.
@@ -123,7 +125,7 @@ int main(void) {
                 // (main.c: p_start = p_block * p_span, p_block = cid / rows), so
                 // the stride is span, not span*share.
                 const uint32_t word =
-                    (ld * (uint32_t)QWEN_LDP + blk * span) * GEMM_ELEM_BYTES / 4 +
+                    (ld * (uint32_t)QWEN_PT + blk * span) * GEMM_ELEM_BYTES / 4 +
                     sub * QWEN_BURST_WORDS;
                 seen |= 1u << gemm_hash_bank(word, shift, bb, banks);
               }

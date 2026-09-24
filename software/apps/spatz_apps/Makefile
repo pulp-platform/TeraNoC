@@ -147,10 +147,32 @@ qwen_ks ?= max
 # at fp16), so every vector load is a full 16-word burst; costs stored width (see
 # qwen_layout.h). `4` restores the old 8-byte spans with no padding.
 qwen_span_align ?= stripe
+# Output-strip width in columns (qwen_layout.h, "P strips"). `auto` = the widest
+# LDP/2^n whose W double buffer + output strip + X fit L1: one strip (the old
+# behaviour) whenever the whole output fits, more strips from B~128 up at K=5120.
+# A number pins it; it must be a whole number of pad units dividing LDP.
+qwen_pt ?= auto
+# Work split across cores. `auto` = gemm_config.h's choice (prefill whenever it is
+# legal, i.e. from B=16*KERNEL_SIZE up). `decode` keeps the columns split across the
+# groups at any batch, so each W element is read by one group instead of all 16 --
+# the right split for an FFN where P >> B. `prefill` forces the other one.
+qwen_split ?= auto
 ifeq ($(qwen_span_align),stripe)
 qwen_span_def := QWEN_SPAN_ALIGN_DEFAULT 1
 else
 qwen_span_def := QWEN_SPAN_ALIGN $(qwen_span_align)
+endif
+ifeq ($(qwen_pt),auto)
+qwen_pt_def := QWEN_PT_REQ 0
+else
+qwen_pt_def := QWEN_PT_REQ $(qwen_pt)
+endif
+ifeq ($(qwen_split),decode)
+qwen_split_def := MATMUL_DECODE_SPLIT 1
+else ifeq ($(qwen_split),prefill)
+qwen_split_def := MATMUL_DECODE_SPLIT 0
+else
+qwen_split_def := QWEN_SPLIT_AUTO 1
 endif
 ifeq ($(qwen_ks),max)
 qwen_ks_def := GEMM_KS_PREFER_MAX 1
@@ -162,7 +184,7 @@ endif
 qwen-gate-up/data/qwen_shape.h: FORCE
 	@mkdir -p $(@D)
 	@{ \
-	  echo '// GENERATED from make vars qwen_b/qwen_k/qwen_p/qwen_kt/qwen_check -- do not hand-edit.'; \
+	  echo '// GENERATED from make vars qwen_b/qwen_k/qwen_p/qwen_kt/qwen_check/qwen_pt/qwen_split -- do not hand-edit.'; \
 	  echo '#ifndef QWEN_SHAPE_H'; \
 	  echo '#define QWEN_SHAPE_H'; \
 	  echo '#define GEMM_M $(qwen_b)          // batch: independent decode sequences'; \
@@ -177,6 +199,8 @@ qwen-gate-up/data/qwen_shape.h: FORCE
 	  echo '#define QWEN_REPEATS $(qwen_repeats)'; \
 	  echo '#define $(qwen_ks_def)'; \
 	  echo '#define $(qwen_span_def)'; \
+	  echo '#define $(qwen_pt_def)'; \
+	  echo '#define $(qwen_split_def)'; \
 	  echo '#endif'; \
 	} > $@.tmp
 	@if cmp -s $@.tmp $@; then rm -f $@.tmp; else mv $@.tmp $@; fi

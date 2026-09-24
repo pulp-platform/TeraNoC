@@ -31,10 +31,27 @@ static void write_bin(const char *path, uint32_t rows, uint32_t cols,
   fclose(f);
 }
 
-// W is [stage][K][LDP]; columns past P are alignment padding the kernel never
-// reads, and are zero so a run that does read them is obviously wrong.
+// W is [stage][strip][K][PT] -- strip-major, so a K tile of one strip is one
+// contiguous DMA (qwen_layout.h, "P strips"); with one strip that is [stage][K][LDP].
+// Columns past P are alignment padding the kernel never reads, and are zero so a run
+// that does read them is obviously wrong.
 static uint16_t w_value(uint32_t stage, uint32_t k, uint32_t p) {
   return (p < (uint32_t)QWEN_P) ? qwen_w_bits(stage, k, p) : 0u;
+}
+static void write_w_bin(const char *path) {
+  FILE *f = fopen(path, "wb");
+  if (!f) { perror(path); exit(1); }
+  uint16_t *row = malloc((size_t)QWEN_PT * sizeof(uint16_t));
+  if (!row) { fprintf(stderr, "out of memory\n"); exit(1); }
+  for (uint32_t s = 0; s < QWEN_STAGES_N; ++s)
+    for (uint32_t strip = 0; strip < (uint32_t)QWEN_NSTRIPS; ++strip)
+      for (uint32_t k = 0; k < (uint32_t)QWEN_K; ++k) {
+        for (uint32_t c = 0; c < (uint32_t)QWEN_PT; ++c)
+          row[c] = w_value(s, k, strip * (uint32_t)QWEN_PT + c);
+        if (fwrite(row, sizeof(uint16_t), QWEN_PT, f) != (size_t)QWEN_PT) { perror(path); exit(1); }
+      }
+  free(row);
+  fclose(f);
 }
 static uint16_t x_value(uint32_t stage, uint32_t b, uint32_t k) {
   (void)stage;
@@ -46,7 +63,7 @@ int main(int argc, char **argv) {
   char path[4096];
 
   snprintf(path, sizeof(path), "%s/qwen_w.bin", argv[1]);
-  write_bin(path, QWEN_K, QWEN_LDP, w_value, QWEN_STAGES_N);
+  write_w_bin(path);
 
   snprintf(path, sizeof(path), "%s/qwen_x.bin", argv[1]);
   write_bin(path, QWEN_B, QWEN_K, x_value, 1);

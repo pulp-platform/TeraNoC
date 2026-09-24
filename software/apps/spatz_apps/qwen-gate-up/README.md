@@ -60,6 +60,8 @@ believing it is the new one. That happened here and silently faked six arms.
 | `qwen_kt` | 40 | reduction rows of `W` per streamed tile (sets the L1 double buffer) |
 | `qwen_check` | 0 | 0 = perf, 1 = unit pattern, 2 = ones pattern (§5) |
 | `qwen_repeats` | 1 | passes inside the timed region; reported cycles are per pass |
+| `qwen_pt` | auto | P-strip width in columns (§2.3). `auto` = widest strip that fits L1 |
+| `qwen_split` | auto | work split: `decode` (rows x column blocks), `prefill` (rows across groups), `auto` = prefill once it is legal |
 | `config` | — | **software** build config = `sw/config/<name>.mk`. NOT the simulator profile |
 | `l2_size` | from config | L2 bytes the linker may use. Needs `536870912` at full size |
 
@@ -81,13 +83,48 @@ Both `QWEN_HOLD_SUBS_*` are **experiment knobs**. The derived values come from t
 `gemm_config.h` split the kernel runs, which is what keeps the MSHR's targets and the
 real sharing in agreement. Override only to measure, and label the result.
 
-## 2.3 L1 capacity
+## 2.3 L1 capacity and P strips
 
-`C` is `2 x B x P x 2` bytes and does not depend on `KT`, so past some batch no `KT`
-helps and the build fails with a `_Static_assert` naming the problem. At 4x4 full size
-B <= 32 fits (KT 40/40/40/40/32/16 for B=1/2/4/8/16/32); **B=64 and B=128 do not** —
-`C` alone is 4.25 and 8.50 MiB against 3.75 MiB usable. They need P panelling, which is
-not implemented.
+L1 holds the `W` double buffer (`2 x KT x PT x 2` B), the gate and up outputs
+(`2 x B x PT x 2` B), `X` and the stacks. The outputs grow with the batch, so they are
+what runs out first: at K=5120, KT=160 the whole output fits up to B=64 and not beyond.
+
+Past that the output columns are cut into **P strips** of `QWEN_PT` columns. A strip is
+finished completely -- every K tile of gate, then of up -- written back to L2, and the
+next strip reuses the same L1 buffers:
+
+```
+for strip in 0 .. NSTRIPS-1:
+    gate: stream W[strip] K tile by K tile, accumulate G[:, strip]
+    up:   stream W[strip] K tile by K tile, accumulate U[:, strip]
+    fence; barrier; DMA G and U strips -> L2; prime gate of strip+1
+```
+
+- **No cross-core reduction.** Each core still owns a block of the output and runs the
+  whole K loop on it; the strip only narrows the block.
+- **Every DMA stays contiguous.** `W` is stored **strip-major** in L2, `[stage][strip][K][PT]`
+  (`script/gen_operands.c` writes it that way), so a K tile of one strip is one run of
+  `KT x PT` elements. The output goes out strip-major too, `[stage][strip][B][PT]`, one
+  `B x PT` copy per stage. The DMA frontend's one-job/one-done-flag model is unchanged.
+- `W` is still read from L2 exactly once (every element belongs to one strip), and `X`
+  stays resident; the cost is one write-back and one barrier per strip.
+- With one strip both layouts are the old row-major ones and the code path is the old
+  one (no write-back, no `qwen_out_l2`).
+
+`qwen_pt=auto` tries `LDP/1, LDP/2, ... LDP/64` and takes the first width that is a
+whole number of pad units, divides `LDP`, keeps each core's span at least one full
+vector load, and fits L1 (`QWEN_PT_OK`, `qwen_layout.h`). The build fails with a
+`_Static_assert` if nothing fits. At K=5120 P=16384 on 8x8:
+
+| B | KT | PT | strips | L1 used |
+|---:|---:|---:|---:|---:|
+| 16 / 32 / 64 | 160 | 16384 | 1 | fits |
+| 128 | 160 | 8192 | 2 | 10.4 MiB |
+| 256 | 160 | 8192 | 2 | 15.6 MiB |
+| 512 | 160 | 4096 | 4 | fits (decode split) |
+
+`auto` picks the prefill split for B >= 128 whenever it is legal; `qwen_split=decode`
+forces the row-chunk x column-block split instead.
 
 ---
 
@@ -186,6 +223,11 @@ nothing is written to the L2 operands: they are `.l2_bss`, reserved but absent f
 ELF, so a full-size ELF is ~130 KiB rather than 340 MiB. GVSoC timing is
 data-independent, so a perf arm loses nothing by running on unwritten weights.
 
+With several strips the check copies each strip's two output blocks back from L2 into
+the L1 accumulators and all cores verify that strip in parallel; a mismatch is reported
+with its stage, row and **global** column, so a wrong strip offset reads as a column
+that is off by a multiple of `QWEN_PT`.
+
 `main.c` disables the MSHR right after `mempool_stop_benchmark()` in check builds: the
 verify loop is one core walking the whole output with scalar halfword loads, forming
 2-subscriber cohorts against a much larger target and timing all of them out. Without
@@ -203,7 +245,8 @@ group that hosts the L1 buffers.
 | Derived shape | `QWEN_LDP` (padded row stride), `QWEN_STEPS`, L1 budget `_Static_assert`s |
 | Storage | `qwen_w_l2` / `qwen_x_l2` in `.l2_bss`; `qwen_w[2][..]` double buffer, `qwen_c[2][..]`, `qwen_x` in `.l1_prio` |
 | Synthetic operands | `qwen_*_bits()`, `qwen_fill_operands()`, `qwen_verify()` — only under `QWEN_CHECK` |
-| Pipeline | `qwen_refill()` one DMA; `qwen_prime()` tile 0 + launch tile 1; `qwen_project()` the K-tile loop |
+| Pipeline | `qwen_refill()` one DMA of strip `s`, tile `t`; `qwen_prime()` tile 0 + launch tile 1; `qwen_project()` the K-tile loop over one strip |
+| Strips | `qwen_writeback()` fence + barrier + DMA both output strips to `qwen_out_l2`; only built when `QWEN_NSTRIPS > 1` |
 | `main` steps 1–6 | work split → operands → group barrier struct → I$ warm-up + MSHR config → measured region → check |
 
 Pipeline shape: on entry tile 0 is resident and tile 1 in flight; each iteration
@@ -256,14 +299,16 @@ on the burst path at every batch, and the 256³ GEMM anchor bit-identical.
 | `KERNEL_SIZE` | `gemm_config.h` | rows per microkernel; selects the `matmul_NxVL` variant |
 | `MATMUL_DECODE_SPLIT` | `gemm_config.h` | decode splits P and rows; prefill splits M across groups |
 | `QWEN_LDP` | `QWEN_PAD_UNIT` | stored row stride, padded so each core's span is a multiple of 4 elements |
-| `QWEN_STEPS` | `K / QWEN_KT` | number of streamed tiles |
+| `QWEN_STEPS` | `K / QWEN_KT` | number of streamed tiles per strip |
+| `QWEN_PT`, `QWEN_NSTRIPS` | `qwen_layout.h` | strip width (kernel and `C` row stride) and `LDP / PT` |
 | `MSHR_D_HOLD_SUBS_*` | `mshr_cfg.h` | subscriber targets, derived from the same split |
 
 ---
 
 # 7. Known limits and open questions
 
-- Output panels are not tiled, so `C` must fit L1 — B <= 32 at full size on 4x4.
+- Strip write-back is serial with compute: the next strip's gate prime waits for the
+  write-back DMA. Overlapping it needs a second `C` buffer or a DMA frontend that queues.
 - `X` is a single L1 copy. At B=1 every core takes its scalar operand from the few
   groups that copy occupies; the MSHR's single class absorbs it (16 cores merge into one
   remote request). A group-local `X` needs a strided per-group placement.
