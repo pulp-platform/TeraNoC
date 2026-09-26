@@ -132,33 +132,53 @@
 #define QWEN_L1_FIXED ((QWEN_X_ELEMS)*GEMM_ELEM_BYTES + (NUM_CORES) * (STACK_SIZE))
 // Each buffer slot is rounded up to a whole mesh sweep so every slot, not just the
 // first, starts sweep-aligned -- the build-time bank hash scores buffer offsets.
-#define QWEN_L1_FOR(pt)                                                                   \
-  (2 * QWEN_ROUND_SWEEP((QWEN_KT) * ((pt) + (QWEN_WPAD))) * GEMM_ELEM_BYTES + /* W x2 */  \
+#define QWEN_L1_KP(kt, pt)                                                                \
+  (2 * QWEN_ROUND_SWEEP((kt) * ((pt) + (QWEN_WPAD))) * GEMM_ELEM_BYTES +      /* W x2 */  \
    2 * QWEN_ROUND_SWEEP((QWEN_B) * ((pt) + (QWEN_WPAD))) * GEMM_ELEM_BYTES +  /* C x2 */  \
    (QWEN_L1_FIXED))
-// A legal strip width: whole pad units (every core's span stays stripe-aligned),
-// an exact divisor of LDP, a per-core span at least as long as the vector load the
-// MSHR tuning assumes (GEMM_LOAD_BYTES), and fits L1.
-#define QWEN_PT_OK(pt)                                                         \
+// A legal strip width for K tiles of kt rows: whole pad units (every core's span
+// stays stripe-aligned), an exact divisor of LDP, a per-core span at least as long as
+// the vector load the MSHR tuning assumes (GEMM_LOAD_BYTES) -- so every W load stays
+// a full-length vector, 2 x 16-word bursts at KS=8 -- and fits L1.
+#define QWEN_PT_OK_K(kt, pt)                                                   \
   ((pt) > 0 && ((pt) % (QWEN_PAD_UNIT)) == 0 && ((QWEN_LDP) % (pt)) == 0 &&     \
    ((pt) / (QWEN_PBLOCKS)) * GEMM_ELEM_BYTES >= GEMM_LOAD_BYTES(KERNEL_SIZE) && \
-   (QWEN_L1_FOR(pt)) < (QWEN_L1_BYTES))
-#define QWEN_PT_TRY(d, rest) \
-  ((((QWEN_LDP) % (d)) == 0 && QWEN_PT_OK((QWEN_LDP) / (d))) ? ((QWEN_LDP) / (d)) : (rest))
-// The widest strip that fits: fewest strip boundaries. 0 when nothing fits.
-#define QWEN_PT_AUTO                                                               \
-  QWEN_PT_TRY(1, QWEN_PT_TRY(2, QWEN_PT_TRY(4, QWEN_PT_TRY(8, QWEN_PT_TRY(16,       \
-      QWEN_PT_TRY(32, QWEN_PT_TRY(64, 0)))))))
-// qwen_pt=<n> on the make line pins the width; qwen_pt=auto (default) picks it.
-#if defined(QWEN_PT_REQ) && (QWEN_PT_REQ) > 0
-#define QWEN_PT (QWEN_PT_REQ)
-#else
-#define QWEN_PT (QWEN_PT_AUTO)
+   (QWEN_L1_KP(kt, pt)) < (QWEN_L1_BYTES))
+
+// ---- K tile height and strip width ---------------------------------------------------
+//
+// A core keeps its 8 x 64 accumulator block in registers for the whole K loop of one
+// 64-column chunk, and pays ~1.5-2k cycles at every chunk boundary (C store, the group
+// rendezvous, C reload, W restart) -- ~10 pp of FPU time at KT=160. The boundaries per
+// MAC fall as 1/KT, and the W double buffer 2 x KT x PT is a fixed L1 budget, so a
+// taller tile trades strip width for height: KT=640 PT=4096 moves the same 5.25 MB per
+// DMA as KT=160 PT=16384 and measured +7 pp at 4x4 B=16/32/64. Every W load keeps its
+// full vector length (QWEN_PT_OK_K), and with the continuous W stream (main.c) a strip
+// boundary costs only the output write-back.
+//
+// script/gen_tiles.c picks both on the host and writes data/qwen_tiles.h (a macro search
+// over KT x PT expands past what the compiler survives):
+//   * QWEN_KT: qwen_kt=<n> pins it; qwen_kt=auto (default) takes the tallest K/s,
+//     s = 2, 4, ..., 128 tiles -- an EVEN count, which the stream's slot parity needs --
+//     up to QWEN_KT_MAX (make qwen_kt_max, default 640, the tallest measured) that leaves
+//     a legal strip width;
+//   * QWEN_PT: qwen_pt=<n> pins it; auto takes the widest legal width beside QWEN_KT.
+#ifndef QWEN_TILE_PROBE
+#include "data/qwen_tiles.h"
 #endif
+#define QWEN_L1_FOR(pt) QWEN_L1_KP(QWEN_KT, pt)
+#define QWEN_PT_OK(pt) QWEN_PT_OK_K(QWEN_KT, pt)
 #define QWEN_NSTRIPS ((QWEN_PT) > 0 ? (QWEN_LDP) / (QWEN_PT) : 1)
 // Stored row stride of W (L2 and L1) and of C: the strip width plus the pad.
 #define QWEN_LDW ((QWEN_PT) + (QWEN_WPAD))
 #define QWEN_WSLOT QWEN_ROUND_SWEEP((QWEN_KT) * (QWEN_LDW))   // one W K-tile buffer
+// W in L2 is [stage][strip][K tile][QWEN_WSLOT]: each K tile starts on a mesh sweep there too.
+// L2 is interleaved on the same bits as the L1 group field, so a sweep-aligned tile makes the
+// DMA backend of group g read L2 bank g for EVERY tile. Packed back to back, a padded tile
+// (5,253,120 B at PT=16384) shifted that by 10 banks per tile and the refill time swung from
+// 15.8k to 34.8k cycles around an unchanged mean -- which a DMA-bound shape pays at its max.
+// Without the pad the slot is exactly the tile and the layout is the packed one.
+#define QWEN_WTILES ((QWEN_NSTRIPS) * ((QWEN_K) / (QWEN_KT)))   // K tiles per stage in L2
 #define QWEN_CSLOT QWEN_ROUND_SWEEP((QWEN_B) * (QWEN_LDW))    // one stage's C strip
 
 #endif

@@ -57,10 +57,11 @@ believing it is the new one. That happened here and silently faked six arms.
 | `qwen_b` | 1 | batch |
 | `qwen_k` | 5120 | hidden / reduction length. Must be a multiple of `qwen_kt` |
 | `qwen_p` | 17408 | FFN intermediate |
-| `qwen_kt` | 40 | reduction rows of `W` per streamed tile (sets the L1 double buffer) |
+| `qwen_kt` | auto | reduction rows of `W` per streamed tile (§2.5). `auto` = tallest that fits, up to `qwen_kt_max` |
+| `qwen_kt_max` | 640 | cap for `qwen_kt=auto` (the tallest measured) |
 | `qwen_check` | 0 | 0 = perf, 1 = unit pattern, 2 = ones pattern (§5) |
 | `qwen_repeats` | 1 | passes inside the timed region; reported cycles are per pass |
-| `qwen_pt` | auto | P-strip width in columns (§2.3). `auto` = widest strip that fits L1 |
+| `qwen_pt` | auto | P-strip width in columns (§2.3). `auto` = widest strip that fits beside `qwen_kt` |
 | `qwen_split` | auto | work split: `decode` (rows x column blocks), `prefill` (rows across groups), `auto` = prefill once it is legal |
 | `qwen_rc_group` | 4 | decode: row chunks per group (§2.4). `group` = the original split |
 | `qwen_wpad` | tile | W/C row pad in elements (§2.4). `tile` = one 64-byte stripe, `0` = none |
@@ -149,7 +150,39 @@ W bursts merge in a tile ROW, X scalars in a tile COLUMN):
   a K tile cycles through all tiles and the group that reads its own W (unmerged:
   local bursts bypass the MSHR) rotates instead of always being g0 and g15. The pad
   is stored in L2, so a K tile is still one DMA; buffer slots are rounded up to a
-  mesh sweep so each stays aligned.
+  mesh sweep so each stays aligned. In L2 each K tile also gets its own
+  sweep-rounded slot (`[stage][strip][K tile][QWEN_WSLOT]`): L2 is interleaved on
+  the L1 group bits, so an aligned tile keeps group g's DMA backend on L2 bank g.
+  Packed back to back, padded tiles shifted that by 10 banks per tile and the
+  refill time swung 15.8k-34.8k cycles around an unchanged mean, which the
+  DMA-bound B=16 paid at its maximum (barrier sleep 2.5 -> 7.8 pp).
+
+## 2.5 K tile height and the continuous W stream
+
+A core keeps its 8 x 64 accumulator block in registers for the whole K loop of one
+64-column chunk and pays ~1.5-2k cycles at every chunk boundary (C store, group
+rendezvous, C reload, W restart): ~10 pp of FPU time at `KT=160`. Boundaries per MAC
+fall as 1/KT, and the W double buffer `2 x KT x PT` is a fixed L1 budget, so the
+default trades strip width for height: `KT=640 PT=4096` moves the same 5.25 MB per DMA
+as `KT=160 PT=16384`. Every W load keeps its full vector length (at KS=8 two 16-word
+bursts); the limit is one full 64-column chunk per core per strip,
+`PT >= 64 x column blocks`.
+
+`script/gen_tiles.c` chooses both on the host and writes `data/qwen_tiles.h`: the
+tallest `KT = K/s` (s = 2, 4, ..., 128, an even tile count) up to `qwen_kt_max` that
+leaves a legal strip, then the widest strip beside it. Full shape (K=5120 P=16384):
+
+| mesh | B | KT x PT | strips | measured (first ~200k cycles) |
+|---|---:|---|---:|---|
+| 4x4 | 16 | 320 x 8192 | 2 | 95.1 % (was 88.5 at 160 x 16384) |
+| 4x4 | 32, 64 | 640 x 4096 | 4 | 95.7 / 95.5 % (was 88.3 / 88.4) |
+| 8x8 | 64, 128 | 640 x 16384 | 1 | 94.0 % at B=64 (was 82.8) |
+
+More strips would add pipeline restarts, so the W stream is continuous (`main.c`,
+`QWEN_STREAM`): the last two K steps of a projection prefetch the next projection's
+tiles 0 and 1, and a strip's write-back runs in the barrier of its last step. The only
+per-strip cost left is the output copy. It needs an even tile count (slot = step & 1);
+an odd one keeps the prime-per-projection path.
 
 ---
 

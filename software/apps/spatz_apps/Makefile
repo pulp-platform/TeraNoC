@@ -123,7 +123,11 @@ FORCE:
 qwen_b     ?= 1
 qwen_k     ?= 5120
 qwen_p     ?= 17408
-qwen_kt    ?= 40
+# Reduction rows of W per streamed K tile. `auto` (default) = the tallest KT with an
+# even number of tiles, up to qwen_kt_max, for which a legal strip width fits L1
+# (qwen_layout.h "K tile height"); a number pins it.
+qwen_kt    ?= auto
+qwen_kt_max ?= 640
 qwen_check ?= 0
 # Fill the operands on target. Off by default: the platform is expected to hand us
 # defined memory (RTL tc_sram SimInit, GVSoC zeroed). A check build implies it.
@@ -209,7 +213,8 @@ qwen-gate-up/data/qwen_shape.h: FORCE
 	  echo '#define GEMM_N $(qwen_k)          // hidden'; \
 	  echo '#define GEMM_P $(qwen_p)          // FFN intermediate'; \
 	  echo '#define GEMM_ELEM_BYTES 2'; \
-	  echo '#define QWEN_KT $(qwen_kt)        // reduction rows of W per streamed tile'; \
+	  echo '#define QWEN_KT_REQ $(if $(filter auto,$(qwen_kt)),0,$(qwen_kt))  // K tile rows, 0 = auto'; \
+	  echo '#define QWEN_KT_MAX $(qwen_kt_max)'; \
 	  echo '#define QWEN_CHECK $(qwen_check)'; \
 	  echo '#define QWEN_INIT $(qwen_init)'; \
 	  echo '#define QWEN_DMA_CORE $(qwen_dma_core)u'; \
@@ -228,7 +233,17 @@ qwen-gate-up/data/qwen_shape.h: FORCE
 # which are known here. Selecting it on the host keeps it out of the target's boot
 # path entirely -- the app just writes the constants to its CSRs.
 HOST_CC ?= cc
-qwen-gate-up/data/qwen_hash.h: qwen-gate-up/data/qwen_shape.h \
+# The K tile height and strip width, chosen on the host (script/gen_tiles.c): a macro
+# search over both expands past what the compiler survives.
+qwen-gate-up/data/qwen_tiles.h: qwen-gate-up/data/qwen_shape.h \
+	qwen-gate-up/qwen_layout.h qwen-gate-up/script/gen_tiles.c \
+	$(RUNTIME_DIR)/gemm_config.h $(RUNTIME_DIR)/gemm_burst.h
+	@mkdir -p $(@D)
+	$(HOST_CC) -O1 -I$(RUNTIME_DIR) -Iqwen-gate-up $(DEFINES) \
+		qwen-gate-up/script/gen_tiles.c -o $(@D)/gen_tiles
+	$(@D)/gen_tiles > $@.tmp && mv $@.tmp $@
+
+qwen-gate-up/data/qwen_hash.h: qwen-gate-up/data/qwen_shape.h qwen-gate-up/data/qwen_tiles.h \
 	qwen-gate-up/qwen_layout.h qwen-gate-up/script/gen_hash.c \
 	$(RUNTIME_DIR)/gemm_hash.h $(RUNTIME_DIR)/gemm_config.h $(RUNTIME_DIR)/gemm_burst.h
 	@mkdir -p $(@D)
@@ -239,7 +254,7 @@ qwen-gate-up/data/qwen_hash.h: qwen-gate-up/data/qwen_shape.h \
 # The operand images and the stub that places them in L2. Written on the host: an
 # initialised C array of this many elements would never finish compiling, so the
 # assembler .incbin's the raw images instead.
-qwen-gate-up/data/qwen_operands.S: qwen-gate-up/data/qwen_shape.h \
+qwen-gate-up/data/qwen_operands.S: qwen-gate-up/data/qwen_shape.h qwen-gate-up/data/qwen_tiles.h \
 	qwen-gate-up/qwen_layout.h qwen-gate-up/qwen_pattern.h \
 	qwen-gate-up/script/gen_operands.c
 	@mkdir -p $(@D)
@@ -250,7 +265,8 @@ qwen-gate-up/data/qwen_operands.S: qwen-gate-up/data/qwen_shape.h \
 qwen-gate-up/data/qwen_operands.S.o: qwen-gate-up/data/qwen_operands.S
 	$(RISCV_CC) $(RISCV_CCFLAGS) -c $< -o $@
 
-qwen-gate-up/main.c.o: qwen-gate-up/data/qwen_shape.h qwen-gate-up/data/qwen_hash.h \
+qwen-gate-up/main.c.o: qwen-gate-up/data/qwen_shape.h qwen-gate-up/data/qwen_tiles.h \
+	qwen-gate-up/data/qwen_hash.h \
 	qwen-gate-up/qwen_layout.h qwen-gate-up/qwen_pattern.h \
 	qwen-gate-up/kernel/qwen-fmatmul.c qwen-gate-up/kernel/qwen-fmatmul.h
 

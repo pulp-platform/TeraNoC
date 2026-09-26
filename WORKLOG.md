@@ -18402,3 +18402,60 @@ instruction stream, so occupancy tracks throughput here; still an early-window m
 B16 pad is -1.6 pp at 200k (within the arms' period-to-period swing, not investigated).
 
 **Status.** Validated (correctness + early-window perf). Perf arms still running on the fleet.
+
+## 2026-09-26 02:30 — qwen-gate-up: where the remaining ~13% goes (scripts/qwen_perf_analyze.py)
+
+**Purpose.** Account for the loss left after the 4x4 patch + row pad, and give the user a script to
+do it on any run.
+
+**Implementation.** `scripts/qwen_perf_analyze.py <run dir | transcript> [--from --to --dip]`: util
+distribution; loss budget (steady shortfall vs barrier sleep = a group with FPU, insn and every
+stall 0, vs sync/refill dips) with dip spacing; per-group util/stalls/IPC; MSHR slice occupancy and
+bypass rate; NoC stages; bank stall and per-period busy tiles per group; dma.log transfer durations.
+Handles Questa "# " prefixes, the CSV leading space, and live transcripts.
+
+**Result** (fleet `gp1`, cycles 40k-700k; GUI build_1/2/3 run the byte-identical ELFs and match the
+fleet [FPU] busy counter exactly at cycle 50k):
+
+| arm | util | barrier sleep | sync/refill | busy tiles/grp | K-tile DMA (mean, min-max) |
+|---|---:|---:|---:|---:|---|
+| B16 base | 87.0 | 2.5 | 10.5 | 8.5 | 23.2k (12.6-24.3k) |
+| B16 pad | 83.1 | 7.8 | 8.6 | 16 | 23.4k (15.8-34.8k) |
+| B32 base | 68.1 | 16.0 | 11.7 | 4.8 | 21.2k |
+| B32 pad | 87.0 | 1.6 | 10.1 | 15.5 | 23.2k (15.6-35.6k) |
+| B64 base | 42.4 | 14.5 | 11.4 | 2.5-5 | 14.4k |
+| B64 grid+pad | 86.3 | 1.6 | 9.9 | 15.2 | 22.2k (14.9-36.0k) |
+
+* The ~10 pp left at every batch is a dip every ~12k cycles = one 64-column chunk (8 rows x 64 cols
+  x 160 K rows = 81,920 MAC = 10.2k cycles at peak): C store + group rendezvous (GBAR_PLOOP) + C
+  reload + W refill. In the dip period `fen` jumps to ~8.7k/16k per group and unsent requests
+  (`memq`) from ~2k to 10-22k: the 16 cores' 1 KB C store + 1 KB C load hit the request ports at once.
+* The K-tile barrier (the only wfi, every ~97k cycles at B64) is ~3k cycles asleep per tile.
+* Correction to the earlier "pad makes the DMA slower": counted over ALL K-tile DMAs the mean is
+  unchanged (23.2k vs 23.4k at B16); the pad WIDENS the spread (L2 source no longer 16 KB aligned,
+  so group g's DMA reads L2 bank g + 10*tile instead of bank g). B16 is DMA-bound (5.25 MB per
+  ~20.5k cycles of compute needs ~256 B/cyc, the DMA gives ~226), so it waits on the max of the two
+  per tile: barrier sleep 2.5 -> 7.8.
+
+**Status.** Analysis done; next candidates: taller/narrower K tiles (fewer chunk boundaries per MAC,
+existing qwen_kt/qwen_pt knobs), 16 KB-aligned K tiles in L2 (restore a fixed L2 bank per group).
+
+## 2026-09-26 17:20 — qwen-gate-up: taller K tiles by default + continuous W stream
+
+**Purpose.** Make the measured KT gain the default: 4x4 B16/32/64 at ~170-200k cycles went 88.5/88.3/88.4 %
+-> 95.1/95.7/95.5 % with kt=320 pt=8192 / kt=640 pt=4096 (8x8 B64 kt=640: 94.0 vs 82.8 %).
+
+**Implementation.** `qwen_kt=auto` (new default) + `qwen_kt_max=640`: `script/gen_tiles.c` picks on the host the
+tallest KT = K/s (even s) up to the cap with a legal strip, then the widest strip; writes
+`data/qwen_tiles.h` (a preprocessor search over KT x PT made clang abort after 6 min). It reproduces exactly
+the tested points (4x4 B16 320x8192, B32/B64 640x4096; 8x8 B64/B128 640x16384). More strips meant more
+exposed primes (a whole tile DMA at every projection start, 2 per strip), which the early windows never
+reached, so the W stream is now continuous: seq = (strip*2+stage)*STEPS+step, the refill of seq+2 crosses
+projection and strip boundaries (slot = step&1, needs an even tile count), and the strip write-back runs
+in the last step's barrier after the next tile 0 lands and before tile 1 launches. Odd tile counts keep
+the old prime path.
+
+**Result.** Builds clean (6-7 s). Fleet `kt1-20260926-171450-2761`: 4 checks (stream 4-strip, stream 2-strip
+device fill, legacy odd 3-tile 2-strip, auto small), 4x4 B16/32/64 and 8x8 B64/B128 defaults. Pending.
+
+**Status.** Implemented; validation running.
