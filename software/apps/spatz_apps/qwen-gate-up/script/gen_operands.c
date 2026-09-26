@@ -41,14 +41,16 @@ static uint16_t w_value(uint32_t stage, uint32_t k, uint32_t p) {
 static void write_w_bin(const char *path) {
   FILE *f = fopen(path, "wb");
   if (!f) { perror(path); exit(1); }
-  uint16_t *row = malloc((size_t)QWEN_PT * sizeof(uint16_t));
+  // Rows of LDW = PT + QWEN_WPAD: the pad is stored too, as zeros, so the target's
+  // K-tile DMA stays one contiguous copy (qwen_layout.h, "Row pad").
+  uint16_t *row = calloc((size_t)QWEN_LDW, sizeof(uint16_t));
   if (!row) { fprintf(stderr, "out of memory\n"); exit(1); }
   for (uint32_t s = 0; s < QWEN_STAGES_N; ++s)
     for (uint32_t strip = 0; strip < (uint32_t)QWEN_NSTRIPS; ++strip)
       for (uint32_t k = 0; k < (uint32_t)QWEN_K; ++k) {
         for (uint32_t c = 0; c < (uint32_t)QWEN_PT; ++c)
           row[c] = w_value(s, k, strip * (uint32_t)QWEN_PT + c);
-        if (fwrite(row, sizeof(uint16_t), QWEN_PT, f) != (size_t)QWEN_PT) { perror(path); exit(1); }
+        if (fwrite(row, sizeof(uint16_t), QWEN_LDW, f) != (size_t)QWEN_LDW) { perror(path); exit(1); }
       }
   free(row);
   fclose(f);

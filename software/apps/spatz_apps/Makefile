@@ -157,6 +157,14 @@ qwen_pt ?= auto
 # groups at any batch, so each W element is read by one group instead of all 16 --
 # the right split for an FFN where P >> B. `prefill` forces the other one.
 qwen_split ?= auto
+# Row chunks per group in the decode split (gemm_config.h GEMM_DECODE_RC_PER_GROUP).
+# 4 = each group a 4 x 4 (row chunks x column blocks) patch, so W and X sharers each
+# fill one 4-tile slice of the split MSHR; `group` = the original split (a group
+# takes up to all 16 row chunks: 8 x 2 at B=64, X down to 2 sharers).
+qwen_rc_group ?= 4
+# W/C row pad in elements (qwen_layout.h, "Row pad"). `tile` = one 64-byte stripe,
+# which moves each successive K row to the next tile; 0 = no pad (the old layout).
+qwen_wpad ?= tile
 ifeq ($(qwen_span_align),stripe)
 qwen_span_def := QWEN_SPAN_ALIGN_DEFAULT 1
 else
@@ -166,6 +174,16 @@ ifeq ($(qwen_pt),auto)
 qwen_pt_def := QWEN_PT_REQ 0
 else
 qwen_pt_def := QWEN_PT_REQ $(qwen_pt)
+endif
+ifeq ($(qwen_rc_group),group)
+qwen_rc_def := QWEN_RC_GROUP_LEGACY 1
+else
+qwen_rc_def := GEMM_DECODE_RC_PER_GROUP $(qwen_rc_group)
+endif
+ifeq ($(qwen_wpad),tile)
+qwen_wpad_def := QWEN_WPAD_DEFAULT 1
+else
+qwen_wpad_def := QWEN_WPAD $(qwen_wpad)
 endif
 ifeq ($(qwen_split),decode)
 qwen_split_def := MATMUL_DECODE_SPLIT 1
@@ -184,7 +202,7 @@ endif
 qwen-gate-up/data/qwen_shape.h: FORCE
 	@mkdir -p $(@D)
 	@{ \
-	  echo '// GENERATED from make vars qwen_b/qwen_k/qwen_p/qwen_kt/qwen_check/qwen_pt/qwen_split -- do not hand-edit.'; \
+	  echo '// GENERATED from make vars qwen_b/qwen_k/qwen_p/qwen_kt/qwen_check/qwen_pt/qwen_split/qwen_rc_group/qwen_wpad -- do not hand-edit.'; \
 	  echo '#ifndef QWEN_SHAPE_H'; \
 	  echo '#define QWEN_SHAPE_H'; \
 	  echo '#define GEMM_M $(qwen_b)          // batch: independent decode sequences'; \
@@ -201,6 +219,8 @@ qwen-gate-up/data/qwen_shape.h: FORCE
 	  echo '#define $(qwen_span_def)'; \
 	  echo '#define $(qwen_pt_def)'; \
 	  echo '#define $(qwen_split_def)'; \
+	  echo '#define $(qwen_rc_def)'; \
+	  echo '#define $(qwen_wpad_def)'; \
 	  echo '#endif'; \
 	} > $@.tmp
 	@if cmp -s $@.tmp $@; then rm -f $@.tmp; else mv $@.tmp $@; fi

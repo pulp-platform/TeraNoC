@@ -41,6 +41,18 @@
 #define GEMM_DECODE_ROWS(k) GEMM_DIV(GEMM_M, k)
 #define GEMM_DECODE_PBLOCKS(k) \
   GEMM_DIV(GEMM_ACTIVE_CORES, GEMM_DECODE_ROWS(k))
+// Row chunks ONE GROUP holds in the decode split. The default, the whole group, is
+// the original split: row_chunk = cid % n_rows, so a group takes up to GEMM_CPG row
+// chunks of a few column blocks. A smaller cap gives each group a squarer
+// (row chunks x column blocks) patch instead. With the split group MSHR's 4-tile
+// slices, a cap of 4 makes both sharing degrees 4 -- W sharers are one tile row
+// (one burst slice), X sharers one tile column (one single slice) -- where
+// 8 x 2 at B=64 left X with 2 sharers, below the merge threshold, and W with 8
+// straddling two slices. Legacy shapes with n_rows <= cap are unchanged.
+#ifndef GEMM_DECODE_RC_PER_GROUP
+#define GEMM_DECODE_RC_PER_GROUP GEMM_CPG
+#endif
+#define GEMM_DECODE_RCG(k) GEMM_MIN(GEMM_DECODE_ROWS(k), GEMM_DECODE_RC_PER_GROUP)
 #define GEMM_DECODE_OK(k) \
   (GEMM_M % (k) == 0 && GEMM_DECODE_ROWS(k) > 0 && \
    GEMM_DECODE_ROWS(k) <= GEMM_ACTIVE_CORES && \
@@ -48,6 +60,8 @@
    ((GEMM_DECODE_ROWS(k) < GEMM_CPG) \
      ? GEMM_MOD(GEMM_CPG, GEMM_DECODE_ROWS(k)) == 0 \
      : GEMM_DECODE_ROWS(k) % GEMM_CPG == 0) && \
+   GEMM_MOD(GEMM_CPG, GEMM_DECODE_RCG(k)) == 0 && \
+   GEMM_MOD(GEMM_DECODE_ROWS(k), GEMM_DECODE_RCG(k)) == 0 && \
    GEMM_MOD(GEMM_P, GEMM_DECODE_PBLOCKS(k)) == 0)
 #ifdef MATMUL_DECODE_SPLIT
 #define GEMM_USE_DECODE(k) MATMUL_DECODE_SPLIT
@@ -59,7 +73,7 @@
    (GEMM_USE_DECODE(k) ? GEMM_DECODE_OK(k) : GEMM_PREFILL_OK(k)))
 #define GEMM_SHARE_B(k) \
   GEMM_MIN(GEMM_CPG, (GEMM_USE_DECODE(k) \
-    ? GEMM_DECODE_ROWS(k) : GEMM_ROW_TILES(k)))
+    ? GEMM_DECODE_RCG(k) : GEMM_ROW_TILES(k)))
 #define GEMM_SHARE_A(k) GEMM_DIV(GEMM_CPG, GEMM_SHARE_B(k))
 #define GEMM_PBLOCKS(k) (GEMM_USE_DECODE(k) \
   ? GEMM_DECODE_PBLOCKS(k) : GEMM_PREFILL_PBLOCKS(k))

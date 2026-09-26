@@ -18353,3 +18353,52 @@ prefill qwen check (t5, 89 MB transcript, 4 h wall) and ~250 on every decode run
 **Result.** Image `hardware/build_split_vcs2` (same flags as `build_split_vcs`). Re-run of t5/t1: pending.
 
 **Status.** Implemented; validation pending.
+
+## 2026-09-25 09:30 — qwen-gate-up: 4x4 decode group patch + one-tile W row pad
+
+**Purpose.** Full-shape RTL (K=5120 P=16384, split MSHR) FPU lane occupancy was B16 85% / B32 77% /
+B64 49%. Diagnosis (per-group probes, Spatz traces, bank probe): at B64 the decode split gave each
+group 8 row chunks x 2 column blocks, so X had 2 sharers per column slice -> `hold_subs_single=1`,
+every X load bypassed the MSHR (column slices 0.00 valid, bypass 1,029/kcyc/group) and W's 8
+sharers straddled two row slices; W vector-load latency 3x, X 2x. Separately, W/C rows are
+32 KiB (a whole number of mesh sweeps) so all W traffic sat on 8/4/2 tiles per group
+(B16/32/64); g0 and g15 read their own W locally (unmerged), which made them the barrier
+stragglers behind B32's ~10k-cycle slumps.
+
+**Implementation.** (A) `gemm_config.h` `GEMM_DECODE_RC_PER_GROUP` (default = whole group, i.e. the
+original split, so sp-fmatmul is unchanged): decode groups take an rcg x (16/rcg) patch,
+row_chunk = (gid % bands)*rcg + core_gid % rcg, p_block = (gid / bands)*(16/rcg) + core_gid / rcg;
+the same cap feeds `mshr_cfg.h` (`MSHR_D_SHR_B` and the runtime derive) and `gen_hash.c` via
+`GEMM_SHARE_B`. (B) `QWEN_WPAD` (default one 64-B stripe): W and C row stride `QWEN_LDW = PT + pad`,
+stored in L2 too (`gen_operands`) so a K tile stays one DMA; slots rounded to a mesh sweep. Make
+knobs `qwen_rc_group=4|group`, `qwen_wpad=tile|n`. Hash: {9,4,0} reaches 2/2 banks for both classes
+(gen_hash and `mshr_bank_hash_explore.py`).
+
+**Result.** Builds clean. Fleet batch `gp1-20260925-092921-eb18` (image `build_split_vcs2`):
+4 check arms (B64 grid+pad, B64 2-strip device fill, B16 pad, B128 prefill pad 2-strip) and full-shape
+A/B arms p_b64_{base,grid,pad,grid_pad}, p_b32_{base,pad}, p_b16_{base,pad}; base = same code with
+`qwen_rc_group=group qwen_wpad=0`.
+
+Correctness: all 4 check arms `success!` (c1 B64 grid+pad 57,509 cyc; c2 B64 2-strip device fill
+56,866; c3 B16 pad 14,543; c4 B128 prefill pad 2-strip 103,727).
+
+Full shape, FPU lane occupancy over the first N benchmark cycles (arms do not finish: 1-5 M cycles):
+
+| arm | 100k | 200k |
+|---|---:|---:|
+| B64 base | 40.2 % | 43.7 % |
+| B64 grid (A) | 78.3 % | - (node lost at 13:43, re-run reproduces 78.3 % exactly) |
+| B64 pad (B) | 67.2 % | 64.3 % |
+| **B64 grid+pad** | **88.9 %** | **86.9 %** |
+| B32 base | 73.0 % | 70.2 % |
+| **B32 pad** | **88.0 %** | **87.7 %** |
+| B16 base | 86.2 % | 86.8 % |
+| B16 pad | 86.0 % | 85.2 % |
+
+Mechanism (B64 grid+pad vs base): column slices 0.00 -> 4.64 valid entries (X merges), NoC
+requests 0.97 -> 0.58 /grp/cyc at ~2x the work, responses 1.78 -> 2.26; every tile of every group
+now serves W (was 2), g0/g15 bank stall/hsk ~1 -> 0.07/0.32. Neither knob changes a core's
+instruction stream, so occupancy tracks throughput here; still an early-window measurement.
+B16 pad is -1.6 pp at 200k (within the arms' period-to-period swing, not investigated).
+
+**Status.** Validated (correctness + early-window perf). Perf arms still running on the fleet.

@@ -62,6 +62,8 @@ believing it is the new one. That happened here and silently faked six arms.
 | `qwen_repeats` | 1 | passes inside the timed region; reported cycles are per pass |
 | `qwen_pt` | auto | P-strip width in columns (§2.3). `auto` = widest strip that fits L1 |
 | `qwen_split` | auto | work split: `decode` (rows x column blocks), `prefill` (rows across groups), `auto` = prefill once it is legal |
+| `qwen_rc_group` | 4 | decode: row chunks per group (§2.4). `group` = the original split |
+| `qwen_wpad` | tile | W/C row pad in elements (§2.4). `tile` = one 64-byte stripe, `0` = none |
 | `config` | — | **software** build config = `sw/config/<name>.mk`. NOT the simulator profile |
 | `l2_size` | from config | L2 bytes the linker may use. Needs `536870912` at full size |
 
@@ -125,6 +127,29 @@ vector load, and fits L1 (`QWEN_PT_OK`, `qwen_layout.h`). The build fails with a
 
 `auto` picks the prefill split for B >= 128 whenever it is legal; `qwen_split=decode`
 forces the row-chunk x column-block split instead.
+
+## 2.4 Decode group patch and row pad
+
+Two layout choices, both measured against the split group MSHR (4-tile slices:
+W bursts merge in a tile ROW, X scalars in a tile COLUMN):
+
+- **Group patch (`qwen_rc_group`).** The original decode split puts the row chunk
+  fastest in the core id, so at B=64 (8 row chunks) a group holds 8 row chunks x 2
+  column blocks: W's 8 sharers straddle two row slices and X has only 2 sharers per
+  column slice, below the merge threshold, so every X load bypasses the MSHR. With
+  `qwen_rc_group=4` each group takes a 4 x 4 patch instead: W sharers are one tile
+  row, X sharers one tile column, both merge 4-way. Shapes with <= 4 row chunks
+  (B<=32 at KS=8) are unchanged. `gemm_config.h` `GEMM_DECODE_RC_PER_GROUP` is the
+  one knob the split, `mshr_cfg.h`'s merge targets and `gen_hash.c` all read.
+- **Row pad (`qwen_wpad`).** W and C rows are PT elements and PT x 2 bytes is a
+  whole number of mesh sweeps, so every K row sits on the same group and tile: at
+  any moment all W traffic comes from 2 tiles per column block (8 of 16 tiles per
+  group at B=16, 4 at B=32, 2 at B=64), and those few tiles source every response.
+  One 64-byte pad moves each K row one tile on, and each 16 rows one group on, so
+  a K tile cycles through all tiles and the group that reads its own W (unmerged:
+  local bursts bypass the MSHR) rotates instead of always being g0 and g15. The pad
+  is stored in L2, so a K tile is still one DMA; buffer slots are rounded up to a
+  mesh sweep so each stays aligned.
 
 ---
 

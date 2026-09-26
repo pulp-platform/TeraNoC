@@ -246,7 +246,14 @@ static inline int mshr_cfg_derive(uint32_t M, uint32_t N, uint32_t P,
         (nrow < cores_per_group ? cores_per_group % nrow
                                : nrow % cores_per_group)) return -2;
     p_blocks = active_cores / nrow;
-    share_b = nrow < cores_per_group ? nrow : cores_per_group;
+    // Same cap as MSHR_D_SHR_B: a group holds at most GEMM_DECODE_RC_PER_GROUP row chunks.
+#ifdef GEMM_DECODE_RC_PER_GROUP
+    const uint32_t rcg = (uint32_t)GEMM_DECODE_RC_PER_GROUP;
+#else
+    const uint32_t rcg = cores_per_group;
+#endif
+    share_b = nrow < rcg ? nrow : rcg;
+    if (cores_per_group % share_b || nrow % share_b) return -2;
     share_a = cores_per_group / share_b;
   } else {
     if (!prefill) return -3;
@@ -395,9 +402,15 @@ static inline int mshr_cfg_derive(uint32_t M, uint32_t N, uint32_t P,
 #  define MSHR_D_CPG_   ((int)NUM_CORES / (int)NUM_GROUPS)
 #  define MSHR_D_NROW   ((int)GEMM_M / (int)MSHR_KERNEL_SIZE)          /* row chunks */
 #  define MSHR_D_NPB    (MSHR_D_ACTIVE_CORES / MSHR_D_NROW)                 /* p blocks, machine-wide */
-   /* W sharers per group = the n_row_chunks consecutive cids that hold one p_block, capped by
-      the group; A sharers per group = however many groups-of-those fit in the group. */
-#  define MSHR_D_SHR_B  (MSHR_D_NROW < MSHR_D_CPG_ ? MSHR_D_NROW : MSHR_D_CPG_)
+   /* W sharers per group = the row chunks one group holds for a p_block: n_row_chunks capped by
+      the group, and by GEMM_DECODE_RC_PER_GROUP (gemm_config.h) when a kernel tiles each group
+      as a squarer patch; A sharers per group = however many groups-of-those fit in the group. */
+#  if defined(GEMM_DECODE_RC_PER_GROUP)
+#    define MSHR_D_RCG_ ((int)GEMM_DECODE_RC_PER_GROUP)
+#  else
+#    define MSHR_D_RCG_ MSHR_D_CPG_
+#  endif
+#  define MSHR_D_SHR_B  (MSHR_D_NROW < MSHR_D_RCG_ ? MSHR_D_NROW : MSHR_D_RCG_)
 #  define MSHR_D_SHR_A  (MSHR_D_CPG_ / MSHR_D_SHR_B)
 #  define MSHR_D_PGAP   MSHR_D_NPB
 #else

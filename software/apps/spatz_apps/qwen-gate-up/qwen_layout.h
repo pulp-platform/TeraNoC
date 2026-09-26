@@ -101,15 +101,40 @@
 // still owns a block of C and runs the whole K loop on it. Every W element belongs to
 // exactly one strip, so W is still read from L2 once, and X stays resident.
 //
-// W is stored STRIP-MAJOR in L2, [strip][K][PT], so the K tile of a strip is one
+// W is stored STRIP-MAJOR in L2, [strip][K][LDW], so the K tile of a strip is one
 // contiguous DMA exactly as before. The output goes to L2 strip-major too,
-// [strip][B][PT], which is also the order the down projection reads it in (it
-// reduces over P). With one strip both layouts are the old row-major ones.
+// [strip][B][LDW], which is also the order the down projection reads it in (it
+// reduces over P). LDW = PT + QWEN_WPAD (below); with one strip and no pad both
+// layouts are the old row-major ones.
+//
+// ---- Row pad: spreading one K row's successor over the tiles -----------------
+//
+// W and C rows are PT elements, and PT*2 bytes is a whole number of mesh sweeps
+// (32 KiB at PT=16384), so going down a K row lands on the SAME group and tile.
+// Every core walks its columns 64 at a time in step with the others, so at any
+// moment the whole machine reads W from 2 tiles per column block: 8 of 16 tiles
+// per group at B=16, 4 at B=32, 2 at B=64. Those few tiles serve every response,
+// and the response remapper can only spread them inside their own 4-tile quad.
+//
+// QWEN_WPAD extra elements per row (default one tile stripe, 64 B) shift row k by
+// k tiles, so a K tile's rows cycle through all 16 tiles, and every 16 rows by one
+// group, so the group that reads its own W (unmerged: local bursts bypass the MSHR)
+// rotates instead of always being the same two. The pad is a whole stripe, so every
+// row still starts on a burst boundary and sharers still load identical addresses.
+// The pad is stored in L2 too, so a K tile is still ONE contiguous DMA. 0 disables.
+#ifndef QWEN_WPAD
+#define QWEN_WPAD QWEN_STRIPE_E
+#endif
+#define QWEN_SWEEP_E ((QWEN_MESH_SWEEP) / GEMM_ELEM_BYTES)
+#define QWEN_ROUND_SWEEP(n) ((((n) + (QWEN_SWEEP_E)-1) / (QWEN_SWEEP_E)) * (QWEN_SWEEP_E))
+
 #define QWEN_L1_BYTES ((NUM_CORES) * (N_FU) * (BANKING_FACTOR) * (L1_BANK_SIZE))
 #define QWEN_L1_FIXED ((QWEN_X_ELEMS)*GEMM_ELEM_BYTES + (NUM_CORES) * (STACK_SIZE))
-#define QWEN_L1_FOR(pt)                                                  \
-  (2 * (QWEN_KT) * (pt)*GEMM_ELEM_BYTES +  /* W double buffer          */ \
-   2 * (QWEN_B) * (pt)*GEMM_ELEM_BYTES +   /* gate + up output strip   */ \
+// Each buffer slot is rounded up to a whole mesh sweep so every slot, not just the
+// first, starts sweep-aligned -- the build-time bank hash scores buffer offsets.
+#define QWEN_L1_FOR(pt)                                                                   \
+  (2 * QWEN_ROUND_SWEEP((QWEN_KT) * ((pt) + (QWEN_WPAD))) * GEMM_ELEM_BYTES + /* W x2 */  \
+   2 * QWEN_ROUND_SWEEP((QWEN_B) * ((pt) + (QWEN_WPAD))) * GEMM_ELEM_BYTES +  /* C x2 */  \
    (QWEN_L1_FIXED))
 // A legal strip width: whole pad units (every core's span stays stripe-aligned),
 // an exact divisor of LDP, a per-core span at least as long as the vector load the
@@ -131,5 +156,9 @@
 #define QWEN_PT (QWEN_PT_AUTO)
 #endif
 #define QWEN_NSTRIPS ((QWEN_PT) > 0 ? (QWEN_LDP) / (QWEN_PT) : 1)
+// Stored row stride of W (L2 and L1) and of C: the strip width plus the pad.
+#define QWEN_LDW ((QWEN_PT) + (QWEN_WPAD))
+#define QWEN_WSLOT QWEN_ROUND_SWEEP((QWEN_KT) * (QWEN_LDW))   // one W K-tile buffer
+#define QWEN_CSLOT QWEN_ROUND_SWEEP((QWEN_B) * (QWEN_LDW))    // one stage's C strip
 
 #endif

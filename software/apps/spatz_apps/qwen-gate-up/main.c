@@ -19,15 +19,17 @@
 // split, KERNEL_SIZE policy, MSHR tuning, group barrier and I$ warm-up are that
 // app's, because the per-tile problem is an L1-resident GEMM of [B]x[KT]x[P].
 //
-// W is stored strip-major [strip][K][QWEN_PT] (row-major [K][QWEN_LDP] when there
-// is one strip), so a K tile of a strip is one contiguous slice: one DMA, no packing.
+// W is stored strip-major [strip][K][QWEN_LDW] (row-major when there is one strip),
+// so a K tile of a strip is one contiguous slice: one DMA, no packing. QWEN_LDW is
+// the strip width plus QWEN_WPAD, a one-tile row pad that spreads successive K rows
+// over the tiles (qwen_layout.h); C uses the same row stride.
 // X is replicated across the mesh (see qwen_layout.h) so no group is a hot spot for
 // it. C is the accumulator in L1.
 //
 // Large batches: when the whole output no longer fits L1 (from B~128 at K=5120) it
 // is cut into QWEN_NSTRIPS column strips of QWEN_PT ("P strips", qwen_layout.h).
 // Each strip runs the complete gate and up K loops into the same L1 buffers, is
-// DMA'd out to qwen_out_l2 (strip-major [strip][B][PT]) and the next strip starts.
+// DMA'd out to qwen_out_l2 (strip-major [strip][B][LDW]) and the next strip starts.
 // No cross-core reduction and no extra W traffic: a strip only narrows the columns.
 // With one strip nothing is written back and C stays in L1 as before.
 //
@@ -106,6 +108,8 @@ _Static_assert((QWEN_K % QWEN_KT) == 0,
                "K must be a whole number of K tiles: pick a QWEN_KT that divides it");
 _Static_assert((QWEN_KT % 2) == 0, "The kernel's n loop unrolls by 2, so KT must be even");
 _Static_assert((QWEN_LDP % QWEN_STRIPE_E) == 0, "Row stride must be a whole number of stripes");
+_Static_assert((QWEN_WPAD % QWEN_STRIPE_E) == 0,
+               "The row pad must be whole stripes, or rows stop starting on a burst boundary");
 _Static_assert((QWEN_PBLOCKS & (QWEN_PBLOCKS - 1)) == 0,
                "A power-of-two column-block count is what makes QWEN_PAD_UNIT a single "
                "round-up instead of a least common multiple");
@@ -145,18 +149,20 @@ enum { QWEN_GATE = 0, QWEN_UP = 1, QWEN_STAGES = 2 };
 
 #if QWEN_PRELOAD
 // Defined by data/qwen_operands.S, which .incbin's the images the host wrote.
-extern elem_t qwen_w_l2[QWEN_STAGES][QWEN_K * QWEN_LDP];
+extern elem_t qwen_w_l2[QWEN_STAGES][QWEN_NSTRIPS * QWEN_K * QWEN_LDW];
 extern elem_t qwen_x_l2[QWEN_B * QWEN_K];
 #else
-static elem_t qwen_w_l2[QWEN_STAGES][QWEN_K * QWEN_LDP] QWEN_L2;
+static elem_t qwen_w_l2[QWEN_STAGES][QWEN_NSTRIPS * QWEN_K * QWEN_LDW] QWEN_L2;
 static elem_t qwen_x_l2[QWEN_B * QWEN_K] QWEN_L2;
 #endif
 
-static elem_t qwen_w[2][QWEN_KT * QWEN_PT] QWEN_L1;           // K-tile double buffer
-static elem_t qwen_c[QWEN_STAGES][QWEN_B * QWEN_PT] QWEN_L1;  // accumulator, one strip
+// Slots are rounded up to whole mesh sweeps (QWEN_WSLOT/CSLOT) so the second of each
+// pair starts sweep-aligned like the first; the rows inside use stride QWEN_LDW.
+static elem_t qwen_w[2][QWEN_WSLOT] QWEN_L1;            // K-tile double buffer
+static elem_t qwen_c[QWEN_STAGES][QWEN_CSLOT] QWEN_L1;  // accumulator, one strip
 #if QWEN_NSTRIPS > 1
-// Finished strips, strip-major [strip][B][PT]: each strip is one contiguous DMA.
-static elem_t qwen_out_l2[QWEN_STAGES][QWEN_B * QWEN_LDP] QWEN_L2;
+// Finished strips, strip-major [strip][B][LDW]: each strip is one contiguous DMA.
+static elem_t qwen_out_l2[QWEN_STAGES][QWEN_NSTRIPS * QWEN_B * QWEN_LDW] QWEN_L2;
 #endif
 // One copy of X per QWEN_X_GROUPS_PER_REPLICA groups; replica r starts at
 // r * QWEN_X_STRIDE_E so it lands on the first group of its neighbourhood.
@@ -173,10 +179,10 @@ static uint32_t qwen_fmac_core[NUM_CORES];
 // a check build verifies strip by strip from L1 instead.
 static inline const uint16_t *qwen_out_at(uint32_t stage, uint32_t b, uint32_t p) {
 #if QWEN_NSTRIPS > 1
-  return (const uint16_t *)&qwen_out_l2[stage][(p / QWEN_PT) * (QWEN_B * QWEN_PT) +
-                                               b * QWEN_PT + (p % QWEN_PT)];
+  return (const uint16_t *)&qwen_out_l2[stage][(p / QWEN_PT) * (QWEN_B * QWEN_LDW) +
+                                               b * QWEN_LDW + (p % QWEN_PT)];
 #else
-  return (const uint16_t *)&qwen_c[stage][b * QWEN_PT + p];
+  return (const uint16_t *)&qwen_c[stage][b * QWEN_LDW + p];
 #endif
 }
 #endif
@@ -211,7 +217,7 @@ static inline uint16_t qwen_expect_bits(uint32_t stage, uint32_t b, uint32_t p) 
 //
 // A WORD at a time, not a halfword: at the full shape this is 178M elements, and
 // each store is a separate NoC transaction to L2, so pairing them halves the cost
-// of the slowest part of a check build. K and LDP are both even, so the pairs never
+// of the slowest part of a check build. K and LDW are both even, so the pairs never
 // straddle a row.
 static void qwen_fill_operands(uint32_t cid, uint32_t num_cores) {
   uint32_t *x = (uint32_t *)qwen_x_l2;
@@ -222,15 +228,19 @@ static void qwen_fill_operands(uint32_t cid, uint32_t num_cores) {
   }
   for (uint32_t s = 0; s < QWEN_STAGES; ++s) {
     uint32_t *w = (uint32_t *)qwen_w_l2[s];
-    for (uint32_t i = cid; i < (uint32_t)(QWEN_K * QWEN_LDP) / 2u; i += num_cores) {
-      // Strip-major: e walks [strip][k][c]. PT is even, so a pair never straddles a
-      // strip; with one strip this is the old row-major (k, col) decode.
-      const uint32_t e = 2u * i, strip = e / (QWEN_K * QWEN_PT), r = e % (QWEN_K * QWEN_PT);
-      const uint32_t k = r / QWEN_PT, col = strip * QWEN_PT + r % QWEN_PT;
-      // Columns in [P, LDP) are alignment padding: never read by the kernel, and
-      // zero so that a run that accidentally reads them is obviously wrong.
-      const uint32_t lo = (col < (uint32_t)QWEN_P) ? qwen_w_bits(s, k, col) : 0u;
-      const uint32_t hi = (col + 1u < (uint32_t)QWEN_P) ? qwen_w_bits(s, k, col + 1u) : 0u;
+    for (uint32_t i = cid; i < (uint32_t)(QWEN_NSTRIPS * QWEN_K * QWEN_LDW) / 2u;
+         i += num_cores) {
+      // Strip-major: e walks [strip][k][c] with c < LDW. LDW is even, so a pair never
+      // straddles a row; with one strip and no pad this is the old row-major decode.
+      const uint32_t e = 2u * i, strip = e / (QWEN_K * QWEN_LDW), r = e % (QWEN_K * QWEN_LDW);
+      const uint32_t k = r / QWEN_LDW, c = r % QWEN_LDW, col = strip * QWEN_PT + c;
+      // Columns in [P, LDP) are alignment padding and c >= PT the row pad: never read
+      // by the kernel, and zero so that a run that accidentally reads them is
+      // obviously wrong.
+      const uint32_t lo = (c < (uint32_t)QWEN_PT && col < (uint32_t)QWEN_P)
+                              ? qwen_w_bits(s, k, col) : 0u;
+      const uint32_t hi = (c + 1u < (uint32_t)QWEN_PT && col + 1u < (uint32_t)QWEN_P)
+                              ? qwen_w_bits(s, k, col + 1u) : 0u;
       w[i] = lo | (hi << 16);
     }
   }
@@ -254,7 +264,7 @@ static void qwen_verify_strip(uint32_t strip, uint32_t cid, uint32_t num_cores) 
     const uint32_t p = strip * (uint32_t)QWEN_PT + col;
     if (p >= (uint32_t)QWEN_P) continue;  // padding columns hold no result
     const uint16_t e = qwen_expect_bits(s, b, p);
-    const uint16_t v = ((const uint16_t *)qwen_c[s])[b * QWEN_PT + col];
+    const uint16_t v = ((const uint16_t *)qwen_c[s])[b * QWEN_LDW + col];
     if (v != e && __atomic_fetch_add(&qwen_bad, 1u, __ATOMIC_RELAXED) == 0u) {
       qwen_bad_s = s;
       qwen_bad_b = b;
@@ -344,13 +354,14 @@ static inline void qwen_barrier(uint32_t core_id) {
 }
 
 // Launch the DMA that refills buffer slot `slot` with K tile `step` of `strip` of
-// `stage`. Strip-major W makes that one contiguous KT x PT block.
-// Core 0 only; the caller has already barriered every reader off this slot.
+// `stage`. Strip-major W with the pad stored in L2 makes that one contiguous
+// KT x LDW block. Core 0 only; the caller has already barriered every reader off
+// this slot.
 static void qwen_refill(uint32_t slot, uint32_t stage, uint32_t strip, uint32_t step) {
   dma_memcpy_nonblocking(qwen_w[slot],
-                         qwen_w_l2[stage] + strip * (uint32_t)(QWEN_K * QWEN_PT) +
-                             (uint32_t)step * (QWEN_KT * QWEN_PT),
-                         (size_t)(QWEN_KT * QWEN_PT) * GEMM_ELEM_BYTES);
+                         qwen_w_l2[stage] + strip * (uint32_t)(QWEN_K * QWEN_LDW) +
+                             (uint32_t)step * (QWEN_KT * QWEN_LDW),
+                         (size_t)(QWEN_KT * QWEN_LDW) * GEMM_ELEM_BYTES);
 }
 
 // Prime the pipeline for one projection of one strip: tile 0 resident, tile 1 in
@@ -364,7 +375,7 @@ static void qwen_prime(uint32_t stage, uint32_t strip, uint32_t cid) {
 }
 
 // One projection of one strip: C[stage] = X . W[stage][strip], reduced over all K
-// tiles. C and the W buffers both have row stride QWEN_PT.
+// tiles. C and the W buffers both have row stride QWEN_LDW (strip width + pad).
 //
 // Each iteration computes on the resident slot, then -- once every reader has left
 // it -- waits for the in-flight tile and launches the next into the slot just
@@ -383,19 +394,19 @@ static void qwen_project(uint32_t stage, uint32_t strip, uint32_t cid, const ele
     const elem_t *a = x + (uint32_t)step * QWEN_KT;
     const uint32_t accum = (step != 0);
 #if KERNEL_SIZE == 1
-    matmul_1xVL(c, a, qwen_w[slot], m_start, m_end, QWEN_KT, QWEN_PT, p_start, p_end,
+    matmul_1xVL(c, a, qwen_w[slot], m_start, m_end, QWEN_KT, QWEN_LDW, p_start, p_end,
                 QWEN_K, accum,
                 (step & 1u)
                   | ((step != 0u) ? 2u : 0u)
                   | ((step + 1u < (uint32_t)QWEN_STEPS) ? 4u : 0u));
 #elif KERNEL_SIZE == 2
-    matmul_2xVL(c, a, qwen_w[slot], m_start, m_end, QWEN_KT, QWEN_PT, p_start, p_end,
+    matmul_2xVL(c, a, qwen_w[slot], m_start, m_end, QWEN_KT, QWEN_LDW, p_start, p_end,
                 QWEN_K, accum,
                 (step & 1u)
                   | ((step != 0u) ? 2u : 0u)
                   | ((step + 1u < (uint32_t)QWEN_STEPS) ? 4u : 0u));
 #elif KERNEL_SIZE == 4
-    matmul_4xVL(c, a, qwen_w[slot], m_start, m_end, QWEN_KT, QWEN_PT, p_start, p_end,
+    matmul_4xVL(c, a, qwen_w[slot], m_start, m_end, QWEN_KT, QWEN_LDW, p_start, p_end,
                 QWEN_K, accum,
                 (step & 1u)
                   | ((step != 0u) ? 2u : 0u)
@@ -405,7 +416,7 @@ static void qwen_project(uint32_t stage, uint32_t strip, uint32_t cid, const ele
     // on is the one the next tile starts on: its accumulators stay in v0..v14 and
     // neither the store nor the reload happens. Not across projections -- the last
     // tile has no successor, so it stores everything.
-    matmul_8xVL(c, a, qwen_w[slot], m_start, m_end, QWEN_KT, QWEN_PT, p_start, p_end,
+    matmul_8xVL(c, a, qwen_w[slot], m_start, m_end, QWEN_KT, QWEN_LDW, p_start, p_end,
                 QWEN_K, accum,
                 (step & 1u)
                   | ((step != 0u) ? 2u : 0u)
@@ -441,8 +452,8 @@ static void qwen_writeback(uint32_t strip, uint32_t cid, uint32_t last) {
   qwen_barrier(cid);
   if (cid == (uint32_t)QWEN_DMA_CORE) {
     for (uint32_t s = 0; s < QWEN_STAGES; ++s) {
-      dma_memcpy_nonblocking(qwen_out_l2[s] + strip * (uint32_t)(QWEN_B * QWEN_PT), qwen_c[s],
-                             (size_t)(QWEN_B * QWEN_PT) * GEMM_ELEM_BYTES);
+      dma_memcpy_nonblocking(qwen_out_l2[s] + strip * (uint32_t)(QWEN_B * QWEN_LDW), qwen_c[s],
+                             (size_t)(QWEN_B * QWEN_LDW) * GEMM_ELEM_BYTES);
       dma_wait();
     }
   }
@@ -488,11 +499,21 @@ int main(void) {
     if (n_row_chunks == 0u || ((uint32_t)QWEN_B % kernel_size) != 0u) return -6;
     if (n_p_blocks == 0u || (active_cores % n_row_chunks) != 0u) return -7;
     if (((uint32_t)QWEN_PT % n_p_blocks) != 0u) return -5;
-    // row_chunk varies fastest so that cores sharing a column block are adjacent
-    // core ids, i.e. in the same group, where the MSHR can merge their identical
-    // W loads.
-    const uint32_t row_chunk = cid % n_row_chunks;
-    const uint32_t p_block = cid / n_row_chunks;
+    // Each group takes an rcg x (cores_per_group / rcg) patch of (row chunks x column
+    // blocks), rcg = min(n_row_chunks, GEMM_DECODE_RC_PER_GROUP). Inside the group the
+    // row chunk varies fastest, so the cores sharing a column block are one run of
+    // rcg adjacent tiles (one tile row at rcg = 4: one burst slice of the split MSHR)
+    // and the cores sharing a row chunk are every rcg-th tile (one tile column: one
+    // single slice). Across groups, gid % n_bands picks the band of row chunks and
+    // gid / n_bands the run of column blocks. With rcg = n_row_chunks (n_bands = 1)
+    // this is exactly the original row_chunk = cid % n, p_block = cid / n.
+    const uint32_t rcg = (n_row_chunks < (uint32_t)GEMM_DECODE_RC_PER_GROUP)
+                             ? n_row_chunks : (uint32_t)GEMM_DECODE_RC_PER_GROUP;
+    if (rcg == 0u || (cores_per_group % rcg) != 0u || (n_row_chunks % rcg) != 0u) return -6;
+    const uint32_t n_bands = n_row_chunks / rcg;
+    const uint32_t pb_per_group = cores_per_group / rcg;
+    const uint32_t row_chunk = (gid % n_bands) * rcg + core_gid % rcg;
+    const uint32_t p_block = (gid / n_bands) * pb_per_group + core_gid / rcg;
     // Split ONE STRIP (the padded width when there is one strip), so every span is
     // burst-friendly; each strip is split identically. The pad columns hold zeros
     // and their results are never read.
@@ -502,10 +523,10 @@ int main(void) {
     p_start = p_block * p_span;
     p_end = p_start + p_span;
     // How many cores of ONE GROUP actually issue each address, per request class.
-    // W (burst): the cores sharing a p_block, i.e. n_row_chunks of them.
-    // X (single): the cores sharing a row chunk, i.e. the rest of the group.
-    share_burst = (n_row_chunks < cores_per_group) ? n_row_chunks : cores_per_group;
-    share_single = cores_per_group / share_burst;
+    // W (burst): the cores sharing a p_block, i.e. the group's rcg row chunks.
+    // X (single): the cores sharing a row chunk, i.e. the group's pb_per_group blocks.
+    share_burst = rcg;
+    share_single = pb_per_group;
     pblocks = n_p_blocks;
   }
 #else
@@ -600,16 +621,16 @@ int main(void) {
   {
     const uint32_t warm = (QWEN_KT < 6u) ? (uint32_t)QWEN_KT : 6u;
 #if KERNEL_SIZE == 1
-    matmul_1xVL(qwen_c[0], x_use, qwen_w[0], m_start, m_end, warm, QWEN_PT, p_start, p_end,
+    matmul_1xVL(qwen_c[0], x_use, qwen_w[0], m_start, m_end, warm, QWEN_LDW, p_start, p_end,
                 QWEN_K, 0, 0u);
 #elif KERNEL_SIZE == 2
-    matmul_2xVL(qwen_c[0], x_use, qwen_w[0], m_start, m_end, warm, QWEN_PT, p_start, p_end,
+    matmul_2xVL(qwen_c[0], x_use, qwen_w[0], m_start, m_end, warm, QWEN_LDW, p_start, p_end,
                 QWEN_K, 0, 0u);
 #elif KERNEL_SIZE == 4
-    matmul_4xVL(qwen_c[0], x_use, qwen_w[0], m_start, m_end, warm, QWEN_PT, p_start, p_end,
+    matmul_4xVL(qwen_c[0], x_use, qwen_w[0], m_start, m_end, warm, QWEN_LDW, p_start, p_end,
                 QWEN_K, 0, 0u);
 #else
-    matmul_8xVL(qwen_c[0], x_use, qwen_w[0], m_start, m_end, warm, QWEN_PT, p_start, p_end,
+    matmul_8xVL(qwen_c[0], x_use, qwen_w[0], m_start, m_end, warm, QWEN_LDW, p_start, p_end,
                 QWEN_K, 0, 0u);
 #endif
   }
@@ -716,12 +737,13 @@ int main(void) {
   //--------------------------------------------------------------------------
   if (cid == 0) {
     printf("[QWEN] B=%u K=%u P=%u ldp=%u (pad %u%%o) cols/core=%u kt=%u steps=%u "
-           "ks=%u decode=%u check=%u xrep=%u pt=%u strips=%u\n",
+           "ks=%u decode=%u check=%u xrep=%u pt=%u strips=%u wpad=%u\n",
            (unsigned)QWEN_B, (unsigned)QWEN_K, (unsigned)QWEN_P, (unsigned)QWEN_LDP,
            (unsigned)(1000u * (QWEN_LDP - QWEN_P) / QWEN_P),
            (unsigned)(p_end - p_start), (unsigned)QWEN_KT, (unsigned)QWEN_STEPS,
            (unsigned)kernel_size, (unsigned)MATMUL_DECODE_SPLIT, (unsigned)QWEN_CHECK,
-           (unsigned)QWEN_X_REPLICAS, (unsigned)QWEN_PT, (unsigned)QWEN_NSTRIPS);
+           (unsigned)QWEN_X_REPLICAS, (unsigned)QWEN_PT, (unsigned)QWEN_NSTRIPS,
+           (unsigned)QWEN_WPAD);
     // The dashboard reads the shape from this line, so --shape is not needed on
     // the generator command line. Gate and up are two independent B x K x P
     // projections; stacking them on M states the real FMAC count, 2*B*K*P.
@@ -796,8 +818,8 @@ int main(void) {
 #if QWEN_NSTRIPS > 1
     if (cid == (uint32_t)QWEN_DMA_CORE)
       for (uint32_t s = 0; s < QWEN_STAGES; ++s)
-        dma_memcpy_blocking(qwen_c[s], qwen_out_l2[s] + strip * (uint32_t)(QWEN_B * QWEN_PT),
-                            (size_t)(QWEN_B * QWEN_PT) * GEMM_ELEM_BYTES);
+        dma_memcpy_blocking(qwen_c[s], qwen_out_l2[s] + strip * (uint32_t)(QWEN_B * QWEN_LDW),
+                            (size_t)(QWEN_B * QWEN_LDW) * GEMM_ELEM_BYTES);
     mempool_barrier(num_cores);
 #endif
     qwen_verify_strip(strip, cid, num_cores);
