@@ -42,11 +42,13 @@ int main(void) {
   pt = fit(kt);
   const char *how = "pinned (qwen_kt)";
 #else
-  // Tallest first: K/2, K/4, ... -- an even tile count, an even KT (the kernel's n loop
-  // unrolls by 2), at most QWEN_KT_MAX, and a legal strip width beside it.
+  // Tallest first: K/2, K/4, ... -- an even tile count, an even KT per core (the kernel's n
+  // loop unrolls by 2; under the K split a core takes KT/QWEN_KSPLIT rows), at most
+  // QWEN_KT_MAX, and a legal strip width beside it.
   for (uint32_t s = 2; s <= 128 && !kt; s *= 2) {
     const uint32_t k = (uint32_t)QWEN_K / s;
-    if (((uint32_t)QWEN_K % s) || (k % 2u) || k > (uint32_t)QWEN_KT_MAX) continue;
+    if (((uint32_t)QWEN_K % s) || (k % (2u * (uint32_t)QWEN_KSPLIT)) ||
+        k > (uint32_t)QWEN_KT_MAX) continue;
     if ((pt = fit(k)) != 0) kt = k;
   }
   const char *how = "auto (tallest even tile count <= QWEN_KT_MAX with a legal strip)";

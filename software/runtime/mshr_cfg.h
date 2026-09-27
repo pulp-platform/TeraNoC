@@ -245,7 +245,13 @@ static inline int mshr_cfg_derive(uint32_t M, uint32_t N, uint32_t P,
     if (M % kernel_size || !nrow || active_cores % nrow ||
         (nrow < cores_per_group ? cores_per_group % nrow
                                : nrow % cores_per_group)) return -2;
-    p_blocks = active_cores / nrow;
+#if defined(GEMM_CONFIG_H)
+    const uint32_t ks = (uint32_t)GEMM_KSPLIT;   // cores sharing one output patch across K
+#else
+    const uint32_t ks = 1u;
+#endif
+    if (active_cores % (nrow * ks)) return -2;
+    p_blocks = active_cores / (nrow * ks);
     // Same cap as MSHR_D_SHR_B: a group holds at most GEMM_DECODE_RC_PER_GROUP row chunks.
 #ifdef GEMM_DECODE_RC_PER_GROUP
     const uint32_t rcg = (uint32_t)GEMM_DECODE_RC_PER_GROUP;
@@ -253,8 +259,8 @@ static inline int mshr_cfg_derive(uint32_t M, uint32_t N, uint32_t P,
     const uint32_t rcg = cores_per_group;
 #endif
     share_b = nrow < rcg ? nrow : rcg;
-    if (cores_per_group % share_b || nrow % share_b) return -2;
-    share_a = cores_per_group / share_b;
+    if (cores_per_group % (share_b * ks) || nrow % share_b) return -2;
+    share_a = cores_per_group / (share_b * ks);
   } else {
     if (!prefill) return -3;
     share_b = tiles < cores_per_group ? tiles : cores_per_group;
@@ -401,7 +407,15 @@ static inline int mshr_cfg_derive(uint32_t M, uint32_t N, uint32_t P,
 #  define MSHR_D_STEER_SINGLE_ROW 0   /* decode: singles -> column slice */
 #  define MSHR_D_CPG_   ((int)NUM_CORES / (int)NUM_GROUPS)
 #  define MSHR_D_NROW   ((int)GEMM_M / (int)MSHR_KERNEL_SIZE)          /* row chunks */
-#  define MSHR_D_NPB    (MSHR_D_ACTIVE_CORES / MSHR_D_NROW)                 /* p blocks, machine-wide */
+   /* K split (gemm_config.h GEMM_KSPLIT): that many cores share one output patch, each on its
+      own K part, so they share neither the W line (different rows) nor the X word (different
+      columns) -- it divides the p blocks machine-wide and the X sharers per group. */
+#  if defined(GEMM_KSPLIT)
+#    define MSHR_D_KSPLIT_ ((int)GEMM_KSPLIT)
+#  else
+#    define MSHR_D_KSPLIT_ 1
+#  endif
+#  define MSHR_D_NPB    (MSHR_D_ACTIVE_CORES / (MSHR_D_NROW * MSHR_D_KSPLIT_)) /* p blocks, machine-wide */
    /* W sharers per group = the row chunks one group holds for a p_block: n_row_chunks capped by
       the group, and by GEMM_DECODE_RC_PER_GROUP (gemm_config.h) when a kernel tiles each group
       as a squarer patch; A sharers per group = however many groups-of-those fit in the group. */
@@ -411,7 +425,7 @@ static inline int mshr_cfg_derive(uint32_t M, uint32_t N, uint32_t P,
 #    define MSHR_D_RCG_ MSHR_D_CPG_
 #  endif
 #  define MSHR_D_SHR_B  (MSHR_D_NROW < MSHR_D_RCG_ ? MSHR_D_NROW : MSHR_D_RCG_)
-#  define MSHR_D_SHR_A  (MSHR_D_CPG_ / MSHR_D_SHR_B)
+#  define MSHR_D_SHR_A  (MSHR_D_CPG_ / (MSHR_D_SHR_B * MSHR_D_KSPLIT_))
 #  define MSHR_D_PGAP   MSHR_D_NPB
 #else
 #  define MSHR_D_STEER_SINGLE_ROW 1   /* prefill: singles -> row slice */

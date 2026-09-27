@@ -7,6 +7,37 @@
 #define QWEN_LAYOUT_H
 
 #include "data/qwen_shape.h"
+
+// ---- K split: two cores on one output patch -------------------------------------
+//
+// The kernel's register block is KERNEL_SIZE x VLMAX = 512 fp16 outputs at every KS >= 2
+// (GEMM_LMUL pins KS * LMUL at 16). A core owns B * P / cores outputs, and below 512 every
+// vector runs at a fraction of its length while each K step still pays the same fixed cost --
+// 8x8 B=16 has 256 per core and measured ~71% against 95%+ for every shape with >= 512.
+//
+// So when a core would own fewer than 512 but at least 256, pair the cores instead: both
+// cores of a pair own the SAME patch, twice as wide, and each takes half of every K tile's
+// rows (QWEN_KT_CORE). Vectors are full again; each core does the same number of FMACs.
+// Nothing extra is loaded -- the two halves of a tile are read by different cores -- and
+// the two partial sums are added once per projection (main.c, qwen_ksplit_reduce).
+// qwen_ksplit=1|2 pins it; auto = 2 exactly in that half-full band, 1 everywhere else.
+#ifndef QWEN_KSPLIT_REQ
+#define QWEN_KSPLIT_REQ 0
+#endif
+#ifdef ACTIVE_GROUP_DIV
+#define QWEN_OUT_PER_CORE (((GEMM_M) * (GEMM_P)) / ((NUM_CORES) / (ACTIVE_GROUP_DIV)))
+#else
+#define QWEN_OUT_PER_CORE (((GEMM_M) * (GEMM_P)) / (NUM_CORES))
+#endif
+#if QWEN_KSPLIT_REQ > 0
+#define GEMM_KSPLIT QWEN_KSPLIT_REQ
+#elif QWEN_OUT_PER_CORE >= 256 && QWEN_OUT_PER_CORE < 512
+#define GEMM_KSPLIT 2
+#else
+#define GEMM_KSPLIT 1
+#endif
+#define QWEN_KSPLIT GEMM_KSPLIT
+
 #include "gemm_config.h"  // KERNEL_SIZE, GEMM_PBLOCKS
 #include "gemm_burst.h"   // GEMM_BURST_* geometry
 
@@ -135,6 +166,9 @@
 #define QWEN_L1_KP(kt, pt)                                                                \
   (2 * QWEN_ROUND_SWEEP((kt) * ((pt) + (QWEN_WPAD))) * GEMM_ELEM_BYTES +      /* W x2 */  \
    2 * QWEN_ROUND_SWEEP((QWEN_B) * ((pt) + (QWEN_WPAD))) * GEMM_ELEM_BYTES +  /* C x2 */  \
+   ((QWEN_KSPLIT) > 1                                                      /* K-split */ \
+        ? QWEN_ROUND_SWEEP((QWEN_B) * ((pt) + (QWEN_WPAD))) * GEMM_ELEM_BYTES /* partial */ \
+        : 0) +                                                                            \
    (QWEN_L1_FIXED))
 // A legal strip width for K tiles of kt rows: whole pad units (every core's span
 // stays stripe-aligned), an exact divisor of LDP, a per-core span at least as long as
@@ -171,6 +205,8 @@
 #define QWEN_NSTRIPS ((QWEN_PT) > 0 ? (QWEN_LDP) / (QWEN_PT) : 1)
 // Stored row stride of W (L2 and L1) and of C: the strip width plus the pad.
 #define QWEN_LDW ((QWEN_PT) + (QWEN_WPAD))
+// K rows of each tile ONE core reduces over: all of them, or its part under the K split.
+#define QWEN_KT_CORE ((QWEN_KT) / (QWEN_KSPLIT))
 #define QWEN_WSLOT QWEN_ROUND_SWEEP((QWEN_KT) * (QWEN_LDW))   // one W K-tile buffer
 // W in L2 is [stage][strip][K tile][QWEN_WSLOT]: each K tile starts on a mesh sweep there too.
 // L2 is interleaved on the same bits as the L1 group field, so a sweep-aligned tile makes the

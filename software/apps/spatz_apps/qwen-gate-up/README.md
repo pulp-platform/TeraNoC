@@ -65,6 +65,7 @@ believing it is the new one. That happened here and silently faked six arms.
 | `qwen_split` | auto | work split: `decode` (rows x column blocks), `prefill` (rows across groups), `auto` = prefill once it is legal |
 | `qwen_rc_group` | 4 | decode: row chunks per group (§2.4). `group` = the original split |
 | `qwen_wpad` | tile | W/C row pad in elements (§2.4). `tile` = one 64-byte stripe, `0` = none |
+| `qwen_ksplit` | auto | cores per output patch, each on its own part of every K tile (§2.4). `auto` = 2 when a core would own 256..511 outputs, else 1 |
 | `config` | — | **software** build config = `sw/config/<name>.mk`. NOT the simulator profile |
 | `l2_size` | from config | L2 bytes the linker may use. Needs `536870912` at full size |
 
@@ -156,6 +157,22 @@ W bursts merge in a tile ROW, X scalars in a tile COLUMN):
   Packed back to back, padded tiles shifted that by 10 banks per tile and the
   refill time swung 15.8k-34.8k cycles around an unchanged mean, which the
   DMA-bound B=16 paid at its maximum (barrier sleep 2.5 -> 7.8 pp).
+- **K split (`qwen_ksplit`).** The kernel's register block is KS x VLMAX = 512 fp16
+  outputs at every KS >= 2, and a core owns B x P / cores of them. Below 512 every
+  vector runs part-full while each K step still pays its fixed cost (8 scalar X
+  loads, 8 vfmacc issues, a vle): 8x8 B=16 has 256 and measured ~71% against 95%+
+  for every shape with >= 512, with no DMA traffic in the window (not memory bound).
+  With the split, two cores own the SAME patch, twice as wide, and each reduces over
+  half of every K tile's rows (`QWEN_KT_CORE` = KT/2): full vectors, the same FMACs
+  per core, no extra loads, one DMA per tile as before. Part 0 accumulates in C,
+  part 1 in a second buffer (`qwen_cp`), and after a projection's last tile the pair
+  adds them, each core half the patch's rows, with the group MSHR bypassed (every
+  address there has one reader). The K part varies right after the row chunk, so
+  at 8x8 B=16 a group is 4 column blocks x (2 row chunks x 2 K parts): W sharers
+  (same block and part) are 2 adjacent tiles of one tile row, X sharers (same row
+  chunk and part) one tile column -- burst target 2, single target 4, both exact.
+  `gemm_config.h` `GEMM_KSPLIT` feeds the split, `mshr_cfg.h`'s targets and
+  `gen_hash.c`; at 1 (every other shape) the image is byte-identical to before.
 
 ## 2.5 K tile height and the continuous W stream
 

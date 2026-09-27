@@ -169,6 +169,10 @@ qwen_rc_group ?= 4
 # W/C row pad in elements (qwen_layout.h, "Row pad"). `tile` = one 64-byte stripe,
 # which moves each successive K row to the next tile; 0 = no pad (the old layout).
 qwen_wpad ?= tile
+# K split (qwen_layout.h, "K split"): cores sharing one output patch, each on its own part
+# of every K tile's rows. `auto` = 2 when a core would own 256..511 outputs (half-full
+# vectors: 8x8 B=16), else 1. 1|2 pins it.
+qwen_ksplit ?= auto
 ifeq ($(qwen_span_align),stripe)
 qwen_span_def := QWEN_SPAN_ALIGN_DEFAULT 1
 else
@@ -206,7 +210,7 @@ endif
 qwen-gate-up/data/qwen_shape.h: FORCE
 	@mkdir -p $(@D)
 	@{ \
-	  echo '// GENERATED from make vars qwen_b/qwen_k/qwen_p/qwen_kt/qwen_check/qwen_pt/qwen_split/qwen_rc_group/qwen_wpad -- do not hand-edit.'; \
+	  echo '// GENERATED from make vars qwen_b/qwen_k/qwen_p/qwen_kt/qwen_check/qwen_pt/qwen_split/qwen_rc_group/qwen_wpad/qwen_ksplit -- do not hand-edit.'; \
 	  echo '#ifndef QWEN_SHAPE_H'; \
 	  echo '#define QWEN_SHAPE_H'; \
 	  echo '#define GEMM_M $(qwen_b)          // batch: independent decode sequences'; \
@@ -226,6 +230,7 @@ qwen-gate-up/data/qwen_shape.h: FORCE
 	  echo '#define $(qwen_split_def)'; \
 	  echo '#define $(qwen_rc_def)'; \
 	  echo '#define $(qwen_wpad_def)'; \
+	  echo '#define QWEN_KSPLIT_REQ $(if $(filter auto,$(qwen_ksplit)),0,$(qwen_ksplit))  // 0 = auto'; \
 	  echo '#endif'; \
 	} > $@.tmp
 	@if cmp -s $@.tmp $@; then rm -f $@.tmp; else mv $@.tmp $@; fi

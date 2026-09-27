@@ -18563,3 +18563,63 @@ PeriphHbmChannel 13 -> 0 (the periph-sharing channel now serves the corner group
 
 **Status.** DMA bound resolved at 8x8 (opt-in `FLOO_TURN_MODEL=yx FLOO_PLACEMENT=linkload`).
 Correctness arms x8yx_c1_b128_4strip / x8yx_c_b64 still running.
+
+## 2026-09-27 17:30 — 8x8 B=16 stuck at ~70%: half-filled vectors, not memory bound
+
+**Purpose.** Explain why qwen-gate-up B=16 reaches ~67-72% at 8x8 against 95% at 4x4.
+
+**Evidence.**
+* Not memory bound. x8yx_b16: the DMA probe prints nothing after cyc 36k (the initial fill moved
+  42.2 MB = two 20 MB W tiles, then zero L2 traffic), while util sits at 71.0% over 40k-57k.
+  Roofline: peak is 8 fp16 FMA/cyc/core (4x4 B=16 steady state: one 41.9M-FMA tile per ~21.5k cyc
+  at 95%). An 8x8 B=16 tile (640x16384, 168M FMA) is 20.5k cyc at 100%; its 20 MB load is 10.9k
+  cyc at the yx rate (30.1 beats/cyc) -> DMA roof ~188%. (At the old routing, 11.8 beats/cyc,
+  it would be 27.8k -> roof ~74%: that is what yx removed.) Memory-bound only for B <~ 8 at 8x8.
+* Cause: outputs per core = B*P/cores = 16*16384/1024 = 256, but the kernel's register block
+  is KS*VLMAX = 512 fp16 (GEMM_LMUL pins KS*LMUL = 16), so every vector runs at half length
+  for ANY KS (KS=8: p_span 32 of VL 64; KS=4: 64 of 128; KS=2: 128 of 256). Each K step still
+  pays the same fixed scalar cost (8 flh X loads, 8 vfmacc issues, a vle, the pair GBAR_SYNC)
+  for half the FMAs. Every other measured point has >= 512 outputs/core and reaches 95%+:
+  4x4 B=16 (1024), 8x8 B=32 (512), 8x8 B=64 (1024).
+* Stall mix (STALLG, 8x8): B=16 acc 36.5% / lsu 11.1%; B=32 acc 57.0% / lsu 1.8%. At B=32 the
+  core waits on a busy Spatz (healthy); at B=16 the scalar X loads are on the critical path.
+
+**Status.** Diagnosed. Candidate fix: split K across core pairs when B*P/cores < KS*VLMAX (both
+cores of a pair own the same 512-output patch, each takes half the K rows, partial C summed
+once at the end) -- not implemented.
+
+## 2026-09-27 23:00 — qwen-gate-up: K split for shapes below one register block (8x8 B=16)
+
+**Purpose.** Fix the half-full vectors diagnosed at 17:30 (8x8 B=16: 256 outputs per core
+against a 512-output register block, ~70% FPU util with no DMA traffic).
+
+**Implementation.**
+* `gemm_config.h` `GEMM_KSPLIT` (default 1): decode p blocks = cores / (row chunks * ksplit),
+  X sharers = CPG / (W sharers * ksplit); prefill is illegal with ksplit > 1. `mshr_cfg.h`
+  compile-time and runtime derivations follow it, so `mshr_cfg_check_splits` still agrees.
+* qwen-gate-up: `qwen_ksplit=auto|1|2` (auto = 2 when a core owns 256..511 outputs). Both cores
+  of a pair own the same patch; each reduces over KT/2 rows of every tile (`QWEN_KT_CORE`),
+  part 0 into C, part 1 into `qwen_cp`. After a projection's last tile the pair adds them
+  (half the rows each) under a group MSHR bypass with the drain/flip/drain protocol of
+  QWEN_CBYPASS. K part varies after the row chunk: at 8x8 B=16 W sharers are 2 adjacent tiles
+  of one row slice, X sharers one column slice (targets 2 / 4, exact). `gen_hash.c` models the
+  two K parts as streams KT/2 rows apart (reaches the 2-bank ceiling); `gen_tiles.c` requires
+  KT % (2*ksplit) == 0; L1 budget counts the partial buffer. No kernel change.
+
+**Result.**
+* No regression, by construction: with ksplit = 1 (every shape but 8x8 B=16 and 4x4 B=4) the
+  disassembly of 4x4 B=16/32/64, 8x8 B=32/64/128 and kc4 is identical to the pre-change build,
+  and the loadable image of 8x8 B=32 / 4x4 B=32 is byte-identical to the fleet ELFs already
+  measured; sp-fmatmul-opt-burst-merge{,-fp16} (decode and prefill shapes) identical too.
+* Correctness (fleet ks1): 8x8 B=16 ones pattern PASS; 4x4 B=4 unit + ones PASS; 8x8 B=16 unit
+  pending (kernel done). The yx routing check x8yx_c_b64 PASS.
+* 8x8 B=16 (yx image, vs x8yx_b16 = byte-identical ELF without the split): inside a tile
+  96.3-96.9% vs ~70-72%; cycles per K tile ~25k vs ~42k (1.7x).
+* 4x4 B=4 (memory-bound shape the auto rule also changes): 63.1% vs 61.4% over matched windows.
+* Remaining loss at B=16: a ~3-4k-cycle tail per tile at the global tile barrier. It is
+  positional and persistent: finish time correlates 0.79 with a group's mean hop distance
+  (centre groups first, corners and the east edge last, same order every tile). Not pursued:
+  the fix (group-local W layout) would move W onto the intra-group burst path, whose
+  throughput is the open risk, and B >= 16 already sustains 92-97% inside a tile.
+
+**Status.** Implemented; one correctness arm pending.

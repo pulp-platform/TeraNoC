@@ -32,15 +32,23 @@
   ((GEMM_ROW_TILES(k) < GEMM_CPG) \
     ? GEMM_DIV(GEMM_CPG, GEMM_ROW_TILES(k)) : 1)
 #define GEMM_PREFILL_OK(k) \
-  (GEMM_M % GEMM_ACTIVE_GROUPS == 0 && GEMM_ROW_TILES(k) > 0 && \
+  (GEMM_KSPLIT == 1 && GEMM_M % GEMM_ACTIVE_GROUPS == 0 && GEMM_ROW_TILES(k) > 0 && \
    GEMM_ROWS_PER_GROUP % (k) == 0 && \
    ((GEMM_ROW_TILES(k) < GEMM_CPG) \
      ? GEMM_MOD(GEMM_CPG, GEMM_ROW_TILES(k)) == 0 \
      : GEMM_ROWS_PER_GROUP % (GEMM_CPG * (k)) == 0) && \
    GEMM_MOD(GEMM_P, GEMM_PREFILL_PBLOCKS(k)) == 0)
 #define GEMM_DECODE_ROWS(k) GEMM_DIV(GEMM_M, k)
+// K split (decode only): GEMM_KSPLIT cores own the SAME output patch and each takes 1/GEMM_KSPLIT
+// of every K tile's rows; their partial sums are added once per projection. It is for shapes where
+// B*P/cores is below one register block (KS x VLMAX = 512 fp16), which otherwise run every vector
+// at a fraction of its length. The caller reduces the partials. 1 = off, which is every app but
+// qwen-gate-up; all the macros below then evaluate exactly as without it.
+#ifndef GEMM_KSPLIT
+#define GEMM_KSPLIT 1
+#endif
 #define GEMM_DECODE_PBLOCKS(k) \
-  GEMM_DIV(GEMM_ACTIVE_CORES, GEMM_DECODE_ROWS(k))
+  GEMM_DIV(GEMM_ACTIVE_CORES, GEMM_DECODE_ROWS(k) * GEMM_KSPLIT)
 // Row chunks ONE GROUP holds in the decode split. The default, the whole group, is
 // the original split: row_chunk = cid % n_rows, so a group takes up to GEMM_CPG row
 // chunks of a few column blocks. A smaller cap gives each group a squarer
@@ -55,12 +63,12 @@
 #define GEMM_DECODE_RCG(k) GEMM_MIN(GEMM_DECODE_ROWS(k), GEMM_DECODE_RC_PER_GROUP)
 #define GEMM_DECODE_OK(k) \
   (GEMM_M % (k) == 0 && GEMM_DECODE_ROWS(k) > 0 && \
-   GEMM_DECODE_ROWS(k) <= GEMM_ACTIVE_CORES && \
-   GEMM_MOD(GEMM_ACTIVE_CORES, GEMM_DECODE_ROWS(k)) == 0 && \
+   GEMM_DECODE_ROWS(k) * GEMM_KSPLIT <= GEMM_ACTIVE_CORES && \
+   GEMM_MOD(GEMM_ACTIVE_CORES, GEMM_DECODE_ROWS(k) * GEMM_KSPLIT) == 0 && \
    ((GEMM_DECODE_ROWS(k) < GEMM_CPG) \
      ? GEMM_MOD(GEMM_CPG, GEMM_DECODE_ROWS(k)) == 0 \
      : GEMM_DECODE_ROWS(k) % GEMM_CPG == 0) && \
-   GEMM_MOD(GEMM_CPG, GEMM_DECODE_RCG(k)) == 0 && \
+   GEMM_MOD(GEMM_CPG, GEMM_DECODE_RCG(k) * GEMM_KSPLIT) == 0 && \
    GEMM_MOD(GEMM_DECODE_ROWS(k), GEMM_DECODE_RCG(k)) == 0 && \
    GEMM_MOD(GEMM_P, GEMM_DECODE_PBLOCKS(k)) == 0)
 #ifdef MATMUL_DECODE_SPLIT
@@ -74,7 +82,9 @@
 #define GEMM_SHARE_B(k) \
   GEMM_MIN(GEMM_CPG, (GEMM_USE_DECODE(k) \
     ? GEMM_DECODE_RCG(k) : GEMM_ROW_TILES(k)))
-#define GEMM_SHARE_A(k) GEMM_DIV(GEMM_CPG, GEMM_SHARE_B(k))
+// A (X) sharers: the group's column blocks at one row chunk AND one K part.
+#define GEMM_SHARE_A(k) \
+  GEMM_DIV(GEMM_CPG, GEMM_SHARE_B(k) * (GEMM_USE_DECODE(k) ? GEMM_KSPLIT : 1))
 #define GEMM_PBLOCKS(k) (GEMM_USE_DECODE(k) \
   ? GEMM_DECODE_PBLOCKS(k) : GEMM_PREFILL_PBLOCKS(k))
 #define GEMM_PSPAN(k) GEMM_DIV(GEMM_P, GEMM_PBLOCKS(k))

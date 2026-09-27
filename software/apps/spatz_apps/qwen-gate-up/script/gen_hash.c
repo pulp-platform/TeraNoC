@@ -97,8 +97,8 @@ int main(void) {
   printf("// mshr_split=%u cores/bankset=%u steer_single_row=%u\n",
          (unsigned)MSHR_CFG_SPLIT, (unsigned)cores_per_bankset,
          (unsigned)MSHR_D_STEER_SINGLE_ROW);
-  printf("// ks=%u share=%u blocks=%u -> %u distinct addrs/step, bank ceiling %u\n",
-         (unsigned)KERNEL_SIZE, (unsigned)share, (unsigned)blocks,
+  printf("// ks=%u ksplit=%u share=%u streams=%u -> %u distinct addrs/step, bank ceiling %u\n",
+         (unsigned)KERNEL_SIZE, (unsigned)QWEN_KSPLIT, (unsigned)share, (unsigned)blocks,
          (unsigned)(blocks * subs),
          (unsigned)(blocks * subs < banks ? blocks * subs : banks));
   printf("static const uint8_t qwen_hash_sel[%u][3] = {\n", (unsigned)NUM_GROUPS);
@@ -119,14 +119,20 @@ int main(void) {
         for (uint32_t loads = 1; loads <= inflight; ++loads) {
           uint32_t seen = 0;
           for (uint32_t ld = 0; ld < loads; ++ld)          // successive k
-            for (uint32_t blk = 0; blk < blocks; ++blk)    // the group's blocks
+            for (uint32_t str = 0; str < blocks; ++str)    // the set's W streams
               for (uint32_t sub = 0; sub < subs; ++sub) {  // bursts of one load
                 // Consecutive p_blocks of a group are `span` elements apart
                 // (main.c: p_start = p_block * p_span, and a group's blocks are a
                 // consecutive run), so the stride is span, not span*share.
                 // Successive k are one stored row apart: LDW = PT + the row pad.
+                // Under the K split the K part varies before the block (main.c), so
+                // stream str is K part str % KSPLIT of block str / KSPLIT: the same
+                // columns, QWEN_KT_CORE rows further down.
+                const uint32_t kpart = str % (uint32_t)QWEN_KSPLIT;
+                const uint32_t blk = str / (uint32_t)QWEN_KSPLIT;
                 const uint32_t word =
-                    (ld * (uint32_t)QWEN_LDW + blk * span) * GEMM_ELEM_BYTES / 4 +
+                    ((ld + kpart * (uint32_t)QWEN_KT_CORE) * (uint32_t)QWEN_LDW + blk * span) *
+                        GEMM_ELEM_BYTES / 4 +
                     sub * QWEN_BURST_WORDS;
                 seen |= 1u << gemm_hash_bank(word, shift, bb, banks);
               }
