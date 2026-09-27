@@ -468,6 +468,7 @@ module mempool_tile
   logic                    [NumBanksPerTile-1:0] bank_req_ready;
   local_req_interco_addr_t [NumBanksPerTile-1:0] bank_req_ini_addr;
   logic                    [NumBanksPerTile-1:0] bank_req_wide;
+  logic                    [NumBanksPerTile-1:0] bank_req_posted; // DMA write, no bank response
   tcdm_slave_req_t         [NumBanksPerTile-1:0] bank_req_payload;
   logic                    [NumBanksPerTile-1:0] bank_resp_valid;
   logic                    [NumBanksPerTile-1:0] bank_resp_ready;
@@ -646,7 +647,8 @@ module mempool_tile
       .narrow_rsp_t   (tcdm_slave_resp_t),
       .wide_req_t     (tcdm_dma_req_t   ),
       .wide_rsp_t     (tcdm_dma_resp_t  ),
-      .group_id_t     (group_id_t       )
+      .group_id_t     (group_id_t       ),
+      .PostedWrites   (DmaPostedWrites  )
     ) i_tcdm_wide_narrow_mux (
       .clk_i                 (clk_i                                             ),
       .rst_ni                (rst_ni                                            ),
@@ -665,6 +667,7 @@ module mempool_tile
       .slv_wide_rsp_ready_i  (tcdm_dma_resp_ready[d]                            ),
       .mst_req_o             (bank_req_payload[d*DmaNumWords+:DmaNumWords]      ),
       .mst_req_wide_o        (bank_req_wide[d*DmaNumWords+:DmaNumWords]         ),
+      .mst_req_posted_o      (bank_req_posted[d*DmaNumWords+:DmaNumWords]       ),
       .mst_req_valid_o       (bank_req_valid[d*DmaNumWords+:DmaNumWords]        ),
       .mst_req_ready_i       (bank_req_ready[d*DmaNumWords+:DmaNumWords]        ),
       .mst_rsp_i             (bank_resp_payload[d*DmaNumWords+:DmaNumWords]     ),
@@ -742,8 +745,9 @@ module mempool_tile
       .AddrWidth  (TCDMAddrMemWidth),
       .DataWidth  (DataWidth       ),
       .metadata_t (bank_metadata_t ),
-      .LrScEnable (LrScEnable      ),
-      .RegisterAmo(1'b0            )
+      .LrScEnable  (LrScEnable      ),
+      .RegisterAmo (1'b0            ),
+      .PostedWrites(DmaPostedWrites )
     ) i_tcdm_adapter (
       .clk_i       (clk_i                                                                       ),
       .rst_ni      (rst_ni                                                                      ),
@@ -755,6 +759,7 @@ module mempool_tile
       .in_wdata_i  (bank_req_payload[b].wdata.data                                              ),
       .in_meta_i   (meta_in                                                                     ),
       .in_be_i     (bank_req_payload[b].be                                                      ),
+      .in_posted_i (bank_req_posted[b]                                                          ),
       .in_valid_o  (bank_resp_valid[b]                                                          ),
       .in_ready_i  (bank_resp_ready[b]                                                          ),
       .in_rdata_o  (bank_resp_payload[b].rdata.data                                             ),

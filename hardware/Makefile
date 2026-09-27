@@ -600,6 +600,10 @@ endif
 # --------------------------
 vlog_defs += -DSPM_BANK_ID_REMAP=$(spm_bank_id_remap)
 vlog_defs += -DTILE_ID_REMAP=$(tile_id_remap)
+# Posted DMA writes into L1 (tcdm_wide_narrow_mux / tcdm_adapter): a bank takes a DMA
+# write whenever its SRAM port is free instead of waiting for its response queue to drain.
+dma_posted_writes ?= 1
+vlog_defs += -DDMA_POSTED_WRITES=$(dma_posted_writes)
 # --------------------------
 # NoC Channel Configuration
 # --------------------------

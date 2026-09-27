@@ -458,6 +458,8 @@ package mempool_pkg;
   localparam integer unsigned NumRouterOutFifoDepth = `ifdef NOC_ROUTER_OUTPUT_FIFO_DEP  `NOC_ROUTER_OUTPUT_FIFO_DEP  `else 2 `endif;
   localparam integer unsigned SpmBankIdRemap = `ifdef SPM_BANK_ID_REMAP `SPM_BANK_ID_REMAP `else 0 `endif;
   localparam integer unsigned TileIdRemap = `ifdef TILE_ID_REMAP `TILE_ID_REMAP `else 0 `endif;
+  // Posted DMA writes into L1: see tcdm_wide_narrow_mux.
+  localparam bit DmaPostedWrites = `ifdef DMA_POSTED_WRITES `DMA_POSTED_WRITES `else 1 `endif;
   localparam integer unsigned RouterRemapGroupSize = `ifdef NOC_ROUTER_REMAP_GROUP_SIZE `NOC_ROUTER_REMAP_GROUP_SIZE `else 2 `endif;
 
   // FlooNoC group id types for XY routing.

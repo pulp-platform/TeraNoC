@@ -18459,3 +18459,39 @@ the old prime path.
 device fill, legacy odd 3-tile 2-strip, auto small), 4x4 B16/32/64 and 8x8 B64/B128 defaults. Pending.
 
 **Status.** Implemented; validation running.
+
+## 2026-09-26 20:00 — DMA probe + posted DMA writes into L1 (dma_posted_writes)
+
+**Purpose.** The K-tile DMA ran at 22-68 % of its 1024 B/cyc peak (4x4). New sim-only probe
+`hardware/tb/tb_dma_profiling.svh` ([DMAP]/[L2BW], per group backend and per L2 channel): alone
+(pre-benchmark) every backend moves data 998/1000 cycles -- the DMA/L2/NoC path is fine. Inside the
+benchmark, aligned L2 tiles: 71 % moving, 27 % R held by the L1 WRITE side, 1 % waiting on L2 (B16,
+10 periods); unaligned: 43 % waiting on L2/NoC. Cause of the write-side stall (RTL): the wide DMA beat
+already has strict priority at `tcdm_wide_narrow_mux`, but `tcdm_adapter` accepts ANY request only
+with an empty response queue (`in_ready_o = rdata_ready`), so a bank still holding a core read
+response it cannot deliver refuses the DMA write, and the beat needs all 16 banks.
+
+**Implementation.** Knob `dma_posted_writes` (hardware/Makefile, default 0) -> `DmaPostedWrites`.
+`tcdm_wide_narrow_mux`: a wide WRITE goes to the banks POSTED (`mst_req_posted_o`) when no bank-routed
+wide response is outstanding and the 3-bit ack counter has room; the decision is latched for a
+partly-taken beat; the mux generates the acknowledgement; bank-routed wide responses wait behind older
+acks (order kept). `tcdm_adapter` (`PostedWrites`, `in_posted_i`): a posted write needs only the SRAM
+port (not mid-AMO), pushes no metadata and no read data, still clears LR/SC reservations. Knob=0 is the
+old logic (generate / constant fold). Sim-only assertions on both (posted is a plain write, no push,
+counter bounds, no response overtaking an ack).
+
+**Result.** Images `build_split_vcs_pw0` / `_pw1` (4x4) and `build_split_vcs_8x8_pw0` / `_pw1`, all
+with the probe, 0 errors/warnings on the edited modules.
+* Knob off is a no-op: finished cycles identical to the old RTL (kc1 102,978, kc4 74,618) and every
+  [FPU]/[FPUG]/[STALLG] line identical (111 + 99 lines).
+* Knob on is correct: all four 4x4 checks `success!` (4-strip and 2-strip with write-back DMA reads
+  interleaved with refill writes, device fill, odd tile count) and the 8x8 B64 check.
+* 4x4, in-benchmark, off -> on: R held by the L1 write side 27 -> 0 % (B16) and 21 -> 0 % (B64); K-tile
+  DMA 7.7k -> 5.7k cycles (684 -> 930 B/cyc, 91 % of peak) at B16 and 13.1k -> 6.6k (405 -> 800 B/cyc) at
+  B64. Utilisation only moves where the DMA is on the critical path: B16 unaligned 84.3 -> 86.5 %,
+  B64 default 95.8 -> 95.9 % at cycle 370k.
+* 8x8 B16/B32: neutral (61.0 -> 60.8 %, 90.7 -> 90.8 % at 120k). There the write side was only 1-4 %;
+  ~65 % of busy cycles are reads outstanding with no data back, at ~24 beats in flight (100-115 at 4x4)
+  and ~700 B/cyc of the 2,048 peak.
+
+**Status.** Done; `dma_posted_writes` default 1. Next: the 8x8 DMA limit.

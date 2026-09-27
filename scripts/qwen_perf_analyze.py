@@ -21,7 +21,11 @@ Reads the TB probe lines of one run and prints, over a cycle window:
   6. banks         [BP] bank_req stall/handshake per group, and per period how many of a
                    group's tiles carry its bank traffic (concentration; averaged over periods,
                    since the hot tiles move from one column chunk to the next)
-  7. DMA           dma.log transfer durations by size (the K-tile refills)
+  7. DMA           dma.log transfer durations by size (the K-tile refills), and -- when the
+                   image has tb_dma_profiling.svh -- [DMAP]/[L2BW]: per backend, the share of
+                   its busy cycles moving data (R handshake), stalled by the L1 write side
+                   (R valid, not ready), or waiting on L2 / the NoC (no R, reads outstanding),
+                   the mean outstanding read beats, and the L2 channels' beats per cycle
 
 Handles both simulators: QuestaSim prefixes every transcript line with "# ", VCS does not,
 and the per-group CSV probes carry a leading space on field 0. A live (still running)
@@ -68,6 +72,8 @@ def parse(path, c_from, c_to):
   bank = {}           # (g, t) -> [hsk, stall]
   bank_p = {}         # (cyc, g) -> {t: hsk}  -- per period, for concentration
   qwen = []
+  dmap = {}           # field -> [per-group sums] over periods with DMA activity
+  l2bw = []           # per period: list of per-channel beats
   with open(path, 'rb') as f:
     for raw in f:
       ln = raw[2:] if raw.startswith(b'# ') else raw
@@ -77,6 +83,21 @@ def parse(path, c_from, c_to):
         s = ln.decode()
         if s.startswith('[UART] [QWEN]') or s.startswith('[UART] [MSHR] share'):
           qwen.append(s.strip())
+          continue
+        if s.startswith('[DMAP]') or s.startswith('[L2BW]'):
+          d = kv(s)
+          c = int(d['cyc'])
+          if not c_from <= c <= c_to:
+            continue
+          if s.startswith('[L2BW]'):
+            l2bw.append(csv_ints(d['beats']))
+          else:
+            for k in ('busy', 'r', 'rstall', 'rwait', 'wstall', 'out'):
+              vals = csv_ints(d[k])
+              acc = dmap.setdefault(k, [0] * len(vals))
+              for i, v in enumerate(vals):
+                acc[i] += v
+            dmap['_n'] = dmap.get('_n', 0) + 1
           continue
         if s.startswith('[FPU] bench'):
           d = kv(s)
@@ -125,7 +146,7 @@ def parse(path, c_from, c_to):
       except (KeyError, ValueError, UnicodeDecodeError, IndexError):
         pass  # half-written live line, or a probe variant this digest does not know
   return dict(fpu=fpu, grp=grp, mshru=mshru, byp=byp, stage=stage, bank=bank, bank_p=bank_p,
-              qwen=qwen)
+              qwen=qwen, dmap=dmap, l2bw=l2bw)
 
 
 def parse_dma(path):
@@ -152,10 +173,35 @@ def row(label, vals, fmt):
   return f"  {label:<11}" + ' '.join(fmt(v) for v in vals)
 
 
+def dma_probe(r):
+  """[DMAP] / [L2BW] digest: the DMA's busy cycles by what the R channel was doing."""
+  d = r['dmap']
+  if not d:
+    return
+  n = d['_n']
+  busy = sum(d['busy'])
+  if not busy:
+    return
+  moved = sum(d['r'])
+  print(f"  DMA probe ({n} active periods, all groups): of the backends' busy cycles "
+        f"{100 * moved / busy:.0f}% moving data (R), {100 * sum(d['rstall']) / busy:.0f}% R held "
+        f"by the L1 write side, {100 * sum(d['rwait']) / busy:.0f}% waiting on L2/NoC; "
+        f"W stalled {100 * sum(d['wstall']) / busy:.0f}%; mean outstanding "
+        f"{sum(d['out']) / busy:.1f} beats")
+  print(f"  DMA beats/busy cycle per group: " +
+        ' '.join(f"{r_ / max(b, 1):.2f}" for r_, b in zip(d['r'], d['busy'])))
+  if r['l2bw']:
+    ch = len(r['l2bw'][0])
+    per = [sum(p[k] for p in r['l2bw']) / (len(r['l2bw']) * 1000) for k in range(ch)]
+    print(f"  L2 beats/cycle per channel (active periods): " + ' '.join(f"{v:.2f}" for v in per) +
+          f"  | total {64 * sum(per):.0f} B/cyc of {64 * ch} peak")
+
+
 def report(name, r, dma, dip):
   print(f"=== {name}")
   for q in r['qwen']:
     print('  ' + q.replace('[UART] ', ''))
+  dma_probe(r)
   fpu = r['fpu']
   if not fpu:
     print('  no [FPU] bench lines in the window (not yet in the benchmark?)')
@@ -231,7 +277,7 @@ def report(name, r, dma, dip):
 
   # ---- MSHR --------------------------------------------------------------------------------
   if r['mshru']:
-    sl = ' '.join(f"s{i}={sum(v) / len(v) / 100:.2f}" for i, v in sorted(r['mshru'].items()))
+    sl = ' '.join(f"s{i}={sum(v) / len(v) / 100:.2f}" for i, v in sorted(r['mshru'].items()) if v)
     print(f"  mshr valid  {sl}")
   bc = sorted(c for c in r['byp'] if cyc[0] <= c <= cyc[-1])
   if len(bc) > 1:

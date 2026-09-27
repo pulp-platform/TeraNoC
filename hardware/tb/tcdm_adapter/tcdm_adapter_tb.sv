@@ -123,6 +123,7 @@ module tcdm_adapter_tb;
       .in_wdata_i  (bank_req_payload.wdata.data  ),
       .in_meta_i   (meta_in                      ),
       .in_be_i     (bank_req_payload.be          ),
+      .in_posted_i (1'b0                         ),
       .in_valid_o  (bank_resp_valid              ),
       .in_ready_i  (bank_resp_ready              ),
       .in_rdata_o  (bank_resp_payload.rdata.data ),

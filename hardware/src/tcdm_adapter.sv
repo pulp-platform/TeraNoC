@@ -17,6 +17,10 @@ module tcdm_adapter #(
   parameter bit           LrScEnable   = 1,
   // Cut path between request and response at the cost of increased AMO latency
   parameter bit           RegisterAmo  = 1'b0,
+  // Accept a POSTED write (in_posted_i) whenever the SRAM port is free: it produces no
+  // response here, so it need not wait for the response queue to drain. Its sender
+  // generates the acknowledgement itself (tcdm_wide_narrow_mux).
+  parameter bit           PostedWrites = 1'b0,
   // Dependent parameters. DO NOT CHANGE.
   localparam int unsigned BeWidth      = DataWidth/8
 ) (
@@ -31,6 +35,7 @@ module tcdm_adapter #(
   input  logic [DataWidth-1:0] in_wdata_i,   // Write data
   input  metadata_t            in_meta_i,    // Meta data
   input  logic [BeWidth-1:0]   in_be_i,      // Byte enable
+  input  logic                 in_posted_i,  // Write without a response (PostedWrites)
   output logic                 in_valid_o,   // Read data
   input  logic                 in_ready_i,   // Read data
   output logic [DataWidth-1:0] in_rdata_o,   // Read data
@@ -73,6 +78,9 @@ module tcdm_adapter #(
 
   logic out_gnt;
   logic pop_resp;
+  // A posted write accepted this cycle: it takes the SRAM port and nothing else.
+  logic posted_acc;
+  assign posted_acc = PostedWrites && in_posted_i && in_valid_i && in_ready_o;
 
   enum logic [1:0] {
       Idle, DoAMO, WriteBackAMO
@@ -95,7 +103,7 @@ module tcdm_adapter #(
   ) i_metadata_register (
     .clk_i  (clk_i                   ),
     .rst_ni (rst_ni                  ),
-    .valid_i(in_valid_i && in_ready_o),
+    .valid_i(in_valid_i && in_ready_o && !posted_acc),
     .ready_o(/*unused*/              ),
     .data_i (in_meta_i               ),
     .valid_o(meta_valid              ),
@@ -145,7 +153,8 @@ module tcdm_adapter #(
   assign pop_resp   = in_ready_i && in_valid_o;
 
   // Generate out_gnt one cycle after sending a request to the bank, except an AMO's write-back
-  `FF(out_gnt, out_req_o && !amo_wb, 1'b0, clk_i, rst_ni);
+  // and a posted write, neither of which returns data.
+  `FF(out_gnt, out_req_o && !amo_wb && !posted_acc, 1'b0, clk_i, rst_ni);
 
   // ----------------
   // LR/SC
@@ -238,8 +247,9 @@ module tcdm_adapter #(
   // ----------------
 
   always_comb begin
-    // feed-through
-    in_ready_o  = rdata_ready;
+    // feed-through. A posted write needs no response slot, only the SRAM port, which the
+    // AMO states below still take away.
+    in_ready_o  = (PostedWrites && in_posted_i) ? 1'b1 : rdata_ready;
     out_req_o   = in_valid_i && in_ready_o;
     out_add_o   = in_address_i;
     out_write_o = in_write_i || (sc_successful_d && (amo_op_t'(in_amo_i) == AMOSC));
@@ -357,6 +367,16 @@ module tcdm_adapter #(
     assert_rdata_full : assert property(
       @(posedge clk_i) disable iff (~rst_ni) (out_gnt |-> !rdata_full))
       else $fatal (1, "Trying to push new data although the i_rdata_register is not ready.");
+    // A posted request is a plain write: no load, no AMO, no LR/SC (those return data).
+    assert_posted_is_write : assert property(
+      @(posedge clk_i) disable iff (~rst_ni)
+      (PostedWrites && in_valid_i && in_posted_i) |->
+        (in_write_i && amo_op_t'(in_amo_i) == AMONone))
+      else $fatal (1, "[tcdm_adapter] posted request that is not a plain write");
+    // A posted write returns nothing: the cycle after it, no read data is pushed for it.
+    assert_posted_no_push : assert property(
+      @(posedge clk_i) disable iff (~rst_ni) posted_acc |=> !out_gnt)
+      else $fatal (1, "[tcdm_adapter] posted write pushed read data");
   `endif
   // pragma translate_on
 

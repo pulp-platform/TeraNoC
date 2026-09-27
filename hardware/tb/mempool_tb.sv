@@ -808,6 +808,15 @@ module mempool_tb;
 `include "tb_fpu_util.svh"
 `endif
 
+/*****************************************************
+* DMA backend AXI and L2 channel occupancy, per      *
+* period: where the L2 -> L1 bandwidth goes. Disable *
+* with +define+DMA_PROF_DISABLE.                     *
+*****************************************************/
+`ifndef DMA_PROF_DISABLE
+`include "tb_dma_profiling.svh"
+`endif
+
 /****************************************************
  * Per-flit NoC Request/Response Event Tracer       *
  * Emits noc_trace/events.csv; analyze with          *
