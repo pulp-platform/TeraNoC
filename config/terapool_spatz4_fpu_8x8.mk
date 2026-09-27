@@ -23,6 +23,14 @@ num_x          ?= 8           # 4x4: 4
 l2_banks       ?= 32          # 4x4: 16
 l2_size        ?= $(shell echo $$((1048576 * $(l2_banks))))
 
+# ---- AXI/L2 mesh routing (root Makefile, update-floonoc) -----------------------------------
+# Y-first dimension-ordered AXI tables + L2 channels reassigned to the same perimeter points to
+# minimise the most DMA streams on one mesh link. The DMA feeds every group in lockstep, so that
+# worst link sets its bandwidth: 4 -> 2 streams here, 11.8 -> 30.1 of 32 L2 beats/cycle measured.
+# The 4x4 keeps shortest/hops (its placement is already at the bound).
+FLOO_TURN_MODEL ?= yx
+FLOO_PLACEMENT  ?= linkload
+
 # ---- build directory -------------------------------------------------------------------------
 config_build_path ?= terapool8x8
 

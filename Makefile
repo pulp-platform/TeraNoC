@@ -282,12 +282,19 @@ FLOO_RT_GEN = $(ROOT_DIR)/hardware/scripts/gen_floo_route_tables.py
 # construction and roughly halves the rules per router but costs ~1.24% here.
 # Both are gated on the generator's channel-dependency-graph acyclicity check.
 FLOO_TURN_MODEL ?= shortest
+# L2 channel placement objective (gen_perimeter_map.py). `hops` minimises total
+# channel->group distance; `linkload` then reassigns channels to the same perimeter
+# points to minimise the most DMA streams on one AXI-mesh link under FLOO_TURN_MODEL
+# (needs xy or yx). The DMA hands every group an equal share in lockstep, so its
+# bandwidth is set by that worst link: at 8x8, yx + linkload halves it, 4 -> 2 streams.
+FLOO_PLACEMENT ?= hops
 
 update-floonoc: $(FLOO_NOC)
 $(FLOO_NOC): install-floogen $(FLOO_CFG) $(FLOO_RT_GEN) \
              $(ROOT_DIR)/hardware/scripts/gen_perimeter_map.py $(ROOT_DIR)/config/$(config).mk
 	python3 $(ROOT_DIR)/hardware/scripts/gen_perimeter_map.py --num-x $(num_x) --num-y $$(( $(num_groups) / $(num_x) )) -o $(FLOO_GEN_OUTDIR) \
-	  --l2-size $(l2_size) --emit-yml $(FLOO_CFG)
+	  --l2-size $(l2_size) --emit-yml $(FLOO_CFG) \
+	  --objective $(FLOO_PLACEMENT) --link-turn-model $(FLOO_TURN_MODEL)
 	floogen -c $(FLOO_CFG) -o $(FLOO_GEN_OUTDIR) --only-pkg
 	$(FLOOGEN_PYTHON) $(FLOO_RT_GEN) -c $(FLOO_CFG) -o $(FLOO_GEN_OUTDIR) --turn-model $(FLOO_TURN_MODEL)
 

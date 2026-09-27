@@ -90,9 +90,11 @@ def parse(path, c_from, c_to):
           if not c_from <= c <= c_to:
             continue
           if s.startswith('[L2BW]'):
-            l2bw.append(csv_ints(d['beats']))
+            l2bw.append({k: csv_ints(d[k]) for k in ('beats', 'ar', 'arstall', 'rstall') if k in d})
           else:
-            for k in ('busy', 'r', 'rstall', 'rwait', 'wstall', 'out'):
+            for k in ('busy', 'r', 'rstall', 'rwait', 'wstall', 'out', 'arstall', 'chunks'):
+              if k not in d:
+                continue
               vals = csv_ints(d[k])
               acc = dmap.setdefault(k, [0] * len(vals))
               for i, v in enumerate(vals):
@@ -190,11 +192,22 @@ def dma_probe(r):
         f"{sum(d['out']) / busy:.1f} beats")
   print(f"  DMA beats/busy cycle per group: " +
         ' '.join(f"{r_ / max(b, 1):.2f}" for r_, b in zip(d['r'], d['busy'])))
+  print(f"  DMA mean outstanding beats per group: " +
+        ' '.join(f"{o / max(b, 1):.0f}" for o, b in zip(d['out'], d['busy'])))
+  if 'arstall' in d:
+    print(f"  DMA AR stalled (% of busy) per group: " +
+          ' '.join(f"{100 * a / max(b, 1):.0f}" for a, b in zip(d['arstall'], d['busy'])))
   if r['l2bw']:
-    ch = len(r['l2bw'][0])
-    per = [sum(p[k] for p in r['l2bw']) / (len(r['l2bw']) * 1000) for k in range(ch)]
+    per_k = lambda key: [sum(p[key][k] for p in r['l2bw']) / (len(r['l2bw']) * 1000)
+                         for k in range(len(r['l2bw'][0][key]))]
+    per = per_k('beats')
     print(f"  L2 beats/cycle per channel (active periods): " + ' '.join(f"{v:.2f}" for v in per) +
-          f"  | total {64 * sum(per):.0f} B/cyc of {64 * ch} peak")
+          f"  | total {64 * sum(per):.0f} B/cyc of {64 * len(per)} peak")
+    if 'rstall' in r['l2bw'][0]:
+      print("  L2 R waiting for the NoC (% of cycles) per channel: " +
+            ' '.join(f"{100 * v:.0f}" for v in per_k('rstall')))
+      print("  L2 AR waiting (% of cycles) per channel: " +
+            ' '.join(f"{100 * v:.0f}" for v in per_k('arstall')))
 
 
 def report(name, r, dma, dip):

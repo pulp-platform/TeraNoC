@@ -28,6 +28,12 @@ Two turn models are offered, and BOTH are gated on an explicit channel-dependenc
     direction's destinations a contiguous id range. Costs ~1.24% on
     sp-fmatmul-opt-burst-merge at 4x4 by funnelling each destination through a
     single approach link.
+  * `yx` -- strict y-before-x, the other dimension order; acyclic by construction
+    in the same way. An L2 channel serves a VERTICAL pair of groups (the address
+    interleave hands channel c groups 2c and 2c+1 = (x, 2k), (x, 2k+1)), so
+    y-first keeps a channel's two DMA streams on one column until they split.
+    Paired with a placement chosen for it (gen_perimeter_map.py --objective
+    linkload --route-algo yx) this halves the worst link's DMA streams at 8x8.
 
 Topology (mesh size, endpoint ids, endpoint placement) still comes from floogen,
 so the yml remains the single source of truth. Output port indices are taken
@@ -98,6 +104,7 @@ def collect_topology(net):
 
     # Place each off-mesh router just outside the mesh, in the direction its
     # link occupies on the meshed router it attaches to.
+    attach = {}
     for name in off_mesh:
         for nb in g.neighbors(name):
             if nb not in coord:
@@ -108,6 +115,7 @@ def collect_topology(net):
             bx, by = coord[nb]
             dx, dy = STEP[d]
             coord[name] = (bx + dx, by + dy)
+            attach[name] = (bx, by)
             break
         if name not in coord:
             sys.exit(f"error: cannot place off-mesh router {name} -- no directed link to a "
@@ -138,15 +146,18 @@ def collect_topology(net):
                 m[d] = port_index(g, name, obj, nb)
         step_port[name] = m
 
-    return {"coord": coord, "by_coord": by_coord, "off_mesh": set(off_mesh),
+    return {"coord": coord, "by_coord": by_coord, "off_mesh": set(off_mesh), "attach": attach,
             "eps": eps, "step_port": step_port, "num_x": num_x, "num_y": num_y,
             "graph": graph, "rt_obj": rt_obj}
 
 
-def xy_dir(src, dst):
-    """Compass direction of the first XY hop from src to dst, x before y."""
+def xy_dir(src, dst, y_first=False):
+    """Compass direction of the first dimension-ordered hop from src to dst:
+    x before y, or y before x with y_first."""
     sx, sy = src
     dx, dy = dst
+    if y_first and sy != dy:
+        return NORTH if dy > sy else SOUTH
     if sx != dx:
         return EAST if dx > sx else WEST
     if sy != dy:
@@ -189,7 +200,14 @@ def next_port(topo, rt, ep):
             sys.exit(f"error: off-mesh router {rt} has {len(uplinks)} mesh links; "
                      f"expected exactly 1")
         return topo["step_port"][rt][uplinks[0]]
-    d = xy_dir(topo["coord"][rt], topo["coord"][ep["anchor"]])
+    y_first = topo.get("turn_model") == "yx"
+    tgt = topo["coord"][ep["anchor"]]
+    if y_first and ep["anchor"] in topo["off_mesh"] and topo["coord"][rt] != topo["attach"][ep["anchor"]]:
+        # An off-mesh router sits one step outside the mesh, so y-first would try to leave
+        # the mesh from the wrong router (e.g. south out of (1,0) for one hanging below
+        # (0,0)). Route to the mesh router it hangs off, then take the one step out.
+        tgt = topo["attach"][ep["anchor"]]
+    d = xy_dir(topo["coord"][rt], tgt, y_first=y_first)
     if d is None or d not in topo["step_port"][rt]:
         return None
     return topo["step_port"][rt][d]
@@ -293,7 +311,8 @@ def check_tables(tables, topo):
                     problems.append(f"{rt}: no rule for {ep['name']} (id {ep['id']})")
                     break
                 if port != next_port(topo, rt, ep):
-                    problems.append(f"{rt} -> {ep['name']}: table port {port} disagrees with XY")
+                    problems.append(f"{rt} -> {ep['name']}: table port {port} disagrees with "
+                                    f"the {topo.get('turn_model')} turn model")
                     break
                 if rt == ep["anchor"]:
                     break  # delivered
@@ -414,7 +433,9 @@ def render(tables, topo, net_name):
          "//",
          "// Per-router IdTable routing tables for the FlooNoC AXI/L2 network.",
          "//"] + ([
-         "// Turn model: STRICT XY (x before y). Acyclic by construction within the mesh.",
+         ("// Turn model: STRICT YX (y before x). Acyclic by construction within the mesh."
+          if topo.get("turn_model") == "yx" else
+          "// Turn model: STRICT XY (x before y). Acyclic by construction within the mesh."),
          ] if topo.get("turn_model") != "shortest" else [
          "// Turn model: SHORTEST-PATH (floogen's nx.shortest_path). This reproduces the",
          "// historical source-routed paths exactly. It is NOT dimension-ordered, so it is",
@@ -479,12 +500,13 @@ def main():
     ap.add_argument("-o", "--outdir", type=Path, help="output directory")
     ap.add_argument("--check-only", action="store_true",
                     help="verify the turn model and report, emit nothing")
-    ap.add_argument("--turn-model", choices=("xy", "shortest"), default="shortest",
+    ap.add_argument("--turn-model", choices=("xy", "yx", "shortest"), default="shortest",
                     help="shortest (default): floogen's nx.shortest_path paths -- matches "
                          "the historical source-routed behaviour exactly and spreads "
                          "many-to-few traffic better. xy: strict dimension-order, acyclic "
                          "by construction and ~half the rules/router, but concentrates "
-                         "many-to-few traffic. BOTH are gated on the CDG acyclicity check "
+                         "many-to-few traffic. yx: the other dimension order (y first). "
+                         "ALL are gated on the CDG acyclicity check "
                          "below; shortest is not deadlock-free by construction, only by "
                          "verification, so the gate is what makes it safe.")
     args = ap.parse_args()

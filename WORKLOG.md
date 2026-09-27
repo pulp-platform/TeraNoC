@@ -18495,3 +18495,71 @@ with the probe, 0 errors/warnings on the edited modules.
   and ~700 B/cyc of the 2,048 peak.
 
 **Status.** Done; `dma_posted_writes` default 1. Next: the 8x8 DMA limit.
+
+## 2026-09-27 13:40 — 8x8 DMA bandwidth: root cause (AXI-mesh link sharing + lockstep handout)
+
+**Purpose.** 8x8 K-tile DMA ran at ~730 B/cyc of 2,048; 8x8 B16 is DMA-bound at ~61 %.
+
+**Implementation (sim-only).** `tb_dma_profiling.svh` extended: per group chunks received and AR
+stalls; per L2 channel AR accepted / AR waiting / R waiting for the NoC; per AXI-mesh router
+(`i_floo_narrow_wide_router`) and port, wide flits out/in and stalls ([AXIW]); both sides of the
+periph router ([AXIWP]; generate block labelled `gen_periph_hbm` in mempool_system.sv, no logic change).
+Images `build_split_vcs_8x8_p2`, `_p3`.
+
+**Result (8x8 B16/B32).**
+* Groups: AR stalled ~0 %; per-group mean outstanding ~16 beats except 26/27 (115-123, queue full,
+  0.18 beats/cyc) and 1/18/19 (36-46). The distributed midend forks every 1 KB piece to all 64
+  backends in lockstep, so all run at the slowest groups' rate: 64 x 0.18 x 64 B = ~740 B/cyc.
+* L2 side: channels 13 / 0 / 9 (corner) have R waiting for the NoC 60 / 47 / 39 % of cycles (others
+  0-17 %).
+* AXI mesh: data from the corner goes NORTH first (router (0,0) east output 0.00, north 0.56 + 0.42
+  stall); (0,1)->(0,2) carries 0.73 flits/cyc at 93 % busy = 4 DMA streams (groups 18,19,26,27)
+  x 0.18. The periph router's stall (0.59) is back-pressure from (0,0), not its own limit.
+* Cause: `gen_floo_route_tables.py` default turn model is `shortest` (networkx, not dimension-
+  ordered; strict XY is `--turn-model xy`), while the perimeter placement minimised hops only. Model
+  (vertical group pairs per channel): current placement worst link 4 streams under Y-first, 3 under
+  XY; a search over the same 32 anchor points reaches 2 under Y-first (hops unchanged, 104), 3 under XY.
+
+**Status.** Root cause identified; fix candidates (Y-first dimension-ordered tables + link-load-aware
+placement; optionally decoupling the midend lockstep) not yet implemented.
+
+## 2026-09-27 14:30 — AXI mesh: y-first routing + link-load-aware L2 placement (opt-in)
+
+**Purpose.** Remove the 8x8 DMA bottleneck found above (4 DMA streams on (0,1)->(0,2)).
+
+**Implementation.**
+* `gen_floo_route_tables.py --turn-model yx`: strict y-before-x (dimension-ordered, gated on the same
+  CDG acyclicity check). An off-mesh destination (the periph router, one step outside the mesh) is
+  reached by routing y-first to the mesh router it hangs off, then stepping out -- plain y-first
+  tried to leave the mesh from the wrong router ("no route from group_router_1_0 to hbm_ni_0").
+  xy and shortest outputs are unchanged.
+* `gen_perimeter_map.py --objective linkload --link-turn-model {xy,yx}`: starting from the
+  hop-optimal placement, reassign channels to the SAME perimeter points by seeded pairwise-swap
+  descent (+16 restarts) minimising (worst-link DMA streams, sum of squared link loads, hops).
+  Default `--objective hops` is unchanged: 8x8 output byte-identical, 4x4 still reproduces the
+  committed placement.
+* Root Makefile: `FLOO_PLACEMENT ?= hops`, passed with FLOO_TURN_MODEL to the placement generator.
+
+**Result (generation, 8x8).** worst link 4 -> 2 streams, sum sq 212 -> 160, hops 104 -> 104;
+PeriphHbmChannel 13 -> 0 (the periph-sharing channel now serves the corner groups); 6,370
+(router, destination) pairs verified; CDG ACYCLIC; 43 rules per router (unchanged). Image
+`build_split_vcs_8x8_yx` (FLOO_TURN_MODEL=yx FLOO_PLACEMENT=linkload), runs vs `_p3`: pending.
+
+**Status.** Implemented (opt-in); validation running.
+
+## 2026-09-27 16:30 — y-first + link-load placement: measured (8x8, same ELFs, same fleet batch)
+
+**Purpose.** Validate the 14:30 change against `_p3` (hops placement, shortest routing, posted writes).
+
+**Result.** `build_split_vcs_8x8_yx` vs `build_split_vcs_8x8_p3`, k8_b{16,32,64}.elf:
+* Initial W/X fill (the DMA-bound phase before compute starts), first period >50% FPU util:
+  b16 63k -> 37k, b32 63k -> 41k, b64 64k -> 34k cycles.
+* Steady DMA phase (cyc 25k-32k, b64): L2 delivers 11.8 -> **30.1 beats/cyc of 32** (94% of the
+  channels' peak); per group 0.18 -> 0.47 beats/cyc; worst channel R-waiting-on-NoC share
+  63% (ch13) -> 6%. The L2 channels, not the mesh, are now the limit.
+* Compute phase unchanged: next 8 periods after start b16 67.2/67.3%, b32 96.8/95.7% (yx/p3).
+* merge_reqs=4 (split MSHR): mr4_k_b32 and mr16_k_b32 both 95.2% over the same 185k cycles; kc3/kc4
+  pass with cycles identical to merge 16.
+
+**Status.** DMA bound resolved at 8x8 (opt-in `FLOO_TURN_MODEL=yx FLOO_PLACEMENT=linkload`).
+Correctness arms x8yx_c1_b128_4strip / x8yx_c_b64 still running.

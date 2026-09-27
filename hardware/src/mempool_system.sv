@@ -126,7 +126,7 @@ module mempool_system
      // X at its first fetch. gen_perimeter_map.py emits the same value into the yml it
      // generates, so the RTL and the routing tables cannot drift apart.
      for (genvar x = 0; x < NumAXIMasters; x++) begin : gen_cluster_axi_chimney
-        if (x == perimeter_map_pkg::PeriphHbmChannel) begin
+        if (x == perimeter_map_pkg::PeriphHbmChannel) begin : gen_periph_hbm
           floo_req_t  [3:0] periph_router_req_in;
           floo_rsp_t  [3:0] periph_router_rsp_out;
           floo_req_t  [3:0] periph_router_req_out;

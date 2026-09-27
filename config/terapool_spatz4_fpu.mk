@@ -211,9 +211,10 @@ endif
 # group_mshr_merge_reqs    ?= 16     # 128x1024x512 (best measured 96.8%): A 16-way, B 1-way
 # 512x512x512 (default): A 4-way, B 4-way -> max = 4
 # Sim convention: MERGE_REQS is elaboration-only and the SW sets the real target via CSR
-# (group_mshr_cfg_runtime=1 above), so 16 is the sizing every sweep image was built with.
-# Only a backend run needs the true merge number here.
-group_mshr_merge_reqs    ?= 16
+# (group_mshr_cfg_runtime=1 above). With group_mshr_split=1 a slice serves 4 tiles of one core
+# each, so no entry can collect more than 4 requests: 4 is the true bound, measured cycle-identical
+# to the 16 that sweep images before 2026-09-27 were built with.
+group_mshr_merge_reqs    ?= 4
 # Admit single-word reqs into MSHR merge pool (1) or let them bypass (0).
 # Set to 1 (design intent: single-word loads coalesce + multicast via the MSHR).
 # The earlier sporadic sp-fmatmul deadlocks attributed here to a "duplicate-entry

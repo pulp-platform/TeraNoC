@@ -198,6 +198,78 @@ def improve(placement, served, num_y):
     return placement
 
 
+def dor_links(src, dst, y_first):
+    """Mesh links (router->router) of the dimension-ordered route from src to dst."""
+    (x, y), (gx, gy) = src, dst
+    links = []
+    for dim in (("y", "x") if y_first else ("x", "y")):
+        if dim == "x":
+            while x != gx:
+                nx_ = x + (1 if gx > x else -1)
+                links.append(((x, y), (nx_, y)))
+                x = nx_
+        else:
+            while y != gy:
+                ny_ = y + (1 if gy > y else -1)
+                links.append(((x, y), (x, ny_)))
+                y = ny_
+    return links
+
+
+def linkload_cost(placement, served, num_y, y_first):
+    """(most DMA streams on one link, sum of squared link loads, total hops).
+
+    Every group pulls an equal share of each DMA transfer from its channel, and the DMA
+    distributes transfers to all groups in lockstep, so the whole transfer runs at the
+    per-stream share of the most loaded link: that is the first key. The read data runs
+    channel -> group along the routing's dimension order."""
+    load, hops = {}, 0
+    for ch, gs in served.items():
+        pt = placement[ch][0]
+        for g in gs:
+            for l in dor_links(pt, group_coord(g, num_y), y_first):
+                load[l] = load.get(l, 0) + 1
+                hops += 1
+    vals = load.values()
+    return (max(vals, default=0), sum(v * v for v in vals), hops)
+
+
+def improve_linkload(placement, served, num_y, y_first, restarts=16, seed=0):
+    """Reassign channels to the SAME perimeter points to minimise linkload_cost.
+
+    Pairwise-swap descent from the hop-optimal placement, then from `restarts`
+    shuffles drawn from a fixed seed, keeping the best: reproducible, no solver
+    dependency. The set of occupied points (and so the periph point) is unchanged."""
+    import random
+    rng = random.Random(seed)
+    chans = sorted(placement)
+
+    def descend(pl):
+        best = linkload_cost(pl, served, num_y, y_first)
+        improved = True
+        while improved:
+            improved = False
+            for i in range(len(chans)):
+                for j in range(i + 1, len(chans)):
+                    a, b = chans[i], chans[j]
+                    pl[a], pl[b] = pl[b], pl[a]
+                    c = linkload_cost(pl, served, num_y, y_first)
+                    if c < best:
+                        best, improved = c, True
+                    else:
+                        pl[a], pl[b] = pl[b], pl[a]
+        return best, pl
+
+    best_cost, best_pl = descend(dict(placement))
+    points = [placement[c] for c in chans]
+    for _ in range(restarts):
+        rng.shuffle(points)
+        cost, pl = descend(dict(zip(chans, points)))
+        if cost < best_cost:
+            best_cost, best_pl = cost, pl
+    return best_pl
+
+
 def check_committed(placement, num_x, num_y):
     """Gate: at 4x4 the rule must reproduce the committed wrapper mapping exactly."""
     if (num_x, num_y) != (4, 4):
@@ -436,12 +508,29 @@ def main():
     ap.add_argument("--periph-dir", default="South",
                     help="edge the periph router occupies at (0,0) (default South)")
     ap.add_argument("--route-algo", default="ID")
+    ap.add_argument("--objective", choices=("hops", "linkload"), default="hops",
+                    help="hops (default): minimise total channel->group distance. linkload: "
+                         "then reassign channels to the same points to minimise the most DMA "
+                         "streams on one mesh link under --link-turn-model")
+    ap.add_argument("--link-turn-model", default="xy",
+                    help="routing the linkload objective models: xy or yx -- pass the AXI "
+                         "network's turn model (FLOO_TURN_MODEL) so placement and tables agree")
     ap.add_argument("--check", action="store_true",
                     help="verify against the committed 4x4 placement and report distances")
     args = ap.parse_args()
 
     nx, ny = args.num_x, args.num_y
     placement, served = assign(nx, ny, args.num_channels)
+    if args.objective == "linkload":
+        if args.link_turn_model not in ("xy", "yx"):
+            ap.error("--objective linkload needs a dimension-ordered --link-turn-model (xy or yx); "
+                     f"'{args.link_turn_model}' has no closed-form path")
+        yf = args.link_turn_model == "yx"
+        before = linkload_cost(placement, served, ny, yf)
+        placement = improve_linkload(placement, served, ny, yf)
+        after = linkload_cost(placement, served, ny, yf)
+        print(f"  linkload ({args.link_turn_model}): worst link {before[0]} -> {after[0]} streams, "
+              f"sum sq {before[1]} -> {after[1]}, hops {before[2]} -> {after[2]}")
 
     ng = nx * ny
     total = sum(manhattan(group_coord(g, ny), placement[c][0])
@@ -451,7 +540,7 @@ def main():
           f"  (axi_width_interleaved = {16*share})")
     print(f"  perimeter points {2*(nx+ny)}, total {total} hops, avg {total/ng:.2f} per group")
 
-    bad = check_committed(placement, nx, ny)
+    bad = check_committed(placement, nx, ny) if args.objective == "hops" else None
     if bad is not None:
         if bad:
             print(f"FAILED: differs from the committed 4x4 placement at groups {bad}")
