@@ -261,25 +261,40 @@ module mempool_tb;
 `ifdef TARGET_SPATZ
   // --------------------------------------------------------------------------
   // Fleet-wide Spatz FPU utilization (wave + per-cycle log; sim-only).
-  //   fpu_busy[i]    : core i's FPU lanes computing this cycle (i_vfu.is_fpu_busy,
-  //                    a LEVEL, not the fpu_result_valid completion pulse).
-  //   fpu_busy_count : $countones(fpu_busy) -- "how many FPUs are busy right now".
+  //   fpu_issue_lanes[i][f] : lane f of core i's FPU ACCEPTED an operation this cycle
+  //                    (spatz_vfu gen_fpnew[f] int_fpu_in_valid && int_fpu_in_ready): work issued.
+  //   fpu_issue_lane_count  : issued lanes machine-wide, 0..NumCores*N_FPU -- the FPU work rate.
+  //   fpu_busy[i]    : core i issued on any FPU lane this cycle.
+  //   fpu_busy_count : $countones(fpu_busy) -- cores whose FPU issued this cycle.
   //   fpu_busy_group : per-group count (NumGroups entries).
-  // Wave: /mempool_tb/fpu_busy (256-bit per-core pattern), /fpu_busy_count,
+  // Until 2026-09-28 fpu_busy was i_vfu.is_fpu_busy = "an op somewhere in the FPU pipeline",
+  // i.e. occupancy: a vfmacc chained to a slowly arriving load holds an op in the pipe between
+  // element groups and read busy while issuing a fraction of the time (see tb_fpu_util.svh).
+  // Wave: /mempool_tb/fpu_issue_lane_count, /fpu_busy (per-core pattern), /fpu_busy_count,
   //       /fpu_busy_group. Log: trace_fpu_fleet.log, one line per cycle
   //       "cyc busy_count g0 ... g15" (bit i of fpu_busy == hart i == (g<<4)|t).
   // --------------------------------------------------------------------------
+  logic [NumCores-1:0][`N_FPU-1:0] fpu_issue_lanes;
   logic [NumCores-1:0] fpu_busy;
   for (genvar g = 0; g < NumGroups; g++) begin: gen_fpu_busy_groups
     for (genvar t = 0; t < NumTilesPerGroup; t++) begin: gen_fpu_busy_tiles
       for (genvar c = 0; c < NumCoresPerTile; c++) begin: gen_fpu_busy_cores
+        for (genvar f = 0; f < `N_FPU; f++) begin: gen_fpu_busy_lanes
+          assign fpu_issue_lanes[g*NumTilesPerGroup*NumCoresPerTile + t*NumCoresPerTile + c][f] =
+              dut.i_mempool_cluster.gen_groups_x[g/NumY].gen_groups_y[g%NumY].gen_rtl_group
+                  .i_group.i_mempool_group.gen_tiles[t].i_tile.gen_cores[c].gen_mempool_cc
+                  .riscv_core.i_spatz.i_vfu.gen_fpu.gen_fpnew[f].int_fpu_in_valid &
+              dut.i_mempool_cluster.gen_groups_x[g/NumY].gen_groups_y[g%NumY].gen_rtl_group
+                  .i_group.i_mempool_group.gen_tiles[t].i_tile.gen_cores[c].gen_mempool_cc
+                  .riscv_core.i_spatz.i_vfu.gen_fpu.gen_fpnew[f].int_fpu_in_ready;
+        end: gen_fpu_busy_lanes
         assign fpu_busy[g*NumTilesPerGroup*NumCoresPerTile + t*NumCoresPerTile + c] =
-            dut.i_mempool_cluster.gen_groups_x[g/NumY].gen_groups_y[g%NumY].gen_rtl_group
-                .i_group.i_mempool_group.gen_tiles[t].i_tile.gen_cores[c].gen_mempool_cc
-                .riscv_core.i_spatz.i_vfu.is_fpu_busy;
+            |fpu_issue_lanes[g*NumTilesPerGroup*NumCoresPerTile + t*NumCoresPerTile + c];
       end: gen_fpu_busy_cores
     end: gen_fpu_busy_tiles
   end: gen_fpu_busy_groups
+  int unsigned fpu_issue_lane_count;
+  assign fpu_issue_lane_count = $countones(fpu_issue_lanes);
 
   localparam int unsigned FpuCntW     = $clog2(NumCores+1);
   localparam int unsigned FpuGrpCntW  = $clog2(NumTilesPerGroup*NumCoresPerTile+1);
@@ -815,6 +830,26 @@ module mempool_tb;
 *****************************************************/
 `ifndef DMA_PROF_DISABLE
 `include "tb_dma_profiling.svh"
+`endif
+
+/*****************************************************
+* Machine-wide per-cycle indicators for the waveform: *
+* TCDM/AXI mesh traffic per router class and          *
+* direction, group MSHR per slice family. Disable     *
+* with +define+SYS_OVERVIEW_DISABLE.                  *
+*****************************************************/
+`ifndef SYS_OVERVIEW_DISABLE
+`include "tb_system_overview.svh"
+`endif
+
+/*****************************************************
+* Per-core vector-load delivery (words/cycle, ROB    *
+* occupancy, Little's-law latency) and link balance  *
+* across the parallel word-level sub-NoCs, per       *
+* period. Disable with +define+LNP_DISABLE.          *
+*****************************************************/
+`ifndef LNP_DISABLE
+`include "tb_load_noc_probe.svh"
 `endif
 
 /****************************************************

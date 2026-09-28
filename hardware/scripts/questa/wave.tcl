@@ -38,10 +38,17 @@ add wave -noupdate -group Utilization -color {Cornflower Blue} -format Analog-St
 add wave -noupdate -group Utilization /mempool_tb/lsu_request
 
 # Fleet-wide Spatz FPU utilization (exists only under TARGET_SPATZ; sim-only TB block).
-# fpu_busy_count: analog "how many FPUs are busy right now". fpu_busy: 256-bit per-core
-# busy pattern (bit i == hart i == (group<<4)|tile) -- expand to see each core's busy
-# pattern over time. fpu_busy_group: per-group counts (spot group skew).
+# These count ISSUED work: an FPU lane is counted in a cycle when its fpnew accepted an
+# operation (gen_fpnew[f] int_fpu_in_valid && int_fpu_in_ready). Before 2026-09-28 they were
+# built from fpnew busy_o, which is pipeline OCCUPANCY and over-reads a vfmacc chained to a
+# slowly arriving vector load.
+# fpu_issue_lane_count: analog FPU work rate, 0..cores*N_FPU lanes (the utilization numerator).
+# fpu_busy_count: cores whose FPU issued this cycle. fpu_busy: per-core pattern (bit i == hart i
+# == (group<<4)|tile) -- expand to see each core over time. fpu_busy_group: per-group counts.
 if {![catch {examine /mempool_tb/fpu_busy_count}]} {
+  set n_fpu 4
+  catch {set n_fpu [examine -radix dec spatz_pkg::N_FPU]}
+  catch {add wave -noupdate -group FPU_Fleet -color {Medium Orchid} -format Analog-Step -height 84 -max [expr {$num_cores * $n_fpu}] -radix unsigned /mempool_tb/fpu_issue_lane_count}
   add wave -noupdate -group FPU_Fleet -color {Medium Orchid} -format Analog-Step -height 84 -max $num_cores -radix unsigned /mempool_tb/fpu_busy_count
   add wave -noupdate -group FPU_Fleet -radix unsigned /mempool_tb/fpu_busy_group
   add wave -noupdate -group FPU_Fleet -radix binary /mempool_tb/fpu_busy
@@ -95,6 +102,60 @@ if {![catch {examine -radix dec /mempool_tb/noc_req_utilization}]} {
 }
 
 # ========================================================================
+# Machine-wide overview (hardware/tb/tb_system_overview.svh): per router CLASS and per
+# MSHR slice FAMILY, summed over every group, per cycle -- the whole system at a glance.
+# hsk = flits/requests that moved this cycle, stall = held (valid && !ready).
+# The per-instance detail is folded below under NoC_Links_PerGroup / MSHR_PerGroup /
+# Groups_Detail.
+# ========================================================================
+if {![catch {examine /mempool_tb/ov_wreq_hsk}]} {
+  set ovG [examine -radix dec mempool_pkg::NumGroups]
+  set ovT [examine -radix dec mempool_pkg::NumTilesPerGroup]
+  set ov_wreq_links [expr {4 * $ovG * $ovT * [examine -radix dec mempool_pkg::NumWideRemoteReqPortsPerTile]}]
+  set ov_nreq_links [expr {4 * $ovG * $ovT * [examine -radix dec mempool_pkg::NumNarrowRemoteReqPortsPerTile]}]
+  set ov_resp_links [expr {4 * $ovG * $ovT * ([examine -radix dec mempool_pkg::NumRemoteRespPortsPerTile] - 1)}]
+  set ov_axiw_links [expr {4 * $ovG}]
+  foreach {cls label nlinks color} [list wreq WideReq $ov_wreq_links {Cornflower Blue} \
+                                          nreq NarrowReq $ov_nreq_links {Cornflower Blue} \
+                                          resp Resp $ov_resp_links {Medium Sea Green} \
+                                          axiw AXI_Wide_DMA $ov_axiw_links {Goldenrod}] {
+    if {$nlinks < 1} { continue }
+    add wave -noupdate -group NoC_Overview -group $label -color $color -format Analog-Step -height 60 -max $nlinks -radix unsigned /mempool_tb/ov_${cls}_hsk
+    add wave -noupdate -group NoC_Overview -group $label -color {Orange Red} -format Analog-Step -height 60 -max $nlinks -radix unsigned /mempool_tb/ov_${cls}_stall
+    add wave -noupdate -group NoC_Overview -group $label -group PerDir_NESW -radix unsigned /mempool_tb/ov_${cls}_hsk_dir
+    add wave -noupdate -group NoC_Overview -group $label -group PerDir_NESW -radix unsigned /mempool_tb/ov_${cls}_stall_dir
+    add wave -noupdate -group NoC_Overview -group $label -group PerGroup_Dir -radix unsigned /mempool_tb/ov_${cls}_hsk_g
+    add wave -noupdate -group NoC_Overview -group $label -group PerGroup_Dir -radix unsigned /mempool_tb/ov_${cls}_stall_g
+  }
+}
+if {![catch {examine /mempool_tb/ov_mshr_inuse}]} {
+  set ovG [examine -radix dec mempool_pkg::NumGroups]
+  set ov_lanes [expr {$ovG * [examine -radix dec mempool_pkg::NumTilesPerGroup] * ([examine -radix dec mempool_pkg::NumRemoteReqPortsPerTile] - 1)}]
+  set ov_split [examine -radix dec mempool_pkg::MshrSplit]
+  set ov_slices_per_fam [expr {$ov_split ? 4 : 1}]
+  set ov_entries [expr {$ovG * $ov_slices_per_fam * 16}]
+  set ov_fams [expr {$ov_split ? {0 Rows_Burst 1 Cols_Single} : {0 All}}]
+  foreach {f fam} $ov_fams {
+    set P [list -group MSHR_Overview -group $fam]
+    add wave -noupdate {*}$P -color {Cornflower Blue} -format Analog-Step -height 60 -max $ov_entries -radix unsigned -label inuse_entries /mempool_tb/ov_mshr_inuse\[$f\]
+    add wave -noupdate {*}$P -color {Medium Sea Green} -format Analog-Step -height 60 -max $ov_entries -radix unsigned -label cached_lines /mempool_tb/ov_mshr_cached\[$f\]
+    add wave -noupdate {*}$P -color {Orange Red} -format Analog-Step -height 40 -max [expr {$ovG * $ov_slices_per_fam}] -radix unsigned -label slices_full /mempool_tb/ov_mshr_full\[$f\]
+    add wave -noupdate {*}$P -color {Cornflower Blue} -format Analog-Step -height 60 -max $ov_lanes -radix unsigned -label req_accepted /mempool_tb/ov_mshr_req_hsk\[$f\]
+    add wave -noupdate {*}$P -color {Orange Red} -format Analog-Step -height 60 -max $ov_lanes -radix unsigned -label req_refused /mempool_tb/ov_mshr_req_stall\[$f\]
+    add wave -noupdate {*}$P -color {Gold} -format Analog-Step -height 60 -max $ov_lanes -radix unsigned -label req_merged /mempool_tb/ov_mshr_merge\[$f\]
+    add wave -noupdate {*}$P -color {Gold} -format Analog-Step -height 60 -max $ov_lanes -radix unsigned -label req_allocated /mempool_tb/ov_mshr_alloc\[$f\]
+    add wave -noupdate {*}$P -color {Orange Red} -format Analog-Step -height 40 -max $ov_lanes -radix unsigned -label bankfull_bypass /mempool_tb/ov_mshr_bypass\[$f\]
+    add wave -noupdate {*}$P -color {Cornflower Blue} -format Analog-Step -height 60 -max $ov_lanes -radix unsigned -label noc_req_sent /mempool_tb/ov_mshr_noc_req_hsk\[$f\]
+    add wave -noupdate {*}$P -color {Orange Red} -format Analog-Step -height 60 -max $ov_lanes -radix unsigned -label noc_req_blocked /mempool_tb/ov_mshr_noc_req_stall\[$f\]
+    add wave -noupdate {*}$P -color {Medium Sea Green} -format Analog-Step -height 60 -max $ov_lanes -radix unsigned -label noc_resp_taken /mempool_tb/ov_mshr_noc_resp_hsk\[$f\]
+    add wave -noupdate {*}$P -color {Orange Red} -format Analog-Step -height 60 -max $ov_lanes -radix unsigned -label noc_resp_refused /mempool_tb/ov_mshr_noc_resp_stall\[$f\]
+    add wave -noupdate {*}$P -color {Medium Sea Green} -format Analog-Step -height 60 -max $ov_lanes -radix unsigned -label resp_to_tiles /mempool_tb/ov_mshr_resp_hsk\[$f\]
+    add wave -noupdate {*}$P -color {Orange Red} -format Analog-Step -height 60 -max $ov_lanes -radix unsigned -label resp_to_tiles_refused /mempool_tb/ov_mshr_resp_stall\[$f\]
+  }
+  add wave -noupdate -group MSHR_Overview -group PerGroup -radix unsigned -label inuse_per_group /mempool_tb/ov_mshr_inuse_grp
+}
+
+# ========================================================================
 # Per-group NoC link utilization (valid, ready, handshake per direction)
 # Shows traffic on each group's mesh router ports: N/S/E/W × req/resp
 # ========================================================================
@@ -121,35 +182,35 @@ for {set g 0} {$g < $NumGroups_noc} {incr g} {
 
   # Wide Req (RDWR) router valid/ready per direction — from the FlooNoC wrapper
   if {![catch {examine ${base}/floo_tcdm_wide_req_valid_out}]} {
-    add wave -noupdate -group $grp_label -group WideReq_Valid ${base}/floo_tcdm_wide_req_valid_out
-    add wave -noupdate -group $grp_label -group WideReq_Valid ${base}/floo_tcdm_wide_req_valid_in
+    add wave -noupdate -group NoC_Links_PerGroup -group $grp_label -group WideReq_Valid ${base}/floo_tcdm_wide_req_valid_out
+    add wave -noupdate -group NoC_Links_PerGroup -group $grp_label -group WideReq_Valid ${base}/floo_tcdm_wide_req_valid_in
   }
 
   # Wide Resp router valid/ready per direction
   if {![catch {examine ${base}/floo_tcdm_resp_valid_out}]} {
-    add wave -noupdate -group $grp_label -group Resp_Valid ${base}/floo_tcdm_resp_valid_out
-    add wave -noupdate -group $grp_label -group Resp_Valid ${base}/floo_tcdm_resp_valid_in
+    add wave -noupdate -group NoC_Links_PerGroup -group $grp_label -group Resp_Valid ${base}/floo_tcdm_resp_valid_out
+    add wave -noupdate -group NoC_Links_PerGroup -group $grp_label -group Resp_Valid ${base}/floo_tcdm_resp_valid_in
   }
 
   # Narrow Req router valid (if narrow channels exist)
   if {![catch {examine ${base}/floo_tcdm_narrow_req_valid_out}]} {
-    add wave -noupdate -group $grp_label -group NarrowReq_Valid ${base}/floo_tcdm_narrow_req_valid_out
-    add wave -noupdate -group $grp_label -group NarrowReq_Valid ${base}/floo_tcdm_narrow_req_valid_in
+    add wave -noupdate -group NoC_Links_PerGroup -group $grp_label -group NarrowReq_Valid ${base}/floo_tcdm_narrow_req_valid_out
+    add wave -noupdate -group NoC_Links_PerGroup -group $grp_label -group NarrowReq_Valid ${base}/floo_tcdm_narrow_req_valid_in
   }
 
   # Master req/resp at MSHR boundary (tile → MSHR → NoC)
   # These are the output ports of the group module. With group_mshr_split=1 the first index is the
   # group NoC LANE {slice[2], k, slice[1:0]} (mempool_pkg::mshr_noc_lane), not the tile.
-  add wave -noupdate -group $grp_label -group MSHR_Req ${base}/tcdm_master_req_valid
-  add wave -noupdate -group $grp_label -group MSHR_Resp ${base}/tcdm_master_resp_valid
+  add wave -noupdate -group NoC_Links_PerGroup -group $grp_label -group MSHR_Req ${base}/tcdm_master_req_valid
+  add wave -noupdate -group NoC_Links_PerGroup -group $grp_label -group MSHR_Resp ${base}/tcdm_master_resp_valid
 
   # Slave req/resp (incoming from NoC → tile banks)
-  add wave -noupdate -group $grp_label -group Slave_Req ${base}/tcdm_slave_req_valid
-  add wave -noupdate -group $grp_label -group Slave_Resp ${base}/tcdm_slave_resp_valid
+  add wave -noupdate -group NoC_Links_PerGroup -group $grp_label -group Slave_Req ${base}/tcdm_slave_req_valid
+  add wave -noupdate -group NoC_Links_PerGroup -group $grp_label -group Slave_Resp ${base}/tcdm_slave_resp_valid
 
   # Resp remapper output (after hash spreading)
   if {![catch {examine ${base}/floo_tcdm_resp_to_router_valid}]} {
-    add wave -noupdate -group $grp_label -group Resp_Remapped ${base}/floo_tcdm_resp_to_router_valid
+    add wave -noupdate -group NoC_Links_PerGroup -group $grp_label -group Resp_Remapped ${base}/floo_tcdm_resp_to_router_valid
   }
 }
 
@@ -171,41 +232,41 @@ proc add_mshr_core_wave {m L} {
     # mshr_q_valid counts response-cache ways too, so use mshr_inuse_* for real MSHR
     # utilization; mshr_held_* is the subset whose NoC fetch is still withheld by
     # hold-the-fetch (0 unless group_mshr_hold_window > 0).
-    catch {add wave -noupdate -group $L -group Util -radix unsigned ${m}/mshr_inuse_cnt_dbg}
-    catch {add wave -noupdate -group $L -group Util -radix unsigned ${m}/mshr_cached_cnt_dbg}
-    catch {add wave -noupdate -group $L -group Util -radix unsigned ${m}/mshr_held_cnt_dbg}
-    catch {add wave -noupdate -group $L -group Util -radix unsigned ${m}/mshr_valid_cnt_dbg}
-    catch {add wave -noupdate -group $L -group Util ${m}/mshr_inuse_dbg}
-    catch {add wave -noupdate -group $L -group Util ${m}/mshr_cached_dbg}
-    catch {add wave -noupdate -group $L -group Util ${m}/mshr_held_dbg}
+    catch {add wave -noupdate {*}$L -group Util -radix unsigned ${m}/mshr_inuse_cnt_dbg}
+    catch {add wave -noupdate {*}$L -group Util -radix unsigned ${m}/mshr_cached_cnt_dbg}
+    catch {add wave -noupdate {*}$L -group Util -radix unsigned ${m}/mshr_held_cnt_dbg}
+    catch {add wave -noupdate {*}$L -group Util -radix unsigned ${m}/mshr_valid_cnt_dbg}
+    catch {add wave -noupdate {*}$L -group Util ${m}/mshr_inuse_dbg}
+    catch {add wave -noupdate {*}$L -group Util ${m}/mshr_cached_dbg}
+    catch {add wave -noupdate {*}$L -group Util ${m}/mshr_held_dbg}
     # Hold-the-fetch release reason: which entry issued its withheld fetch this cycle,
     # and why (window expired vs early-release subscriber target met). Counters are
     # free-running from reset -- take a cursor-to-cursor delta to scope a region.
-    catch {add wave -noupdate -group $L -group HoldRelease ${m}/mshr_issue_timeout_dbg}
-    catch {add wave -noupdate -group $L -group HoldRelease ${m}/mshr_issue_subs_dbg}
-    catch {add wave -noupdate -group $L -group HoldRelease -radix unsigned ${m}/mshr_issue_timeout_cnt_dbg}
-    catch {add wave -noupdate -group $L -group HoldRelease -radix unsigned ${m}/mshr_issue_subs_cnt_dbg}
+    catch {add wave -noupdate {*}$L -group HoldRelease ${m}/mshr_issue_timeout_dbg}
+    catch {add wave -noupdate {*}$L -group HoldRelease ${m}/mshr_issue_subs_dbg}
+    catch {add wave -noupdate {*}$L -group HoldRelease -radix unsigned ${m}/mshr_issue_timeout_cnt_dbg}
+    catch {add wave -noupdate {*}$L -group HoldRelease -radix unsigned ${m}/mshr_issue_subs_cnt_dbg}
     # Bank-full alloc bypass: a mergeable load wanted an MSHR entry but its bank was
     # full, so it bypassed to the NoC without one (per-request vector + running count).
-    catch {add wave -noupdate -group $L -group BankFullBypass ${m}/req_bankfull_bypass_dbg}
-    catch {add wave -noupdate -group $L -group BankFullBypass -radix unsigned ${m}/req_bankfull_bypass_cnt_dbg}
+    catch {add wave -noupdate {*}$L -group BankFullBypass ${m}/req_bankfull_bypass_dbg}
+    catch {add wave -noupdate {*}$L -group BankFullBypass -radix unsigned ${m}/req_bankfull_bypass_cnt_dbg}
     # Cache lifecycle counters (present only when group_mshr_enable_stats=1). A CACHED line
     # leaves the cache via evict (alloc reclaim), amo_inval (AMO), or self_inval (idea 1
     # self-invalidate at the served target). self_inval is the NEW drain path -- without it the
     # fill vs evict accounting does not balance and hit_rate=hit/(hit+evict) reads high. The
     # *_cycle signal pulses every cycle (always live); the bare accumulators advance only while
     # csr_trace is active (benchmark-gated). served_cnt (per entry) is under Entries/mshr_q.
-    catch {add wave -noupdate -group $L -group CacheStats -radix unsigned ${m}/stat_cache_self_inval_cycle}
-    catch {add wave -noupdate -group $L -group CacheStats -radix unsigned ${m}/stat_cache_self_inval}
-    catch {add wave -noupdate -group $L -group CacheStats -radix unsigned ${m}/stat_cache_evict}
-    catch {add wave -noupdate -group $L -group CacheStats -radix unsigned ${m}/stat_cache_amo_inval}
-    catch {add wave -noupdate -group $L -group CacheStats -radix unsigned ${m}/stat_cache_fill}
-    catch {add wave -noupdate -group $L -group CacheStats -radix unsigned ${m}/stat_cache_hit}
+    catch {add wave -noupdate {*}$L -group CacheStats -radix unsigned ${m}/stat_cache_self_inval_cycle}
+    catch {add wave -noupdate {*}$L -group CacheStats -radix unsigned ${m}/stat_cache_self_inval}
+    catch {add wave -noupdate {*}$L -group CacheStats -radix unsigned ${m}/stat_cache_evict}
+    catch {add wave -noupdate {*}$L -group CacheStats -radix unsigned ${m}/stat_cache_amo_inval}
+    catch {add wave -noupdate {*}$L -group CacheStats -radix unsigned ${m}/stat_cache_fill}
+    catch {add wave -noupdate {*}$L -group CacheStats -radix unsigned ${m}/stat_cache_hit}
 
     # --- Entry table (state / base_addr / resp_buf_cnt / sub_reqs / beat_pending ...) ---
-    catch {add wave -noupdate -group $L -group Entries ${m}/mshr_q_valid}
-    catch {add wave -noupdate -group $L -group Entries ${m}/mshr_q}
-    catch {add wave -noupdate -group $L -group Entries ${m}/mshr_resp_inflight}
+    catch {add wave -noupdate {*}$L -group Entries ${m}/mshr_q_valid}
+    catch {add wave -noupdate {*}$L -group Entries ${m}/mshr_q}
+    catch {add wave -noupdate {*}$L -group Entries ${m}/mshr_resp_inflight}
 
     # --- Overflow pool: MshrOverflowNum extra UNBANKED entries (group_mshr_overflow_num, def 1) ---
     # Deliberately a SECOND array, not a wider banked table. BankPublish asserts
@@ -222,38 +283,38 @@ proc add_mshr_core_wave {m L} {
     if {![catch {examine ${m}/gen_pool_reg/pool_ctl_en}]} {
       # pool_q_valid counts ONLY pool entries -- unlike mshr_q_valid, which counts response-cache
       # ways too, so the two are not comparable as occupancies.
-      catch {add wave -noupdate -group $L -group Pool_Entry ${m}/pool_q_valid}
-      catch {add wave -noupdate -group $L -group Pool_Entry ${m}/pool_q}
-      catch {add wave -noupdate -group $L -group Pool_Entry ${m}/pool_d_valid}
-      catch {add wave -noupdate -group $L -group Pool_Entry ${m}/pool_d}
+      catch {add wave -noupdate {*}$L -group Pool_Entry ${m}/pool_q_valid}
+      catch {add wave -noupdate {*}$L -group Pool_Entry ${m}/pool_q}
+      catch {add wave -noupdate {*}$L -group Pool_Entry ${m}/pool_d_valid}
+      catch {add wave -noupdate {*}$L -group Pool_Entry ${m}/pool_d}
       # Clock-gate enables, the same three groups the banked registers use. A gate narrower than
       # the pool's own next-state cone drops the write and leaves the previous occupant's
       # self-consistent snapshot -- which every per-entry assertion still passes.
-      catch {add wave -noupdate -group $L -group Pool_Gate ${m}/gen_pool_reg/pool_ctl_en}
-      catch {add wave -noupdate -group $L -group Pool_Gate ${m}/gen_pool_reg/pool_id_en}
-      catch {add wave -noupdate -group $L -group Pool_Gate ${m}/gen_pool_reg/pool_rb_en}
+      catch {add wave -noupdate {*}$L -group Pool_Gate ${m}/gen_pool_reg/pool_ctl_en}
+      catch {add wave -noupdate {*}$L -group Pool_Gate ${m}/gen_pool_reg/pool_id_en}
+      catch {add wave -noupdate {*}$L -group Pool_Gate ${m}/gen_pool_reg/pool_rb_en}
       # Allocation / merge grant, plus the free-entry pointer (one pool entry, so pool_free_id is
       # always 0 -- it exists so the pool arbiter keeps the banked one's shape).
-      catch {add wave -noupdate -group $L -group Pool_Grant ${m}/pool_alloc_inflight}
-      catch {add wave -noupdate -group $L -group Pool_Grant ${m}/pool_merge_inflight}
-      catch {add wave -noupdate -group $L -group Pool_Grant ${m}/pool_st_merge_drain}
-      catch {add wave -noupdate -group $L -group Pool_Grant ${m}/pool_free_valid}
-      catch {add wave -noupdate -group $L -group Pool_Grant ${m}/pool_has_free}
-      catch {add wave -noupdate -group $L -group Pool_Grant -radix unsigned ${m}/pool_free_id}
-      catch {add wave -noupdate -group $L -group Pool_Grant ${m}/pool_free_oh}
-      catch {add wave -noupdate -group $L -group Pool_Grant ${m}/apb_v}
-      catch {add wave -noupdate -group $L -group Pool_Grant ${m}/apb_q_v}
-      catch {add wave -noupdate -group $L -group Pool_Grant -radix unsigned ${m}/apb_q_way}
-      catch {add wave -noupdate -group $L -group Pool_Grant ${m}/apb_q_len}
-      catch {add wave -noupdate -group $L -group Pool_Grant ${m}/mpb_v}
-      catch {add wave -noupdate -group $L -group Pool_Grant ${m}/mpb_q_v}
-      catch {add wave -noupdate -group $L -group Pool_Grant -radix unsigned ${m}/mpb_q_way}
+      catch {add wave -noupdate {*}$L -group Pool_Grant ${m}/pool_alloc_inflight}
+      catch {add wave -noupdate {*}$L -group Pool_Grant ${m}/pool_merge_inflight}
+      catch {add wave -noupdate {*}$L -group Pool_Grant ${m}/pool_st_merge_drain}
+      catch {add wave -noupdate {*}$L -group Pool_Grant ${m}/pool_free_valid}
+      catch {add wave -noupdate {*}$L -group Pool_Grant ${m}/pool_has_free}
+      catch {add wave -noupdate {*}$L -group Pool_Grant -radix unsigned ${m}/pool_free_id}
+      catch {add wave -noupdate {*}$L -group Pool_Grant ${m}/pool_free_oh}
+      catch {add wave -noupdate {*}$L -group Pool_Grant ${m}/apb_v}
+      catch {add wave -noupdate {*}$L -group Pool_Grant ${m}/apb_q_v}
+      catch {add wave -noupdate {*}$L -group Pool_Grant -radix unsigned ${m}/apb_q_way}
+      catch {add wave -noupdate {*}$L -group Pool_Grant ${m}/apb_q_len}
+      catch {add wave -noupdate {*}$L -group Pool_Grant ${m}/mpb_v}
+      catch {add wave -noupdate {*}$L -group Pool_Grant ${m}/mpb_q_v}
+      catch {add wave -noupdate {*}$L -group Pool_Grant -radix unsigned ${m}/mpb_q_way}
       # Per-lane outcome for this cycle, indexed [tile][port]: hit an existing pool entry, won a
       # pool entry, and which one. req_hit_pool feeds req_hit_mshr, which is what keeps a pooled
       # request from ALSO being an allocation candidate -- check it against Pool_Lane alloc_found.
-      catch {add wave -noupdate -group $L -group Pool_Lane ${m}/req_hit_pool}
-      catch {add wave -noupdate -group $L -group Pool_Lane ${m}/req_alloc_found_pool}
-      catch {add wave -noupdate -group $L -group Pool_Lane -radix unsigned ${m}/req_alloc_found_pool_id}
+      catch {add wave -noupdate {*}$L -group Pool_Lane ${m}/req_hit_pool}
+      catch {add wave -noupdate {*}$L -group Pool_Lane ${m}/req_alloc_found_pool}
+      catch {add wave -noupdate {*}$L -group Pool_Lane -radix unsigned ${m}/req_alloc_found_pool_id}
     }
 
     # --- Bank allocation cut (the pipeline-cut invariant suite) ---
@@ -263,58 +324,58 @@ proc add_mshr_core_wave {m L} {
     # the assertion a pool run currently dies on ~400 cycles into the benchmark, so park these
     # beside Pool_Grant: at the failure, find the cycle where agb_q_v[bank] is high while
     # free_way_valid[way] is also high, and read agb_q_way to get the way that was taken twice.
-    catch {add wave -noupdate -group $L -group Alloc_Cut ${m}/free_way_valid}
-    catch {add wave -noupdate -group $L -group Alloc_Cut ${m}/alloc_inflight}
-    catch {add wave -noupdate -group $L -group Alloc_Cut ${m}/merge_inflight}
-    catch {add wave -noupdate -group $L -group Alloc_Cut ${m}/agb_v}
-    catch {add wave -noupdate -group $L -group Alloc_Cut ${m}/agb_q_v}
-    catch {add wave -noupdate -group $L -group Alloc_Cut -radix unsigned ${m}/agb_q_way}
-    catch {add wave -noupdate -group $L -group Alloc_Cut ${m}/bank_has_free}
-    catch {add wave -noupdate -group $L -group Alloc_Cut -radix unsigned ${m}/bank_free_id}
+    catch {add wave -noupdate {*}$L -group Alloc_Cut ${m}/free_way_valid}
+    catch {add wave -noupdate {*}$L -group Alloc_Cut ${m}/alloc_inflight}
+    catch {add wave -noupdate {*}$L -group Alloc_Cut ${m}/merge_inflight}
+    catch {add wave -noupdate {*}$L -group Alloc_Cut ${m}/agb_v}
+    catch {add wave -noupdate {*}$L -group Alloc_Cut ${m}/agb_q_v}
+    catch {add wave -noupdate {*}$L -group Alloc_Cut -radix unsigned ${m}/agb_q_way}
+    catch {add wave -noupdate {*}$L -group Alloc_Cut ${m}/bank_has_free}
+    catch {add wave -noupdate {*}$L -group Alloc_Cut -radix unsigned ${m}/bank_free_id}
 
     # --- Boundary 1: tiles -> MSHR (request ingress) ---
-    catch {add wave -noupdate -group $L -group ReqIn  ${m}/group_mshr_req_valid_i}
-    catch {add wave -noupdate -group $L -group ReqIn  ${m}/group_mshr_req_ready_o}
-    catch {add wave -noupdate -group $L -group ReqIn  ${m}/group_mshr_req_i}
-    catch {add wave -noupdate -group $L -group ReqIn  ${m}/req_merge_valid}
-    catch {add wave -noupdate -group $L -group ReqIn  ${m}/req_alloc_found}
+    catch {add wave -noupdate {*}$L -group ReqIn  ${m}/group_mshr_req_valid_i}
+    catch {add wave -noupdate {*}$L -group ReqIn  ${m}/group_mshr_req_ready_o}
+    catch {add wave -noupdate {*}$L -group ReqIn  ${m}/group_mshr_req_i}
+    catch {add wave -noupdate {*}$L -group ReqIn  ${m}/req_merge_valid}
+    catch {add wave -noupdate {*}$L -group ReqIn  ${m}/req_alloc_found}
 
     # --- Boundary 2: MSHR -> NoC (request egress) ---
-    catch {add wave -noupdate -group $L -group ReqOutNoC ${m}/mshr_noc_req_valid_o}
-    catch {add wave -noupdate -group $L -group ReqOutNoC ${m}/mshr_noc_req_ready_i}
-    catch {add wave -noupdate -group $L -group ReqOutNoC ${m}/mshr_noc_req_o}
+    catch {add wave -noupdate {*}$L -group ReqOutNoC ${m}/mshr_noc_req_valid_o}
+    catch {add wave -noupdate {*}$L -group ReqOutNoC ${m}/mshr_noc_req_ready_i}
+    catch {add wave -noupdate {*}$L -group ReqOutNoC ${m}/mshr_noc_req_o}
 
     # --- Boundary 3: NoC -> MSHR (response ingress) — DEADLOCK SOURCE ---
     # mshr_noc_resp_ready_o wedges low when the matched entry's resp_buf is full
     # or (bypass) the drain output is back-pressured by a stalled core.
-    catch {add wave -noupdate -group $L -group RespInNoC ${m}/mshr_noc_resp_valid_i}
-    catch {add wave -noupdate -group $L -group RespInNoC ${m}/mshr_noc_resp_ready_o}
-    catch {add wave -noupdate -group $L -group RespInNoC ${m}/mshr_noc_resp_i}
+    catch {add wave -noupdate {*}$L -group RespInNoC ${m}/mshr_noc_resp_valid_i}
+    catch {add wave -noupdate {*}$L -group RespInNoC ${m}/mshr_noc_resp_ready_o}
+    catch {add wave -noupdate {*}$L -group RespInNoC ${m}/mshr_noc_resp_i}
 
     # --- Boundary 4: MSHR -> tiles (response egress / multicast drain) ---
-    catch {add wave -noupdate -group $L -group RespOut ${m}/group_mshr_resp_valid_o}
-    catch {add wave -noupdate -group $L -group RespOut ${m}/group_mshr_resp_ready_i}
-    catch {add wave -noupdate -group $L -group RespOut ${m}/group_mshr_resp_o}
+    catch {add wave -noupdate {*}$L -group RespOut ${m}/group_mshr_resp_valid_o}
+    catch {add wave -noupdate {*}$L -group RespOut ${m}/group_mshr_resp_ready_i}
+    catch {add wave -noupdate {*}$L -group RespOut ${m}/group_mshr_resp_o}
 
     # --- Internal response path (post-spill) — watch these for the wedge ---
-    catch {add wave -noupdate -group $L -group RespPath ${m}/resp_in_valid}
-    catch {add wave -noupdate -group $L -group RespPath ${m}/resp_in_ready}
-    catch {add wave -noupdate -group $L -group RespPath ${m}/resp_in}
-    catch {add wave -noupdate -group $L -group RespPath ${m}/resp_out_valid}
-    catch {add wave -noupdate -group $L -group RespPath ${m}/resp_out_ready}
-    catch {add wave -noupdate -group $L -group RespPath ${m}/resp_out}
-    catch {add wave -noupdate -group $L -group RespPath ${m}/mshr_resp_slots}
-    catch {add wave -noupdate -group $L -group RespPath ${m}/resp_capture_fire}
+    catch {add wave -noupdate {*}$L -group RespPath ${m}/resp_in_valid}
+    catch {add wave -noupdate {*}$L -group RespPath ${m}/resp_in_ready}
+    catch {add wave -noupdate {*}$L -group RespPath ${m}/resp_in}
+    catch {add wave -noupdate {*}$L -group RespPath ${m}/resp_out_valid}
+    catch {add wave -noupdate {*}$L -group RespPath ${m}/resp_out_ready}
+    catch {add wave -noupdate {*}$L -group RespPath ${m}/resp_out}
+    catch {add wave -noupdate {*}$L -group RespPath ${m}/mshr_resp_slots}
+    catch {add wave -noupdate {*}$L -group RespPath ${m}/resp_capture_fire}
 
     # --- Response classification (bypass vs MSHR-managed, drain selection) ---
-    catch {add wave -noupdate -group $L -group Classify ${m}/resp_is_mshr}
-    catch {add wave -noupdate -group $L -group Classify ${m}/resp_mshr_id}
-    catch {add wave -noupdate -group $L -group Classify ${m}/resp_from_mshr}
-    catch {add wave -noupdate -group $L -group Classify ${m}/resp_from_bypass}
-    catch {add wave -noupdate -group $L -group Classify ${m}/resp_mshr_id_dbg}
-    catch {add wave -noupdate -group $L -group Classify ${m}/resp_sel_valid}
-    catch {add wave -noupdate -group $L -group Classify ${m}/resp_sel_mshr_id}
-    catch {add wave -noupdate -group $L -group Classify ${m}/resp_sel_subreq_idx}
+    catch {add wave -noupdate {*}$L -group Classify ${m}/resp_is_mshr}
+    catch {add wave -noupdate {*}$L -group Classify ${m}/resp_mshr_id}
+    catch {add wave -noupdate {*}$L -group Classify ${m}/resp_from_mshr}
+    catch {add wave -noupdate {*}$L -group Classify ${m}/resp_from_bypass}
+    catch {add wave -noupdate {*}$L -group Classify ${m}/resp_mshr_id_dbg}
+    catch {add wave -noupdate {*}$L -group Classify ${m}/resp_sel_valid}
+    catch {add wave -noupdate {*}$L -group Classify ${m}/resp_sel_mshr_id}
+    catch {add wave -noupdate {*}$L -group Classify ${m}/resp_sel_subreq_idx}
 }
 
 # Per group: the legacy instance (gen_group_mshr/i_group_mshr), or -- with group_mshr_split=1 --
@@ -327,46 +388,46 @@ proc add_group_mshr_wave {g NumX NumY} {
     set grp "sim:/mempool_tb/dut/i_mempool_cluster/gen_groups_x\[${gx}\]/gen_groups_y\[${gy}\]/gen_rtl_group/i_group/i_mempool_group"
     set legacy "${grp}/gen_group_mshr/i_group_mshr"
     if {![catch {examine ${legacy}/mshr_q_valid}]} {
-        add_mshr_core_wave $legacy "MSHR_G${g}_X${gx}Y${gy}"
+        add_mshr_core_wave $legacy [list -group MSHR_PerGroup -group "G${g}_X${gx}Y${gy}"]
         return
     }
     # Group-level split logic: the class steer per tile port (to_col = 1 -> column slice), the
     # row/column response arbiters, and the CSR that decides which family serves singles.
-    set S "MSHR_G${g}_X${gx}Y${gy}_Steer"
-    catch {add wave -noupdate -group $S ${grp}/mshr_cfg.steer_single_row}
-    catch {add wave -noupdate -group $S ${grp}/mshr_cfg.enable}
-    catch {add wave -noupdate -group $S ${grp}/gen_group_mshr_split/sl_busy}
-    catch {add wave -noupdate -group $S ${grp}/gen_group_mshr_split/cfg_bypass_single}
-    catch {add wave -noupdate -group $S ${grp}/gen_group_mshr_split/cfg_bypass_burst}
-    catch {add wave -noupdate -group $S -group ToSlice ${grp}/gen_group_mshr_split/sl_req_valid}
-    catch {add wave -noupdate -group $S -group ToSlice ${grp}/gen_group_mshr_split/sl_req_ready}
-    catch {add wave -noupdate -group $S -group FromSlice ${grp}/gen_group_mshr_split/sl_resp_valid}
-    catch {add wave -noupdate -group $S -group FromSlice ${grp}/gen_group_mshr_split/sl_resp_ready}
-    catch {add wave -noupdate -group $S -group NoCFace ${grp}/gen_group_mshr_split/sl_noc_req_valid}
-    catch {add wave -noupdate -group $S -group NoCFace ${grp}/gen_group_mshr_split/sl_noc_resp_valid}
+    set S [list -group MSHR_PerGroup -group "G${g}_X${gx}Y${gy}" -group Steer]
+    catch {add wave -noupdate {*}$S ${grp}/mshr_cfg.steer_single_row}
+    catch {add wave -noupdate {*}$S ${grp}/mshr_cfg.enable}
+    catch {add wave -noupdate {*}$S ${grp}/gen_group_mshr_split/sl_busy}
+    catch {add wave -noupdate {*}$S ${grp}/gen_group_mshr_split/cfg_bypass_single}
+    catch {add wave -noupdate {*}$S ${grp}/gen_group_mshr_split/cfg_bypass_burst}
+    catch {add wave -noupdate {*}$S -group ToSlice ${grp}/gen_group_mshr_split/sl_req_valid}
+    catch {add wave -noupdate {*}$S -group ToSlice ${grp}/gen_group_mshr_split/sl_req_ready}
+    catch {add wave -noupdate {*}$S -group FromSlice ${grp}/gen_group_mshr_split/sl_resp_valid}
+    catch {add wave -noupdate {*}$S -group FromSlice ${grp}/gen_group_mshr_split/sl_resp_ready}
+    catch {add wave -noupdate {*}$S -group NoCFace ${grp}/gen_group_mshr_split/sl_noc_req_valid}
+    catch {add wave -noupdate {*}$S -group NoCFace ${grp}/gen_group_mshr_split/sl_noc_resp_valid}
     for {set t 0} {$t < 16} {incr t} {
         set st "${grp}/gen_group_mshr_split/gen_steer_t\[${t}\]"
-        catch {add wave -noupdate -group $S -group Tile${t} ${st}/gen_steer_r\[1\]/is_burst}
-        catch {add wave -noupdate -group $S -group Tile${t} ${st}/gen_steer_r\[1\]/to_col}
-        catch {add wave -noupdate -group $S -group Tile${t} ${st}/gen_steer_r\[2\]/is_burst}
-        catch {add wave -noupdate -group $S -group Tile${t} ${st}/gen_steer_r\[2\]/to_col}
+        catch {add wave -noupdate {*}$S -group Tile${t} ${st}/gen_steer_r\[1\]/is_burst}
+        catch {add wave -noupdate {*}$S -group Tile${t} ${st}/gen_steer_r\[1\]/to_col}
+        catch {add wave -noupdate {*}$S -group Tile${t} ${st}/gen_steer_r\[2\]/is_burst}
+        catch {add wave -noupdate {*}$S -group Tile${t} ${st}/gen_steer_r\[2\]/to_col}
     }
     for {set m 0} {$m < 8} {incr m} {
         set sl "${grp}/gen_group_mshr_split/gen_slice\[${m}\]/i_slice"
         if {[catch {examine ${sl}/i_core/mshr_q_valid}]} { continue }
         set fam [expr {$m < 4 ? "R" : "C"}]
-        set L "MSHR_G${g}_X${gx}Y${gy}_${fam}[expr {$m % 4}]"
+        set L [list -group MSHR_PerGroup -group "G${g}_X${gx}Y${gy}" -group "${fam}[expr {$m % 4}]"]
         add_mshr_core_wave "${sl}/i_core" $L
-        catch {add wave -noupdate -group $L -group Slice ${sl}/noc_req_valid_o}
-        catch {add wave -noupdate -group $L -group Slice ${sl}/noc_req_ready_i}
-        catch {add wave -noupdate -group $L -group Slice ${sl}/noc_req_o}
-        catch {add wave -noupdate -group $L -group Slice ${sl}/noc_resp_valid_i}
-        catch {add wave -noupdate -group $L -group Slice ${sl}/noc_resp_ready_o}
-        catch {add wave -noupdate -group $L -group Slice ${sl}/noc_resp_i}
-        catch {add wave -noupdate -group $L -group Slice ${sl}/tile_req_valid_i}
-        catch {add wave -noupdate -group $L -group Slice ${sl}/tile_req_ready_o}
-        catch {add wave -noupdate -group $L -group Slice ${sl}/tile_resp_valid_o}
-        catch {add wave -noupdate -group $L -group Slice ${sl}/tile_resp_ready_i}
+        catch {add wave -noupdate {*}$L -group Slice ${sl}/noc_req_valid_o}
+        catch {add wave -noupdate {*}$L -group Slice ${sl}/noc_req_ready_i}
+        catch {add wave -noupdate {*}$L -group Slice ${sl}/noc_req_o}
+        catch {add wave -noupdate {*}$L -group Slice ${sl}/noc_resp_valid_i}
+        catch {add wave -noupdate {*}$L -group Slice ${sl}/noc_resp_ready_o}
+        catch {add wave -noupdate {*}$L -group Slice ${sl}/noc_resp_i}
+        catch {add wave -noupdate {*}$L -group Slice ${sl}/tile_req_valid_i}
+        catch {add wave -noupdate {*}$L -group Slice ${sl}/tile_req_ready_o}
+        catch {add wave -noupdate {*}$L -group Slice ${sl}/tile_resp_valid_o}
+        catch {add wave -noupdate {*}$L -group Slice ${sl}/tile_resp_ready_i}
     }
 }
 
@@ -418,7 +479,12 @@ proc add_spatz_core_wave {g t c NumX NumY} {
     catch {add wave -noupdate -group $L -group VFU ${s}/i_vfu/int_ipu_result_valid}
     catch {add wave -noupdate -group $L -group VFU ${s}/i_vfu/fpu_result_valid}
     catch {add wave -noupdate -group $L -group VFU ${s}/i_vfu/is_ipu_busy}
-    catch {add wave -noupdate -group $L -group VFU ${s}/i_vfu/is_fpu_busy}
+    # FPU work: lane f issued when its fpnew accepted an op (valid && ready). is_fpu_busy is
+    # occupancy ("an op somewhere in the pipe") and over-reads chained, data-starved ops.
+    for {set f 0} {$f < 8} {incr f} {
+      catch {add wave -noupdate -group $L -group VFU -group FPU_Issue ${s}/i_vfu/gen_fpu/gen_fpnew\[${f}\]/int_fpu_in_valid}
+      catch {add wave -noupdate -group $L -group VFU -group FPU_Issue ${s}/i_vfu/gen_fpu/gen_fpnew\[${f}\]/int_fpu_in_ready}
+    }
     catch {add wave -noupdate -group $L -group VFU ${s}/i_vfu/vfu_rsp_valid_o}
     # --- VLSU: memory-beat activity + FSM state ---
     catch {add wave -noupdate -group $L -group VLSU ${s}/i_vlsu/state_q}
@@ -452,7 +518,7 @@ if {[catch {expr {$NumX + 0}}] || [catch {expr {$NumY + 0}}]} {
 }
 for {set group 0} {$group < [examine -radix dec /mempool_pkg::NumGroups]} {incr group} {
     for {set tile 0} {$tile < [examine -radix dec /mempool_pkg::NumTilesPerGroup]} {incr tile} {
-        add wave -Group super_bank_req_valid -position insertpoint sim:/mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr ${group}/${NumX}]\]/gen_groups_y\[[expr ${group}%${NumY}]\]/gen_rtl_group/i_group/i_mempool_group/gen_tiles\[${tile}\]/i_tile/superbank_req_valid
+        add wave -group super_bank_req_valid -position insertpoint sim:/mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr ${group}/${NumX}]\]/gen_groups_y\[[expr ${group}%${NumY}]\]/gen_rtl_group/i_group/i_mempool_group/gen_tiles\[${tile}\]/i_tile/superbank_req_valid
     }
 }
 
@@ -540,46 +606,46 @@ set Interleave [examine -radix dec mempool_pkg::Interleave]
 
 for {set group 0} {$group < [examine -radix dec /mempool_pkg::NumGroups]} {incr group} {
     # Add Interface
-    add wave -group group_[$group] -group X[[expr ${group}/${NumX}]]Y[[expr ${group}%${NumY}]]_Intf /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr ${group}/${NumX}]\]/gen_groups_y\[[expr ${group}%${NumY}]\]/gen_rtl_group/i_group/i_mempool_group/*
+    add wave -group Groups_Detail -group group_[$group] -group X[[expr ${group}/${NumX}]]Y[[expr ${group}%${NumY}]]_Intf /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr ${group}/${NumX}]\]/gen_groups_y\[[expr ${group}%${NumY}]\]/gen_rtl_group/i_group/i_mempool_group/*
     # Addr Map
-    add wave -group group_[$group] -group addr_map /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr ${group}/${NumX}]\]/gen_groups_y\[[expr ${group}%${NumY}]\]/gen_rtl_group/i_group/i_mempool_group/addr_map
+    add wave -group Groups_Detail -group group_[$group] -group addr_map /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr ${group}/${NumX}]\]/gen_groups_y\[[expr ${group}%${NumY}]\]/gen_rtl_group/i_group/i_mempool_group/addr_map
     # Add Tiles
     for {set tile 0} {$tile < [examine -radix dec /mempool_pkg::NumTilesPerGroup]} {incr tile} {
         do ../scripts/questa/wave_tile.tcl $group $tile $NumY
     }
     # Local TCDM
-    add wave -group group_[$group] -group interconnect_local /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr ${group}/${NumX}]\]/gen_groups_y\[[expr ${group}%${NumY}]\]/gen_rtl_group/i_group/i_mempool_group/tcdm_master_req*
-    add wave -group group_[$group] -group interconnect_local /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr ${group}/${NumX}]\]/gen_groups_y\[[expr ${group}%${NumY}]\]/gen_rtl_group/i_group/i_mempool_group/tcdm_master_resp*
-    add wave -group group_[$group] -group interconnect_local /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr ${group}/${NumX}]\]/gen_groups_y\[[expr ${group}%${NumY}]\]/gen_rtl_group/i_group/i_mempool_group/tcdm_slave_req*
-    add wave -group group_[$group] -group interconnect_local /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr ${group}/${NumX}]\]/gen_groups_y\[[expr ${group}%${NumY}]\]/gen_rtl_group/i_group/i_mempool_group/tcdm_slave_resp*
+    add wave -group Groups_Detail -group group_[$group] -group interconnect_local /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr ${group}/${NumX}]\]/gen_groups_y\[[expr ${group}%${NumY}]\]/gen_rtl_group/i_group/i_mempool_group/tcdm_master_req*
+    add wave -group Groups_Detail -group group_[$group] -group interconnect_local /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr ${group}/${NumX}]\]/gen_groups_y\[[expr ${group}%${NumY}]\]/gen_rtl_group/i_group/i_mempool_group/tcdm_master_resp*
+    add wave -group Groups_Detail -group group_[$group] -group interconnect_local /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr ${group}/${NumX}]\]/gen_groups_y\[[expr ${group}%${NumY}]\]/gen_rtl_group/i_group/i_mempool_group/tcdm_slave_req*
+    add wave -group Groups_Detail -group group_[$group] -group interconnect_local /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr ${group}/${NumX}]\]/gen_groups_y\[[expr ${group}%${NumY}]\]/gen_rtl_group/i_group/i_mempool_group/tcdm_slave_resp*
     # TCDM Router - Request Ports (wide + narrow)
     for {set tile 0} {$tile < [examine -radix dec /mempool_pkg::NumTilesPerGroup]} {incr tile} {
         # Wide Request Ports
         for {set port 1} {$port < [examine -radix dec /mempool_pkg::NumWideRemoteReqPortsPerTile]} {incr port} {
-            add wave -group group_[$group] -group floo_tcdm_router_req \
+            add wave -group Groups_Detail -group group_[$group] -group floo_tcdm_router_req \
             /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr ${group}/${NumX}]\]/gen_groups_y\[[expr ${group}%${NumY}]\]/gen_rtl_group/i_group/gen_router_router_i[$tile]/gen_router_wide_req_router_j[$port]/gen_2dmesh/i_floo_tcdm_wide_req_router/*
         }
         # Narrow Request Ports (optional, only if enabled)
         for {set port 1} {$port < [examine -radix dec /mempool_pkg::NumNarrowRemoteReqPortsPerTile]} {incr port} {
-            add wave -group group_[$group] -group floo_tcdm_router_req \
+            add wave -group Groups_Detail -group group_[$group] -group floo_tcdm_router_req \
             /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr ${group}/${NumX}]\]/gen_groups_y\[[expr ${group}%${NumY}]\]/gen_rtl_group/i_group/gen_router_router_i[$tile]/gen_router_narrow_req_router_j[$port]/gen_2dmesh/i_floo_tcdm_narrow_req_router/*
         }
     }
     # TCDM Router - Response Ports (only wide)
     for {set tile 0} {$tile < [examine -radix dec /mempool_pkg::NumTilesPerGroup]} {incr tile} {
         for {set port 1} {$port < [examine -radix dec /mempool_pkg::NumRemoteRespPortsPerTile]} {incr port} {
-            add wave -group group_[$group] -group floo_tcdm_router_resp \
+            add wave -group Groups_Detail -group group_[$group] -group floo_tcdm_router_resp \
             /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr ${group}/${NumX}]\]/gen_groups_y\[[expr ${group}%${NumY}]\]/gen_rtl_group/i_group/gen_router_router_i[$tile]/gen_router_wide_resp_router_j[$port]/gen_2dmesh/i_floo_tcdm_wide_resp_router/*
         }
     }
     # Splitter & Interleaver
     if {$DmaBurstLen > $Interleave} {
-      add wave -group group_[$group] -group axi_splitter /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr ${group}/${NumX}]\]/gen_groups_y\[[expr ${group}%${NumY}]\]/gen_rtl_group/i_group/gen_axi_splitter/i_axi_burst_splitter/*
+      add wave -group Groups_Detail -group group_[$group] -group axi_splitter /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr ${group}/${NumX}]\]/gen_groups_y\[[expr ${group}%${NumY}]\]/gen_rtl_group/i_group/gen_axi_splitter/i_axi_burst_splitter/*
     }
-    add wave -group group_[$group] -group axi_interleaver /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr ${group}/${NumX}]\]/gen_groups_y\[[expr ${group}%${NumY}]\]/gen_rtl_group/i_group/i_axi_L2_interleaver/*
+    add wave -group Groups_Detail -group group_[$group] -group axi_interleaver /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr ${group}/${NumX}]\]/gen_groups_y\[[expr ${group}%${NumY}]\]/gen_rtl_group/i_group/i_axi_L2_interleaver/*
     # AXI Router
-    add wave -group group_[$group] -group floo_axi_chimney /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr ${group}/${NumX}]\]/gen_groups_y\[[expr ${group}%${NumY}]\]/gen_rtl_group/i_group/i_floo_narrow_wide_chimney/*
-    add wave -group group_[$group] -group floo_axi_router /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr ${group}/${NumX}]\]/gen_groups_y\[[expr ${group}%${NumY}]\]/gen_rtl_group/i_group/i_floo_narrow_wide_router/*
+    add wave -group Groups_Detail -group group_[$group] -group floo_axi_chimney /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr ${group}/${NumX}]\]/gen_groups_y\[[expr ${group}%${NumY}]\]/gen_rtl_group/i_group/i_floo_narrow_wide_chimney/*
+    add wave -group Groups_Detail -group group_[$group] -group floo_axi_router /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr ${group}/${NumX}]\]/gen_groups_y\[[expr ${group}%${NumY}]\]/gen_rtl_group/i_group/i_floo_narrow_wide_router/*
 }
 
 # Add cluster
@@ -633,7 +699,7 @@ for {set group 0} {$group < [examine -radix dec /mempool_pkg::NumGroups]} {incr 
     add wave -group DMA -group midend_group_${group} /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr ${group}/${NumX}]\]/gen_groups_y\[[expr ${group}%${NumY}]\]/gen_rtl_group/i_group/i_mempool_group/i_idma_distributed_midend/FullRegionAddressBits
     add wave -group DMA -group midend_group_${group} /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr ${group}/${NumX}]\]/gen_groups_y\[[expr ${group}%${NumY}]\]/gen_rtl_group/i_group/i_mempool_group/i_idma_distributed_midend/*
     for {set dma 0} {$dma < [examine -radix dec /mempool_pkg::NumDmasPerGroup]} {incr dma} {
-      add wave -group DMA -Group backend_group${group}_be${dma} /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr ${group}/${NumX}]\]/gen_groups_y\[[expr ${group}%${NumY}]\]/gen_rtl_group/i_group/i_mempool_group/gen_dmas[$dma]/i_axi_dma_backend/*
+      add wave -group DMA -group backend_group${group}_be${dma} /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr ${group}/${NumX}]\]/gen_groups_y\[[expr ${group}%${NumY}]\]/gen_rtl_group/i_group/i_mempool_group/gen_dmas[$dma]/i_axi_dma_backend/*
     }
     add wave -group DMA -group tcdm_dma_group_${group} /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr ${group}/${NumX}]\]/gen_groups_y\[[expr ${group}%${NumY}]\]/gen_rtl_group/i_group/i_mempool_group/tcdm_dma_req*
     add wave -group DMA -group tcdm_dma_group_${group} /mempool_tb/dut/i_mempool_cluster/gen_groups_x\[[expr ${group}/${NumX}]\]/gen_groups_y\[[expr ${group}%${NumY}]\]/gen_rtl_group/i_group/i_mempool_group/tcdm_dma_resp*

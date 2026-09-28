@@ -18624,6 +18624,34 @@ against a 512-output register block, ~70% FPU util with no DMA traffic).
 
 **Status.** Implemented; one correctness arm pending.
 
+## 2026-09-28 02:30 — FPU util counts issued ops; machine-wide overview signals; wave.tcl folding
+
+**Purpose.** (1) The FPU util counter read pipeline occupancy (fpnew busy_o), which over-reads a
+vfmacc chained to a slowly arriving load: 4x4 qwen B=1 showed 27% (64-el vectors) vs 12% (256-el)
+for identical work and time, true efficiency 12.8%. (2) The per-instance router / split-MSHR waves
+run to thousands of entries at 8x8 with no whole-machine view.
+
+**Implementation (TB and Questa scripts only, no RTL).**
+* `tb_fpu_util.svh`, `mempool_tb.sv`: per FPU lane, count spatz_vfu `gen_fpnew[f]`
+  int_fpu_in_valid && int_fpu_in_ready (an op accepted). [FPU]/[FPUG] keep their format; new
+  `fpu_issue_lane_count`. Images built before this are occupancy and not comparable.
+* New `tb/tb_system_overview.svh` (`+define+SYS_OVERVIEW_DISABLE`): per cycle, summed over all
+  groups -- TCDM mesh per router class (narrow req / wide req / resp) and AXI wide mesh, flits moved
+  and held per output direction; group MSHR per family (row slices = bursts, column slices =
+  singles): entries in use, cached lines, full slices, requests accepted / refused / merged /
+  allocated / bank-full bypass, NoC requests sent / blocked, NoC responses taken / refused,
+  responses to tiles; entries in use per group.
+* `wave.tcl`: NoC_Overview and MSHR_Overview groups; per-group NoC link groups folded under
+  NoC_Links_PerGroup, per-group MSHR (Steer, R0-R3, C0-C3) under MSHR_PerGroup, group_N detail
+  (routers, tiles via wave_tile.tcl) under Groups_Detail; per-core VFU shows FPU_Issue lanes
+  instead of is_fpu_busy (also add_spatz_core.tcl). Fixed two `-Group` typos that aborted the
+  super-bank and DMA-backend loops.
+
+**Result.** Scratch 4x4 Questa build: compile 0 errors; wave.tcl loads with 0 errors (after the
+`-Group` fix; they were the only two); the new signals resolve.
+
+**Status.** Done; layout to be eyeballed in the next GUI run.
+
 ## 2026-09-28 04:00 — qwen-gate-up: K split extended to every small batch
 
 **Purpose.** Below 512 outputs per core every vector ran part-full (8x8 B=1: 6% fill); and at 8x8
@@ -18642,3 +18670,20 @@ baseline / no split); 4x4 B=1/2/4 unchanged at 9-10k. ROB=64 image (4x4): no cha
 (B=1/2 10k -> 10k), so the small-batch ceiling (~1-2 B/cyc/core of W from L1) is not ROB capacity.
 
 **Status.** Committed as default. Small batches remain well off the L2 roofline; cause open.
+
+## 2026-09-28 05:30 — probe: per-core load delivery and sub-NoC balance (tb_load_noc_probe.svh)
+
+**Purpose.** Small batches are bound by how fast a core pulls W from L1 (~2 B/cyc/core), not by L2,
+compute, KS layout or ROB depth; find where, and whether the parallel word-level sub-NoCs are evenly
+loaded by the req/resp remappers.
+
+**Implementation (TB only).** `[LDP]` per group per period: words delivered to the VLSU per cycle per
+core (spatz_mem_rsp_valid), mean reorder-buffer occupancy (gen_rob[p] status_cnt_q) and their ratio
+(Little's-law latency). `[SUBNOC]`/`[SUBNOCD]`: per router class and per sub-NoC (tile x port),
+flits moved and held at router outputs, total and per direction. `+define+LNP_DISABLE`.
+
+**Result (4x4, image build_split_vcs_lnp).** B=1/2: 0.60-0.64 words/cyc/core, ~40 words in flight
+per core (of 128 ROB words), ~65-cycle latency; B=8: 0.50, ~21, ~42 (compute-bound, issue-based
+util 99.7%). The ROB is far from full: the limit is loads kept in flight (one-vector prefetch in
+the kernel, dual-load VLSU), not buffer space. 4x4 B=1 with the K split: 4 MSHR serve timeouts at
+the end of the first K tile, then ~8k cycles with no issue (once per run). Sub-NoC balance: pending.

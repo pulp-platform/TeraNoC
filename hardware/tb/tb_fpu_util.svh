@@ -3,12 +3,21 @@
 // Include inside mempool_tb module.
 //
 // Answers "what is the FPU utilisation?" WHILE the run is in flight, instead of
-// only from the final cycle count. Samples spatz_vfu's fpu_busy_q (one bit per
-// FPU lane, N_FPU per core) every cycle and reports, per period:
+// only from the final cycle count. Samples, per FPU lane (N_FPU per core), whether that
+// lane's fpnew ACCEPTED an operation this cycle -- spatz_vfu gen_fpnew[f]
+// int_fpu_in_valid && int_fpu_in_ready -- and reports, per period:
 //
-//   busy FPU-lane-cycles / (period * NumCores * N_FPU)
+//   issued FPU-lane-cycles / (period * NumCores * N_FPU)
 //
-// which is the fraction of available FPU issue slots that were occupied.
+// i.e. the fraction of FPU issue slots that carried work. (The "busy" name in the output is
+// kept so every reader of [FPU]/[FPUG] still parses it.)
+//
+// Until 2026-09-28 this sampled fpu_busy_q, fpnew's busy_o: "an operation is somewhere in the
+// pipeline". That is OCCUPANCY, not work: a vfmacc chained to a slowly arriving vector load
+// keeps an op in the pipe between element groups, so it read busy while issuing a fraction of
+// the time. Measured on 4x4 qwen B=1 (same FMACs, same 10k cycles per K tile): 27% busy with
+// 64-element vectors chained to the load vs 12% with dense 256-element vectors, against a true
+// 12.8%. Numbers from images built before that date are occupancy and are not comparable.
 //
 // Reports EVERY period, tagged "pre" or "bench" by whether csr_trace_any_global is
 // high. The other gated probes ([LP], [BP]) stay silent until the software marks the
@@ -39,7 +48,7 @@
   localparam int FU_Lanes      = FU_NumCores * `N_FPU;
   localparam int FU_PerGrpLane = NumTilesPerGroup * NumCoresPerTile * `N_FPU;
 
-  // Per-core busy-lane bitmap, filled by constant-indexed generate assigns.
+  // Per-core issued-lane bitmap, filled by constant-indexed generate assigns.
   logic [`N_FPU-1:0] fu_busy_bits [NumGroups][NumTilesPerGroup][NumCoresPerTile];
 
   generate
@@ -47,11 +56,17 @@
       for (genvar gy = 0; gy < NumY; gy++) begin : gen_fu_gy
         for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_fu_t
           for (genvar c = 0; c < NumCoresPerTile; c++) begin : gen_fu_c
-            assign fu_busy_bits[NumY*gx+gy][t][c] =
-              dut.i_mempool_cluster.gen_groups_x[gx].gen_groups_y[gy]
-                 .gen_rtl_group.i_group.i_mempool_group
-                 .gen_tiles[t].i_tile.gen_cores[c].gen_mempool_cc.riscv_core
-                 .i_spatz.i_vfu.gen_fpu.fpu_busy_q;
+            for (genvar f = 0; f < `N_FPU; f++) begin : gen_fu_f
+              assign fu_busy_bits[NumY*gx+gy][t][c][f] =
+                dut.i_mempool_cluster.gen_groups_x[gx].gen_groups_y[gy]
+                   .gen_rtl_group.i_group.i_mempool_group
+                   .gen_tiles[t].i_tile.gen_cores[c].gen_mempool_cc.riscv_core
+                   .i_spatz.i_vfu.gen_fpu.gen_fpnew[f].int_fpu_in_valid &
+                dut.i_mempool_cluster.gen_groups_x[gx].gen_groups_y[gy]
+                   .gen_rtl_group.i_group.i_mempool_group
+                   .gen_tiles[t].i_tile.gen_cores[c].gen_mempool_cc.riscv_core
+                   .i_spatz.i_vfu.gen_fpu.gen_fpnew[f].int_fpu_in_ready;
+            end
           end
         end
       end

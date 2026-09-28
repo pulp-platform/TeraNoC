@@ -56,7 +56,12 @@ proc add_spatz_core_wave {g t c NumX NumY} {
     catch {add wave -noupdate -group $L -group VFU ${s}/i_vfu/int_ipu_result_valid}
     catch {add wave -noupdate -group $L -group VFU ${s}/i_vfu/fpu_result_valid}
     catch {add wave -noupdate -group $L -group VFU ${s}/i_vfu/is_ipu_busy}
-    catch {add wave -noupdate -group $L -group VFU ${s}/i_vfu/is_fpu_busy}
+    # FPU work: lane f issued when its fpnew accepted an op (valid && ready). is_fpu_busy is
+    # occupancy ("an op somewhere in the pipe") and over-reads chained, data-starved ops.
+    for {set f 0} {$f < 8} {incr f} {
+      catch {add wave -noupdate -group $L -group VFU -group FPU_Issue ${s}/i_vfu/gen_fpu/gen_fpnew\[${f}\]/int_fpu_in_valid}
+      catch {add wave -noupdate -group $L -group VFU -group FPU_Issue ${s}/i_vfu/gen_fpu/gen_fpnew\[${f}\]/int_fpu_in_ready}
+    }
     catch {add wave -noupdate -group $L -group VFU ${s}/i_vfu/vfu_rsp_valid_o}
     # FP-LSU (the FPU sequencer's scalar float load/store path). This is where `flh`/`flw`/`fsw`
     # actually go on a Spatz build -- NOT the Snitch integer LSU and NOT the VLSU -- so a scalar
