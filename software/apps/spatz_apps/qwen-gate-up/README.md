@@ -65,7 +65,7 @@ believing it is the new one. That happened here and silently faked six arms.
 | `qwen_split` | auto | work split: `decode` (rows x column blocks), `prefill` (rows across groups), `auto` = prefill once it is legal |
 | `qwen_rc_group` | 4 | decode: row chunks per group (§2.4). `group` = the original split |
 | `qwen_wpad` | tile | W/C row pad in elements (§2.4). `tile` = one 64-byte stripe, `0` = none |
-| `qwen_ksplit` | auto | cores per output patch, each on its own part of every K tile (§2.4). `auto` = 2 when a core would own 256..511 outputs, else 1 |
+| `qwen_ksplit` | auto | cores per output patch, each on its own part of every K tile (§2.4). `auto` = smallest power of two <= 16 giving each core a full register block (2 at 8x8 B=16, 16 at 8x8 B=1), 1 from 512 outputs per core |
 | `config` | — | **software** build config = `sw/config/<name>.mk`. NOT the simulator profile |
 | `l2_size` | from config | L2 bytes the linker may use. Needs `536870912` at full size |
 
@@ -162,12 +162,16 @@ W bursts merge in a tile ROW, X scalars in a tile COLUMN):
   vector runs part-full while each K step still pays its fixed cost (8 scalar X
   loads, 8 vfmacc issues, a vle): 8x8 B=16 has 256 and measured ~71% against 95%+
   for every shape with >= 512, with no DMA traffic in the window (not memory bound).
-  With the split, two cores own the SAME patch, twice as wide, and each reduces over
-  half of every K tile's rows (`QWEN_KT_CORE` = KT/2): full vectors, the same FMACs
+  With the split, s cores own the SAME patch, s times as wide, and each reduces over
+  1/s of every K tile's rows (`QWEN_KT_CORE` = KT/s): full vectors, the same FMACs
   per core, no extra loads, one DMA per tile as before. Part 0 accumulates in C,
-  part 1 in a second buffer (`qwen_cp`), and after a projection's last tile the pair
-  adds them, each core half the patch's rows, with the group MSHR bypassed (every
-  address there has one reader). The K part varies right after the row chunk, so
+  part j in `qwen_cp[j-1]`, and after a projection's last tile the s cores add them,
+  split by rows when KS divides by s, else by columns, with the group MSHR bypassed
+  (every address there has one reader). s is the smallest power of two filling the
+  block, up to 16 (one group): 2 at 8x8 B=16 and 4x4 B=4, 4 at 8x8 B=8 and 4x4
+  B=1/2, 8 at 8x8 B=4, 16 at 8x8 B=1/2. Fewer, wider blocks also stop the
+  stripe-aligned span from padding the stored width: without the split, 8x8 B<=8
+  has 1024 blocks of 16 columns, LDP pads 16384 -> 32768 and W overflows L2. The K part varies right after the row chunk, so
   at 8x8 B=16 a group is 4 column blocks x (2 row chunks x 2 K parts): W sharers
   (same block and part) are 2 adjacent tiles of one tile row, X sharers (same row
   chunk and part) one tile column -- burst target 2, single target 4, both exact.

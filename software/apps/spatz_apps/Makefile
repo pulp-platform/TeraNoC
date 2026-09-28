@@ -170,8 +170,9 @@ qwen_rc_group ?= 4
 # which moves each successive K row to the next tile; 0 = no pad (the old layout).
 qwen_wpad ?= tile
 # K split (qwen_layout.h, "K split"): cores sharing one output patch, each on its own part
-# of every K tile's rows. `auto` = 2 when a core would own 256..511 outputs (half-full
-# vectors: 8x8 B=16), else 1. 1|2 pins it.
+# of every K tile's rows. `auto` = the smallest power of two (<= 16) that gives each core a
+# full register block (512 outputs, 256 at KS=1): 2 at 8x8 B=16, 16 at 8x8 B=1; 1 from 512
+# outputs per core up. 1|2|4|8|16 pins it.
 qwen_ksplit ?= auto
 ifeq ($(qwen_span_align),stripe)
 qwen_span_def := QWEN_SPAN_ALIGN_DEFAULT 1

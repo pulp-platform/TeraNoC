@@ -18623,3 +18623,22 @@ against a 512-output register block, ~70% FPU util with no DMA traffic).
   throughput is the open risk, and B >= 16 already sustains 92-97% inside a tile.
 
 **Status.** Implemented; one correctness arm pending.
+
+## 2026-09-28 04:00 — qwen-gate-up: K split extended to every small batch
+
+**Purpose.** Below 512 outputs per core every vector ran part-full (8x8 B=1: 6% fill); and at 8x8
+B<=8 the stripe-aligned span padded LDP 16384 -> 32768, so W overflowed the 512 MiB L2.
+
+**Implementation.** `QWEN_KSPLIT` auto = smallest power of two <= 16 giving each core a full register
+block (512 outputs, 256 at KS=1): 16 at 8x8 B=1/2, 8 at B=4, 4 at B=8, 2 at B=16; 4 at 4x4 B=1/2,
+2 at B=4. Partials in `qwen_cp[ks-1]`; the reduction adds all of them, split by rows when KS divides
+by ks, else by columns. Fewer, wider blocks remove the padding (LDP 16384 everywhere). ks=1 shapes
+stay byte-identical.
+
+**Result.** Correctness (fleet ks2): 13/16 pass, the other 3 finished their kernels (verify running);
+every factor 2/4/8/16 passes on both meshes. Cycles per K tile (8x8 KT=640, DMA-only 10.9k):
+B=1 22k -> 17k, B=2 25k -> 17k, B=4 34k -> 20k, B=16 41k -> 25k (vs the unpadded span_align=4
+baseline / no split); 4x4 B=1/2/4 unchanged at 9-10k. ROB=64 image (4x4): no change for either
+(B=1/2 10k -> 10k), so the small-batch ceiling (~1-2 B/cyc/core of W from L1) is not ROB capacity.
+
+**Status.** Committed as default. Small batches remain well off the L2 roofline; cause open.

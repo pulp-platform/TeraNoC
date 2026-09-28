@@ -34,8 +34,8 @@
 // With one strip nothing is written back and C stays in L1 as before.
 //
 // Small batches: when a core would own fewer outputs than one register block (8x8
-// B=16), QWEN_KSPLIT cores share a patch and split each K tile's rows between them
-// (qwen_layout.h, "K split"); the partial sums are added once per projection.
+// B<=16, 4x4 B<=4), QWEN_KSPLIT cores share a patch and split each K tile's rows
+// between them (qwen_layout.h, "K split"); the partial sums are added once per projection.
 //
 // The L2 operands are .l2_bss: reserved, not stored in the ELF. QWEN_CHECK builds
 // fill them on the target with a pattern whose exact result is known and verify it
@@ -114,10 +114,9 @@ _Static_assert((QWEN_KT % 2) == 0, "The kernel's n loop unrolls by 2, so KT must
 _Static_assert((QWEN_KT % (2 * QWEN_KSPLIT)) == 0,
                "Under the K split each core reduces KT/QWEN_KSPLIT rows, which must be even too");
 #if QWEN_KSPLIT > 1
-_Static_assert(QWEN_KSPLIT == 2, "The K split pairs cores; only a factor of 2 is implemented");
+_Static_assert((QWEN_KSPLIT & (QWEN_KSPLIT - 1)) == 0 && QWEN_KSPLIT <= 16,
+               "The K split factor is a power of two up to one group (16)");
 _Static_assert(MATMUL_DECODE_SPLIT, "The K split exists only in the decode split");
-_Static_assert((KERNEL_SIZE % QWEN_KSPLIT) == 0,
-               "The partial sums are added row by row, half of each patch's rows per core");
 _Static_assert(QWEN_NSTRIPS == 1,
                "The K split reduces after the last K tile, but a strip is written back inside "
                "that tile's barrier -- it would write out the unreduced half");
@@ -177,9 +176,9 @@ static elem_t qwen_x_l2[QWEN_B * QWEN_K] QWEN_L2;
 static elem_t qwen_w[2][QWEN_WSLOT] QWEN_L1;            // K-tile double buffer
 static elem_t qwen_c[QWEN_STAGES][QWEN_CSLOT] QWEN_L1;  // accumulator, one strip
 #if QWEN_KSPLIT > 1
-// The second K part's partial sums, same layout as qwen_c. One buffer serves both stages: a
-// projection's partials are consumed by its own reduction before the next projection runs.
-static elem_t qwen_cp[QWEN_CSLOT] QWEN_L1;
+// K parts 1..QWEN_KSPLIT-1's partial sums, each the layout of qwen_c. One set serves both
+// stages: a projection's partials are consumed by its own reduction before the next one runs.
+static elem_t qwen_cp[QWEN_KSPLIT - 1][QWEN_CSLOT] QWEN_L1;
 #endif
 #if QWEN_NSTRIPS > 1
 // Finished strips, strip-major [strip][B][LDW]: each strip is one contiguous DMA.
@@ -441,10 +440,11 @@ static inline void qwen_ksplit_mshr(uint32_t on) {
 #endif
 }
 
-// Add the second K part's partial sums into C: C[stage] += qwen_cp over this core's patch.
-// The two cores of a pair split the patch's ROWS, so each adds half of it.
+// Add the other K parts' partial sums into C: C[stage] += sum of qwen_cp over the patch. The
+// QWEN_KSPLIT cores sharing the patch split it: by ROWS when they divide evenly (8x8 B=16:
+// 4 of 8 rows each), else by COLUMNS (KS=1 has one row).
 //
-// Both partner cores are in the same group (main.c puts the K part inside the group), so a
+// All partners are in the same group (main.c puts the K part inside the group), so a
 // group rendezvous is all the ordering this needs -- gbar_sync_drain waits for this core's
 // vector stores to COMPLETE before arriving, so after it every partial is in L1.
 //
@@ -457,24 +457,33 @@ static void qwen_ksplit_reduce(uint32_t stage, uint32_t kpart, uint32_t m_start,
                                uint32_t p_start, uint32_t p_end) {
   if (m_end == m_start) return;  // an inactive group skips it whole, rendezvous included
   const uint32_t gb = gbar_base(GBAR_PLOOP_STRUCT);
-  const uint32_t rows = (m_end - m_start) / (uint32_t)QWEN_KSPLIT;
-  const uint32_t r0 = m_start + kpart * rows;
+  const uint32_t ks = (uint32_t)QWEN_KSPLIT;
+  const uint32_t nrow = m_end - m_start, ncol = p_end - p_start;
+  uint32_t r0 = m_start, r1 = m_end, c0 = p_start, c1 = p_end;
+  if ((nrow % ks) == 0) {
+    r0 = m_start + kpart * (nrow / ks);
+    r1 = r0 + nrow / ks;
+  } else {
+    c0 = p_start + kpart * (ncol / ks);
+    c1 = c0 + ncol / ks;
+  }
   elem_t *c = qwen_c[stage];
 
   gbar_sync_drain(gb);  // every partial stored, the MSHR empty
   qwen_ksplit_mshr(0u);
   gbar_sync_drain(gb);  // the bypass is in force before anyone loads
-  for (uint32_t r = r0; r < r0 + rows; ++r) {
-    for (uint32_t p = p_start; p < p_end;) {
+  for (uint32_t r = r0; r < r1; ++r) {
+    for (uint32_t p = c0; p < c1;) {
       // e16,m2 caps a vector at 64 elements: the kernel's own KS=8 load, 128 B, two bursts.
       size_t vl;
-      asm volatile("vsetvli %0, %1, e16, m2, ta, ma" : "=r"(vl) : "r"(p_end - p));
-      elem_t *d = c + r * (uint32_t)QWEN_LDW + p;
-      const elem_t *q = qwen_cp + r * (uint32_t)QWEN_LDW + p;
-      asm volatile("vle16.v v24, (%0)" ::"r"(d));
-      asm volatile("vle16.v v28, (%0)" ::"r"(q));
-      asm volatile("vfadd.vv v24, v24, v28");
-      asm volatile("vse16.v v24, (%0)" ::"r"(d));
+      asm volatile("vsetvli %0, %1, e16, m2, ta, ma" : "=r"(vl) : "r"(c1 - p));
+      const uint32_t off = r * (uint32_t)QWEN_LDW + p;
+      asm volatile("vle16.v v24, (%0)" ::"r"(c + off));
+      for (uint32_t j = 0; j + 1u < ks; ++j) {
+        asm volatile("vle16.v v28, (%0)" ::"r"(qwen_cp[j] + off));
+        asm volatile("vfadd.vv v24, v24, v28");
+      }
+      asm volatile("vse16.v v24, (%0)" ::"r"(c + off));
       p += (uint32_t)vl;
     }
   }
@@ -492,7 +501,7 @@ static void qwen_ksplit_reduce(uint32_t stage, uint32_t kpart, uint32_t m_start,
 // One projection of one strip: C[stage] = X . W[stage][strip], reduced over all K
 // tiles. C and the W buffers both have row stride QWEN_LDW (strip width + pad).
 // Under the K split, K part `kpart` of every tile goes to this core; part 0 accumulates
-// in C, part 1 in qwen_cp, and qwen_ksplit_reduce adds them after the last tile.
+// in C, part j in qwen_cp[j-1], and qwen_ksplit_reduce adds them after the last tile.
 //
 // Each iteration computes on the resident slot, then -- once every reader has left
 // it -- waits for the in-flight tile and launches the next into the slot just
@@ -502,7 +511,7 @@ static void qwen_project(uint32_t stage, uint32_t strip, uint32_t cid, const ele
                          uint32_t m_start, uint32_t m_end,
                          uint32_t p_start, uint32_t p_end QWEN_KPART_PARAM) {
 #if QWEN_KSPLIT > 1
-  elem_t *c = kpart ? qwen_cp : qwen_c[stage];
+  elem_t *c = kpart ? qwen_cp[kpart - 1u] : qwen_c[stage];
 #else
   elem_t *c = qwen_c[stage];
 #endif
@@ -689,6 +698,8 @@ int main(void) {
     // burst-friendly; each strip is split identically. The pad columns hold zeros
     // and their results are never read.
     const uint32_t p_span = (uint32_t)QWEN_PT / n_p_blocks;
+    // qwen_ksplit_reduce splits a patch between its ks cores by rows, else by columns.
+    if ((kernel_size % ks) != 0u && (p_span % ks) != 0u) return -8;
     m_start = row_chunk * kernel_size;
     m_end = m_start + kernel_size;
     p_start = p_block * p_span;

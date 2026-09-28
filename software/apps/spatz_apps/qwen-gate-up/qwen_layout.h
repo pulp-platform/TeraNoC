@@ -15,12 +15,17 @@
 // vector runs at a fraction of its length while each K step still pays the same fixed cost --
 // 8x8 B=16 has 256 per core and measured ~71% against 95%+ for every shape with >= 512.
 //
-// So when a core would own fewer than 512 but at least 256, pair the cores instead: both
-// cores of a pair own the SAME patch, twice as wide, and each takes half of every K tile's
-// rows (QWEN_KT_CORE). Vectors are full again; each core does the same number of FMACs.
-// Nothing extra is loaded -- the two halves of a tile are read by different cores -- and
-// the two partial sums are added once per projection (main.c, qwen_ksplit_reduce).
-// qwen_ksplit=1|2 pins it; auto = 2 exactly in that half-full band, 1 everywhere else.
+// So when a core would own fewer, QWEN_KSPLIT cores share one patch, that many times wider,
+// and each takes 1/QWEN_KSPLIT of every K tile's rows (QWEN_KT_CORE). Vectors are full again;
+// each core does the same number of FMACs. Nothing extra is loaded -- the K parts of a tile
+// are read by different cores -- and the partial sums are added once per projection (main.c,
+// qwen_ksplit_reduce). Fewer, wider column blocks also keep the stripe-aligned span from
+// padding the stored width: at 8x8 B<=8 without the split, 1024 blocks of 16 columns pad
+// LDP 16384 -> 32768, which doubles W and overflows the 512 MiB L2.
+//
+// auto = the smallest power of two that fills the block (KS=1, i.e. odd B, runs m8: 256),
+// capped at 16 = one group: 2 at 8x8 B=16 and 4x4 B=4, 4 at 8x8 B=8 and 4x4 B=1/2, 8 at 8x8
+// B=4, 16 at 8x8 B=1/2; 1 from 512 outputs up. qwen_ksplit=1|2|4|8|16 pins it.
 #ifndef QWEN_KSPLIT_REQ
 #define QWEN_KSPLIT_REQ 0
 #endif
@@ -29,12 +34,19 @@
 #else
 #define QWEN_OUT_PER_CORE (((GEMM_M) * (GEMM_P)) / (NUM_CORES))
 #endif
+#define QWEN_KS_BLOCK (((GEMM_M) % 2) ? 256 : 512)  // KS x VLMAX: 256 at KS=1 (m8), else 512
 #if QWEN_KSPLIT_REQ > 0
 #define GEMM_KSPLIT QWEN_KSPLIT_REQ
-#elif QWEN_OUT_PER_CORE >= 256 && QWEN_OUT_PER_CORE < 512
-#define GEMM_KSPLIT 2
-#else
+#elif (QWEN_OUT_PER_CORE) >= (QWEN_KS_BLOCK)
 #define GEMM_KSPLIT 1
+#elif 2 * (QWEN_OUT_PER_CORE) >= (QWEN_KS_BLOCK)
+#define GEMM_KSPLIT 2
+#elif 4 * (QWEN_OUT_PER_CORE) >= (QWEN_KS_BLOCK)
+#define GEMM_KSPLIT 4
+#elif 8 * (QWEN_OUT_PER_CORE) >= (QWEN_KS_BLOCK)
+#define GEMM_KSPLIT 8
+#else
+#define GEMM_KSPLIT 16
 #endif
 #define QWEN_KSPLIT GEMM_KSPLIT
 
@@ -166,9 +178,8 @@
 #define QWEN_L1_KP(kt, pt)                                                                \
   (2 * QWEN_ROUND_SWEEP((kt) * ((pt) + (QWEN_WPAD))) * GEMM_ELEM_BYTES +      /* W x2 */  \
    2 * QWEN_ROUND_SWEEP((QWEN_B) * ((pt) + (QWEN_WPAD))) * GEMM_ELEM_BYTES +  /* C x2 */  \
-   ((QWEN_KSPLIT) > 1                                                      /* K-split */ \
-        ? QWEN_ROUND_SWEEP((QWEN_B) * ((pt) + (QWEN_WPAD))) * GEMM_ELEM_BYTES /* partial */ \
-        : 0) +                                                                            \
+   ((QWEN_KSPLIT) - 1) * /* K-split partials */                                           \
+       QWEN_ROUND_SWEEP((QWEN_B) * ((pt) + (QWEN_WPAD))) * GEMM_ELEM_BYTES +              \
    (QWEN_L1_FIXED))
 // A legal strip width for K tiles of kt rows: whole pad units (every core's span
 // stays stripe-aligned), an exact divisor of LDP, a per-core span at least as long as
