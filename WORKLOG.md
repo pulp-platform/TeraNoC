@@ -18687,3 +18687,50 @@ per core (of 128 ROB words), ~65-cycle latency; B=8: 0.50, ~21, ~42 (compute-bou
 util 99.7%). The ROB is far from full: the limit is loads kept in flight (one-vector prefetch in
 the kernel, dual-load VLSU), not buffer space. 4x4 B=1 with the K split: 4 MSHR serve timeouts at
 the end of the first K tile, then ~8k cycles with no issue (once per run). Sub-NoC balance: pending.
+
+## 2026-09-28 12:30 — response ejection: probe, three NoC experiments; B=1 check hang traced to an X branch
+
+**Purpose.** Find why a small-batch core receives only ~0.58 W words/cycle, and try cheap RTL fixes.
+Separately, find why `ks2/c4_b1_p2` (4x4 B=1 K-split, check=2) hangs after the timed region.
+
+**Implementation.**
+* `tb_load_noc_probe.svh` gains `[EJECT]` (per-group router local output before the local resp
+  crossbar, cls=rtr, and the crossbar lanes after it, cls=lane) and `[SLICEQ]` (per-MSHR-slice
+  noc/tile resp handshakes).
+* `mempool_pkg.sv`: `NumRespRouterOutFifoDepth` (define `NOC_RESP_ROUTER_OUTPUT_FIFO_DEP`, default =
+  `NumRouterOutFifoDepth`) and `RespLocalExtraFifoDepth` (define `NOC_RESP_LOCAL_EXTRA_FIFO_DEP`,
+  default 0). `mempool_group_floonoc_wrapper.sv`: the two resp routers take the first; the second
+  inserts a `stream_fifo` of that depth on each resp router's LOCAL output only (0 = original wiring).
+  Fall-through (13:00 change, after lf8 ran non-fall-through): an empty FIFO adds no cycle, ready
+  stays registered (`!full`), the forward path gains one mux after the router's registered output.
+* `mempool_system.sv`: `SIM_XZERO_L2` (sim only) turns X in L2 read data into 0. L1 is NOT masked
+  (user rule: an L1 X is a hw/sw bug to find, not to hide).
+* `hardware/tb/tb_x_detect.svh` (`+define+XDET`): `[XDET] L1` X reads, `L1W` X writes, `L2` raw X
+  reads, `PC` X program counters with the last good PC; `XDET_L1_FROM` / `+XDET_L1_FROM=` hides the
+  warm-up flood.
+* `hardware/elf_split/build_image2.sh`: `build_image.sh` accepting several defines in one argument.
+
+**Result — per-core W delivery (words/cycle, windowed, same four ELFs).**
+
+| case | base (ej1) | rm1: remap=1 | ofd4: all resp outputs 4 | lf8: local output 2+6 |
+|---|---|---|---|---|
+| sb4 B=1 | 0.581 | 0.580 | 0.648 (+11.5%) | 0.634 (+9.1%) |
+| ks4 B=1 | 0.604 | 0.608 | 0.650 (+7.6%) | 0.642 (+6.3%) |
+| sb4 B=2 | 0.581 | 0.546 (-6%) | 0.633 (+9.0%) | 0.638 (+9.8%) |
+| sb4 B=8 | 0.489 | 0.474 | 0.491 | 0.490 |
+| mesh resp stall/flit (sb4 B=1) | 0.66 | 0.47 | 0.44 | **0.34** |
+
+* Bottleneck located at the destination local response crossbar (burst words spread by the source
+  remapper converge on one (slice,k) lane). rm1 moves the stall off the router but does not raise
+  delivery. Buffering the router output does.
+* lf8 ~= ofd4 on delivery, lower mesh stall, at 32x6 = 192 extra entries/group vs 320 for ofd4.
+  The extra FIFO adds one cycle; measured latency did not move (64 vs 66 cycles).
+
+**Result — B=1 check hang.** L2 X->0 alone does not fix it. With XDET, 128 cores (groups 8..15)
+get an X PC at cycle ~113.7k, inside `qwen_verify_strip`: the compare `v != e` reads an X element of
+`qwen_c` and the branch on it propagates X into the PC. check=1 (p1) on the same image passes. The
+warm-up (cycle ~2.8k) also reads ~180k never-written W words from L1 (`qwen_w`, 0x3d000...).
+
+**Status.** xd2 (`build_split_vcs_xd2`, `XDET_L1_FROM=6800`) is building/queued to name the first X
+read and the first X write in the timed region. The local-output FIFO (pkg + wrapper, default 0) is
+committed; lfft (fall-through, 2+6) re-runs the four probe cases plus c4_b1_p1/c4_b4_p1 checks.

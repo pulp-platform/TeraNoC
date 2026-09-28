@@ -970,7 +970,7 @@ for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_router_router_i
         .NumVirtChannels  (1                                      ),
         .flit_t           (floo_tcdm_resp_t                       ),
         .InFifoDepth      (mempool_pkg::NumRouterInFifoDepth      ), // Input buffer depth
-        .OutFifoDepth     (mempool_pkg::NumRouterOutFifoDepth     ), // Output buffer depth, can try to set it to 0 for -1 cycle latency
+        .OutFifoDepth     (mempool_pkg::NumRespRouterOutFifoDepth ), // Output buffer depth, can try to set it to 0 for -1 cycle latency
         .RouteAlgo        (IdTable                                ),
         .id_t             (routing_table_pkg::routing_rule_addr_t ),
         .NumAddrRules     (NumGroups                              ),
@@ -996,7 +996,7 @@ for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_router_router_i
         .NumVirtChannels  (1                                  ),
         .flit_t           (floo_tcdm_resp_t                   ),
         .InFifoDepth      (mempool_pkg::NumRouterInFifoDepth  ), // Input buffer depth
-        .OutFifoDepth     (mempool_pkg::NumRouterOutFifoDepth ), // Output buffer depth, can try to set it to 0 for -1 cycle latency
+        .OutFifoDepth     (mempool_pkg::NumRespRouterOutFifoDepth ), // Output buffer depth, can try to set it to 0 for -1 cycle latency
         .RouteAlgo        (floo_route_algo                    ),
         .id_t             (group_xy_id_t                      ),
         .NumAddrRules     (1                                  ),
@@ -1015,9 +1015,33 @@ for (genvar i = 0; i < NumTilesPerGroup; i++) begin : gen_router_router_i
         .data_o         ({floo_tcdm_resp_from_router_vc[i][j],       floo_tcdm_resp_out_trans[i][j]}      )
       );
     end
-    assign floo_tcdm_resp_from_router[i][j] = floo_tcdm_resp_from_router_vc[i][j];
-    assign floo_tcdm_resp_from_router_before_xbar_valid[i][j] = floo_tcdm_resp_from_router_vc_valid[i][j];
-    assign floo_tcdm_resp_from_router_vc_ready[i][j] = floo_tcdm_resp_from_router_before_xbar_ready[i][j];
+    // Router local output -> local response crossbar, optionally through extra buffering
+    // (mempool_pkg::RespLocalExtraFifoDepth; 0 = direct, the original wiring). Fall-through, so
+    // an empty FIFO adds no cycle: the forward path gains one mux after the router's registered
+    // output FIFO, and ready_o (= !full) stays registered -- no combinational ready path.
+    if (mempool_pkg::RespLocalExtraFifoDepth > 0) begin : gen_resp_local_fifo
+      stream_fifo #(
+        .FALL_THROUGH(1'b1                                  ),
+        .DEPTH       (mempool_pkg::RespLocalExtraFifoDepth  ),
+        .T           (floo_tcdm_resp_t                      )
+      ) i_resp_local_fifo (
+        .clk_i     (clk_i                                                 ),
+        .rst_ni    (rst_ni                                                ),
+        .flush_i   (1'b0                                                  ),
+        .testmode_i(testmode_i                                            ),
+        .usage_o   (/* unused */                                          ),
+        .data_i    (floo_tcdm_resp_from_router_vc[i][j]                   ),
+        .valid_i   (floo_tcdm_resp_from_router_vc_valid[i][j]             ),
+        .ready_o   (floo_tcdm_resp_from_router_vc_ready[i][j]             ),
+        .data_o    (floo_tcdm_resp_from_router[i][j]                      ),
+        .valid_o   (floo_tcdm_resp_from_router_before_xbar_valid[i][j]    ),
+        .ready_i   (floo_tcdm_resp_from_router_before_xbar_ready[i][j]    )
+      );
+    end else begin : gen_resp_local_direct
+      assign floo_tcdm_resp_from_router[i][j] = floo_tcdm_resp_from_router_vc[i][j];
+      assign floo_tcdm_resp_from_router_before_xbar_valid[i][j] = floo_tcdm_resp_from_router_vc_valid[i][j];
+      assign floo_tcdm_resp_from_router_vc_ready[i][j] = floo_tcdm_resp_from_router_before_xbar_ready[i][j];
+    end
   end : gen_router_wide_resp_router_j
 end : gen_router_router_i
 

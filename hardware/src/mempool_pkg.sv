@@ -456,6 +456,18 @@ package mempool_pkg;
   // router buffer configuration
   localparam integer unsigned NumRouterInFifoDepth  = `ifdef NOC_ROUTER_INPUT_FIFO_DEP   `NOC_ROUTER_INPUT_FIFO_DEP   `else 2 `endif;
   localparam integer unsigned NumRouterOutFifoDepth = `ifdef NOC_ROUTER_OUTPUT_FIFO_DEP  `NOC_ROUTER_OUTPUT_FIFO_DEP  `else 2 `endif;
+  // Output buffer depth of the TCDM RESPONSE routers alone (default: the shared depth above). Lets
+  // the response network absorb destination-crossbar conflicts without also growing every request
+  // router; override with NOC_RESP_ROUTER_OUTPUT_FIFO_DEP.
+  localparam integer unsigned NumRespRouterOutFifoDepth =
+      `ifdef NOC_RESP_ROUTER_OUTPUT_FIFO_DEP `NOC_RESP_ROUTER_OUTPUT_FIFO_DEP `else NumRouterOutFifoDepth `endif;
+  // Extra buffering on each response router's LOCAL output only (router -> local response
+  // crossbar), on top of the router's own output FIFO; the mesh outputs are unchanged. The local
+  // crossbar serialises words that converge on one MSHR lane, and with a shallow local output the
+  // blocked flit also blocks everything queued behind it in the router, which spreads through the
+  // mesh. 0 = no FIFO (bit-identical). Override with NOC_RESP_LOCAL_EXTRA_FIFO_DEP.
+  localparam integer unsigned RespLocalExtraFifoDepth =
+      `ifdef NOC_RESP_LOCAL_EXTRA_FIFO_DEP `NOC_RESP_LOCAL_EXTRA_FIFO_DEP `else 0 `endif;
   localparam integer unsigned SpmBankIdRemap = `ifdef SPM_BANK_ID_REMAP `SPM_BANK_ID_REMAP `else 0 `endif;
   localparam integer unsigned TileIdRemap = `ifdef TILE_ID_REMAP `TILE_ID_REMAP `else 0 `endif;
   // Posted DMA writes into L1: see tcdm_wide_narrow_mux.
