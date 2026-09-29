@@ -962,13 +962,15 @@ module mempool_group
     //   slice m < 4 : row    R_m     = tiles {4m .. 4m+3}, lane-local index = t[1:0]
     //   slice m >= 4: column C_{m-4} = tiles {m-4 + 4a},   lane-local index = t[3:2]
     // Tile t's port r is demuxed to its row or column slice by request CLASS; bypass traffic goes
-    // to mshr_bypass_slice(t). Each slice's 4 NoC lanes land at mshr_noc_lane(m, k) so the
-    // wrapper's remapper groups pair R_k with C_k per port. Each tile response port arbitrates its
-    // row and column slice.
+    // to mshr_bypass_slice(t). Request side: each slice's 4 NoC lanes (2 per port) land at
+    // mshr_noc_lane(m, k) so the wrapper's remapper groups pair R_k with C_k per port. Response
+    // side: group lane t carries tile t's responses and a 1:2 demux picks its row or column slice
+    // (one response lane per tile per slice). Each tile response port arbitrates its row and column
+    // slice.
     // ------------------------------------------------------------------------------------------
     localparam int unsigned NumSlices           = MshrNumSlices;          // 8
     localparam int unsigned NumTilesPerSlice    = MshrSliceTiles;         // 4
-    localparam int unsigned NumNocLanesPerSlice = NumTilesPerSlice / 2;   // 2 per port class
+    localparam int unsigned NumNocLanesPerSlice = NumTilesPerSlice / 2;   // request lanes per port
     // Whether the elaborated MSHR merges singles at all; a class the core cannot merge is bypass
     // traffic for steering purposes (mirrors req_can_merge_single in mempool_group_mshr_req_decode).
     localparam bit SplitSingleMerge =
@@ -980,9 +982,16 @@ module mempool_group
     tcdm_master_req_t  [NumSlices-1:0][NumNocLanesPerSlice-1:0][NumRemoteReqPortsPerTile-1:1]  sl_noc_req;
     logic              [NumSlices-1:0][NumNocLanesPerSlice-1:0][NumRemoteReqPortsPerTile-1:1]  sl_noc_req_valid;
     logic              [NumSlices-1:0][NumNocLanesPerSlice-1:0][NumRemoteReqPortsPerTile-1:1]  sl_noc_req_ready;
-    tcdm_master_resp_t [NumSlices-1:0][NumNocLanesPerSlice-1:0][NumRemoteRespPortsPerTile-1:1] sl_noc_resp;
-    logic              [NumSlices-1:0][NumNocLanesPerSlice-1:0][NumRemoteRespPortsPerTile-1:1] sl_noc_resp_valid;
-    logic              [NumSlices-1:0][NumNocLanesPerSlice-1:0][NumRemoteRespPortsPerTile-1:1] sl_noc_resp_ready;
+    tcdm_master_resp_t [NumSlices-1:0][NumTilesPerSlice-1:0][NumRemoteRespPortsPerTile-1:1] sl_noc_resp;
+    logic              [NumSlices-1:0][NumTilesPerSlice-1:0][NumRemoteRespPortsPerTile-1:1] sl_noc_resp_valid;
+    logic              [NumSlices-1:0][NumTilesPerSlice-1:0][NumRemoteRespPortsPerTile-1:1] sl_noc_resp_ready;
+    // Response face: registered group lane t (= tile t) and its row/column family demux.
+    tcdm_master_resp_t [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]                 pt_resp_q;
+    logic              [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]                 pt_resp_q_valid;
+    logic              [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1]                 pt_resp_q_ready;
+    logic              [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1][MshrSliceIdW-1:0] pt_resp_slice;
+    logic              [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1][1:0]            pt_demux_valid;
+    logic              [NumTilesPerGroup-1:0][NumRemoteRespPortsPerTile-1:1][1:0]            pt_demux_ready;
     tcdm_master_resp_t [NumSlices-1:0][NumTilesPerSlice-1:0][NumRemoteRespPortsPerTile-1:1] sl_resp;
     logic              [NumSlices-1:0][NumTilesPerSlice-1:0][NumRemoteRespPortsPerTile-1:1] sl_resp_valid;
     logic              [NumSlices-1:0][NumTilesPerSlice-1:0][NumRemoteRespPortsPerTile-1:1] sl_resp_ready;
@@ -1065,7 +1074,7 @@ module mempool_group
       end
     end
 
-    // ---- NoC face: slice (m, k) <-> group lane mshr_noc_lane(m, k) = {m[2], k, m[1:0]} --------
+    // ---- Request NoC face: slice (m, k) -> group lane mshr_noc_lane(m, k) = {m[2], k, m[1:0]} --
     for (genvar m = 0; m < NumSlices; m++) begin : gen_noc_m
       for (genvar k = 0; k < NumNocLanesPerSlice; k++) begin : gen_noc_k
         localparam int unsigned Lane = ((m / 4) * 8) + (k * 4) + (m % 4);
@@ -1078,11 +1087,62 @@ module mempool_group
           assign tcdm_master_req_valid_o[Lane][r] = sl_noc_req_valid[m][k][r];
           assign sl_noc_req_ready[m][k][r]        = tcdm_master_req_ready_i[Lane][r];
         end
-        for (genvar r = 1; r < NumRemoteRespPortsPerTile; r++) begin : gen_noc_resp_r
-          assign sl_noc_resp[m][k][r]              = tcdm_master_resp_i[Lane][r];
-          assign sl_noc_resp_valid[m][k][r]        = tcdm_master_resp_valid_i[Lane][r];
-          assign tcdm_master_resp_ready_o[Lane][r] = sl_noc_resp_ready[m][k][r];
-        end
+      end
+    end
+
+    // ---- Response face: group lane t = tile t ----------------------------------------------------
+    // The wrapper's local response crossbar routes on hdr.tile_id, so lane t carries only tile t's
+    // responses, bursts and singles alike. Register the lane, then send the beat to the slice that
+    // holds its entry -- the tile's row slice or its column slice, named by the family bit of the
+    // tag's slice id (every request, bypass included, leaves one of these two slices). Each slice
+    // lane l is fed by exactly one tile: row R_m lane l = tile 4m+l, column C_c lane l = tile c+4l.
+    for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_noc_resp_t
+      localparam int unsigned Row = t / 4;   // mshr_row_slice(t)
+      localparam int unsigned Col = 4 + (t % 4);  // mshr_col_slice(t)
+      localparam int unsigned Lr  = t % 4;   // local index in Row
+      localparam int unsigned Lc  = t / 4;   // local index in Col
+      for (genvar r = 1; r < NumRemoteRespPortsPerTile; r++) begin : gen_r
+        spill_register #(
+          .T(tcdm_master_resp_t)
+        ) i_resp_spill (
+          .clk_i  (clk_i                         ),
+          .rst_ni (rst_ni                        ),
+          .valid_i(tcdm_master_resp_valid_i[t][r]),
+          .ready_o(tcdm_master_resp_ready_o[t][r]),
+          .data_i (tcdm_master_resp_i[t][r]      ),
+          .valid_o(pt_resp_q_valid[t][r]         ),
+          .ready_i(pt_resp_q_ready[t][r]         ),
+          .data_o (pt_resp_q[t][r]               )
+        );
+        assign pt_resp_slice[t][r] = mshr_resp_slice(pt_resp_q[t][r].mshr_tag);
+
+        stream_demux #(
+          .N_OUP (2)
+        ) i_resp_family (
+          .inp_valid_i (pt_resp_q_valid[t][r]     ),
+          .inp_ready_o (pt_resp_q_ready[t][r]     ),
+          .oup_sel_i   (pt_resp_slice[t][r][2]    ),   // 0 = row slice, 1 = column slice
+          .oup_valid_o (pt_demux_valid[t][r]      ),
+          .oup_ready_i (pt_demux_ready[t][r]      )
+        );
+        assign sl_noc_resp[Row][Lr][r]       = pt_resp_q[t][r];
+        assign sl_noc_resp_valid[Row][Lr][r] = pt_demux_valid[t][r][0];
+        assign pt_demux_ready[t][r][0]       = sl_noc_resp_ready[Row][Lr][r];
+        assign sl_noc_resp[Col][Lc][r]       = pt_resp_q[t][r];
+        assign sl_noc_resp_valid[Col][Lc][r] = pt_demux_valid[t][r][1];
+        assign pt_demux_ready[t][r][1]       = sl_noc_resp_ready[Col][Lc][r];
+
+`ifndef TARGET_SYNTHESIS
+        resp_tile_matches_lane: assert property (@(posedge clk_i) disable iff (!rst_ni)
+            pt_resp_q_valid[t][r] |-> (pt_resp_q[t][r].tile_id == tile_group_id_t'(t)))
+          else $error("[mempool_group] response lane %0d port %0d carries tile %0d",
+                      t, r, pt_resp_q[t][r].tile_id);
+        resp_slice_is_tiles: assert property (@(posedge clk_i) disable iff (!rst_ni)
+            pt_resp_q_valid[t][r] |->
+              (pt_resp_slice[t][r] == MshrSliceIdW'(pt_resp_slice[t][r][2] ? Col : Row)))
+          else $error("[mempool_group] tile %0d port %0d: response tag 0x%0h names slice %0d, not the tile's row %0d / column %0d",
+                      t, r, pt_resp_q[t][r].mshr_tag, pt_resp_slice[t][r], Row, Col);
+`endif
       end
     end
 

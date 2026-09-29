@@ -852,6 +852,19 @@ module mempool_tb;
 `include "tb_load_noc_probe.svh"
 `endif
 
+/*****************************************************
+* X detector: first X/Z reads from L1 and L2 banks   *
+* and X program counters. Only with +define+XDET.    *
+*****************************************************/
+`include "tb_x_detect.svh"
+
+/*****************************************************
+* Remote-path breakdown: per-point bandwidth, per-   *
+* segment latency, local crossbar conflicts.         *
+* Only with +define+NOC_PATH_PROBE.                  *
+*****************************************************/
+`include "tb_noc_path_probe.svh"
+
 /****************************************************
  * Per-flit NoC Request/Response Event Tracer       *
  * Emits noc_trace/events.csv; analyze with          *

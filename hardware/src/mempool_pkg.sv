@@ -308,9 +308,11 @@ package mempool_pkg;
   // bypass traffic (stores, AMOs, disabled classes) by tile parity t[0]^t[2], so each slice carries
   // bypass for exactly 2 of its 4 tiles -- 4 sources against its 4 NoC lanes, full rate.
   // With GROUP_MSHR_NUM/OVERFLOW_NUM now PER SLICE (8+1 = 64+8 per group), the tag carries the
-  // slice id above the slice-local entry id so the group-level response crossbar can route by tag.
-  // Requires NumTilesPerGroup == 16. Each remote request/response port gets its own pair of
-  // slice NoC lanes; the fold geometry does not depend on the number of ports.
+  // slice id above the slice-local entry id so a response can find its slice. Requires
+  // NumTilesPerGroup == 16. Request side: each remote port gets its own pair of slice NoC lanes
+  // (mshr_noc_lane). Response side: the group-level response crossbar routes by tile
+  // (hdr.tile_id) and mempool_group picks the row or column slice from the tag; the geometry does
+  // not depend on the number of ports.
   localparam bit          MshrSplit      = `ifdef GROUP_MSHR_SPLIT `GROUP_MSHR_SPLIT `else 1'b0 `endif;
   localparam int unsigned MshrNumSlices  = MshrSplit ? 8 : 1;
   localparam int unsigned MshrSliceTiles = MshrSplit ? 4 : NumTilesPerGroup; // lane-tiles per slice
@@ -343,9 +345,9 @@ package mempool_pkg;
   function automatic logic [3:0] mshr_slice_tile(input logic [MshrSliceIdW-1:0] m, input logic [1:0] l);
     return m[2] ? {l, m[1:0]} : {m[1:0], l};
   endfunction
-  // NoC lane (0..15, per port class) of slice m's output lane k (0..1). Chosen so the floo_remapper's
-  // Interleaved groups {i, i+4, i+8, i+12} pair R_k's two lanes with C_k's two lanes on each port,
-  // i.e. the (R_k, C_k) x port remap grouping, with no remapper change.
+  // Request NoC lane (0..15, per port class) of slice m's output lane k (0..1). Chosen so the
+  // floo_remapper's Interleaved groups {i, i+4, i+8, i+12} pair R_k's two lanes with C_k's two lanes
+  // on each port, i.e. the (R_k, C_k) x port remap grouping, with no remapper change.
   function automatic logic [3:0] mshr_noc_lane(input logic [MshrSliceIdW-1:0] m, input logic k);
     return {m[2], k, m[1:0]};
   endfunction

@@ -125,6 +125,10 @@ $(info [DEBUG:][noc_resp_channel_num]------$(noc_resp_channel_num))
 # Router buffer configuration
 noc_router_input_fifo_dep  ?= 2
 noc_router_output_fifo_dep ?= 2
+# Extra fall-through FIFO on each response router's LOCAL output (router -> local response
+# crossbar), on top of the router's own output FIFO; mesh outputs unchanged. 6 = local depth 8:
+# +9% per-core load delivery at 4x4 B=1/2 (WORKLOG 2026-09-28). 0 = the original direct wiring.
+noc_resp_local_extra_fifo_dep ?= 6
 
 # Router remapping xbar size configuration
 noc_router_remap_group_size ?= 4

@@ -18734,3 +18734,83 @@ warm-up (cycle ~2.8k) also reads ~180k never-written W words from L1 (`qwen_w`, 
 **Status.** xd2 (`build_split_vcs_xd2`, `XDET_L1_FROM=6800`) is building/queued to name the first X
 read and the first X write in the timed region. The local-output FIFO (pkg + wrapper, default 0) is
 committed; lfft (fall-through, 2+6) re-runs the four probe cases plus c4_b1_p1/c4_b4_p1 checks.
+
+## 2026-09-28 15:30 — remote-path breakdown probe (tb_noc_path_probe.svh); resp local FIFO default on
+
+**Purpose.** Measure where a remote word's latency goes and which stage caps per-core delivery.
+
+**Implementation.**
+* `config/terapool_spatz4_fpu.mk`: `noc_resp_local_extra_fifo_dep ?= 6` (local output 2+6, fall-through);
+  `hardware/Makefile` passes it as `-DNOC_RESP_LOCAL_EXTRA_FIFO_DEP` when set. Pin `=0` against older images.
+* `hardware/tb/tb_noc_path_probe.svh` (`+define+NOC_PATH_PROBE`): 11 taps MIN, MOUT, RINJ, REJ, SIN,
+  SOUT, PINJ, PEJ, PLANE, MRSP, MRO; `[NPP]` BW/util/stall per point, `[NPPL]` per-segment READ latency by
+  Little's law on cumulative word counts (MOUT..MRSP conserves words), `[NPPX]` local req/resp crossbar
+  conflict share. A segment's latency includes time blocked at its exit (the crossbars are combinational).
+  `hardware/scripts/npp_breakdown.py` prints the tables.
+* `tb_x_detect.svh`: VRF write/read X, VLSU memory-response X, NoC response-word X (SOUT/MRSP/MRO).
+
+**Result (4x4, streaming periods, npp1 batch; on = local FIFO 2+6, off = original).**
+
+| | sb4 B=1 on | sb4 B=1 off | ks4 B=1 on | ks4 B=1 off | sb4 B=8 on |
+|---|---|---|---|---|---|
+| delivery w/c/core | 0.641 | 0.583 | 0.641 | 0.592 | 0.492 |
+| in flight / core | 40.6 | 39.4 | 90.7 | 92.8 | 20.6 |
+| core latency | 63 | 67 | 141 | 157 | 42 |
+| req mesh (RINJ->REJ) | 8.8 | 9.6 | 14.5 | 17.7 | 7.6 |
+| tile service (SIN->SOUT) | 11.4 | 14.4 | 29.6 | 37.3 | 6.5 |
+| resp mesh (PINJ->PEJ) | 12.6 | 18.3 | 21.6 | 27.1 | 8.5 |
+| local FIFO (PEJ->PLANE) | 6.7 | - | 8.7 | - | 4.9 |
+| NoC round trip | 39.6 | 42.2 | 74.4 | 82.2 | 27.5 |
+| outside NoC (MSHR+tile+ROB) | 23.6 | 25.0 | 66.1 | 74.3 | 14.5 |
+| resp xbar conflict / stall | 0.76 / 0.52 | 0.75 / 0.51 | 0.78 / 0.57 | 0.74 / 0.53 | 0.77 / 0.51 |
+| resp mesh link util / stall per flit | 0.27 / 0.33 | 0.25 / 0.65 | 0.27 / 0.89 | - | - |
+
+* Throughput is flat (0.64) while in-flight words double (sb4 -> ks4): a throughput cap, not latency.
+* No stage is near saturation on average: resp lanes 0.30 busy, resp mesh links 0.27, tile resp ports 0.30.
+  But 76% of valid inputs of the local response crossbar share their target lane with another input that
+  cycle and 52% are stalled: burst words (spread over up to 8 sub-NoCs at the source) arrive together
+  and converge on one (slice,k) lane. That head-of-line blocking backs up the router local outputs, then
+  the resp mesh (stall/flit 0.33-0.89 at 27% link use), then the source tile's response port (SOUT stall
+  0.35/port-cycle in ks4), then the tile's request input (SIN stall 3.3/handshake) and the req mesh.
+* The FIFO absorbs part of it (resp mesh 18.3 -> 12.6, tile 14.4 -> 11.4, +10% delivery).
+* Tile service at low load (B=8) is 6.5 cycles: a 16-word burst leaves one tile port at 1 word/cycle.
+* MSHR merge in B=1 decode is ~1.03 (B=8: 1.21), as expected for disjoint W columns.
+
+**Status.** Next: remove the convergence at the destination crossbar (spread a burst's words over lanes, or
+lane speedup / virtual output queues), and a latency histogram for the in-order ROB tail ("outside NoC"
+grows 24 -> 66 cycles with more in flight).
+
+## 2026-09-29 02:40 — split MSHR: per-tile RESPONSE face (MshrRespPerTile); xd3 X origin
+
+**Purpose.** With merging on, bursts return only through row slices and singles only through column
+slices, and each slice had 2 response lanes per port for 4 tiles: a merging class reached 8 of the 16
+local-crossbar outputs per port, so any class imbalance halved response bandwidth.
+
+**Implementation.** Measured behind a temporary knob, then the folded response path was deleted (no knob
+remains; the request face is still folded).
+* wrapper: local resp crossbar selects by `hdr.tile_id` (output t = tile t); crossbar unchanged (2 x 16x16).
+* `mempool_group`: per tile t, port r: `spill_register` + 1:2 `stream_demux` on the tag's slice family
+  -> row slice R(t/4) lane t%4 or column slice C(t%4) lane t/4 (32 each per group, same count as the
+  slice-internal spill+steer they replace). Assertions: lane == tile, tag slice is one of the tile's two.
+* slice: NoC response face = 4 lanes per port, one per lane-tile; no spill/steer, only the slice id is
+  stripped (assertions lane-vs-tile, tag-vs-slice). `docs/mshr_split_design.md` §3/§6 updated.
+
+**Result** (4x4, rpt1 = new face vs npp = same RTL folded, both FIFO 2+6 and NOC_PATH_PROBE).
+* Class imbalance is real: row-slice share of response words qwen B=16 0.94, B=64 0.88; fp32 GEMM
+  512x128x128 column share 0.77. qwen B<=8 is 0.50/0.50 (bursts bypass -> tile-parity steering).
+* fp32 GEMM 512x128x128: [SPOT] bit-identical, retval 0; **12,375 -> 11,896 cycles (-3.9%)**, bench util
+  68.3 -> 74.1%, core latency 82 -> 75 cycles.
+* qwen B=16/64: 94.9% either way (compute-bound). qwen B=1/2/8 unchanged within 1% (already balanced;
+  the local resp crossbar conflict stays 0.76 -- same-burst convergence on one tile's output).
+* Correctness on the new image: kc1, kc3, kc4, K-split c4_b2_p1, c4_b4_p2 success; 0 assertion hits.
+  kc2 (B=64, 2 strips): benchmark **101,784 cycles vs 102,738** on mr4 (gate 47,779 / up 53,963); the
+  ~3k-cycle FPU-idle gap at the gate->up boundary is present on mr4 too. An earlier "hang" reading was
+  a misread of the transcript (the kc2ab A/B it prompted was cancelled). Check: **success**.
+
+**xd3 (B=1 check hang, both new features off):** no X in any memory response (SOUT/MRSP/MRO/VLSU
+response). The first X is a vector-register READ of never-written registers (VLSU read port, cycle
+7234, all harts), then VFU writes of X at 7485 -> the X is born in the VRF (read-before-write), not in
+the memory system.
+
+**Status.** All correctness runs on the per-tile image pass (GEMM, kc1-kc4, K-split B=2/4). The knob-free
+rebuild (build_split_vcs_rpt2) re-runs GEMM 512 + c4_b2_p1 + c4_b4_p2 to confirm cycle-identical results.

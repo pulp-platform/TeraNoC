@@ -46,26 +46,37 @@ given up relative to the hardened configuration.
 ## 3. Structure
 
 ```
-tile t, port r ──demux (class)──► R_{t/4}  ─┐            ┌─ 4 NoC lanes ──► routers/remapper
+tile t, port r ──demux (class)──► R_{t/4}  ─┐            ┌─ 4 NoC lanes (2/port) ──► routers/remapper
                               └► C_{t%4}  ─┘  slice m:  ─┤
-                                                         └─ 4 NoC lanes ◄── resp crossbar
+                                                         └─ 8 NoC lanes (1/tile/port) ◄── demux (family)
+                                                                  ◄── spill ◄── resp crossbar output t
 tile t, port r ◄──RR arbiter──── R_{t/4}, C_{t%4}
 ```
 
 Per group: 8 × `mempool_group_mshr_slice` (`hardware/src/mempool_group_mshr_slice.sv`), 32 request
-steer demuxes and 32 response 2:1 round-robin arbiters (`mempool_group.sv`, `gen_group_mshr_split`).
+steer demuxes, 32 response 2:1 round-robin arbiters, and on the NoC side 32 response spill registers
++ 32 1:2 family demuxes, one per tile and port (`mempool_group.sv`, `gen_group_mshr_split`).
+
+**Response face (2026-09-29).** The response side is not folded: the wrapper's response crossbar
+routes on `hdr.tile_id` (output t = tile t) and a 1:2 demux on the tag's slice-family bit sends the
+beat to tile t's row slice (lane `t%4`) or column slice (lane `t/4`). The folded face it replaced
+(`output = mshr_noc_lane(slice, k)`, 2 lanes per slice per port, each shared by 2 tiles) let a merging
+class reach only 8 of the 16 outputs per port; with merging on, the class mix is lopsided (qwen B=16:
+94 % of response words to row slices; fp32 512x128x128 prefill: 77 % to column slices), and the
+per-tile face took that GEMM from 12,375 to 11,896 cycles (-3.9 %, spot values identical). Cost:
+each slice takes 8 NoC response lanes instead of 4 (column slices wire to 4 tiles down a column).
 
 A slice reuses `mempool_group_mshr` elaborated with `NumTilesPerGroup=4` lane-tiles
 and `NumAddrTiles=16` (address geometry; `TileIdBits` was the only place the two were
-conflated), plus two lane folds. Its two-bank hash path is specialized by `SliceFamily` (§9b).
-The core is strictly lane-keyed (a bypass beat leaves on the lane
+conflated), plus a request-side lane fold. Its two-bank hash path is specialized by `SliceFamily`
+(§9b). The core is strictly lane-keyed (a bypass beat leaves on the lane
 it entered; a merged beat must arrive on its owner's lane, `mempool_group_mshr.sv:4479`), so the
-folds live outside it:
+fold lives outside it:
 
 - **Request fold 8→4.** NoC lane `(k, p)` = RR between lane-local tiles `{2k, 2k+1}` on port `p`.
   Stamps `src_tile_id` (global tile) and the slice id into the tag (§5).
-- **Response steer 4→8.** NoC lane `(k, p)` → local tile `{2k, 2k+1}` by the low bit of the tile's
-  slice-local index; the group crossbar already chose `k` = high bit. Strips the slice id.
+- **Response side, no fold.** NoC response lane `l` is lane-tile `l` (registered and chosen by
+  `mempool_group`); the slice only strips its id from the tag.
 
 Entries: `group_mshr_num` and `group_mshr_overflow_num` are **per slice** when split. `8` + `1`
 reproduces the legacy `64 + 8` per group, in 2 banks of 4 ways per slice.
@@ -110,7 +121,7 @@ a kernel that does not program the MSHR.
   port; with this placement each remap group is `R_k`'s two port-`p` lanes + `C_k`'s two, i.e. the
   (R_k, C_k) × port pairing — **no remapper change**.
 - Response crossbar (`i_local_resp_interco`, 16×16 per port, unchanged size) select:
-  `mshr_noc_lane(tag.slice, mshr_slice_local(tag.slice, hdr.tile_id)[1])`.
+  `hdr.tile_id`, as without the split (§3, "Response face"). `mshr_noc_lane` is request-side only.
 
 ## 7. Software
 

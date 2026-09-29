@@ -619,6 +619,9 @@ vlog_defs += -DNOC_RESP_CHANNEL_NUM=$(noc_resp_channel_num)
 # --------------------------
 vlog_defs += -DNOC_ROUTER_INPUT_FIFO_DEP=$(noc_router_input_fifo_dep)
 vlog_defs += -DNOC_ROUTER_OUTPUT_FIFO_DEP=$(noc_router_output_fifo_dep)
+ifneq ($(noc_resp_local_extra_fifo_dep),)
+vlog_defs += -DNOC_RESP_LOCAL_EXTRA_FIFO_DEP=$(noc_resp_local_extra_fifo_dep)
+endif
 vlog_defs += -DNOC_ROUTER_REMAP_GROUP_SIZE=$(noc_router_remap_group_size)
 # Extra defines injected from command line (e.g. sweep scripts) without clobbering base config.
 extra_vlog_defs ?=

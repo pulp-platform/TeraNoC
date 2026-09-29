@@ -14,6 +14,14 @@
 //        word-level meshes the req/resp remappers spread traffic over -- flits that left a router
 //        output (hsk) and flits held there (stall), summed over all groups and N/E/S/W outputs.
 //        [SUBNOCD] is the same per output direction. An even spread is equal numbers across s.
+// [EJECT] The response path at the DESTINATION group, per stage, summed over groups, hsk / stall
+//        (valid && !ready) cycles:
+//          cls=rtr   each resp router's local output, index tile*RP + port (RP resp ports);
+//          cls=lane  the local response crossbar's outputs = MemPool master-response lanes,
+//                    index lane*RP + port. With the split MSHR a lane is (slice, k) =
+//                    mshr_noc_lane: bursts land on row-slice lanes, singles on column-slice ones.
+// [SLICEQ] Split MSHR, per slice m (0..3 rows R, 4..7 columns C), summed over groups: NoC-response
+//        ingress hsk/stall (noc_resp_valid_i/ready_o) and tile-response egress hsk/stall.
 //
 // Simulation only; references inside genvar loops (cross-module refs into generate arrays need
 // constant indices). Disable with +define+LNP_DISABLE.
@@ -77,6 +85,38 @@
     end
   end
 
+  // ---- destination response path (combinational per cycle) ----
+  localparam int unsigned LnpEj = NumTilesPerGroup * LnpRP;
+  logic [NumGroups-1:0][LnpEj-1:0] lnp_ej_v, lnp_ej_r, lnp_ln_v, lnp_ln_r;
+  for (genvar g = 0; g < NumGroups; g++) begin : gen_lnp_ej_g
+    assign lnp_ej_v[g] = `LNP_GRP(g).floo_tcdm_resp_from_router_before_xbar_valid;
+    assign lnp_ej_r[g] = `LNP_GRP(g).floo_tcdm_resp_from_router_before_xbar_ready;
+    assign lnp_ln_v[g] = `LNP_GRP(g).floo_tcdm_resp_from_router_after_xbar_valid;
+    assign lnp_ln_r[g] = `LNP_GRP(g).floo_tcdm_resp_from_router_after_xbar_ready;
+  end
+  localparam int unsigned LnpSl = MshrSplit ? 8 : 1;
+  int unsigned lnp_sq_nh [NumGroups][LnpSl], lnp_sq_ns [NumGroups][LnpSl];
+  int unsigned lnp_sq_th [NumGroups][LnpSl], lnp_sq_ts [NumGroups][LnpSl];
+`define LNP_SL(G,M) `LNP_GRP(G).i_mempool_group.gen_group_mshr_split.gen_slice[M].i_slice
+  if (MshrSplit) begin : gen_lnp_sq
+    for (genvar g = 0; g < NumGroups; g++) begin : gen_lnp_sq_g
+      for (genvar m = 0; m < 8; m++) begin : gen_lnp_sq_m
+        assign lnp_sq_nh[g][m] = $countones(`LNP_SL(g,m).noc_resp_valid_i &  `LNP_SL(g,m).noc_resp_ready_o);
+        assign lnp_sq_ns[g][m] = $countones(`LNP_SL(g,m).noc_resp_valid_i & ~`LNP_SL(g,m).noc_resp_ready_o);
+        assign lnp_sq_th[g][m] = $countones(`LNP_SL(g,m).tile_resp_valid_o &  `LNP_SL(g,m).tile_resp_ready_i);
+        assign lnp_sq_ts[g][m] = $countones(`LNP_SL(g,m).tile_resp_valid_o & ~`LNP_SL(g,m).tile_resp_ready_i);
+      end
+    end
+  end else begin : gen_lnp_sq_none
+    for (genvar g = 0; g < NumGroups; g++) begin : gen_lnp_sq_g
+      assign lnp_sq_nh[g][0] = 0; assign lnp_sq_ns[g][0] = 0;
+      assign lnp_sq_th[g][0] = 0; assign lnp_sq_ts[g][0] = 0;
+    end
+  end
+`undef LNP_SL
+  int unsigned lnp_ej_h [LnpEj], lnp_ej_s [LnpEj], lnp_ln_h [LnpEj], lnp_ln_s [LnpEj];
+  int unsigned lnp_sqa_nh [LnpSl], lnp_sqa_ns [LnpSl], lnp_sqa_th [LnpSl], lnp_sqa_ts [LnpSl];
+
   // ---- period accumulation ----
   longint unsigned lnp_rsp_acc [NumGroups], lnp_occ_acc [NumGroups];
   int unsigned lnp_w_h [4][LnpWSub], lnp_w_s [4][LnpWSub];
@@ -87,6 +127,8 @@
   always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       lnp_cyc = 0; lnp_win = 0;
+      for (int e = 0; e < LnpEj; e++) begin lnp_ej_h[e] = 0; lnp_ej_s[e] = 0; lnp_ln_h[e] = 0; lnp_ln_s[e] = 0; end
+      for (int m = 0; m < LnpSl; m++) begin lnp_sqa_nh[m] = 0; lnp_sqa_ns[m] = 0; lnp_sqa_th[m] = 0; lnp_sqa_ts[m] = 0; end
       for (int g = 0; g < NumGroups; g++) begin lnp_rsp_acc[g] = 0; lnp_occ_acc[g] = 0; end
       for (int d = 0; d < 4; d++) begin
         for (int s = 0; s < LnpWSub; s++) begin lnp_w_h[d][s] = 0; lnp_w_s[d][s] = 0; end
@@ -98,6 +140,16 @@
       if (csr_trace_any_global) begin
         lnp_win = lnp_win + 1;
         for (int g = 0; g < NumGroups; g++) begin
+          for (int e = 0; e < LnpEj; e++) begin
+            if (lnp_ej_v[g][e] &&  lnp_ej_r[g][e]) lnp_ej_h[e] += 1;
+            if (lnp_ej_v[g][e] && !lnp_ej_r[g][e]) lnp_ej_s[e] += 1;
+            if (lnp_ln_v[g][e] &&  lnp_ln_r[g][e]) lnp_ln_h[e] += 1;
+            if (lnp_ln_v[g][e] && !lnp_ln_r[g][e]) lnp_ln_s[e] += 1;
+          end
+          for (int m = 0; m < LnpSl; m++) begin
+            lnp_sqa_nh[m] += lnp_sq_nh[g][m]; lnp_sqa_ns[m] += lnp_sq_ns[g][m];
+            lnp_sqa_th[m] += lnp_sq_th[g][m]; lnp_sqa_ts[m] += lnp_sq_ts[g][m];
+          end
           for (int c = 0; c < LnpCpg; c++) begin
             lnp_rsp_acc[g] += lnp_rsp[g][c];
             for (int p = 0; p < NumMemPortsPerSpatz; p++) lnp_occ_acc[g] += lnp_occ_pp[g][c][p];
@@ -156,7 +208,29 @@
             $display("[SUBNOCD] cyc=%0d cls=%s dir=%0d hsk=%s stall=%s", lnp_cyc, cn, d, dh, ds);
           end
         end
+        begin : lnp_eject_report
+          automatic string a = "", b = "", c = "", d = "";
+          for (int e = 0; e < LnpEj; e++) begin
+            a = {a, $sformatf((e == 0) ? "%0d" : ",%0d", lnp_ej_h[e])};
+            b = {b, $sformatf((e == 0) ? "%0d" : ",%0d", lnp_ej_s[e])};
+            c = {c, $sformatf((e == 0) ? "%0d" : ",%0d", lnp_ln_h[e])};
+            d = {d, $sformatf((e == 0) ? "%0d" : ",%0d", lnp_ln_s[e])};
+          end
+          $display("[EJECT] cyc=%0d cls=rtr hsk=%s stall=%s", lnp_cyc, a, b);
+          $display("[EJECT] cyc=%0d cls=lane hsk=%s stall=%s", lnp_cyc, c, d);
+          a = ""; b = ""; c = ""; d = "";
+          for (int m = 0; m < LnpSl; m++) begin
+            a = {a, $sformatf((m == 0) ? "%0d" : ",%0d", lnp_sqa_nh[m])};
+            b = {b, $sformatf((m == 0) ? "%0d" : ",%0d", lnp_sqa_ns[m])};
+            c = {c, $sformatf((m == 0) ? "%0d" : ",%0d", lnp_sqa_th[m])};
+            d = {d, $sformatf((m == 0) ? "%0d" : ",%0d", lnp_sqa_ts[m])};
+          end
+          $display("[SLICEQ] cyc=%0d nrsp_hsk=%s nrsp_stall=%s trsp_hsk=%s trsp_stall=%s",
+                   lnp_cyc, a, b, c, d);
+        end
         lnp_win = 0;
+        for (int e = 0; e < LnpEj; e++) begin lnp_ej_h[e] = 0; lnp_ej_s[e] = 0; lnp_ln_h[e] = 0; lnp_ln_s[e] = 0; end
+        for (int m = 0; m < LnpSl; m++) begin lnp_sqa_nh[m] = 0; lnp_sqa_ns[m] = 0; lnp_sqa_th[m] = 0; lnp_sqa_ts[m] = 0; end
         for (int g = 0; g < NumGroups; g++) begin lnp_rsp_acc[g] = 0; lnp_occ_acc[g] = 0; end
         for (int d = 0; d < 4; d++) begin
           for (int s = 0; s < LnpWSub; s++) begin lnp_w_h[d][s] = 0; lnp_w_s[d][s] = 0; end

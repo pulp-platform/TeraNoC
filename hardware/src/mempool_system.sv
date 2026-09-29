@@ -667,6 +667,24 @@ module mempool_system
   axi_strb_t     [NumL2Banks-1:0]   bank_strb;
   logic          [NumL2Banks-1:0]   bank_we;
   axi_data_t     [NumL2Banks-1:0]   bank_rdata;
+  // L2 read data as the channels see it. L2 starts all-X out of reset (SimInit "custom": the
+  // testbench preload writes only the ELF sections), so with SIM_XZERO_L2 every X/Z bit of a
+  // read returns 0 instead -- a simulation-only diagnostic for reads of never-written words.
+  // Off by default; synthesis always takes the plain assign.
+  axi_data_t     [NumL2Banks-1:0]   bank_rdata_ch;
+`ifndef TARGET_SYNTHESIS
+`ifdef SIM_XZERO_L2
+  always_comb begin
+    for (int unsigned i = 0; i < NumL2Banks; i++)
+      for (int unsigned b = 0; b < $bits(axi_data_t); b++)
+        bank_rdata_ch[i][b] = (bank_rdata[i][b] === 1'b1);
+  end
+`else
+  assign bank_rdata_ch = bank_rdata;
+`endif
+`else
+  assign bank_rdata_ch = bank_rdata;
+`endif
 
 `ifdef WAKEUP_PROBE
   // Is the L2 servicing requests? Counters live entirely in one always_ff (an `initial`
@@ -731,7 +749,7 @@ module mempool_system
     assign bank_wdata[i]  = mem_wdata[i];
     assign bank_strb[i]   = mem_strb[i];
     assign mem_rvalid[i]  = bank_rvalid[i];
-    assign mem_rdata[i]   = bank_rdata[i];
+    assign mem_rdata[i]   = bank_rdata_ch[i];
   end
 
   `FF(bank_rvalid, bank_req, 1'b0, clk_i, rst_ni)
