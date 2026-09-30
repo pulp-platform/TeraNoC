@@ -2295,6 +2295,7 @@ module snitch
       riscv_instr::FCVT_D_WU: begin
         if (FP_EN && RVD) begin
           opa_select      = Reg;
+          write_rd        = 1'b0;  // the result goes to the FP register file only
           is_acc          = 1'b1;
           acc_qvalid_o = valid_instr;
         end else begin
@@ -2309,6 +2310,7 @@ module snitch
       riscv_instr::FCVT_S_WU: begin
         if (FP_EN && RVF) begin
           opa_select      = Reg;
+          write_rd        = 1'b0;  // the result goes to the FP register file only
           is_acc          = 1'b1;
           acc_qvalid_o = valid_instr;
         end else begin
