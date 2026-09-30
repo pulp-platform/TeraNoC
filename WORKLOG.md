@@ -18814,3 +18814,72 @@ the memory system.
 
 **Status.** All correctness runs on the per-tile image pass (GEMM, kc1-kc4, K-split B=2/4). The knob-free
 rebuild (build_split_vcs_rpt2) re-runs GEMM 512 + c4_b2_p1 + c4_b4_p2 to confirm cycle-identical results.
+
+## 2026-09-30 — Spatz short-vector completion and load retirement fixes
+
+**Purpose.** Resolve the IPU/FPU switching wedge from
+`docs/spatz_short_vl_wedge_handover.md`, validate two-element SwiGLU without
+its software workaround, and investigate the original P4 raw-load failure.
+
+**Implementation.** Spatz `7c98455` includes staged FPU input-valid bits in
+busy tracking, accepts participating lanes atomically, and masks output ready
+by the retiring instruction. Spatz `ee4db56` carries each slide write's ID and
+last-word marker through the output spill register and completes after the
+final VRF grant. Spatz `fa77858` rounds each lane's load extent to memory
+words before allocating padding, drains ROB dummy entries in both modes,
+and excludes dummy retirement from VRF data readiness, pending-beat charges,
+and offset-queue pops. The extra e16 partial-word dummy explains the
+`[13,13,13,16]` allocation divergence; stale partial-burst dummies corrupt
+or stall younger loads. Main lockfile pin moves from `b040b94` to `fa77858`;
+working path overrides and unrelated changes are preserved. The changed IP
+is the live `working_dir/spatz` checkout, not stale `hardware/deps/spatz`.
+
+**Validation.** Focused Questa: 705 arithmetic cases, 352 original/fixed
+multiword timings identical, scalar/vector and lane-skew checks, and 9,600
+controller/VRF/slide completions. The VLSU test checks 1,728 cases and 5,184
+completions per configuration, with delayed/reordered responses, request
+and VRF backpressure, three distinct consecutive loads, e8/e16/e32 tails,
+word/subword offsets and strides. Default, serial-load, walking-allocation,
+and legacy-ID configurations all pass. Maximum m4 adds 6,912 cases and
+20,736 completions, with full-ROB coverage required and observed. Baseline
+comparisons reproduce the
+corrected hazards. All eight rebuilt arithmetic/raw software variants have
+`.text` sections identical to the preserved test ELFs.
+The complete V3 image passes the original P4..P6 probe, all four raw e16/e32
+m1/m4 P0..P7 probes, unchanged two-element/core SwiGLU (14,991 cycles),
+and the first calibration (23,851 cycles); all seven runs reach EOC retval
+zero. The longer QWEN B32/K256/P8192 calibration measures 74,834 cycles,
+confirmed by hart-0 CSR reads and UART, versus the historical 74,122.
+V2 measured the same 74,834, so VLSU adds no kernel cycles. Its earlier
+200,000-cycle limit ended during checking; the historical run completed
+at 282,834 total cycles. V3 uses 400,000 cycles and reached 276,137 before
+a license-service restart at 17:04 suspended runtime execution. A matched
+baseline image uses the same 467 sources/120 defines and Snitch fix, with
+only these three Spatz modules restored to b040b94; it reached about
+43,000 cycles before the same interruption. Both processes remain alive,
+retry license checkout every 20 seconds, and are preserved for recovery.
+Long-calibration numerical completion and attribution of the 712-cycle
+historical timing difference remain pending; this is not a passing
+no-regression verdict.
+
+Exact complete-image command:
+`make -C hardware -o update-floogen compile_vcs_simvopt config=terapool_spatz4_fpu buildpath=build_spatzfix_vcs_4x4_v3 snitch_trace=1 noc_resp_local_extra_fifo_dep= vcs_jobs=4`.
+Generated mesh remains 4x4; Snitch fix `df049c78` is included; defines differ
+from the calibration image only in trace enable. Source hashes differ from
+v2 only in VLSU. Fleet batch `spatzfix-v3-20260930-125959-cd25` used a
+validated private bounded-UCLI spec and badile01..49 placement. Its initial
+two-seat cap increased to four after a second dry run and improved license
+headroom; one seat remains reserved. Existing simulations were preserved. It collects transcripts and hart traces into
+`hardware/spatzfix_v3_<case>/`; each checker requires phase/success markers,
+expected calibration cycles, and EOC retval zero. The local runner keeps
+the historical reference by default and permits an explicit
+`--gate-up-cycles` override for a documented matched baseline. Commands, source snapshots,
+hashes, results and waves: `hardware/tb/spatz_short_vl/README.md`,
+`hardware/elf_spatzfix/results.json`, private build/run manifests.
+
+**Scope.** The focused load test does not cover indexed loads, stores, or
+nonzero vstart. The first calibration ELF prints QWEN B=1/K=128/P=16384,
+not the handover's fp16 GEMM label; its exact identity is preserved. Older
+superseded runs ended through native UCLI with trace buffers flushed. The
+upstream VFU comparison uses today's packages/FPU implementation and does
+not establish behavior of the complete historical upstream configuration.
