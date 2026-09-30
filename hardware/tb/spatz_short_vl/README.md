@@ -232,7 +232,7 @@ directories into private `hardware/spatzfix_v3_<case>/` directories.
 | original P4..P6 | stalled during setup loads | ALL_DONE, EOC=0 |
 | SwiGLU, two elements/core | success!, 14,991 cycles, EOC=0 | same, EOC=0 |
 | `ks2/c4_b1_p1.elf` | success!, 23,851 cycles, EOC=0 | same, EOC=0 |
-| `kt/kc4_auto_small.elf` | 74,834 cycles; checking exceeded old bound | 74,834; checking paused by license restart |
+| `kt/kc4_auto_small.elf` | 74,834 cycles; checking exceeded old bound | success!, 74,834 cycles, EOC=0; timing difference below |
 
 The longer calibration is QWEN B=32/K=256/P=8192. Its preserved historical
 run (`spatzfix_reference_mr4/`) measured 74,122 kernel cycles and finished
@@ -241,22 +241,59 @@ reached its older 200,000-cycle bound during checking. V3 uses a
 400,000-cycle bound. Its hart-0 timer reads at PC `0x80001808` and
 `0x80001bd8` are 8,602 and 83,436, confirming the same 74,834-cycle
 measurement before the UART report (`v3_long_calibration_timer.json`).
-A matched baseline retains the V3 source/define set
-and Snitch fix, with only the three Spatz modules restored to `b040b94`,
-to isolate the timing difference from the historical image.
+A matched baseline retains the V3 source/define set and Snitch fix, with
+only the three Spatz modules restored to `b040b94`. It measures 74,780
+cycles: 658 more than the historical image, and 54 fewer than the fixed
+image (0.072%). The first stage matches exactly at 37,447 cycles; the
+second stage measures 37,320 baseline versus 37,374 fixed. The historical
+image is not a same-source baseline; it lacks the Snitch fix and a source
+manifest. The 658-cycle difference cannot be attributed to these three
+Spatz repairs. V2 and V3 kernel counts match, so the VLSU follow-up adds no
+observed calibration-cycle cost.
+
+The matched timer reads and instruction comparison are preserved in
+`elf_spatzfix/matched_calibration_timing.json` and
+`calibration_hart0_timing_diff.json`. Hart 0 executes the same 29,867
+instructions through cycle 84,000; its first timing difference is at
+`vfmacc.vf v6, ft4, v18` (PC `0x8000062c`) in the second stage. The final
+54-cycle gap includes the group barrier. These observations localize the
+difference but do not identify which of the VFU/slide corrections causes
+it. The handover's exact-cycle requirement is not met for this calibration.
 
 On 2026-09-30 at 17:04, the license server restarted. The V3 calibration
 paused at about 276,137 total cycles and the matched baseline at about
-43,000 cycles. Both native processes remain alive and retry license
-checkout every 20 seconds, but neither holds a runtime seat. Their
-transcripts and timer trace are preserved; numerical completion and
-attribution of the 712-cycle difference remain pending. This is a host
-license wait, not a passing timing check. The matched baseline image is
+43,000 cycles. Both clients retried license checkout every 20 seconds
+without holding runtime seats. After the recovery results were gathered,
+native UCLI interrupts ended these superseded clients and flushed their
+traces. Both returned 255 from the interrupted license wait and emitted a
+VCS simulation report; their `early_stop.json` records distinguish these
+stopped runs from validation verdicts. The fresh runs below resolve the
+timing comparison and pass numerical checking. The matched baseline image is
 `build_spatzfix_vcs_4x4_baseline/`, fleet batch
 `spatzfix-baseline-20260930-155608-dc98`. Its 100,000-cycle bound captures
 the kernel timer reads; it intentionally ends before UART reporting and
 numerical checking. Compare its hart-0 CSR reads at the same PCs rather
 than requiring `success!` from that timing-only run.
+
+A fresh two-nanosecond VCS smoke run obtained a runtime seat and quit
+normally after the restart. Fresh bounded validations therefore run as
+`spatzfix-recovery-20260930-174104-9b53`, initially retaining the original
+clients.
+They use the same images and ELFs, hart tracing, and `+notracer` to disable
+only the optional NoC CSV logger. The private spec reserves two seats,
+5 GB RAM and 32 GB scratch per job, informed by the observed runtime
+footprint. `hardware/badist_specs/spatzfix_recovery/watch_results.py`
+collects and checks both results automatically, preserving the historical
+cycle expectation and reporting the matched baseline separately. The
+fresh baseline exited normally at its bound. The fixed run printed
+`success!` and exited at 567,116 ns (283,558 total cycles), EOC=0. All
+seven other full-system cases also pass. `elf_spatzfix/results.json`
+records numerical success separately from the failed historical exact-cycle
+expectation; `calibration_assessment` reports the 54-cycle matched-baseline
+difference. No VCS processes or runtime seats remain in use by this
+investigation. Fleet statistics measured at most 3.65 GiB RSS and 3h51m
+wall time; the next equivalent spec can use 5 GB RAM, 7 GB scratch, and
+16,624 seconds estimated runtime. All collected outputs remain local.
 
 The local runner retains the historical reference by default;
 `--gate-up-cycles N` selects an explicit alternative reference. Do not

@@ -18883,3 +18883,45 @@ not the handover's fp16 GEMM label; its exact identity is preserved. Older
 superseded runs ended through native UCLI with trace buffers flushed. The
 upstream VFU comparison uses today's packages/FPU implementation and does
 not establish behavior of the complete historical upstream configuration.
+
+### 2026-09-30: Close Spatz load-path validation and audit VCS usage
+
+- The complete Spatz image passes the original P4..P6 ELF, all four raw
+  e16/e32 and m1/m4 P0..P7 probes, unchanged two-element SwiGLU, and both
+  calibration ELFs numerically, with EOC=0. The final longer calibration
+  prints `success!`, measures 74,834 kernel cycles, and exits at 567,116 ns
+  (283,558 total cycles). Results and hashes are preserved in
+  `hardware/elf_spatzfix/results.json`; exact commands, bounded UCLI files,
+  manifests, transcripts, and all 256 hart traces are in each run directory.
+- The source-matched baseline keeps all 467 source hashes and 120 defines
+  from V3 except the original VFU, slide, and VLSU at `b040b94`. It measures
+  74,780 kernel cycles, versus the historical image's 74,122. The fixes add
+  54 cycles (0.072%) against this matched baseline. Gate-stage timing is
+  identical at 37,447 cycles; up is 37,320 baseline versus 37,374 fixed.
+  V2 and V3 both measure 74,834, so the VLSU follow-up adds no observed
+  calibration-cycle cost. Hart-0 instruction sequences match; their first
+  timing difference occurs at up-stage FMA PC `0x8000062c`, and the final
+  difference includes the barrier. Attribution between VFU and slide
+  remains unresolved. The handover's exact-cycle requirement is not met
+  for this calibration; the runner's historical default remains 74,122.
+- The historical image lacks Snitch `df049c78` and a source manifest.
+  Its 658-cycle difference from the matched baseline is outside the three
+  Spatz repairs. Timer evidence and the instruction comparison are in
+  `hardware/elf_spatzfix/matched_calibration_timing.json` and
+  `calibration_hart0_timing_diff.json`. See the committed regression README
+  for the preserved source/configuration qualifications and commands.
+- A license-server restart left two earlier clients waiting without seats.
+  A dry-run-validated recovery batch, capped at two VCS seats, completed
+  both checks using the same images/ELF and `+notracer` (only NoC CSV logging
+  disabled; hart tracing retained). After collecting the successful runs,
+  native UCLI interrupts retired the superseded clients. Both returned 255
+  from the interrupted license wait and emitted VCS reports; all 256
+  nonempty hart traces were gathered, with `early_stop.json` distinguishing
+  these stops from validation verdicts. No VCS process or runtime license
+  remains held by this investigation. `license_audit.json` records usage.
+- Gathered all three private batches, recorded `badist stats`, and removed
+  their node scratch via `badist gc`. Fresh-run maximum RSS was 3.65 GiB,
+  maximum wall time 3h51m; future equivalent runs can declare 5 GB RAM,
+  7 GB scratch, and 16,624 seconds estimated runtime, retaining the governor.
+  RTL commits remain `7c98455`, `ee4db56`, and `fa77858`; main commit
+  `f9fce5d7` already pins them and adds the focused regressions.
