@@ -980,6 +980,19 @@ void matmul_4xVL(elem_t *c, const elem_t *a, const elem_t *b,
                               SPATZ_LD_ACC_RESTORE(); } while (0)
 #endif
 
+// QWEN_LOAD_ONLY (make qwen_load_only=1, perf diagnostic only -- the result is wrong): the 1xVL
+// loop keeps every weight load and drops its vfmacc, so the reorder buffer drains as soon as the
+// data lands and the vector unit can keep its full load window in flight. Measures what the memory
+// system delivers per core with the kernel's own access pattern but no compute or register reuse.
+#ifndef QWEN_LOAD_ONLY
+#define QWEN_LOAD_ONLY 0
+#endif
+#if QWEN_LOAD_ONLY
+#define QWEN_1XVL_FMA(vreg) do { (void)t0; } while (0)
+#else
+#define QWEN_1XVL_FMA(vreg) asm volatile("vfmacc.vf v0, %0, " vreg ::"f"(t0))
+#endif
+
 //==========================================================
 // 1xVL: ONE output row per iteration, LMUL=8
 //==========================================================
@@ -1093,7 +1106,7 @@ void matmul_1xVL(elem_t *c, const elem_t *a, const elem_t *b,
       a__ = a_ + n;
       SPATZ_LD("v16", "v20", (b__));
       b__ += P;
-      asm volatile("vfmacc.vf v0, %0, v8" ::"f"(t0));
+      QWEN_1XVL_FMA("v8");
       t0 = *a__;
 
       ++n;  // n = 2
@@ -1101,7 +1114,7 @@ void matmul_1xVL(elem_t *c, const elem_t *a, const elem_t *b,
       if (n != N) {
         SPATZ_LD("v8", "v12", (b__));
         b__ += P;
-        asm volatile("vfmacc.vf v0, %0, v16" ::"f"(t0));
+        QWEN_1XVL_FMA("v16");
         t0 = *a__;
       }
 
@@ -1114,7 +1127,7 @@ void matmul_1xVL(elem_t *c, const elem_t *a, const elem_t *b,
         SPATZ_LD("v16", "v20", (b__));
         b__ += P;
 
-        asm volatile("vfmacc.vf v0, %0, v8" ::"f"(t0));
+        QWEN_1XVL_FMA("v8");
         t0 = *a__;
 
         ++n;
@@ -1126,11 +1139,11 @@ void matmul_1xVL(elem_t *c, const elem_t *a, const elem_t *b,
         SPATZ_LD("v8", "v12", (b__));
         b__ += P;
 
-        asm volatile("vfmacc.vf v0, %0, v16" ::"f"(t0));
+        QWEN_1XVL_FMA("v16");
         t0 = *a__;
       }
 
-      asm volatile("vfmacc.vf v0, %0, v16" ::"f"(t0));
+      QWEN_1XVL_FMA("v16");
       // SPLIT STORE (SPATZ_1XVL_SPLIT_STORE, default ON).
       // Bursts are LOADS ONLY (use_port0_burst_req requires is_load), so a vector STORE always
       // takes the word-interleaved path across NrMemPorts=4 and its per-port share must fit the

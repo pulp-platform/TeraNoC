@@ -174,6 +174,9 @@ qwen_wpad ?= tile
 # full register block (512 outputs, 256 at KS=1): 2 at 8x8 B=16, 16 at 8x8 B=1; 1 from 512
 # outputs per core up. 1|2|4|8|16 pins it.
 qwen_ksplit ?= auto
+# Perf diagnostic: 1 drops the KS=1 kernel's vfmacc and keeps its weight loads (wrong result; memory
+# system delivery per core with the kernel's own access pattern and no compute).
+qwen_load_only ?= 0
 ifeq ($(qwen_span_align),stripe)
 qwen_span_def := QWEN_SPAN_ALIGN_DEFAULT 1
 else
@@ -225,6 +228,7 @@ qwen-gate-up/data/qwen_shape.h: FORCE
 	  echo '#define QWEN_DMA_CORE $(qwen_dma_core)u'; \
 	  echo '#define QWEN_PRELOAD $(qwen_preload)'; \
 	  echo '#define QWEN_REPEATS $(qwen_repeats)'; \
+	  echo '#define QWEN_LOAD_ONLY $(qwen_load_only)'; \
 	  echo '#define $(qwen_ks_def)'; \
 	  echo '#define $(qwen_span_def)'; \
 	  echo '#define $(qwen_pt_def)'; \

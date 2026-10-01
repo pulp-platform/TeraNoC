@@ -326,6 +326,18 @@ it from `scripts/gemm_sweep_shapes.txt` with `--shapes ... --elf-template ...`.
   (`--max-parallel 24 --reserve-licenses 20`); jobs held `pending` by it are correct
   behaviour, not a hang. **Distributing does not create seats** — it buys a full 4.4 GHz
   core per arm instead of nine tenths of a contended one.
+- **⚠️ Kill probe runs after harvest — the seat lives for the WHOLE sim, not the
+  benchmark.** A probe run needs ~50–150k benchmark cycles of data but then simulates the
+  full benchmark plus epilogue (500k–12M cycles), holding its seat for hours to days. On
+  2026-09-30 this accumulated to 96 of the 100 seats because batches were left running
+  after their analysis was done. Rules:
+  * Pull the probe logs, analyse, then **`badist cancel` the batch AND kill the simvs by
+    cwd** (cancel only marks the job; see the "badist cancel keeps the seat" note) — all
+    in the same turn as the analysis. Only full-length control runs whose point is the
+    final cycle count run to EOC.
+  * Probe batches: `--max-parallel 24 --reserve-licenses 10`. Archive probe lines first
+    (`hardware/elf_split/calib_snapshot.sh`), then clean node `trace_*`/`v4m_out`.
+  * `timeout-s` is not a substitute: it kills a run days after the data is in.
 - **Fall back, do not wait.** `--fallback questa` runs VCS and, if VCS exits before
   simulation time 0 (the only trace a refused seat leaves), re-runs the same ELF under
   QuestaSim *in the same job*. Questa's binding pool is **`mtiverification`** — **200 seats** (check with

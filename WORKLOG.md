@@ -18814,6 +18814,8 @@ the memory system.
 
 **Status.** All correctness runs on the per-tile image pass (GEMM, kc1-kc4, K-split B=2/4). The knob-free
 rebuild (build_split_vcs_rpt2) re-runs GEMM 512 + c4_b2_p1 + c4_b4_p2 to confirm cycle-identical results.
+  -> 2026-09-29 08:58: cycle-identical (11,896 / 23,787 / 23,131; GEMM EOC at the same 297,714 ns,
+  [SPOT] bit-identical, both checks success).
 
 ## 2026-09-30 — Spatz short-vector completion and load retirement fixes
 
@@ -18925,3 +18927,211 @@ not establish behavior of the complete historical upstream configuration.
   7 GB scratch, and 16,624 seconds estimated runtime, retaining the governor.
   RTL commits remain `7c98455`, `ee4db56`, and `fa77858`; main commit
   `f9fce5d7` already pins them and adds the focused regressions.
+
+## 2026-09-29 10:45 — overtaking potential at the local response crossbar ([NPPO])
+
+**Purpose.** Before building a look-ahead ("overtaking") local response arbiter, measure how many idle
+crossbar outputs a blocked queue could fill from the entries behind its stalled head.
+
+**Implementation.** `tb_noc_path_probe.svh` `[NPPO]`: per cycle and port, stalled inputs, idle outputs,
+and a greedy one-word-per-input count of idle outputs fillable from the 2nd (look 2) or 2nd..4th
+(look 4) local-FIFO entry, only entries with no older same-output entry in their queue (per-output
+order kept). Image `build_split_vcs_ov` (fa097164 + NOC_PATH_PROBE), batch ov1, streaming periods.
+
+**Result** (per group per cycle, both ports = 32 outputs; upper bound for one cycle):
+
+| case | stalled inputs | idle outputs | delivered | +look 2 | +look 4 |
+|---|---|---|---|---|---|
+| B=1 | 10.5 | 21.8 | 9.78 | +1.95 (+20%) | +2.99 (+31%) |
+| B=1 K-split | 12.8 | 21.9 | 9.73 | +2.81 (+29%) | +4.52 (+47%) |
+| B=2 | 10.0 | 22.1 | 9.50 | +1.85 (+20%) | +2.82 (+30%) |
+| B=8 | 8.6 | 24.0 | 7.64 | +1.02 (+13%) | +1.44 (+19%) |
+
+**Status.** Potential is substantial at B<=2; design of a look-ahead local response arbiter is next
+(pending review). The bound ignores feedback (released words change later cycles, downstream MSHR/tile
+ports) and only sees the 6-entry local FIFO, not the router's own 2 output slots.
+
+## 2026-09-29 15:10 — look-ahead local response buffer (resp_lookahead_queue): correct, no throughput gain
+
+**Purpose.** Relieve head-of-line blocking at the local response crossbar ([NPPO] bound: +31% B=1,
++47% K-split, look 4), per the Option B design agreed with the user (registered offer, 16-bit busy
+vector per port, per-output order kept, starvation guard).
+
+**Implementation.** `hardware/src/resp_lookahead_queue.sv` (Depth 6, LookDepth 2..4, MaxSkip 3);
+wrapper instantiates it when `RespLocalLookahead >= 2` (`noc_resp_local_lookahead`, default off) and
+then runs the local response crossbar with AxiVldRdy=0/LockIn=0; `resp_out_busy_q` = registered
+after-xbar valid per port. Probe `[NPPLA]` (overtake share). First batch (la1) killed after 6 min: the
+`offered_is_stored` assertion used `==` and fired on X data words (never-written memory); fixed to `===`.
+
+**Result** (batch la2r vs ov1 = same RTL without look-ahead; per-core delivery, streaming periods):
+
+| case | base | look 2 | look 3 | look 4 | overtaken share (look 4) |
+|---|---|---|---|---|---|
+| B=1 | 0.649 | 0.653 | 0.646 | 0.646 | 24.5% |
+| B=1 K-split | 0.641 | 0.648 | 0.648 | 0.655 | 28.6% |
+| B=2 | 0.640 | 0.644 | 0.641 | 0.635 | 24.0% |
+| B=8 | 0.490 | 0.482 | 0.494 | 0.491 | 15.1% |
+
+* Crossbar output delivery per group unchanged (9.76 -> 9.73 words/cycle); latency +0.5..2 cycles.
+* fp32 GEMM 512x128x128: [SPOT] bit-identical; 11,896 -> 11,767 (L2) / 11,523 (L3) / 12,562 (L4).
+* Correctness: K-split B=2/B=4 checks (all depths) and kc3 (L4) success; 0 assertion hits.
+* Words DO overtake (15-29%), but throughput does not move: HOL at this crossbar is not what caps the
+  streaming rate. The [NPPO] bound over-counted (one-cycle view, no feedback).
+* Per-period delivery (B=1) is bimodal: ~0.66-0.72 while streaming, with a 1.5-2-period dip
+  (0.03-0.5) every ~9 periods = each K-tile boundary (~15-20% of the time).
+
+**Status.** Knob stays off; keep or remove the module pending the user's call.
+
+## 2026-09-30 07:00 — streaming-phase breakdown incl. the requesting side ([NPPC]); reverse sensitivity
+
+**Purpose.** Split the "outside the NoC" part of a word's latency and test whether the MSHR drain width
+or the source tile's burst-expander contexts bound the streaming rate.
+
+**Implementation.** `tb_noc_path_probe.svh` `[NPPC]`: core-port read requests (inter-/intra-group by
+address), core-port read responses and request stalls; Little's-law core-port round trip. Images si0
+(fa097164 + probe), si1 (`group_mshr_drain_beats=1`), si2 (`tcdm_burst_interleave=0`); batch si1.
+Caveat: the c2m / mreq / mrsp latencies in [NPPC] are INVALID (those point pairs do not conserve words:
+multicast, merges, intra-group bursts entering the MSHR) -- to be removed or re-based.
+
+**Result** (streaming periods only: per-core delivery >= 0.6; cycles):
+
+| run | rate | in flight | reorder-buffer latency | core-port round trip | NoC round trip | reorder wait |
+|---|---|---|---|---|---|---|
+| B=1 base | 0.690 | 44.1 | 63.9 | 44.1 | 40.1 | 19.8 |
+| B=1 drain 1 | 0.690 | 44.1 | 63.9 | 44.1 | 40.0 | 19.8 |
+| B=1 1 ctx | 0.681 | 44.1 | 64.7 | 44.9 | 40.7 | 19.8 |
+| K-split base | 0.673 | 96.4 | 143.3 | 77.9 | 75.6 | 65.3 |
+| K-split drain 1 | 0.674 | 96.5 | 143.2 | 77.9 | 75.6 | 65.3 |
+| K-split 1 ctx | 0.676 | 96.9 | 143.3 | 79.5 | 77.3 | 63.8 |
+| B=2 base | 0.669 | 41.2 | 61.7 | 42.9 | 38.8 | 18.9 |
+| B=8 base | 0.493 | 20.5 | 41.5 | 31.2 | 27.2 | 10.3 |
+
+* The requesting-side path (core port -> tile -> MSHR and back) adds only ~2-4 cycles beyond the NoC
+  round trip; the core is never stalled by the tile (request stall ~0). MSHR drain width 1 vs 2: no effect.
+  One-context expander: -1.3% at B=1, none under K-split (the source-tile queue moves into the req mesh).
+* The large "outside the NoC" part is REORDER-BUFFER time: 20 of 64 cycles at B=1 (31%), 65 of 143 under
+  K-split. Intra-group words are ~6% of reads.
+* Streaming rate 0.67-0.69 w/c/core with ~30 words outstanding in the memory system at B=1 (rate x
+  core-port round trip) and no core-port backpressure: at B=1 the core is not issuing more; under K-split
+  (2.2x outstanding) the memory round trip roughly doubles, mostly at the source tile (11.7 -> 30.8).
+
+**Status.** Next: VLSU issue-side and reorder-buffer probe (why only ~30 words outstanding at B=1; how much
+of the reorder wait is in-order head-of-line), and a synthetic many-outstanding load test for the
+network's saturation rate.
+
+## 2026-09-30 09:30 — streaming bottleneck: the vector unit's outstanding-load window (load-only test)
+
+**Purpose.** Find what caps streaming delivery at ~0.67-0.69 words/cycle/core at small batch.
+
+**Implementation.** `tb_noc_path_probe.svh` `[NPPV]` (Spatz VLSU state per core-cycle: issue / active
+without issuing / idle-refused / idle-no-instruction, VRF write accepted/refused, LSU instructions per
+1000 cycles); invalid [NPPC] c2m/mreq/mrsp removed. Perf-only knob `qwen_load_only=1` (qwen Makefile ->
+QWEN_LOAD_ONLY; the KS=1 loop keeps its weight loads and drops the vfmacc). ELFs hardware/elf_split/lo/
+(lo0_ks4_b1 normal K-split 4, lo1_ks4_b1 load-only, lo1_sb4_b1 load-only K-split 1). Image sv0
+(fa097164 + probe), batch sv1.
+
+**Result** (streaming periods; words per core; RT = core-port round trip):
+
+| run | rate | ROB occupancy | in memory | waiting in ROB | memory RT | reorder wait | VLSU active, not issuing | VLSU idle, no LSU op |
+|---|---|---|---|---|---|---|---|---|
+| B=1 (64 cols/core, 32-word loads) | 0.690 | 44.1 | 30.5 | 13.7 | 44 | 20 | 0.77 | 0.18 |
+| same, load-only | **0.788** | 50.8 | 35.2 | 15.6 | 45 | 20 | 0.94 | 0.01 |
+| K-split 4 (256 cols, 2x64-word loads) | 0.673 | 96.4 | 52.4 | 43.9 | 78 | 65 | 0.87 | 0.09 |
+| same, load-only | 0.697 | 103.7 | 55.7 | 48.0 | 80 | 69 | 0.95 | 0.01 |
+
+* Without compute the vector unit holds an instruction but does not issue 94-95% of the time: it waits
+  for reorder-buffer space. Occupancy sits at its window: 51 of 64 words (2 loads x 32) and 104 of 128
+  (2 loads x 64, ROB 32/port). Per-core delivery = window / (memory RT + reorder wait).
+* The reorder wait is NOT the vfmacc write-after-read: it stays 20 / 69 cycles with no compute. It is
+  in-order release -- a word waits for older words of its load (bursts from different tiles, variable RT).
+* The network is not saturated by the 32-word pattern: 0.79/core at an unchanged 45-cycle RT. The K-split
+  pattern does raise the RT (source tile 11.7 -> 30.8 cycles) at ~0.7.
+* With compute (normal B=1), 18% of cycles the unit has no load to work on (kernel's two register buffers).
+
+**Status.** The streaming limit is the VLSU's outstanding-load window versus RT + reorder wait, not the
+NoC crossbar/links. Options pending review: deeper load window (spatz_vlsu_dual_load > 2 / ROB depth,
+more register buffers in the KS=1 kernel), less in-order hold in the ROB, and the K-split source-tile
+queueing.
+
+## 2026-09-30 12:40 — K-split on/off at 4x4; three-buffer KS=1 kernel; source-side probe
+
+**Implementation.** `qwen_1xvl_bufs=3` (KS=1 loop rotates v8/v16/v24, two rows ahead; default 2 is
+disassembly-identical to before). `[NPPS]` source-side probe (tile egress saturation, request intake
+blocking, per-group words). ELFs hardware/elf_split/kb/ (K=5120, P=16384; ks1 = qwen_ksplit=1, ksA = auto).
+Image sw0 (fa097164 + probe), batch sw1. The 4 check ELFs were first built without qwen_preload (fill on
+target, still pre-benchmark at 324k cycles): killed, rebuilt with qwen_preload=1 (kb/chkp*), batch swc.
+
+**Result** (streaming-window FPU util over all benchmark periods so far; per-core delivery in
+streaming periods). Windows exclude the K-split's final reduction, so they favour K-split slightly.
+
+| case | FPU util | delivery | memory RT | reorder wait | VLSU idle, no LSU op | src tile SIN->SOUT | src intake blocked |
+|---|---|---|---|---|---|---|---|
+| B=1 ksplit 1 | 14.7% | 0.689 | 44 | 20 | 0.18 | 11.8 | 0.026 |
+| B=1 ksplit 1, 3 buffers | 15.0% | 0.697 | 44 | 20 | 0.19 | 11.3 | 0.026 |
+| B=1 ksplit auto (4) | 12.5% | 0.674 | 78 | 65 | 0.09 | 30.9 | 0.134 |
+| B=1 auto, 3 buffers | 12.2% | 0.645 | 77 | 62 | 0.16 | 30.3 | 0.110 |
+| B=2 ksplit 1 | 28.4% | 0.667 | 43 | 19 | 0.25 | 11.0 | 0.023 |
+| B=2 ksplit auto | 25.7% | 0.703 | 82 | 78 | 0.18 | 29.5 | 0.181 |
+| B=4 ksplit 1 | 57.4% | 0.628 | 36 | 14 | 0.55 | 8.3 | 0.012 |
+| B=4 ksplit auto | 60.0% | 0.672 | 55 | 34 | 0.58 | 16.5 | 0.048 |
+| B=8 (auto = 1) | 91.2% | 0.494 | 31 | 10 | 0.86 | 6.4 | 0.007 |
+
+* K-split at 4x4 costs at B=1 (-15%) and B=2 (-9%), helps at B=4 (+4.5%, before its reduction cost).
+* Three buffers: +2% at B=1 only; the VLSU "no LSU op" share does not drop, so the missing loads are not
+  the buffer write-after-read.
+* Core stall counters (STALLG, streaming): the Snitch waits on the Spatz offload (acc) 70-76% of cycles,
+  scalar RAW ~0 -> the gap is in Spatz's instruction flow, not the scalar activation load.
+* Source side: no group hot spot (max/mean 1.17-1.29). K-split raises request-intake blocking at the
+  source tile 5x (0.026 -> 0.13) while its egress is LESS saturated (both ports busy 0.27 -> 0.16):
+  the K-split pattern is limited at the tile's intake (bank/expander), not its response ports.
+
+* Correctness (swc, preloaded, B=1 K=128 P=16384 kt=32, ksplit 1): check=1 and check=2 pass with
+  2 and 3 buffers (18,302 / 18,476 / 18,255 / 18,500 cycles). check=2 passing without K-split confines the
+  earlier B=1 X hang to the K-split path.
+
+**Status.** Next: a Spatz controller probe (head instruction and why it waits); full-run cycle counts
+for ksplit 1 vs auto at B=1/2/4 (ctl1).
+
+## 2026-09-30 15:00 — Spatz controller probe: B=1 is bound by the remote scalar activation load
+
+**Implementation.** `tb_noc_path_probe.svh` `[NPPK]` (Spatz controller issue head per core-cycle:
+empty / issue / ids full / VFU / VLSU / SLDU not ready; mean ids in use). Image sk0, batch sk1.
+
+**Result** (streaming periods):
+
+| run | head empty | head waits VLSU | head waits VFU | ids in use |
+|---|---|---|---|---|
+| B=1 ksplit 1 | 0.68 | 0.27 | 0.00 | 2.2 |
+| B=1 ksplit 1, 3 buffers | 0.71 | 0.25 | 0.00 | 1.9 |
+| B=1 ksplit auto (4) | 0.23 | 0.73 | 0.00 | 2.0 |
+| B=1 load-only | 0.02 | 0.96 | 0.00 | 2.9 |
+| B=8 | 0.04 | 0.00 | 0.82 | 3.1 |
+
+* Without K-split the controller is EMPTY 68% of the time (the Snitch's "acc" stall): the vfmacc.vf waits
+  in the FPU sequencer for its scalar A operand t0 = a_[n], loaded only one row ahead. A is word-
+  interleaved over all groups, so that flh is remote (~one NoC round trip) and the loop runs at one
+  remote latency per row (~46 cycles for 32 words = 0.69 w/c). Load-only (no vfmacc, t0 unused): empty
+  2%, VLSU-bound. The 4-instruction id limit is NOT hit (ids full <1%).
+* K-split: the head waits on the VLSU 73% (memory-side bound, as before). B=8: VFU-bound (compute).
+
+**Fix under test.** `qwen_x_prefetch=4` (KS=1 loop, 2 buffers): t0..t3 hold rows n..n+3, each refilled
+four rows ahead right after its vfmacc.vf (disassembly checked); default 1 is disassembly-identical.
+Batch xp1: probe run, check=1/check=2 correctness, and a full-length control run.
+
+## 2026-10-01 09:00 — look-ahead buffer removed; small-batch probe knobs trimmed; fleet freeze
+
+**Implementation.** `resp_lookahead_queue.sv` and its wrapper/pkg/Makefile/Bender wiring deleted (no
+throughput gain, see 2026-09-29 15:10); `[NPPLA]` and the `[NPPO]` overtaking-potential counter removed
+from `tb_noc_path_probe.svh`. Kept probes: `[NPPC]` requesting side, `[NPPV]` VLSU state, `[NPPS]`
+source tile, `[NPPK]` Spatz controller head. Kept SW knob `qwen_load_only` (default 0; default build
+disassembly-identical). Dropped `qwen_1xvl_bufs=3` (+2% only) and `qwen_x_prefetch=4` (correct at K=128,
+degrades at K=5120: stuck duplicate VLSU reads); copy kept at jobs tmp for reference.
+
+**Fleet.** The Synopsys licence server dropped every checkout at 2026-09-30 17:04; VCS simvs that did not
+re-acquire slept in `+vcs+lic+wait` for 14 h (transcript frozen, hrtimer_nanosleep): ctl1 x7,
+e2e64c, x8yx_b64 killed. 45 simvs of batches reported killed on 09-30 were still alive (the kill script
+cancelled first, then found no "running" jobs to kill) -- killed by cwd, verified by a fleet-wide list.
+Trace files of all dead jobs removed fleet-wide: 8.8 TB freed. Finished: x8yx_b32 749,393 cycles;
+8x8 B=16 K-split 420,111 / 423,452 vs 660,796 without (1.6x).
+
+**Status.** Next: small-batch activation-latency fix (few runs), then FFN integration.
