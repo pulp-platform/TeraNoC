@@ -987,6 +987,17 @@ void matmul_4xVL(elem_t *c, const elem_t *a, const elem_t *b,
 #ifndef QWEN_LOAD_ONLY
 #define QWEN_LOAD_ONLY 0
 #endif
+// QWEN_X_CONST (make qwen_x_const=1, perf diagnostic only -- the result is wrong): the 1xVL loop
+// skips the per-row scalar activation load t0 = a_[n] (t0 keeps the row's first element), so the
+// vfmacc.vf never waits on that remote load. Bounds what hiding the activation latency can buy.
+#ifndef QWEN_X_CONST
+#define QWEN_X_CONST 0
+#endif
+#if QWEN_X_CONST
+#define QWEN_X_LD(t, p) do { (void)(p); } while (0)
+#else
+#define QWEN_X_LD(t, p) (t) = *(p)
+#endif
 #if QWEN_LOAD_ONLY
 #define QWEN_1XVL_FMA(vreg) do { (void)t0; } while (0)
 #else
@@ -1107,7 +1118,7 @@ void matmul_1xVL(elem_t *c, const elem_t *a, const elem_t *b,
       SPATZ_LD("v16", "v20", (b__));
       b__ += P;
       QWEN_1XVL_FMA("v8");
-      t0 = *a__;
+      QWEN_X_LD(t0, a__);
 
       ++n;  // n = 2
       a__ = a_ + n;
@@ -1115,7 +1126,7 @@ void matmul_1xVL(elem_t *c, const elem_t *a, const elem_t *b,
         SPATZ_LD("v8", "v12", (b__));
         b__ += P;
         QWEN_1XVL_FMA("v16");
-        t0 = *a__;
+        QWEN_X_LD(t0, a__);
       }
 
       // ---- Steady state: vfmacc only ----
@@ -1128,7 +1139,7 @@ void matmul_1xVL(elem_t *c, const elem_t *a, const elem_t *b,
         b__ += P;
 
         QWEN_1XVL_FMA("v8");
-        t0 = *a__;
+        QWEN_X_LD(t0, a__);
 
         ++n;
         a__ = a_ + n;
@@ -1140,7 +1151,7 @@ void matmul_1xVL(elem_t *c, const elem_t *a, const elem_t *b,
         b__ += P;
 
         QWEN_1XVL_FMA("v16");
-        t0 = *a__;
+        QWEN_X_LD(t0, a__);
       }
 
       QWEN_1XVL_FMA("v16");

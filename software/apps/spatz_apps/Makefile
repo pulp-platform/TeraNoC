@@ -177,6 +177,9 @@ qwen_ksplit ?= auto
 # Perf diagnostic: 1 drops the KS=1 kernel's vfmacc and keeps its weight loads (wrong result; memory
 # system delivery per core with the kernel's own access pattern and no compute).
 qwen_load_only ?= 0
+# Perf diagnostic: 1 skips the KS=1 kernel's per-row scalar activation load (wrong result; bounds
+# what hiding that remote load latency can buy).
+qwen_x_const ?= 0
 ifeq ($(qwen_span_align),stripe)
 qwen_span_def := QWEN_SPAN_ALIGN_DEFAULT 1
 else
@@ -229,6 +232,7 @@ qwen-gate-up/data/qwen_shape.h: FORCE
 	  echo '#define QWEN_PRELOAD $(qwen_preload)'; \
 	  echo '#define QWEN_REPEATS $(qwen_repeats)'; \
 	  echo '#define QWEN_LOAD_ONLY $(qwen_load_only)'; \
+	  echo '#define QWEN_X_CONST $(qwen_x_const)'; \
 	  echo '#define $(qwen_ks_def)'; \
 	  echo '#define $(qwen_span_def)'; \
 	  echo '#define $(qwen_pt_def)'; \

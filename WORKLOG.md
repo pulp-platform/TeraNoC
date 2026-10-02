@@ -19135,3 +19135,19 @@ Trace files of all dead jobs removed fleet-wide: 8.8 TB freed. Finished: x8yx_b3
 8x8 B=16 K-split 420,111 / 423,452 vs 660,796 without (1.6x).
 
 **Status.** Next: small-batch activation-latency fix (few runs), then FFN integration.
+
+## 2026-10-01 08:30 — small-batch ceiling: the activation-latency fix is worth +14% at B=1, then hardware
+
+**Implementation.** Perf-only knob `qwen_x_const=1` (KS=1 loop skips the per-row scalar activation load
+t0 = a_[n]; default 0 is disassembly-identical). One run (xc1) on build_split_vcs_pr1 (a3a8c03b + probe),
+4x4 B=1 K=5120 P=16384, ksplit 1; baseline = sk1 sk_ks1_b1 (same ELF/RTL).
+
+**Result** (streaming periods): delivery 0.689 -> **0.788** words/cycle/core = the load-only ceiling
+(0.786); streaming FPU 17.2 -> 19.7%; Spatz controller empty 68% -> 6%, waiting on the VLSU 27% -> 87%;
+memory RT unchanged (44). So the remote activation load costs 14% at B=1, and beyond it the VLSU's
+two-loads-in-flight window against RT + reorder wait is the wall (needs MaxInflight > 2: hardware).
+
+**Status.** Decision (user, 2026-10-01): stop small-batch tuning, move to FFN integration. Possible later
+SW item: stage each K tile's activation slice into the core's own tile banks (+~14% at B<=2).
+Clean-up 2026-10-02: 280 node job dirs of finished batches deleted (1.18 TB); 29 build images deleted
+(26 GB; kept 8x8_p2/p3 for live runs, 8x8_yx/mr4 used by the FFN arms, pr1/rpt2 = current RTL).

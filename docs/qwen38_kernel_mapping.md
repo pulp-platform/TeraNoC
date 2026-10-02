@@ -735,6 +735,19 @@ GEMM work this model requires.
 
 ## 8. Tranche plan
 
+> **Status 2026-09-28** (details: `docs/qwen3_8_27b/qwen3_8_27b_teranoc_gvsoc_deployment_prompt.md` §0):
+> **T3 is done for the FFN projections** -- `qwen-gate-up` splits decode along output columns (plus
+> a 4x4 group patch and a K split for small batches), streams W from L2, and runs 92-98% of FPU
+> issue per K tile for B >= 16 on both meshes. T0 was superseded by that streaming app. T1, T2, T4,
+> T5 and the down projection are not started. Small batches (B < 16) are bound by per-core L1
+> delivery, not by L2 bandwidth. All measurements use `l1_bank_size=4096` (16 / 64 MiB L1), not
+> the 3.61 / 14.86 MiB budgets in §5.
+> **Small-batch bottleneck, 2026-10-01** (WORKLOG 2026-09-30..10-01): at 4x4 B=1 a core streams
+> 0.69 W words/cycle against a 1.0 roofline. The NoC is not saturated (links ~27%, local crossbar
+> outputs ~30%). Two limits stack: the KS=1 kernel's per-row scalar activation load is remote and
+> issued one row ahead (hiding it: 0.79, +14%), then the VLSU keeps only two loads in flight against a
+> ~44-cycle round trip plus ~20 cycles of in-order reorder wait (a hardware window, not software).
+
 **T0 — shape mapping, no new kernel (days).**
 Wrap the existing GEMM as `qwen_<workload>_<operation>` apps with the runtime
 `logical=… tile=…` provenance line and `SHA256SUMS`. Publish the prefill projection claim from the
