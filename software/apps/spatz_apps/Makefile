@@ -35,6 +35,9 @@ qwen_preload ?= 0
 ifeq ($(qwen_preload),1)
 QWEN_EXTRA_OBJS := qwen-gate-up/data/qwen_operands.S.o
 endif
+# qwen-ffn-down keeps its rules and ffn_* variables in its own fragment; it must come
+# before $(BINARIES) below, whose prerequisites (QWEN_EXTRA_OBJS) are expanded at parse time.
+-include $(APPS_DIR)/qwen-ffn-down/app.mk
 
 # Make all applications
 all: $(ALL_GCC)

@@ -1,0 +1,216 @@
+// Copyright 2026 ETH Zurich and University of Bologna.
+// SPDX-License-Identifier: Apache-2.0
+//
+// Build-time MSHR bank-hash selection. Runs on the HOST and emits the constants
+// the target writes straight into its CSRs, so no core searches for them at boot.
+//
+// It includes the same runtime/gemm_hash.h the target would have used, so the
+// scoring cannot drift from the model it is supposed to reproduce.
+//
+// Addresses: the score reads address bits [shift+2, shift+6). Every operand is
+// aligned to QWEN_MESH_SWEEP, so with the shift capped at QWEN_HASH_SHIFT_MAX
+// those bits come entirely from the offset within the buffer and not at all from
+// the buffer's link address -- which is why passing offsets here is exact rather
+// than an approximation. The target asserts that alignment at boot.
+#include <stdint.h>
+#include <stdio.h>
+
+#include "qwen_layout.h"
+#include "gemm_config.h"
+#include "gemm_burst.h"
+#include "gemm_hash.h"
+
+// Highest bank shift whose index bits [shift, shift+log2(banks)) still lie inside the mesh sweep
+// (word bits < log2(QWEN_MESH_SWEEP/4) = 12), so the score is exact on buffer offsets; clamped to
+// the RTL CSR range (mempool_group_mshr_cfg BankShiftMax = 10). Was a fixed 8, which is right only
+// for 16 banks (4 index bits): with the split MSHR's 2 banks it hid bits 9-11, and a qwen shape
+// whose X rows are 2560 words apart (K=5120 fp16) differ ONLY in bits 9 and 11 -- every shift the
+// chooser was allowed to try put all 8 concurrent row loads in one bank.
+#define QWEN_RTL_SHIFT_MAX 10u
+static uint32_t qwen_log2(uint32_t x) { uint32_t l = 0; while (x > 1u) { x >>= 1; ++l; } return l; }
+// What one core actually has outstanding, derived rather than assumed.
+//
+// A vector load is split into 16-word bursts (gemm_burst_next), 64 bytes apart.
+// Each full burst costs MaxBurstWords/lanes ids in EVERY reorder buffer, and a
+// ROB holds GEMM_BURST_ROB_DEPTH, so the ids a load needs decide how many loads
+// can be in flight -- often just one. Both axes matter and they pull opposite
+// ways: sub-requests step by 16 words, reduction steps by a whole row.
+#define QWEN_VL_HW ((VLEN) * GEMM_LMUL(KERNEL_SIZE) / (8u * GEMM_ELEM_BYTES))
+#define QWEN_VL_CAP \
+  ((GEMM_BURST_ROB_DEPTH) * (GEMM_BURST_LANES) * 4u / GEMM_ELEM_BYTES)
+#define QWEN_VL_MAX ((QWEN_VL_HW) < (QWEN_VL_CAP) ? (QWEN_VL_HW) : (QWEN_VL_CAP))
+#define QWEN_BURST_WORDS (GEMM_BURST_TILE_WORDS)
+#define QWEN_IDS_PER_BURST ((QWEN_BURST_WORDS) / (GEMM_BURST_LANES))
+
+// ---- Single class (the scalar X/H loads), scored on the REAL layout -------------------
+// gemm_hash.h models A as [M][GEMM_N] with no K split. This app's H is [B][QWEN_LDX] (the H row
+// pad) and each core reads its own K part, so that model is wrong here -- and with the shift
+// capped at QWEN_HASH_SHIFT_MAX it could not separate unpadded rows at all (K >= 4096: every
+// candidate tied and the smallest shift won, putting all 8 of a core's row loads in ONE bank of
+// its slice: 4-sharer entries filled it and bank-full backpressure collapsed 4x4 B>=16 ~100x).
+// Here: for group g, every column slice (singles steer to the column family in the decode
+// split: tiles m, m+4, m+8, m+12), the distinct H words its cores issue at the same K step --
+// rows of their row chunk, at their K part -- and how many banks the shift spreads them over,
+// summed over slices and sampled steps; then the busiest bank. Same decode-split arithmetic as
+// main.c STEP 1.
+typedef struct { uint32_t spread, peak; } single_score_t;
+static single_score_t score_single(uint32_t g, uint32_t shift, uint32_t banks, uint32_t x_base) {
+  const uint32_t cpg = (uint32_t)(NUM_CORES / NUM_GROUPS), ks = (uint32_t)QWEN_KSPLIT;
+  const uint32_t n_rc = (uint32_t)QWEN_B / (uint32_t)KERNEL_SIZE;
+  const uint32_t rcg = n_rc < (uint32_t)GEMM_DECODE_RC_PER_GROUP ? n_rc : (uint32_t)GEMM_DECODE_RC_PER_GROUP;
+  const uint32_t n_bands = rcg ? n_rc / rcg : 1u;
+  const uint32_t slices = MSHR_CFG_SPLIT ? (uint32_t)MSHR_SPLIT_TILES : 1u;
+  uint32_t load[64] = {0};
+  single_score_t sc = {0, 0};
+  const uint32_t samples = 64u;
+  for (uint32_t sm = 0; sm < samples; ++sm) {
+    // A K step inside a tile (the parts advance together, one row per step).
+    const uint32_t t = (sm * (uint32_t)(QWEN_K / QWEN_KT)) / samples;
+    const uint32_t n = (sm * 37u) % (uint32_t)QWEN_KT_CORE;
+    for (uint32_t m = 0; m < slices; ++m) {
+      uint32_t seen = 0;
+      for (uint32_t c = 0; c < cpg; ++c) {
+        if (MSHR_CFG_SPLIT && (c % (uint32_t)MSHR_SPLIT_TILES) != m) continue;  // column family m
+#if FFN_KSPLIT_XGROUP
+        const uint32_t rc = ((g / ks) % n_bands) * rcg + c % rcg;  // main.c STEP 1, ffn_kgroup=1
+        const uint32_t kpart = g % ks;
+#else
+        const uint32_t rc = (g % n_bands) * rcg + c % rcg;
+        const uint32_t kpart = (c / rcg) % ks;
+#endif
+        const uint32_t k = t * (uint32_t)QWEN_KT + kpart * (uint32_t)QWEN_KT_CORE + n;
+        for (uint32_t r = 0; r < (uint32_t)KERNEL_SIZE; ++r) {
+          const uint32_t word = (x_base + ((rc * (uint32_t)KERNEL_SIZE + r) * (uint32_t)QWEN_LDX + k) *
+                                              GEMM_ELEM_BYTES) / 4u;
+          const uint32_t bank = gemm_hash_bank(word, shift, 0, banks);
+          seen |= 1u << bank;
+          ++load[bank];
+        }
+      }
+      for (uint32_t b = 0; b < banks; ++b) sc.spread += (seen >> b) & 1u;
+    }
+  }
+  for (uint32_t b = 0; b < banks; ++b) if (load[b] > sc.peak) sc.peak = load[b];
+  return sc;
+}
+
+int main(void) {
+  const uint32_t banks = (MSHR_CFG_ENTRIES) / (MSHR_CFG_WAYS);
+  const uint32_t sweep_bits = qwen_log2((uint32_t)(QWEN_MESH_SWEEP) / 4u);
+  const uint32_t shift_fit  = sweep_bits - qwen_log2(banks);
+  const uint32_t QWEN_HASH_SHIFT_MAX = shift_fit < QWEN_RTL_SHIFT_MAX ? shift_fit : QWEN_RTL_SHIFT_MAX;
+
+  // What one group actually has outstanding, which is what the banks have to
+  // hold: the distinct column blocks it owns -- cores sharing a block merge into
+  // one entry -- times the bursts each load splits into, across the loads that
+  // fit in the reorder buffer at once.
+  //
+  // The shared model in gemm_hash.h scores only the spread ACROSS CORES at a
+  // single step. That misses both axes that matter here: the sub-requests of one
+  // load, 64 bytes apart, and the reduction step, a whole row apart.
+  // Cores sharing one column block, and the DISTINCT blocks a group therefore
+  // has outstanding. Take it from GEMM_SHARE_B, the same macro main.c's split and
+  // mshr_cfg.h's merge targets come from: it is B/KERNEL_SIZE in the decode split
+  // but ROWS_PER_GROUP/KERNEL_SIZE in the prefill one, and deriving it here from
+  // QWEN_B instead got both wrong once KERNEL_SIZE stopped being 1.
+  const uint32_t share  = (uint32_t)GEMM_SHARE_B(KERNEL_SIZE);
+  // Split group MSHR (MSHR_CFG_SPLIT): the burst class of one group is served by four 4-tile
+  // slices with their own banks, so what a bank set has outstanding is what ONE slice's 4 cores
+  // hold -- 4/min(share,4) distinct blocks -- not the whole group's GEMM_CPG/share.
+  const uint32_t cores_per_bankset = MSHR_CFG_SPLIT ? (uint32_t)MSHR_SPLIT_TILES
+                                                    : (uint32_t)GEMM_CPG;
+  const uint32_t share_in_set = (share < cores_per_bankset) ? share : cores_per_bankset;
+  const uint32_t blocks = cores_per_bankset / (share_in_set ? share_in_set : 1u);
+  // Per-core columns of ONE STRIP; the W buffer's row stride is the strip width plus
+  // the row pad, QWEN_LDW (qwen_layout.h, "P strips" and "Row pad").
+  const uint32_t span   = (uint32_t)QWEN_PT / (uint32_t)GEMM_PBLOCKS(KERNEL_SIZE);
+  // One load covers min(span, VL_MAX) elements and splits into that many bursts;
+  // its id cost then caps how many loads can overlap.
+  // Below 16-byte spans the kernel keeps the stripe cap, so a load is one burst.
+  const uint32_t cap    = (QWEN_SPAN_ALIGN >= 8) ? (uint32_t)QWEN_VL_MAX
+                                                 : (uint32_t)QWEN_STRIPE_E;
+  const uint32_t vl     = (span < cap) ? span : cap;
+  const uint32_t subs   = (vl * GEMM_ELEM_BYTES + QWEN_BURST_WORDS * 4u - 1u) /
+                          (QWEN_BURST_WORDS * 4u);
+  const uint32_t ids    = subs * QWEN_IDS_PER_BURST;
+  const uint32_t inflight = ids && (uint32_t)GEMM_BURST_ROB_DEPTH / ids ?
+                            (uint32_t)GEMM_BURST_ROB_DEPTH / ids : 1u;
+
+  printf("// GENERATED by script/gen_hash.c -- do not hand-edit.\n");
+  printf("// Bank-hash selectors for this shape, one triple per group.\n");
+  printf("#ifndef QWEN_HASH_H\n#define QWEN_HASH_H\n\n");
+  printf("#define QWEN_HASH_SHIFT_MAX %u\n", (unsigned)QWEN_HASH_SHIFT_MAX);
+  printf("#define QWEN_HASH_BANKS %u\n\n", (unsigned)banks);
+  printf("// { bank_shift_single, bank_shift_burst, bank_burst_bits }\n");
+  printf("// one load = %u elems = %u bursts = %u ids/ROB -> %u load(s) in flight\n",
+         (unsigned)vl, (unsigned)subs, (unsigned)ids, (unsigned)inflight);
+  // The sharing model the scores are built on, and the ceiling they can reach:
+  // a group cannot occupy more banks than it has distinct addresses outstanding.
+  printf("// mshr_split=%u cores/bankset=%u steer_single_row=%u\n",
+         (unsigned)MSHR_CFG_SPLIT, (unsigned)cores_per_bankset,
+         (unsigned)MSHR_D_STEER_SINGLE_ROW);
+  printf("// ks=%u ksplit=%u share=%u streams=%u -> %u distinct addrs/step, bank ceiling %u\n",
+         (unsigned)KERNEL_SIZE, (unsigned)QWEN_KSPLIT, (unsigned)share, (unsigned)blocks,
+         (unsigned)(blocks * subs),
+         (unsigned)(blocks * subs < banks ? blocks * subs : banks));
+  printf("static const uint8_t qwen_hash_sel[%u][3] = {\n", (unsigned)NUM_GROUPS);
+
+  for (uint32_t g = 0; g < (uint32_t)NUM_GROUPS; ++g) {
+    const uint32_t a = QWEN_X_REPLICA_OF(g) * (uint32_t)QWEN_X_STRIDE_B;
+    uint32_t single = 4, burst = 4, bits = 0;
+    single_score_t best_s = score_single(g, single, banks, a);
+    uint32_t best_now = 0, best_soon = 0;
+
+    for (uint32_t shift = 4; shift <= QWEN_HASH_SHIFT_MAX; ++shift) {
+      const single_score_t s = score_single(g, shift, banks, a);
+      if (s.spread > best_s.spread || (s.spread == best_s.spread && s.peak < best_s.peak)) {
+        best_s = s;
+        single = shift;
+      }
+
+      for (uint32_t bb = 0; bb <= 1; ++bb) {
+        if (shift < GEMM_BURST_HASH_ALIGN + bb) continue;
+        uint32_t now = 0, soon = 0;
+        for (uint32_t loads = 1; loads <= inflight; ++loads) {
+          uint32_t seen = 0;
+          for (uint32_t ld = 0; ld < loads; ++ld)          // successive k
+            for (uint32_t str = 0; str < blocks; ++str)    // the set's W streams
+              for (uint32_t sub = 0; sub < subs; ++sub) {  // bursts of one load
+                // Consecutive p_blocks of a group are `span` elements apart
+                // (main.c: p_start = p_block * p_span, and a group's blocks are a
+                // consecutive run), so the stride is span, not span*share.
+                // Successive k are one stored row apart: LDW = PT + the row pad.
+                // Under the K split the K part varies before the block (main.c), so
+                // stream str is K part str % KSPLIT of block str / KSPLIT: the same
+                // columns, QWEN_KT_CORE rows further down.
+#if FFN_KSPLIT_XGROUP
+                const uint32_t kpart = g % (uint32_t)QWEN_KSPLIT;  // one K part per group
+                const uint32_t blk = str;
+#else
+                const uint32_t kpart = str % (uint32_t)QWEN_KSPLIT;
+                const uint32_t blk = str / (uint32_t)QWEN_KSPLIT;
+#endif
+                const uint32_t word =
+                    ((ld + kpart * (uint32_t)QWEN_KT_CORE) * (uint32_t)QWEN_LDW + blk * span) *
+                        GEMM_ELEM_BYTES / 4 +
+                    sub * QWEN_BURST_WORDS;
+                seen |= 1u << gemm_hash_bank(word, shift, bb, banks);
+              }
+          uint32_t count = 0;
+          for (uint32_t b = 0; b < banks; ++b) count += (seen >> b) & 1u;
+          if (loads == 1) now = count; else soon = count;
+        }
+        if (soon < now) soon = now;
+        if (now > best_now || (now == best_now && soon > best_soon)) {
+          best_now = now; best_soon = soon; burst = shift; bits = bb;
+        }
+      }
+    }
+    printf("  {%u, %u, %u},  // group %2u: burst banks %u now, %u with %u in flight; single spread %u/%u\n",
+           (unsigned)single, (unsigned)burst, (unsigned)bits, (unsigned)g,
+           (unsigned)best_now, (unsigned)best_soon, (unsigned)inflight, (unsigned)best_s.spread,
+           (unsigned)(64u * (MSHR_CFG_SPLIT ? MSHR_SPLIT_TILES : 1u) * banks));
+  }
+  printf("};\n\n#endif\n");
+  return 0;
+}
