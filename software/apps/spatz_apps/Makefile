@@ -38,6 +38,7 @@ endif
 # qwen-ffn-down keeps its rules and ffn_* variables in its own fragment; it must come
 # before $(BINARIES) below, whose prerequisites (QWEN_EXTRA_OBJS) are expanded at parse time.
 -include $(APPS_DIR)/qwen-ffn-down/app.mk
+-include $(APPS_DIR)/qwen-ffn/app.mk
 
 # Make all applications
 all: $(ALL_GCC)

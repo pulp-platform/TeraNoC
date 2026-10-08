@@ -103,3 +103,6 @@ paper/**/*.fls
 paper/**/*.out
 *.transcript
 *.transcript.zst
+software/apps/spatz_apps/qwen-ffn/gu/
+software/apps/spatz_apps/qwen-ffn/dn/
+software/apps/spatz_apps/qwen-ffn/data/
