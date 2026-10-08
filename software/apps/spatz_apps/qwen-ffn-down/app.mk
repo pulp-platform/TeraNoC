@@ -153,35 +153,38 @@ qwen-ffn-down/data/qwen_shape.h: FORCE
 
 FFN_HOST_CC ?= cc
 qwen-ffn-down/data/qwen_tiles.h: qwen-ffn-down/data/qwen_shape.h \
-	qwen-ffn-down/qwen_layout.h qwen-ffn-down/script/gen_tiles.c \
+	qwen-common/qwen_layout.h qwen-ffn-down/script/gen_tiles.c \
 	$(RUNTIME_DIR)/gemm_config.h $(RUNTIME_DIR)/gemm_burst.h
 	@mkdir -p $(@D)
-	$(FFN_HOST_CC) -O1 -I$(RUNTIME_DIR) -Iqwen-ffn-down $(DEFINES) \
+	$(FFN_HOST_CC) -O1 -I$(RUNTIME_DIR) -Iqwen-ffn-down -Iqwen-common -Iqwen-common/script $(DEFINES) \
 		qwen-ffn-down/script/gen_tiles.c -o $(@D)/gen_tiles
 	$(@D)/gen_tiles > $@.tmp && mv $@.tmp $@
 
 qwen-ffn-down/data/qwen_hash.h: qwen-ffn-down/data/qwen_shape.h qwen-ffn-down/data/qwen_tiles.h \
-	qwen-ffn-down/qwen_layout.h qwen-ffn-down/script/gen_hash.c \
+	qwen-common/qwen_layout.h qwen-common/script/gen_hash.c \
 	$(RUNTIME_DIR)/gemm_hash.h $(RUNTIME_DIR)/gemm_config.h $(RUNTIME_DIR)/gemm_burst.h
 	@mkdir -p $(@D)
-	$(FFN_HOST_CC) -O1 -I$(RUNTIME_DIR) -Iqwen-ffn-down $(DEFINES) \
-		qwen-ffn-down/script/gen_hash.c -o $(@D)/gen_hash
+	$(FFN_HOST_CC) -O1 -I$(RUNTIME_DIR) -Iqwen-ffn-down -Iqwen-common -Iqwen-common/script $(DEFINES) \
+		qwen-common/script/gen_hash.c -o $(@D)/gen_hash
 	$(@D)/gen_hash > $@
 
 qwen-ffn-down/data/qwen_operands.S: qwen-ffn-down/data/qwen_shape.h qwen-ffn-down/data/qwen_tiles.h \
-	qwen-ffn-down/qwen_layout.h qwen-ffn-down/qwen_pattern.h \
-	qwen-ffn-down/script/gen_operands.c qwen-ffn-down/script/fp16_host.h
+	qwen-common/qwen_layout.h qwen-common/qwen_pattern.h \
+	qwen-ffn-down/script/gen_operands.c qwen-common/script/fp16_host.h
 	@mkdir -p $(@D)
-	$(FFN_HOST_CC) -O2 -I$(RUNTIME_DIR) -Iqwen-ffn-down $(DEFINES) \
+	$(FFN_HOST_CC) -O2 -I$(RUNTIME_DIR) -Iqwen-ffn-down -Iqwen-common -Iqwen-common/script $(DEFINES) \
 		qwen-ffn-down/script/gen_operands.c -o $(@D)/gen_operands -lm
 	$(@D)/gen_operands $(@D)
 
 qwen-ffn-down/data/qwen_operands.S.o: qwen-ffn-down/data/qwen_operands.S
 	$(RISCV_CC) $(RISCV_CCFLAGS) -c $< -o $@
 
+# The shared streamed-GEMM code is in qwen-common/; this app's generated headers (data/) resolve
+# through -Iqwen-ffn-down from there.
+qwen-ffn-down/main.c.o: RISCV_CCFLAGS += -I$(abspath qwen-ffn-down) -I$(abspath qwen-common)
 qwen-ffn-down/main.c.o: qwen-ffn-down/data/qwen_shape.h qwen-ffn-down/data/qwen_tiles.h \
 	qwen-ffn-down/data/qwen_hash.h \
-	qwen-ffn-down/qwen_layout.h qwen-ffn-down/qwen_pattern.h qwen-ffn-down/swiglu.h \
-	qwen-ffn-down/kernel/qwen-fmatmul.c qwen-ffn-down/kernel/qwen-fmatmul.h
+	qwen-common/qwen_layout.h qwen-common/qwen_pattern.h qwen-common/swiglu.h \
+	qwen-common/kernel/qwen-fmatmul.c qwen-common/kernel/qwen-fmatmul.h
 
 .DEFAULT_GOAL := $(ffn_saved_goal)

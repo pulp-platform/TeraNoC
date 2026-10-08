@@ -4,45 +4,50 @@
 // Author: Zexin Fu, ETH Zurich
 //
 //==============================================================================
-// qwen-ffn: ONE phase of the fused FFN, compiled twice.
+// ONE streamed projection phase:  C[s] = A . W[s] for its QWEN_STAGES_N projections
 //==============================================================================
 //
-//   phase_gu.c (FFN_PHASE_GU):  G = X . Wg, U = X . Wu, then H = SiLU(G) * U on each core's
-//                               own output patch, straight into the H replicas
-//   phase_dn.c (FFN_PHASE_DN):  Y = H . Wd
-//
-// The two phases have different shapes, and gemm_config.h / mshr_cfg.h derive the kernel size,
-// split and MSHR tuning from GEMM_M/N/P at compile time -- hence one translation unit each, with
-// that phase's generated headers (<phase>/data/qwen_shape.h, qwen_tiles.h, qwen_hash.h) on the
-// include path and its exported symbols prefixed gu_ / dn_ (ffn.h).
+// Not compiled on its own: an app's phase wrapper defines the hooks below, puts the phase's
+// generated headers (<phase>/data/qwen_shape.h, qwen_tiles.h, qwen_hash.h) on the include path
+// and #includes this file -- once per phase, because gemm_config.h / mshr_cfg.h derive the kernel
+// size, split and MSHR tuning from GEMM_M/N/P at compile time (qwen-ffn: phase_gu.c, phase_dn.c).
 //
 // The pipeline is qwen-ffn-down's (itself qwen-gate-up's): K tiles streamed by one DMA into a
-// double buffer, the decode split, the K split inside or across groups, the fp16 C. What is
-// shared between the phases is in ffn.h: the W area (the stream runs on from the last gate+up
-// tile into the first down tile) and H. Parked qwen-ffn-down features are left out: the fp32 C,
-// the piece-wise first tile (the continuous stream makes it moot), the G/U staging and checks
-// 3/4.
+// double buffer, the decode split, the K split inside or across groups (FFN_KSPLIT_XGROUP), the
+// fp16 C, the group MSHR tuned per phase.
+//
+// Hooks the wrapper defines before including this file:
+//   QP_PFX(x)        required: prefixes every exported symbol, e.g. gu_##x
+//   QP_NAME          required: the phase's name in reports, e.g. "gate+up"
+//   QP_W_AREA        required: the W double buffer, two regions of QP_WREG_ELEMS elements --
+//   QP_WREG_ELEMS              may be shared with other phases (tile t of a projection is in t & 1)
+//   QP_A_EXT         optional: the A operand is this external buffer (e.g. written by an earlier
+//                    phase's epilogue); QP_A_EXT_ELEMS / _LDX / _REPLICAS / _STRIDE_E must match
+//                    this phase's layout. Without it the phase owns a replicated A (qwen_x) and
+//                    copies it from L2 (qwen_x_l2) in setup.
+//   QP_SETUP_GBAR    optional, 1: this phase programs the GBAR_PLOOP group-barrier struct
+//                    (exactly one phase per app does, the struct is shared)
+//   QP_EPILOGUE      optional: void QP_EPILOGUE(uint32_t cid, uint32_t strip, const qp_patch_t *)
+//                    called after each strip's projections are reduced, with the MSHR off around
+//                    it (its loads have one reader each) and global rendezvous on both sides. It
+//                    owns its output layout. Without it a multi-strip phase writes C back to L2.
+//                    After the last strip the MSHR is left OFF for the next phase to tune.
+//   QP_NEXT_REFILL   optional: void QP_NEXT_REFILL(uint32_t j) -- the stream continues into the
+//                    next phase: this phase's last two pipeline barriers launch that phase's
+//                    tiles 0 and 1 (its QP_PFX(refill_head)), into the regions just freed.
+//   QP_PREV_BANK_SEL optional: uint32_t QP_PREV_BANK_SEL(uint32_t g) -- the previous phase's
+//                    packed bank-hash triple; enables QP_PFX(mshr_handover).
+//
+// Exported (each prefixed): setup, prime (the first phase: tiles 0/1 + full MSHR tuning), run,
+// refill_head, mshr_handover, bank_sel, barrier, mshr_off, macs, report.
 //
 //==============================================================================
 
 #include <stddef.h>
 #include <stdint.h>
 
-#ifndef FFN_PHASE_GU
-#define FFN_PHASE_GU 0
-#endif
-#ifndef FFN_PHASE_DN
-#define FFN_PHASE_DN 0
-#endif
-
-#if FFN_PHASE_GU
-#define FFN_PFX(x) gu_##x
-#define FFN_NAME "gate+up"
-#elif FFN_PHASE_DN
-#define FFN_PFX(x) dn_##x
-#define FFN_NAME "down"
-#else
-#error "Compile phase.c through phase_gu.c or phase_dn.c"
+#ifndef QP_PFX
+#error "qwen_phase.c is included by a phase wrapper that defines QP_PFX, QP_NAME and QP_W_AREA"
 #endif
 
 #include "data/qwen_shape.h"  // this phase's, via the include path
@@ -57,35 +62,16 @@ _Static_assert(sizeof(qwen_hash_sel) / sizeof(qwen_hash_sel[0]) == NUM_GROUPS,
 
 #define MSHR_HASH_SEARCH 0
 #include "mshr_cfg.h"
-// The kernels are global functions; each phase compiles its own copy (its own KERNEL_SIZE and
-// shape macros), so prefix them to keep the two copies apart at link time.
-#if FFN_PHASE_GU
-#define matmul_1xVL gu_matmul_1xVL
-#define matmul_2xVL gu_matmul_2xVL
-#define matmul_4xVL gu_matmul_4xVL
-#define matmul_8xVL gu_matmul_8xVL
-#else
-#define matmul_1xVL dn_matmul_1xVL
-#define matmul_2xVL dn_matmul_2xVL
-#define matmul_4xVL dn_matmul_4xVL
-#define matmul_8xVL dn_matmul_8xVL
-#endif
+#include "qwen_tu_prefix.h"  // this TU's own copies of the kernels and of dma.h's two functions
 #include "kernel/qwen-fmatmul.c"
-#if FFN_PHASE_GU
-#include "swiglu.h"
-#endif
 
 #include "printf.h"
 #include "runtime.h"
 #include "synchronization.h"
 #include "encoding.h"
-// runtime/dma.h defines two of its functions without `static`; each phase gets its own copy.
-#define dma_memcpy_nonblocking FFN_PFX(dma_memcpy_nonblocking)
-#define dma_memcpy_blocking FFN_PFX(dma_memcpy_blocking)
 #include "dma.h"
 
-#include "ffn.h"
-
+#include "qwen_phase.h"
 
 #define QWEN_STEPS ((QWEN_K) / (QWEN_KT))
 #define QWEN_GROUP_HELPER 1u
@@ -95,35 +81,35 @@ _Static_assert(sizeof(qwen_hash_sel) / sizeof(qwen_hash_sel[0]) == NUM_GROUPS,
 #ifndef QWEN_PRELOAD
 #define QWEN_PRELOAD 0
 #endif
+#ifndef QP_SETUP_GBAR
+#define QP_SETUP_GBAR 0
+#endif
 
 _Static_assert(GEMM_ELEM_BYTES == 2, "fp16 only");
 _Static_assert(!QWEN_ACC32 && !QWEN_SWIGLU && FFN_PRIME_SPLIT == 1,
-               "qwen-ffn uses the fp16 C, no SwiGLU prologue and a whole first tile per phase");
+               "qwen_phase.c runs the fp16 C, no SwiGLU prologue, a whole first tile");
 _Static_assert((QWEN_K % QWEN_KT) == 0 && (QWEN_KT % 2) == 0, "K tiles must tile K, even rows");
 _Static_assert((QWEN_KT % (2 * QWEN_KSPLIT)) == 0, "Each K part must be an even number of rows");
+_Static_assert(QWEN_STAGES_N <= 2, "qp_patch_t carries at most two projections");
 #if QWEN_KSPLIT > 1
 _Static_assert((QWEN_KSPLIT & (QWEN_KSPLIT - 1)) == 0 && QWEN_KSPLIT <= 16, "ks: 2^n <= 16");
 _Static_assert(MATMUL_DECODE_SPLIT, "The K split exists only in the decode split");
-_Static_assert(QWEN_NSTRIPS == 1 || FFN_PHASE_GU,
-               "Down reduces after the last tile, but writes a strip back inside that tile's "
-               "barrier: one strip under a K split");
 _Static_assert(GBAR_PLOOP, "The reduction rendezvouses on the GBAR_PLOOP struct");
+#ifndef QP_EPILOGUE
+_Static_assert(QWEN_NSTRIPS == 1,
+               "Without an epilogue a strip is written back inside its last tile's barrier, "
+               "before the reduction: one strip under a K split");
+#endif
 #endif
 _Static_assert((QWEN_LDP % QWEN_STRIPE_E) == 0 && (QWEN_WPAD % QWEN_STRIPE_E) == 0,
                "Rows must start on a burst boundary");
 _Static_assert(QWEN_PT_LEGAL_K(QWEN_KT, QWEN_PT), "Illegal strip width for this phase");
-_Static_assert(QWEN_WSLOT <= FFN_WREG_ELEMS, "This phase's W slot does not fit the shared region");
+_Static_assert(QWEN_WSLOT <= QP_WREG_ELEMS, "This phase's W slot does not fit the W region");
 _Static_assert((QWEN_STEPS % 2) == 0, "The continuous stream needs an even K-tile count");
-#if FFN_PHASE_GU
-_Static_assert(QWEN_STAGES_N == 2 && QWEN_P == FFN_DN_K && QWEN_LDP == QWEN_P,
-               "gate+up: two projections whose output width is down's K, unpadded");
-_Static_assert(((QWEN_NSTRIPS * 2 * QWEN_STEPS) % 2) == 0,
-               "Down's tile 0 must land in region 0: an even gate+up tile count");
-#else
-_Static_assert(QWEN_STAGES_N == 1, "down: one projection");
-_Static_assert(QWEN_X_ELEMS == FFN_H_ELEMS && QWEN_LDX == FFN_H_LDX &&
-                   QWEN_X_REPLICAS == FFN_H_REPLICAS && QWEN_X_STRIDE_E == FFN_H_STRIDE_E,
-               "data/ffn_shared.h is stale: it must describe this phase's A operand");
+#ifdef QP_A_EXT
+_Static_assert(QWEN_X_ELEMS == QP_A_EXT_ELEMS && QWEN_LDX == QP_A_EXT_LDX &&
+                   QWEN_X_REPLICAS == QP_A_EXT_REPLICAS && QWEN_X_STRIDE_E == QP_A_EXT_STRIDE_E,
+               "The external A operand's layout is stale: it must be this phase's");
 #endif
 
 //==============================================================================
@@ -134,43 +120,38 @@ _Static_assert(QWEN_X_ELEMS == FFN_H_ELEMS && QWEN_LDX == FFN_H_LDX &&
 #define QWEN_L2 __attribute__((section(".l2_bss"), aligned(QWEN_MESH_SWEEP)))
 
 #if QWEN_PRELOAD
-// Written by the host (script/gen_operands_<phase>.c) and placed by data/<phase>_operands.S.
-extern elem_t FFN_PFX(w_l2)[QWEN_STAGES_N][QWEN_WTILES * QWEN_WSLOT];
-#define qwen_w_l2 FFN_PFX(w_l2)
-#if FFN_PHASE_GU
-extern elem_t gu_x_l2[QWEN_B * QWEN_LDX];
-#define qwen_x_l2 gu_x_l2
+// Written by the host and placed by the app's operands stub: <prefix>w_l2 (and <prefix>x_l2).
+extern elem_t QP_PFX(w_l2)[QWEN_STAGES_N][QWEN_WTILES * QWEN_WSLOT];
+#define qwen_w_l2 QP_PFX(w_l2)
+#ifndef QP_A_EXT
+extern elem_t QP_PFX(x_l2)[QWEN_B * QWEN_LDX];
+#define qwen_x_l2 QP_PFX(x_l2)
 #endif
 #else
 static elem_t qwen_w_l2[QWEN_STAGES_N][QWEN_WTILES * QWEN_WSLOT] QWEN_L2;
-#if FFN_PHASE_GU
+#ifndef QP_A_EXT
 static elem_t qwen_x_l2[QWEN_B * QWEN_LDX] QWEN_L2;
 #endif
 #endif
 
-// The two W regions, shared with the other phase (ffn.h). Tile t of any projection is in t & 1.
-// Arithmetic, not a pointer table: a const table sits in .rodata (L2), one load per K tile.
-#define QWEN_W(slot) (ffn_w_area + (uint32_t)(slot) * (uint32_t)FFN_WREG_ELEMS)
+// The two W regions. Arithmetic, not a pointer table: a const table sits in .rodata (L2), one
+// load per K tile.
+#define QWEN_W(slot) ((elem_t *)(QP_W_AREA) + (uint32_t)(slot) * (uint32_t)(QP_WREG_ELEMS))
 static elem_t qwen_c[QWEN_STAGES_N][QWEN_CSLOT] QWEN_L1;  // C, one strip
 #if QWEN_KSPLIT > 1
 static elem_t qwen_cp[QWEN_KSPLIT - 1][QWEN_CSLOT] QWEN_L1;  // K parts 1.. partial sums
 #endif
-#if FFN_PHASE_GU
-static elem_t qwen_x[QWEN_X_ELEMS] QWEN_L1;  // X, replicated
+#ifdef QP_A_EXT
+#define qwen_x ((elem_t *)(QP_A_EXT))
 #else
-#define qwen_x ffn_h                         // H is the A operand
-#if QWEN_NSTRIPS > 1
-static elem_t qwen_out_l2[QWEN_NSTRIPS * QWEN_B * QWEN_LDW] QWEN_L2;  // Y strips
+static elem_t qwen_x[QWEN_X_ELEMS] QWEN_L1;  // A, replicated
 #endif
+#if !defined(QP_EPILOGUE) && QWEN_NSTRIPS > 1
+static elem_t qwen_out_l2[QWEN_STAGES_N][QWEN_NSTRIPS * QWEN_B * QWEN_LDW] QWEN_L2;  // C strips
 #endif
 
 static uint32_t qwen_tile_ts[QWEN_NSTRIPS * QWEN_STAGES_N * QWEN_STEPS];
 static uint32_t qwen_fmac_core[NUM_CORES];
-
-// This core's split lives in the caller's ffn_split_t, on the core's own stack: a per-core array
-// here would sit in interleaved L1, and every core reading its entry is a remote single load
-// with one reader -- the live MSHR holds each for its whole hold window (~8k cycles) waiting for
-// a merge partner, measured as ~90k cycles at the start of every projection (GVSoC).
 static uint32_t ph_share_burst, ph_share_single, ph_pblocks;
 #if MSHR_RUNTIME_CFG
 static mshr_cfg_t ph_cfg;
@@ -233,12 +214,12 @@ static inline void qwen_barrier(uint32_t core_id) {
 }
 
 // Global rendezvous with this core's vector stores drained first (the barrier atomic is scalar).
-static inline void ffn_sync(uint32_t cid) {
+static inline void qp_sync(uint32_t cid) {
   __asm__ volatile("fence" ::: "memory");
   qwen_barrier(cid);
 }
 
-static inline void ffn_mshr_enable(uint32_t on) {
+static inline void qp_mshr_enable(uint32_t on) {
 #if MSHR_RUNTIME_CFG
   if (mshr_cfg_is_group_writer())
     mshr_cfg_write(mshr_cfg_my_group(), mshr_cfg_peer_tile(), MSHR_CSR_ENABLE, on);
@@ -266,19 +247,21 @@ static void qwen_refill_seq(uint32_t seq) {
   qwen_refill(step & 1u, proj % (uint32_t)QWEN_STAGES_N, proj / (uint32_t)QWEN_STAGES_N, step);
 }
 
-#if FFN_PHASE_DN
-// The stream's hand-over: gate+up's last two pipeline barriers launch down's tiles 0 and 1, into
-// the regions gate+up has just left (its tile count is even, so down's tile t lands in t & 1).
-void dn_refill_head(uint32_t j) {
+// The stream's hand-over target: the previous phase's last two pipeline barriers launch this
+// phase's tiles 0 and 1, into the regions it has just left. Its tile count must be even so
+// that this phase's tile t lands in region t & 1.
+void QP_PFX(refill_head)(uint32_t j) {
   if (j < QWEN_SEQ_TOTAL) qwen_refill_seq(j);
 }
-#if QWEN_NSTRIPS > 1
+
+#if !defined(QP_EPILOGUE) && QWEN_NSTRIPS > 1
 static void qwen_writeback_dma(uint32_t strip) {
-  dma_memcpy_nonblocking(qwen_out_l2 + strip * (uint32_t)(QWEN_B * QWEN_LDW), qwen_c[0],
-                         (size_t)(QWEN_B * QWEN_LDW) * GEMM_ELEM_BYTES);
-  dma_wait();
+  for (uint32_t s = 0; s < (uint32_t)QWEN_STAGES_N; ++s) {
+    dma_memcpy_nonblocking(qwen_out_l2[s] + strip * (uint32_t)(QWEN_B * QWEN_LDW), qwen_c[s],
+                           (size_t)(QWEN_B * QWEN_LDW) * GEMM_ELEM_BYTES);
+    dma_wait();
+  }
 }
-#endif
 #endif
 
 //==============================================================================
@@ -286,9 +269,9 @@ static void qwen_writeback_dma(uint32_t strip) {
 //==============================================================================
 
 // The sub-patch of (rows, columns) a K part finalises: by rows when they divide, else columns.
-static inline void ffn_subpatch(uint32_t kpart, uint32_t m_start, uint32_t m_end,
-                                uint32_t p_start, uint32_t p_end, uint32_t *r0, uint32_t *r1,
-                                uint32_t *c0, uint32_t *c1) {
+static inline void qp_subpatch(uint32_t kpart, uint32_t m_start, uint32_t m_end,
+                               uint32_t p_start, uint32_t p_end, uint32_t *r0, uint32_t *r1,
+                               uint32_t *c0, uint32_t *c1) {
   const uint32_t ks = (uint32_t)QWEN_KSPLIT, nrow = m_end - m_start, ncol = p_end - p_start;
   *r0 = m_start; *r1 = m_end; *c0 = p_start; *c1 = p_end;
   if (ks == 1u || m_end == m_start) return;
@@ -308,7 +291,7 @@ static inline void ffn_subpatch(uint32_t kpart, uint32_t m_start, uint32_t m_end
 static void qwen_ksplit_reduce(uint32_t cid, uint32_t stage, uint32_t kpart, uint32_t m_start,
                                uint32_t m_end, uint32_t p_start, uint32_t p_end) {
 #if FFN_KSPLIT_XGROUP
-#define QWEN_KS_SYNC() ffn_sync(cid)
+#define QWEN_KS_SYNC() qp_sync(cid)
 #else
   if (m_end == m_start) return;
   const uint32_t gb = gbar_base(GBAR_PLOOP_STRUCT);
@@ -316,10 +299,10 @@ static void qwen_ksplit_reduce(uint32_t cid, uint32_t stage, uint32_t kpart, uin
   (void)cid;
 #endif
   uint32_t r0, r1, c0, c1;
-  ffn_subpatch(kpart, m_start, m_end, p_start, p_end, &r0, &r1, &c0, &c1);
+  qp_subpatch(kpart, m_start, m_end, p_start, p_end, &r0, &r1, &c0, &c1);
   elem_t *c = qwen_c[stage];
   QWEN_KS_SYNC();
-  ffn_mshr_enable(0u);
+  qp_mshr_enable(0u);
   QWEN_KS_SYNC();
   for (uint32_t r = r0; r < r1; ++r) {
     for (uint32_t p = c0; p < c1;) {
@@ -336,7 +319,7 @@ static void qwen_ksplit_reduce(uint32_t cid, uint32_t stage, uint32_t kpart, uin
     }
   }
   QWEN_KS_SYNC();
-  ffn_mshr_enable(1u);
+  qp_mshr_enable(1u);
   QWEN_KS_SYNC();
 #undef QWEN_KS_SYNC
 }
@@ -361,7 +344,7 @@ static inline void qwen_kernel(elem_t *c, const elem_t *a, const elem_t *w, uint
 }
 
 static void qwen_project(uint32_t stage, uint32_t strip, uint32_t cid, const elem_t *x,
-                         const ffn_split_t *sp) {
+                         const qp_split_t *sp) {
   const uint32_t m_start = sp->m_start, m_end = sp->m_end;
   const uint32_t p_start = sp->p_start, p_end = sp->p_end, kpart = sp->kpart;
 #if QWEN_KSPLIT > 1
@@ -381,28 +364,32 @@ static void qwen_project(uint32_t stage, uint32_t strip, uint32_t cid, const ele
                     ((step + 1u < (uint32_t)QWEN_STEPS) ? 4u : 0u));
 
     const uint32_t seq = (strip * (uint32_t)QWEN_STAGES_N + stage) * (uint32_t)QWEN_STEPS + step;
-#if FFN_PHASE_GU
-    // The stream does not stop at the end of gate+up: its last two barriers wait for and launch
-    // down's tiles 0 and 1 (dn_refill_head).
+#ifdef QP_NEXT_REFILL
+    // The stream does not stop at the end of this phase: its last two barriers wait for and
+    // launch the next phase's tiles 0 and 1.
     const uint32_t pending = 1u, launch = 1u, wb = 0u;
 #else
     const uint32_t pending = (seq + 1u < QWEN_SEQ_TOTAL);
     const uint32_t launch = (seq + 2u < QWEN_SEQ_TOTAL);
-    const uint32_t wb = (QWEN_NSTRIPS > 1) && (step + 1u == (uint32_t)QWEN_STEPS);
+#if !defined(QP_EPILOGUE) && QWEN_NSTRIPS > 1
+    const uint32_t wb = (stage + 1u == (uint32_t)QWEN_STAGES_N) && (step + 1u == (uint32_t)QWEN_STEPS);
     if (wb) __asm__ volatile("fence" ::: "memory");
+#else
+    const uint32_t wb = 0u;
+#endif
 #endif
     uint32_t bar = qwen_dma_log_barrier(QWEN_RADIX, cid, pending);
     if (bar) {
       qwen_tile_ts[seq] = mempool_get_timer();
       if (pending) dma_wait();
-#if FFN_PHASE_DN && QWEN_NSTRIPS > 1
+#if !defined(QP_EPILOGUE) && QWEN_NSTRIPS > 1
       if (wb) qwen_writeback_dma(strip);
 #endif
       (void)wb;
       if (launch) {
         if (seq + 2u < QWEN_SEQ_TOTAL) qwen_refill_seq(seq + 2u);
-#if FFN_PHASE_GU
-        else dn_refill_head(seq + 2u - QWEN_SEQ_TOTAL);
+#ifdef QP_NEXT_REFILL
+        else QP_NEXT_REFILL(seq + 2u - QWEN_SEQ_TOTAL);
 #endif
       }
       __atomic_store_n((uint32_t *)bar, 0, __ATOMIC_RELAXED);
@@ -416,30 +403,27 @@ static void qwen_project(uint32_t stage, uint32_t strip, uint32_t cid, const ele
 #endif
 }
 
-#if FFN_PHASE_GU
-//==============================================================================
-// The fused SwiGLU epilogue
-//==============================================================================
-// After both projections of a strip are reduced, C[0] = G and C[1] = U hold this core's patch
-// (its sub-patch under the K split: the one its own reduction finalised). H = SiLU(G) * U goes
-// straight into every H replica at column strip * PT + p: no G/U in L2, no staging. MSHR off
-// around it -- these reads have one reader each. The closing rendezvous also keeps the next
-// strip's partial stores off C until every core has read it. After the last strip the MSHR is
-// left off: the down phase writes its own tuning (dn_mshr_apply).
-static void ffn_swiglu_strip(uint32_t cid, uint32_t strip, uint32_t last, const ffn_split_t *sp) {
-  uint32_t r0, r1, c0, c1;
-  ffn_subpatch(sp->kpart, sp->m_start, sp->m_end, sp->p_start, sp->p_end, &r0, &r1, &c0, &c1);
-  ffn_sync(cid);
-  ffn_mshr_enable(0u);
-  ffn_sync(cid);
-  for (uint32_t r = r0; r < r1 && c1 > c0; ++r)
-    swiglu_f16(qwen_c[0] + r * (uint32_t)QWEN_LDW + c0, qwen_c[1] + r * (uint32_t)QWEN_LDW + c0,
-               ffn_h + r * (uint32_t)FFN_H_LDX + strip * (uint32_t)QWEN_PT + c0, c1 - c0,
-               (uint32_t)FFN_H_REPLICAS, (uint32_t)FFN_H_STRIDE_E);
-  ffn_sync(cid);
+#ifdef QP_EPILOGUE
+// After a strip's projections are reduced: the core's finished patch to the app's epilogue.
+// MSHR off around it -- these reads have one reader each. The closing rendezvous also keeps the
+// next strip's partial stores off C until every core has read it. After the last strip the
+// MSHR is left off: the next phase writes its own tuning (QP_PFX(mshr_handover)).
+static void qp_epilogue_strip(uint32_t cid, uint32_t strip, uint32_t last, const qp_split_t *sp) {
+  qp_patch_t pt;
+  qp_subpatch(sp->kpart, sp->m_start, sp->m_end, sp->p_start, sp->p_end, &pt.r0, &pt.r1, &pt.c0,
+              &pt.c1);
+  pt.c[0] = qwen_c[0];
+  pt.c[1] = QWEN_STAGES_N > 1 ? qwen_c[QWEN_STAGES_N > 1 ? 1 : 0] : (const elem_t *)0;
+  pt.ldc = (uint32_t)QWEN_LDW;
+  pt.col0 = strip * (uint32_t)QWEN_PT;
+  qp_sync(cid);
+  qp_mshr_enable(0u);
+  qp_sync(cid);
+  QP_EPILOGUE(cid, strip, &pt);
+  qp_sync(cid);
   if (!last) {
-    ffn_mshr_enable(1u);
-    ffn_sync(cid);
+    qp_mshr_enable(1u);
+    qp_sync(cid);
   }
 }
 #endif
@@ -448,7 +432,7 @@ static void ffn_swiglu_strip(uint32_t cid, uint32_t strip, uint32_t last, const 
 // Setup (outside the timed region)
 //==============================================================================
 
-int FFN_PFX(setup)(uint32_t cid, ffn_split_t *sp) {
+int QP_PFX(setup)(uint32_t cid, qp_split_t *sp) {
   const uint32_t num_cores = mempool_get_core_count();
   const uint32_t cores_per_group = num_cores / NUM_GROUPS;
   const uint32_t core_gid = cid % cores_per_group, gid = cid / cores_per_group;
@@ -496,7 +480,7 @@ int FFN_PFX(setup)(uint32_t cid, ffn_split_t *sp) {
     pblocks = n_p_blocks;
   }
 #else
-#error "qwen-ffn runs the decode split"
+#error "qwen_phase.c runs the decode split"
 #endif
   if (cid >= active_cores) m_start = m_end = p_start = p_end = 0;
   sp->m_start = m_start; sp->m_end = m_end;
@@ -505,8 +489,8 @@ int FFN_PFX(setup)(uint32_t cid, ffn_split_t *sp) {
   qwen_fmac_core[cid] = (p_end - p_start) * (m_end - m_start) * (uint32_t)QWEN_NSTRIPS *
                         (uint32_t)(QWEN_K / QWEN_KSPLIT) * (uint32_t)QWEN_STAGES_N;
 
-#if FFN_PHASE_GU
-  // X into its replicas (in the fused layer it is the previous block's output, already in L1).
+#ifndef QP_A_EXT
+  // A into its replicas.
   if (cid == (uint32_t)QWEN_DMA_CORE) {
     for (uint32_t r = 0; r < (uint32_t)QWEN_X_REPLICAS; ++r) {
       dma_memcpy_nonblocking(qwen_x + r * (uint32_t)QWEN_X_STRIDE_E, qwen_x_l2,
@@ -514,17 +498,17 @@ int FFN_PFX(setup)(uint32_t cid, ffn_split_t *sp) {
       dma_wait();
     }
   }
-  // One group-barrier struct serves both phases (same group, same target).
-#if GBAR_PLOOP
+#endif
+#if QP_SETUP_GBAR && GBAR_PLOOP
+  // One group-barrier struct serves every phase (same group, same target).
   if (cid < active_cores && core_gid == QWEN_GROUP_HELPER) {
     const uint32_t gmask = (cores_per_group >= 32u) ? 0xFFFFFFFFu : ((1u << cores_per_group) - 1u);
     gbar_setup(GBAR_PLOOP_STRUCT, cores_per_group, gmask);
   }
 #endif
-#endif
 
-  // I$ warm-up of this phase's kernel copy (and of the epilogue), on W region 0: its contents
-  // are whatever is there, the results are discarded.
+  // I$ warm-up of this phase's kernel copy, on W region 0: its contents are whatever is there,
+  // the results are discarded.
 #if ICACHE_WARMUP
   {
     const elem_t *x_use = qwen_x + (uint32_t)QWEN_X_REPLICA_OF(gid) * (uint32_t)QWEN_X_STRIDE_E;
@@ -534,7 +518,7 @@ int FFN_PFX(setup)(uint32_t cid, ffn_split_t *sp) {
 #endif
 
 #if MSHR_RUNTIME_CFG
-  // This phase's tuning, from its own derivation; written by dn_mshr_apply / gu_prime.
+  // This phase's tuning, from its own derivation; written by prime / mshr_handover.
   if (cid == 0) {
     mshr_cfg_t cfg = MSHR_CFG_DERIVED_INIT;
 #if FFN_KSPLIT_XGROUP
@@ -558,20 +542,24 @@ int FFN_PFX(setup)(uint32_t cid, ffn_split_t *sp) {
   return 0;
 }
 
+//==============================================================================
+// MSHR tuning
+//==============================================================================
+
 #if MSHR_RUNTIME_CFG
-// This group's bank-hash triple, packed (both phases compare them at the handover).
-uint32_t FFN_PFX(bank_sel)(uint32_t g) {
+// This group's bank-hash triple, packed (phases compare them at a handover).
+uint32_t QP_PFX(bank_sel)(uint32_t g) {
   return (uint32_t)qwen_hash_sel[g][0] | ((uint32_t)qwen_hash_sel[g][1] << 8) |
          ((uint32_t)qwen_hash_sel[g][2] << 16);
 }
 
 // This phase's tuning into this group's CSRs, enabled. Group helper only; the caller barriers.
-// At boot (gate+up) the MSHR is empty and mshr_cfg_apply_group writes everything. At the
-// handover (down) it is not: lines gate+up left in the response cache stay until their serve
-// timeout, and a bank-hash write while any entry is resident is refused (MSHR_STATUS_BANK_BUSY,
-// old hash kept). So the down phase writes the hold / reuse / timeout fields straight away and
-// the bank hash only where it differs from gate+up's -- retrying until the entries have drained.
-static void ffn_mshr_apply(uint32_t cid, uint32_t at_handover) {
+// At boot the MSHR is empty and mshr_cfg_apply_group writes everything. At a handover it is not:
+// lines the previous phase left in the response cache stay until their serve timeout, and a
+// bank-hash write while any entry is resident is refused (MSHR_STATUS_BANK_BUSY, old hash kept).
+// So a handover writes the hold / reuse / timeout fields straight away and the bank hash only
+// where it differs from the previous phase's -- retrying until the entries have drained.
+static void qp_mshr_apply(uint32_t cid, uint32_t prev_sel, uint32_t at_handover) {
   const uint32_t cores_per_group = NUM_CORES / NUM_GROUPS;
   if (cid % cores_per_group != QWEN_GROUP_HELPER) return;
   const uint32_t gid = cid / cores_per_group;
@@ -600,7 +588,7 @@ static void ffn_mshr_apply(uint32_t cid, uint32_t at_handover) {
 #endif
   __asm__ volatile("fence" ::: "memory");
   uint32_t st = mshr_cfg_status(g, tile);
-  if (gu_bank_sel(gid) != FFN_PFX(bank_sel)(gid)) {
+  if (prev_sel != QP_PFX(bank_sel)(gid)) {
     for (uint32_t tries = 0; tries < 256u; ++tries) {
       mshr_cfg_write(g, tile, MSHR_CSR_STATUS, 0);
       mshr_cfg_write(g, tile, MSHR_CSR_BANK_SHIFT_SINGLE, cfg.bank_shift_single);
@@ -619,70 +607,67 @@ static void ffn_mshr_apply(uint32_t cid, uint32_t at_handover) {
 }
 #endif
 
-#if FFN_PHASE_GU
-// The pipeline's log barrier for main.c (mempool_barrier's single counter costs ~14k cycles at
-// 8x8), with this core's vector stores drained first.
-void ffn_barrier(uint32_t cid) { ffn_sync(cid); }
-#else
-// MSHR off in this group (after the region: the epilogue's loads have one reader each).
-void ffn_mshr_off(void) { ffn_mshr_enable(0u); }
-#endif
-
-#if FFN_PHASE_GU
-// Tiles 0 and 1 of the stream (before the region: nothing to overlap), and gate+up's tuning.
-void gu_prime(uint32_t cid) {
-  if (cid == (uint32_t)QWEN_DMA_CORE) {
-    qwen_refill(0, 0, 0, 0);
-    dma_wait();
-    qwen_refill_seq(1);
-  }
+#ifdef QP_PREV_BANK_SEL
+// The previous phase is done and left the MSHR off: this phase's tuning, enabled. The caller
+// rendezvouses everyone before any of this phase's loads.
+void QP_PFX(mshr_handover)(uint32_t cid) {
 #if MSHR_RUNTIME_CFG
-  ffn_mshr_apply(cid, 0u);
-#endif
-}
-
-void gu_run(uint32_t cid, const ffn_split_t *sp) {
-  const elem_t *x_use =
-      qwen_x + (uint32_t)QWEN_X_REPLICA_OF(cid / (NUM_CORES / NUM_GROUPS)) * (uint32_t)QWEN_X_STRIDE_E;
-  ph_t_pass = mempool_get_timer();
-  for (uint32_t strip = 0; strip < (uint32_t)QWEN_NSTRIPS; ++strip) {
-    qwen_project(0, strip, cid, x_use, sp);  // gate
-    qwen_project(1, strip, cid, x_use, sp);  // up
-    ffn_swiglu_strip(cid, strip, strip + 1u == (uint32_t)QWEN_NSTRIPS, sp);
-  }
-}
-#else
-void dn_mshr_apply(uint32_t cid) {
-#if MSHR_RUNTIME_CFG
-  ffn_mshr_apply(cid, 1u);
+  qp_mshr_apply(cid, QP_PREV_BANK_SEL(cid / (NUM_CORES / NUM_GROUPS)), 1u);
 #else
   (void)cid;
 #endif
 }
+#endif
 
-void dn_run(uint32_t cid, const ffn_split_t *sp) {
+// The pipeline's log barrier (mempool_barrier's single counter costs ~14k cycles at 8x8), with
+// this core's vector stores drained first; and this group's MSHR off.
+void QP_PFX(barrier)(uint32_t cid) { qp_sync(cid); }
+void QP_PFX(mshr_off)(void) { qp_mshr_enable(0u); }
+
+//==============================================================================
+// Run
+//==============================================================================
+
+// The first phase of a region: tiles 0 and 1 of the stream (before the region: nothing to
+// overlap) and this phase's MSHR tuning on the still-empty MSHR.
+void QP_PFX(prime)(uint32_t cid) {
+  if (cid == (uint32_t)QWEN_DMA_CORE) {
+    qwen_refill(0, 0, 0, 0);
+    dma_wait();
+    if (QWEN_SEQ_TOTAL > 1u) qwen_refill_seq(1);
+  }
+#if MSHR_RUNTIME_CFG
+  qp_mshr_apply(cid, 0u, 0u);
+#endif
+}
+
+void QP_PFX(run)(uint32_t cid, const qp_split_t *sp) {
   const elem_t *x_use =
       qwen_x + (uint32_t)QWEN_X_REPLICA_OF(cid / (NUM_CORES / NUM_GROUPS)) * (uint32_t)QWEN_X_STRIDE_E;
   ph_t_pass = mempool_get_timer();
-  for (uint32_t strip = 0; strip < (uint32_t)QWEN_NSTRIPS; ++strip)
-    qwen_project(0, strip, cid, x_use, sp);
-}
+  for (uint32_t strip = 0; strip < (uint32_t)QWEN_NSTRIPS; ++strip) {
+    for (uint32_t stage = 0; stage < (uint32_t)QWEN_STAGES_N; ++stage)
+      qwen_project(stage, strip, cid, x_use, sp);
+#ifdef QP_EPILOGUE
+    qp_epilogue_strip(cid, strip, strip + 1u == (uint32_t)QWEN_NSTRIPS, sp);
 #endif
+  }
+}
 
 //==============================================================================
-// Report and check
+// Report
 //==============================================================================
 
-uint64_t FFN_PFX(macs)(void) {
+uint64_t QP_PFX(macs)(void) {
   return (uint64_t)QWEN_STAGES_N * QWEN_B * QWEN_K * QWEN_P;
 }
 
-void FFN_PFX(report)(uint32_t cid, uint32_t cycles) {
+void QP_PFX(report)(uint32_t cid, uint32_t cycles) {
   if (cid != 0) return;
-  const uint64_t ideal = FFN_PFX(macs)() / ((uint64_t)NUM_CORES * 2u * N_FPU);
+  const uint64_t ideal = QP_PFX(macs)() / ((uint64_t)NUM_CORES * 2u * N_FPU);
   printf("[FFN] %s B=%u K=%u P=%u stages=%u kt=%u pt=%u strips=%u steps=%u ks=%u ksplit=%u "
          "kgroup=%u xrep=%u\n",
-         FFN_NAME, (unsigned)QWEN_B, (unsigned)QWEN_K, (unsigned)QWEN_P, (unsigned)QWEN_STAGES_N,
+         QP_NAME, (unsigned)QWEN_B, (unsigned)QWEN_K, (unsigned)QWEN_P, (unsigned)QWEN_STAGES_N,
          (unsigned)QWEN_KT, (unsigned)QWEN_PT, (unsigned)QWEN_NSTRIPS, (unsigned)QWEN_STEPS,
          (unsigned)KERNEL_SIZE, (unsigned)QWEN_KSPLIT, (unsigned)FFN_KSPLIT_XGROUP,
          (unsigned)QWEN_X_REPLICAS);
@@ -690,66 +675,15 @@ void FFN_PFX(report)(uint32_t cid, uint32_t cycles) {
   uint32_t bad = 0;
   for (uint32_t g = 0; g < (uint32_t)NUM_GROUPS; ++g) bad |= ph_mshr_status[g];
   printf("[FFN] %s MSHR share burst=%u single=%u pblocks=%u | subs=%u/%u reuse=%u%s%s%s\n",
-         FFN_NAME, (unsigned)ph_share_burst, (unsigned)ph_share_single, (unsigned)ph_pblocks,
+         QP_NAME, (unsigned)ph_share_burst, (unsigned)ph_share_single, (unsigned)ph_pblocks,
          (unsigned)ph_cfg.hold_subs_single, (unsigned)ph_cfg.hold_subs_burst,
          (unsigned)ph_cfg.cache_reuse_target, ph_split_bad ? " SPLIT MISMATCH" : "",
          ph_align_bad ? " UNALIGNED" : "", bad ? " cfg REJECTED" : "");
 #endif
-  printf("[FFN] %s cycles=%u ideal=%u eff=%u%%o\n", FFN_NAME, (unsigned)cycles, (unsigned)ideal,
+  printf("[FFN] %s cycles=%u ideal=%u eff=%u%%o\n", QP_NAME, (unsigned)cycles, (unsigned)ideal,
          (unsigned)(ideal * 1000ull / (cycles ? cycles : 1u)));
-  printf("[FFN] %s tile_cyc", FFN_NAME);
+  printf("[FFN] %s tile_cyc", QP_NAME);
   for (uint32_t i = 0; i < QWEN_SEQ_TOTAL; ++i)
     printf("%s%u", i ? "," : "=", (unsigned)(qwen_tile_ts[i] - (i ? qwen_tile_ts[i - 1] : ph_t_pass)));
   printf("\n");
 }
-
-#if FFN_PHASE_DN
-// Check 1 (end to end): Y against down's multi-hot expectation -- H is exactly that pattern when
-// gate+up and SwiGLU are right (script/gen_operands_gu.c). Integer compares only.
-#if QWEN_CHECK == 1
-static volatile uint32_t ffn_bad, ffn_bad_b, ffn_bad_p, ffn_bad_got, ffn_bad_want;
-#endif
-int dn_verify(uint32_t cid) {
-#if QWEN_CHECK == 1
-  const uint32_t num_cores = mempool_get_core_count();
-  if (cid == 0) ffn_bad = 0;
-  qwen_barrier(cid);
-  for (uint32_t strip = 0; strip < (uint32_t)QWEN_NSTRIPS; ++strip) {
-#if QWEN_NSTRIPS > 1
-    if (cid == (uint32_t)QWEN_DMA_CORE)
-      dma_memcpy_blocking(qwen_c[0], qwen_out_l2 + strip * (uint32_t)(QWEN_B * QWEN_LDW),
-                          (size_t)(QWEN_B * QWEN_LDW) * GEMM_ELEM_BYTES);
-    qwen_barrier(cid);
-#endif
-    uint32_t cached = 0xffffffffu;
-    uint16_t want3[3] = {0, 0, 0};
-    for (uint32_t i = cid; i < (uint32_t)(QWEN_B * QWEN_PT); i += num_cores) {
-      const uint32_t b = i / (uint32_t)QWEN_PT, col = i % (uint32_t)QWEN_PT;
-      const uint32_t p = strip * (uint32_t)QWEN_PT + col;
-      if (p >= (uint32_t)QWEN_P) continue;
-      if (cached != b) {
-        cached = b;
-        for (uint32_t m = 0; m < 3u; ++m) want3[m] = qwen_eighths_to_fp16(qwen_expect_eighths(0, b, m));
-      }
-      const uint16_t e = want3[p % 3u], v = ((const uint16_t *)qwen_c[0])[b * QWEN_LDW + col];
-      if (v != e && __atomic_fetch_add(&ffn_bad, 1u, __ATOMIC_RELAXED) == 0u) {
-        ffn_bad_b = b; ffn_bad_p = p; ffn_bad_got = v; ffn_bad_want = e;
-      }
-    }
-    qwen_barrier(cid);
-  }
-  if (cid == 0) {
-    if (ffn_bad)
-      printf("FAIL: %u/%u outputs wrong; first at b=%u p=%u got=0x%04x want=0x%04x\n",
-             (unsigned)ffn_bad, (unsigned)(QWEN_B * QWEN_P), (unsigned)ffn_bad_b,
-             (unsigned)ffn_bad_p, (unsigned)ffn_bad_got, (unsigned)ffn_bad_want);
-    else
-      printf("success!\n");
-  }
-  return ffn_bad ? -1 : 0;
-#else
-  (void)cid;
-  return 0;
-#endif
-}
-#endif

@@ -11,8 +11,8 @@
 //   H = SiLU(G) * U          fused into gate+up's epilogue, H stays in L1
 //   Y = H . Wd               Wd [16384][4096]   Y [B][4096]         phase_dn.c
 //
-// docs/qwen3_8_27b/ffn_fused_plan.md. Each phase is phase.c compiled with its own shape; this
-// file owns what they share (ffn.h): the W double buffer -- one stream from the first gate tile
+// docs/qwen3_8_27b/ffn_fused_plan.md. Each phase is qwen-common/qwen_phase.c compiled with its
+// own shape; this file owns what they share (ffn.h): the W double buffer -- one stream from the first gate tile
 // to the last down tile -- and H.
 //
 // ffn_check=1 checks end to end: X one-hot, Wg = 16 and Wu = 1/16 at down's multi-hot positions,
@@ -45,7 +45,7 @@ int main(void) {
 
   // Both splits, X into its replicas, the warm-ups, both MSHR tunings computed; then the first
   // two gate tiles and gate+up's tuning. All outside the region.
-  ffn_split_t s_gu, s_dn;  // on this core's stack: local, never through the MSHR
+  qp_split_t s_gu, s_dn;  // on this core's stack: local, never through the MSHR
   const int e_gu = gu_setup(cid, &s_gu), e_dn = dn_setup(cid, &s_dn);
   if (e_gu || e_dn) {
     if (cid == 0) printf("[FFN] split error: gate+up %d, down %d\n", e_gu, e_dn);
@@ -59,14 +59,14 @@ int main(void) {
   mempool_start_benchmark();
   gu_run(cid, &s_gu);  // ends with the MSHR off and down's tiles 0 (landed) and 1 (in flight)
   const uint32_t t1 = mempool_get_timer();
-  dn_mshr_apply(cid);
-  ffn_barrier(cid);  // down's tuning in force everywhere before any down load
+  dn_mshr_handover(cid);
+  gu_barrier(cid);  // down's tuning in force everywhere before any down load
   const uint32_t t2 = mempool_get_timer();
   dn_run(cid, &s_dn);
   mempool_stop_benchmark();
   const uint32_t t3 = mempool_get_timer();
 
-  ffn_mshr_off();
+  dn_mshr_off();
   mempool_barrier(num_cores);
   if (cid == 0) {
     const uint64_t macs = gu_macs() + dn_macs();

@@ -28,16 +28,16 @@ parked: not bit-exact on RTL, ~20% slower at 4x4 B=16). Batches: 8x8 B = 1, 2, 4
 The two phases have different compile-time shapes (`gemm_config.h` / `mshr_cfg.h` derive the
 kernel size, split and MSHR tuning from `GEMM_M/N/P`), so they cannot share one translation unit.
 
-- `qwen-ffn/phase.c`: the pipeline of `qwen-ffn-down` (kernel, K-tile stream, K split incl. the
-  cross-group split, reduction, bank hash, MSHR tuning), as functions of one phase. Compiled
-  twice -- `phase_gu.c` and `phase_dn.c` set the phase and its generated shape headers and
-  prefix the exported symbols (`gu_*`, `dn_*`).
+- `qwen-common/qwen_phase.c` (since 2026-10-08, shared with the GDN mixer apps): one streamed
+  projection phase -- kernel, K-tile stream, K split incl. the cross-group split, reduction, bank
+  hash, MSHR tuning -- instantiated by a small wrapper per phase that defines its hooks (prefix,
+  W area, external A operand, epilogue, stream hand-over, previous phase's bank hash; see the
+  file header). qwen-ffn: `phase_gu.c` (SwiGLU epilogue into H, stream into down) and
+  `phase_dn.c` (A = H, MSHR handover, check 1). Also in qwen-common: the kernel, `qwen_layout.h`,
+  `qwen_pattern.h`, `swiglu.h`, `qwen_tu_prefix.h`, `script/gen_hash.c`, `script/fp16_host.h`
+  (qwen-ffn-down uses the same files).
 - `qwen-ffn/main.c`: setup, the timed region (`gu_run`, `dn_run`), report, checks.
-- Shared L1, defined once in `main.c` and sized by a joint host generator: the W double buffer
-  (two regions of max(gate+up slot, down slot) -- the stream hands the free region from one
-  phase to the other), X (gate+up's A, replicated), H (down's A, replicated), gate+up's C strip
-  (2 projections), down's C and K-split partials.
-- `script/gen_ffn_tiles.c`: joint K-tile / strip choice for both phases under one L1 budget.
+- `script/gen_cands.c` + `gen_joint.c`: joint K-tile / strip choice for both phases under one L1 budget.
   `gen_hash.c` per phase. `gen_operands.c`: X, Wg, Wu, Wd images for checks.
 - Phase boundary: MSHR off for the SwiGLU epilogue (unshared local reads), down's MSHR tuning
   written and enabled before the down phase.

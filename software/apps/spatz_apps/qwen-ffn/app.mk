@@ -7,7 +7,7 @@
 #   make qwen-ffn config=terapool_spatz4_fpu icache_warmup=1 l1_bank_size=4096 l2_size=536870912 ffn_b=16
 #   make qwen-ffn ... ffn_b=4 ffn_h=512 ffn_i=2048 ffn_check=1        # end-to-end check, small dims
 #
-# The two phases are phase.c compiled twice (phase_gu.c, phase_dn.c), each with its own generated
+# The two phases are qwen-common/qwen_phase.c compiled twice (phase_gu.c, phase_dn.c), each with its own generated
 # headers in gu/data/ and dn/data/ on its include path; data/ holds what they share.
 ffn_saved_goal_fused := $(.DEFAULT_GOAL)
 
@@ -79,8 +79,10 @@ $(eval $(call ffn_shape_rule,gu,$(ffn_b),$(ffn_h),$(ffn_i),2,0,$(ffn_gu_kt_max))
 $(eval $(call ffn_shape_rule,dn,$(ffn_b),$(ffn_i),$(ffn_h),1,$(ffn_check),$(ffn_dn_kt_max)))
 
 FFN_HOST_CC ?= cc
-FFN_HOST = $(FFN_HOST_CC) -O1 -I$(RUNTIME_DIR) -I$(FFN_DIR)/$(1) -I$(FFN_DIR) $(DEFINES)
-FFN_LAYOUT_DEPS = $(FFN_DIR)/qwen_layout.h $(RUNTIME_DIR)/gemm_config.h $(RUNTIME_DIR)/gemm_burst.h
+FFN_COMMON := qwen-common
+FFN_HOST = $(FFN_HOST_CC) -O1 -I$(RUNTIME_DIR) -I$(FFN_DIR)/$(1) -I$(FFN_DIR) -I$(FFN_COMMON) \
+	-I$(FFN_COMMON)/script $(DEFINES)
+FFN_LAYOUT_DEPS = $(FFN_COMMON)/qwen_layout.h $(RUNTIME_DIR)/gemm_config.h $(RUNTIME_DIR)/gemm_burst.h
 
 # Every legal (KT, PT) of one phase, then the joint choice for both under one L1 budget.
 $(FFN_DIR)/%/data/cands.txt: $(FFN_DIR)/%/data/qwen_shape.h $(FFN_LAYOUT_DEPS) $(FFN_DIR)/script/gen_cands.c
@@ -100,17 +102,17 @@ $(FFN_DIR)/data/ffn_shared.h: $(FFN_DIR)/dn/data/qwen_tiles.h $(FFN_LAYOUT_DEPS)
 	$(@D)/gen_shared > $@.tmp && mv $@.tmp $@
 
 $(FFN_DIR)/%/data/qwen_hash.h: $(FFN_DIR)/%/data/qwen_tiles.h $(FFN_LAYOUT_DEPS) \
-	$(FFN_DIR)/script/gen_hash.c $(RUNTIME_DIR)/gemm_hash.h
-	$(call FFN_HOST,$*) $(FFN_DIR)/script/gen_hash.c -o $(@D)/gen_hash
+	$(FFN_COMMON)/script/gen_hash.c $(RUNTIME_DIR)/gemm_hash.h
+	$(call FFN_HOST,$*) $(FFN_COMMON)/script/gen_hash.c -o $(@D)/gen_hash
 	$(@D)/gen_hash > $@
 
 # Check builds: the operand images, preloaded in L2 (script/gen_operands_{gu,dn}.c).
 $(FFN_DIR)/gu/data/operands.done: $(FFN_DIR)/gu/data/qwen_tiles.h $(FFN_DIR)/data/ffn_shared.h \
-	$(FFN_LAYOUT_DEPS) $(FFN_DIR)/qwen_pattern.h $(FFN_DIR)/script/gen_operands_gu.c
+	$(FFN_LAYOUT_DEPS) $(FFN_COMMON)/qwen_pattern.h $(FFN_DIR)/script/gen_operands_gu.c
 	$(call FFN_HOST,gu) -O2 $(FFN_DIR)/script/gen_operands_gu.c -o $(@D)/gen_operands -lm
 	$(@D)/gen_operands $(abspath $(@D)) && touch $@
 $(FFN_DIR)/dn/data/operands.done: $(FFN_DIR)/dn/data/qwen_tiles.h \
-	$(FFN_LAYOUT_DEPS) $(FFN_DIR)/qwen_pattern.h $(FFN_DIR)/script/gen_operands_dn.c
+	$(FFN_LAYOUT_DEPS) $(FFN_COMMON)/qwen_pattern.h $(FFN_DIR)/script/gen_operands_dn.c
 	$(call FFN_HOST,dn) -O2 $(FFN_DIR)/script/gen_operands_dn.c -o $(@D)/gen_operands -lm
 	$(@D)/gen_operands $(abspath $(@D)) && touch $@
 $(FFN_DIR)/data/ffn_operands.S: $(FFN_DIR)/gu/data/operands.done $(FFN_DIR)/dn/data/operands.done
@@ -125,12 +127,13 @@ $(FFN_DIR)/data/ffn_operands.S.o: $(FFN_DIR)/data/ffn_operands.S
 	$(RISCV_CC) $(RISCV_CCFLAGS) -c $< -o $@
 
 FFN_GEN = $(FFN_DIR)/data/ffn_joint.h $(FFN_DIR)/data/ffn_shared.h
-$(FFN_DIR)/phase_gu.c.o: RISCV_CCFLAGS += -I$(abspath $(FFN_DIR)/gu)
-$(FFN_DIR)/phase_dn.c.o: RISCV_CCFLAGS += -I$(abspath $(FFN_DIR)/dn)
-$(FFN_DIR)/phase_gu.c.o: $(FFN_DIR)/gu/data/qwen_hash.h $(FFN_GEN) $(FFN_DIR)/phase.c \
-	$(FFN_DIR)/ffn.h $(FFN_DIR)/swiglu.h $(FFN_DIR)/kernel/qwen-fmatmul.c $(FFN_LAYOUT_DEPS)
-$(FFN_DIR)/phase_dn.c.o: $(FFN_DIR)/dn/data/qwen_hash.h $(FFN_GEN) $(FFN_DIR)/phase.c \
-	$(FFN_DIR)/ffn.h $(FFN_DIR)/kernel/qwen-fmatmul.c $(FFN_LAYOUT_DEPS)
-$(FFN_DIR)/main.c.o: $(FFN_GEN) $(FFN_DIR)/ffn.h
+$(FFN_DIR)/phase_gu.c.o: RISCV_CCFLAGS += -I$(abspath $(FFN_DIR)/gu) -I$(abspath $(FFN_COMMON))
+$(FFN_DIR)/phase_dn.c.o: RISCV_CCFLAGS += -I$(abspath $(FFN_DIR)/dn) -I$(abspath $(FFN_COMMON))
+$(FFN_DIR)/main.c.o: RISCV_CCFLAGS += -I$(abspath $(FFN_COMMON))
+FFN_PHASE_DEPS = $(FFN_GEN) $(FFN_DIR)/ffn.h $(FFN_COMMON)/qwen_phase.c $(FFN_COMMON)/qwen_phase.h \
+	$(FFN_COMMON)/qwen_tu_prefix.h $(FFN_COMMON)/kernel/qwen-fmatmul.c $(FFN_LAYOUT_DEPS)
+$(FFN_DIR)/phase_gu.c.o: $(FFN_DIR)/gu/data/qwen_hash.h $(FFN_PHASE_DEPS) $(FFN_COMMON)/swiglu.h
+$(FFN_DIR)/phase_dn.c.o: $(FFN_DIR)/dn/data/qwen_hash.h $(FFN_PHASE_DEPS)
+$(FFN_DIR)/main.c.o: $(FFN_GEN) $(FFN_DIR)/ffn.h $(FFN_COMMON)/qwen_phase.h
 
 .DEFAULT_GOAL := $(ffn_saved_goal_fused)
