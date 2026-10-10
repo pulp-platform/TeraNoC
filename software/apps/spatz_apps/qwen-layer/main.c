@@ -105,6 +105,15 @@ int main(void) {
   // ---- the mixer alone: the MSHR stays off, as the in-projection leaves it --------------------
   _Static_assert(!QL_FFN && !QL_CHECK, "ql_mixer_only needs ql_ffn=0 and ql_check=0");
   {
+    if (cid == 0) ql_mixer_dma_prime();  // the DMA as the in-projection leaves it (RTL: done = 1)
+    mempool_barrier(num_cores);
+#if !QL_ATTN && QL_GCHK  // the self-test's first step (untimed); the state carries over
+    ql_mixer_run(cid);
+    if (cid == 0) ql_mixer_dma_wait();
+    mempool_barrier(num_cores);
+    ql_gchk_refill(cid);
+    mempool_barrier(num_cores);
+#endif
     const uint32_t m0 = mempool_get_timer();
     mempool_start_benchmark();
     ql_mixer_run(cid);
@@ -113,6 +122,10 @@ int main(void) {
     mempool_stop_benchmark();
     if (cid == 0) ql_mixer_dma_wait();
     mempool_barrier(num_cores);
+#if !QL_ATTN && QL_GCHK
+    ql_gchk_check(cid);
+    mempool_barrier(num_cores);
+#endif
     if (cid == 0) {
       printf("\n----- qwen %s mixer only (B=%u, T=%u) -----\n", QL_ATTN ? "attention" : "gdn", QL_B,
              QL_TOK);

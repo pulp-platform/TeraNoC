@@ -19444,3 +19444,78 @@ when the app sets it (`qwen-ffn/app.mk`: `-DQC_EXP_FAKE=0` under `ffn_check=1`, 
 has QWEN_CHECK=0). Verified on GVSoC 4x4: qwen-ffn ffn_check=1 success; qwen-ffn-down check=3
 (SwiGLU vs host) 2033/2048 bit-exact, max 1 ulp; perf build's swiglu_f16 108 -> 89 instructions.
 FFN agent session notified. Pin QC_EXP_FAKE when comparing with earlier (real-exp) FFN numbers.
+
+## 2026-10-10 03:55 — GUI ELFs: mixer-only builds hung on RTL (DMA done flag); fixed ELFs swapped in
+
+**Purpose.** The four 8x8 GUI runs (hardware/build_1..4) preload `hardware/elf_gui8/gui8_*.elf`,
+all `ql_mixer_only=1`. A 4x4 RTL probe of the same mode (fleet batch rp1, VCS pr1 image) hung.
+
+**Root cause.** In mixer-only mode no in-projection runs, so no DMA has ever completed when the
+mixer starts, and both mixers begin with `dma_wait()` (core 0, "the in-projection's last transfer").
+On RTL the DMA's done register reads 0 until a first transfer completes (GVSoC starts it at 1), so
+core 0 spun in `dma_done()` forever (trace PC 0x80004d9c attention / 0x80004f34 GDN, at cycle
+368k / 265k) with every other core asleep in the next barrier. Mixer-only ELFs had only ever run on
+GVSoC; the earlier RTL layer runs had an in-projection DMA first.
+
+**Fix.** `ql_mixer_dma_prime()` (mixer_gdn.c / mixer_attn.c): core 0 does one 64 B blocking DMA
+before the timed region in main.c's mixer-only block, leaving the DMA as an in-projection would.
+Its L2 source lives in the small initialised `.l2` section: a first version put it in `.l2_bss`,
+which shifted `ql_s_l2` / `ql_kv_l2` from a 64 KiB boundary to +4 KiB and HALVED the DMA rate on
+GVSoC (attention B=4 155k -> 376k; GDN prologue 11.9k -> 22.5k). The large L2 buffers are only
+`aligned(4096)` and sat on sweep boundaries by luck -- to be aligned to the sweep explicitly.
+
+**Rebuilt GUI ELFs** from the committed software (95f14357) plus only this fix, in a detached
+worktree (`TeraNoC_guifix`, install/ symlinked); disassembly differs from the originals only by the
+prime call/function and relocations; `.l2_bss` placement identical. GVSoC 8x8 (old -> fixed):
+GDN B=1 76,225 -> 79,214; GDN B=4 81,943 -> 79,998; attention B=1 66,408 -> 64,453; attention B=4
+155,249 -> 157,815 (run-to-run spread). Swapped in place (cp + rename) at 03:53 while all four GUI
+sims were still in vopt (ELF read at simulation time 0); originals kept in
+`elf_gui8/orig_dmahang/`. RTL confirmation: fleet batch rp2 (8x8 VCS image, fixed attention B=1 and
+GDN B=1), in flight.
+
+Also: a fresh checkout could not build `ql_ffn=0` (app.mk kept the FFN A-header rules' dependency on
+`gu/dn/data/qwen_tiles.h`, which only existed in the main tree from old FFN builds); the FFN rules
+are now under `ifeq ($(ql_ffn),1)`.
+
+**Status.** Fix in the working tree, not committed (awaits review).
+
+## 2026-10-10 05:00 — GDN chunked delta rule (MTP) + column split; attention KV sharing (off)
+
+**Purpose.** The two mixer optimisations planned for MTP T=4: one pass over the GDN state for all
+the step's tokens, and attention token groups sharing one K/V copy.
+
+**GDN (`ql_gck=1`, default; `ql_cs` 0 = auto).** qc_gdn.h `qc_gdn_ck_pr` / `qc_gdn_ck_out`
+(`QC_GDN_NT` tokens): P_t = S0 k_t, R_t = S0 q_t over the core's columns, then
+c_t = beta_t (v_t - Gamma_t P^_t - sum_{s<t} r(s,t) (k^_s.k^_t) c_s),
+o_t = Gamma_t R^_t + sum_{s<=t} r(s,t) (k^_s.q^_t) c_s, S = Gamma_last S0 + sum_s r(s,last) c_s k^_s^T;
+the L2 norms of q, k fold into the scalar coefficients (no rescaling pass); the 24 dot products are
+m1 FMAs into scratch rows summed by one strided transpose (no reductions, no LMUL switch -- m4
+ops cost ~400 cycles each on GVSoC). Each chunk's 128 columns split over QL_CS adjacent cores
+(chunk part u = c * QL_CS + p): at 8x8 B=1 768 cores work instead of 192 and the state tile is
+2 MiB, not 8; parts sum their partial P / R through aux slots after a set-local flag sync; part p
+gated-norms tokens j % QL_CS == p. a,b stage: all tokens per task, KP = 2 QL_CS, m1 loads
+software-pipelined over two register sets. One-round case: state tile 0 loads under the a,b stage,
+the o-projection's tile 0 under the round. The chunked kernel uses v16-v31: the SiLU constants are
+reloaded before the gated norm (missing that was the self-test's first FAIL).
+Value self-test `ql_gchk=1` (mixer only, real exp): patterns in, two decode steps, o' vs a float64
+model (script/gen_gchk.py) at 5% + 0.02: PASS at 4x4 B=1 for the per-token kernel (max err 0.017)
+and chunked CS=1/2/4 (0.011-0.014), 8x8 B=1 (CS=4) and B=4 (CS=1). Whole-block structural check
+(T=1, in-projection scatter to column parts) PASS at 4x4 B=4.
+GVSoC 8x8 T=4 mixer-only (GUI baseline -> chunked): B=1 76,225 -> 43,509; B=4 81,943 -> 64,431.
+4x4 B=1 T=4: 51,165 -> 40,280 (CS=1; CS>1 needs extra rounds there and is slower).
+Tried and dropped: a,b as 96 more qz columns -- the GEMM's leading dimension must be a multiple of
+4096 at 4x4, so 16512 pads to 20480 (+24% weights).
+
+**Attention (`ql_ks`, default 1 = off).** The ql_t/ql_tg token groups of a (sequence, KV head) on
+adjacent cores sharing one K/V copy, each holding 1/ql_ks of the head dims (qc_attn.h
+QC_ATT_SLICE_OFF), set-local sync after the new-token inserts. GVSoC 8x8: B=1 69,544 vs 66,731;
+B=4 152,459 vs 156,909 -- the KV DMA drops 4x but reading 3/4 of K/V from neighbour tiles slows the
+kernels about as much. Profile: 8x8 B=4 rounds are compute-bound (100k compute / 21k wait per core,
+kernel ~49% of FPU peak); the next step is a head-dim split with 24 rows per local K/V row, pending
+RTL evidence on the QK loop's per-row load bubble.
+
+**GUI runs.** build_1 / build_2 (GDN B=1 / B=4) now preload chunked-GDN ELFs (swapped before time
+0; the per-token hang-fix ELFs are in `elf_gui8/hangfix_pertoken/`); build_3 / build_4 (attention)
+keep the hang-fix ELFs.
+
+**Status.** Committed with the DMA-prime fix.

@@ -29,6 +29,7 @@
 #define QC_ATT_RES ql_res
 #define QC_ATT_K0 QL_A_RES_K0
 #define QC_ATT_TOKS QL_TG
+#define QC_ATT_KS QL_KS
 #include "../qwen-common/qc_attn.h"
 
 _Static_assert((QL_S % QC_ATT_TB) == 0, "S: whole 32-token blocks");
@@ -37,13 +38,19 @@ _Static_assert(QL_A_NPRB <= NUM_CORES || (QL_A_NPRB % NUM_CORES) == 0, "problems
 _Static_assert(QL_A_CPP % QL_A_SUB == 0 && QL_A_NPC % QL_A_SUB == 0 && QL_A_NSUB <= 32u &&
                QL_A_P1 <= 16u || QL_A_NSUB == 1u, "two-level split: whole sub-problems");
 _Static_assert(QL_TOK % QL_TG == 0 && QL_TOK <= QC_ATT_TB, "token groups: whole, in one block");
+_Static_assert(QL_KS == 1u || (QL_A_TGRP % QL_KS == 0 && NUM_TILES_PER_GROUP % QL_KS == 0),
+               "KV sharing: whole token groups, a set inside one group");
 
 #if QL_STATE_W
 #define ql_kvbuf ((uint8_t *)ql_w_area)  // K tile, then V tile: idle W area
 #else
-static uint8_t ql_kvbuf[2u * QC_ATT_TILE_B] QC_L1_SWEEP;
+static uint8_t ql_kvbuf[2u * QL_A_TILE_B] QC_L1_SWEEP;
 #endif
-static uint8_t ql_kv_l2[QL_A_T * 2u * QC_ATT_TILE_B] __attribute__((section(".l2_bss"), aligned(4096)));
+// Sweep-aligned (a 4 KiB shift of an L2 tile source halved the GVSoC DMA rate).
+static uint8_t ql_kv_l2[QL_A_T * 2u * QL_A_TILE_B] __attribute__((section(".l2_bss"), aligned(QC_SWEEP_B)));
+// KV sharing: inserts of the step's new k / v done by each core (its slices of the last block);
+// the set's other cores wait for them before reading the block.
+static volatile uint32_t ql_ins_cnt[NUM_CORES];
 static uint32_t ql_t_start, ql_t_prep, ql_t_rounds, ql_t_comb, ql_t_end;
 static uint32_t ql_bad_knew[NUM_CORES];  // check mode: the new k in the KV cache (L2) vs its slots
 
@@ -53,17 +60,24 @@ static inline uint8_t *ql_scr_at(uint32_t k, uint32_t cid) {
 
 typedef struct {
   uint32_t b, g, p, blk, qp, t0;  // t0: the problem's first token of the step
+  uint32_t kw;                    // this token group writes the step's new k / v into the cache
 } ql_a_id_t;
+// Core cid is token group cid % QL_KS of plane core cid / QL_KS (layer.h); a plane problem is a
+// (sequence, set of QL_KS token groups, KV head).
 static inline ql_a_id_t ql_a_id(uint32_t cid, uint32_t r) {
   ql_a_id_t d;
+  const uint32_t v = cid / QL_KS, pv = v / QL_A_CPP + r / QL_A_RPP * (QL_A_NV / QL_A_CPP);
+  const uint32_t ts = pv / QC_ATT_KVH % (QL_A_TGRP / QL_KS), tgi = ts * QL_KS + cid % QL_KS;
   d.qp = r / QL_A_RPP;
-  d.p = (cid / QL_A_CPP) + d.qp * (NUM_CORES / QL_A_CPP);
-  d.b = d.p / QC_ATT_KVH / QL_A_TGRP;
-  d.t0 = (d.p / QC_ATT_KVH) % QL_A_TGRP * QL_TG;
-  d.g = d.p % QC_ATT_KVH;
-  d.blk = (cid % QL_A_CPP) * QL_A_RPP + r % QL_A_RPP;
+  d.g = pv % QC_ATT_KVH;
+  d.b = pv / QC_ATT_KVH / (QL_A_TGRP / QL_KS);
+  d.t0 = tgi * QL_TG;
+  d.p = (d.b * QL_A_TGRP + tgi) * QC_ATT_KVH + d.g;
+  d.blk = v % QL_A_CPP * QL_A_RPP + r % QL_A_RPP;
+  d.kw = ts == 0u;
   return d;
 }
+static inline uint32_t ql_a_part(uint32_t cid) { return cid / QL_KS % QL_A_CPP; }
 
 //==============================================================================
 // prep: per-head RMSNorm (256 dims = 8 slots) and the partial RoPE (dims 0..63 = slots 0, 1)
@@ -122,7 +136,7 @@ static __attribute__((noinline)) void ql_head_norm_rope(uint32_t cid, uint32_t o
 // Level 2 of the q broadcast: this core's (already normalised) head at sw0.. to cores d0 .. +nd.
 static __attribute__((noinline)) void ql_head_bcast(uint32_t cid, uint32_t sw0, uint32_t d0,
                                                     uint32_t nd) {
-  const uint32_t ds = 1u;
+  const uint32_t ds = QL_KS;  // the problem's part cores
   size_t vl;
   __asm__ volatile("vsetvli %0, %1, e16, m1, ta, ma" : "=r"(vl) : "r"(QC_ATT_TB));
   for (uint32_t s = 0; s < QC_ATT_NSL; ++s) {
@@ -138,31 +152,36 @@ static __attribute__((noinline)) void ql_head_bcast(uint32_t cid, uint32_t sw0, 
 // K tile row d holds the block's 32 tokens; the step's new tokens are its last QL_TOK positions.
 #define QL_NEWPOS(t) (QC_ATT_TB - QL_TOK + (t))
 static __attribute__((noinline)) void ql_insert_k(uint32_t cid, const ql_a_id_t *d) {
-  // slot s of token t's k (dims s*32..) is column NEWPOS(t) of rows s*32..: one strided store
+  // slot s of token t's k (dims s*32..) is column NEWPOS(t) of rows s*32..: one strided store;
+  // KV sharing: this core's slices only (its tile rows (s % NSLC) * 32..)
+  const uint32_t s0 = cid % QL_KS * QC_ATT_NSLC;
   size_t vl;
   __asm__ volatile("vsetvli %0, %1, e16, m1, ta, ma" : "=r"(vl) : "r"(QC_ATT_TB));
   for (uint32_t t = 0; t < QL_TOK; ++t)
-    for (uint32_t s = 0; s < QC_ATT_NSL; ++s) {
+    for (uint32_t s = s0; s < s0 + QC_ATT_NSLC; ++s) {
       __asm__ volatile("vle16.v v0, (%0)" ::"r"(ql_resp(QL_A_RES_KNEW + (d->qp * QL_TOK + t) * 8u + s, cid)) : "memory");
-      __asm__ volatile("vsse16.v v0, (%0), %1" ::"r"((uint8_t *)qc_slot(ql_kvbuf, s * QC_ATT_TB, cid) +
+      __asm__ volatile("vsse16.v v0, (%0), %1" ::"r"((uint8_t *)qc_slot(ql_kvbuf, (s - s0) * QC_ATT_TB, cid) +
                                                      QL_NEWPOS(t) * 2u),
                        "r"(QC_SWEEP_B) : "memory");
     }
 }
 // The new k into the L2 cache (column 31 of the last block's K tile: 256 scattered 2-byte writes),
 // after the rounds and split over the problem's cores -- on one core it held up every barrier.
-#define QL_KW QL_A_MIN(QL_A_CPP, 16u)  // writers: >= 16 dims each (no short vectors)
+#define QL_KW QL_A_MIN(QL_A_CPP, 16u / QL_KS)  // writers: >= 16 dims each (no short vectors)
 static __attribute__((noinline)) void ql_put_k_l2(uint32_t cid, uint32_t part) {
-  if (part >= QL_KW || ql_a_id(cid, 0).t0 != 0u) return;  // one token group writes the cache
-  const uint32_t last = cid - part + QL_A_CPP - 1u, n = QC_ATT_D / QL_KW;
+  if (part >= QL_KW || !ql_a_id(cid, 0).kw) return;  // one token group (set) writes the cache
+  // KV sharing: each core of the set writes its own dims (its tile rows), from its plane's last core
+  const uint32_t last = cid + (QL_A_CPP - 1u - part) * QL_KS, n = QC_ATT_D / QL_KS / QL_KW;
+  const uint32_t d0 = cid % QL_KS * (QC_ATT_D / QL_KS);
   const uint32_t m = n < QC_ATT_TB ? n : QC_ATT_TB;
   size_t vl;
   __asm__ volatile("vsetvli %0, %1, e16, m1, ta, ma" : "=r"(vl) : "r"(m));
   for (uint32_t qp = 0; qp < QL_A_PPC; ++qp) {
     const uint32_t r = qp * QL_A_RPP + QL_A_RPP - 1u;  // the round of the problem's last block
     for (uint32_t t = 0; t < QL_TOK; ++t) {
-      uint8_t *l2 = ql_kv_l2 + (2u * r) * QC_ATT_TILE_B + last * QC_SLOT_B + QL_NEWPOS(t) * 2u;
-      for (uint32_t dd = part * n; dd < (part + 1u) * n; dd += m) {
+      uint8_t *l2 = ql_kv_l2 + (2u * r) * QL_A_TILE_B + last * QC_SLOT_B + QL_NEWPOS(t) * 2u -
+                    d0 * QC_SWEEP_B;
+      for (uint32_t dd = d0 + part * n; dd < d0 + (part + 1u) * n; dd += m) {
         __asm__ volatile("vle16.v v0, (%0)" ::"r"(ql_resp(QL_A_RES_KNEW + (qp * QL_TOK + t) * 8u + dd / 32u, last) +
                                                    (dd % 32u) * 2u)
                          : "memory");
@@ -175,16 +194,27 @@ static __attribute__((noinline)) void ql_put_k_l2(uint32_t cid, uint32_t part) {
 static __attribute__((noinline)) void ql_insert_v(uint32_t cid, const ql_a_id_t *d, uint32_t r) {
   size_t vl;
   __asm__ volatile("vsetvli %0, %1, e16, m1, ta, ma" : "=r"(vl) : "r"(QC_ATT_TB));
+  const uint32_t s0 = cid % QL_KS * QC_ATT_NSLC;  // KV sharing: this core's slices
   for (uint32_t t = 0; t < QL_TOK; ++t)
-    for (uint32_t s = 0; s < QC_ATT_NSL; ++s) {
-      const uint32_t sw = s * QC_ATT_TB + QL_NEWPOS(t);
+    for (uint32_t s = s0; s < s0 + QC_ATT_NSLC; ++s) {
+      const uint32_t sw = (s - s0) * QC_ATT_TB + QL_NEWPOS(t);
       __asm__ volatile("vle16.v v0, (%0)" ::"r"(ql_resp(QL_A_RES_VNEW + (d->qp * QL_TOK + t) * 8u + s, cid)) : "memory");
-      __asm__ volatile("vse16.v v0, (%0)" ::"r"(qc_slot(ql_kvbuf + QC_ATT_TILE_B, sw, cid)) : "memory");
-      if (d->t0 == 0u)  // one token group writes the cache
-        __asm__ volatile("vse16.v v0, (%0)" ::"r"(ql_kv_l2 + (2u * r + 1u) * QC_ATT_TILE_B + sw * QC_SWEEP_B +
+      __asm__ volatile("vse16.v v0, (%0)" ::"r"(qc_slot(ql_kvbuf + QL_A_TILE_B, sw, cid)) : "memory");
+      if (d->kw)  // one token group (set) writes the cache
+        __asm__ volatile("vse16.v v0, (%0)" ::"r"(ql_kv_l2 + (2u * r + 1u) * QL_A_TILE_B + sw * QC_SWEEP_B +
                                                    cid * QC_SLOT_B)
                          : "memory");
     }
+}
+
+// KV sharing: the set's cores insert their slices of the last block, then wait for each other's
+// before any of them reads the block (a set-local barrier, counted per insert).
+static __attribute__((noinline)) void ql_ins_sync(uint32_t cid) {
+  __asm__ volatile("fence" ::: "memory");  // this core's inserts (VLSU stores) have landed
+  const uint32_t n = ql_ins_cnt[cid] + 1u, c0 = cid - cid % QL_KS;
+  ql_ins_cnt[cid] = n;
+  for (uint32_t j = 0; j < QL_KS; ++j)
+    while (ql_ins_cnt[c0 + j] < n) { }
 }
 
 //==============================================================================
@@ -259,7 +289,7 @@ static inline void ql_wsum(uint32_t cid, const uint8_t *p, uint32_t n, uint32_t 
 // partials, QL_A_P1 pieces each, into their own C1 slots with the merged m, l in C1M -- every
 // core busy, every load inside the group.
 static __attribute__((noinline)) void ql_combine_l1(uint32_t cid, uint32_t part) {
-  const uint32_t i = part % QL_A_SUB, s0 = cid - i;
+  const uint32_t i = part % QL_A_SUB, s0 = cid - i * QL_KS;
   float *mo = (float *)ql_resp(QL_A_RES_C1M, cid), *lo = (float *)ql_resp(QL_A_RES_C1M + 1u, cid);
   float mx = qc_f32_imm(0u), sl = mx;
   uint32_t hc = ~0u;
@@ -270,11 +300,11 @@ static __attribute__((noinline)) void ql_combine_l1(uint32_t cid, uint32_t part)
     const uint32_t s = k % QC_ATT_NSL;
     if (tk * QC_ATT_QPK + h != hc) {
       sl = ql_wts(cid, (const uint8_t *)&qc_att_m(s0, tk)[h], (const uint8_t *)&qc_att_l(s0, tk)[h],
-                  QL_A_SUB, QC_SLOT_B, &mx);
+                  QL_A_SUB, QL_KS * QC_SLOT_B, &mx);
       hc = tk * QC_ATT_QPK + h;
       __asm__ volatile("vsetvli %0, %1, e16, m1, ta, ma" : "=r"(vl) : "r"(QC_ATT_TB));
     }
-    ql_wsum(cid, qc_att_res(QC_ATT_ACC + h * 8u + s, s0), QL_A_SUB, QC_SLOT_B);
+    ql_wsum(cid, qc_att_res(QC_ATT_ACC + h * 8u + s, s0), QL_A_SUB, QL_KS * QC_SLOT_B);
     __asm__ volatile("vse16.v v1, (%0)" ::"r"(ql_resp(QL_A_RES_C1 + o, cid)) : "memory");
     mo[o] = mx;
     lo[o] = sl;
@@ -308,15 +338,15 @@ static __attribute__((noinline)) void ql_cmp_piece(uint32_t cid, uint32_t c0, ui
   __asm__ volatile("vse16.v v7, (%0)" ::"r"(got) : "memory");
   __asm__ volatile("fence" ::: "memory");
   float mx = qc_att_m(c0, tk)[h];
-  for (uint32_t j = 1; j < QL_A_CPP; ++j) mx = __builtin_fmaxf(mx, qc_att_m(c0 + j, tk)[h]);
+  for (uint32_t j = 1; j < QL_A_CPP; ++j) mx = __builtin_fmaxf(mx, qc_att_m(c0 + j * QL_KS, tk)[h]);
   float lsum = qc_f32_imm(0u);
   for (uint32_t j = 0; j < QL_A_CPP; ++j)
-    lsum = lsum + qc_exp_f32(qc_att_m(c0 + j, tk)[h] - mx) * qc_att_l(c0 + j, tk)[h];
+    lsum = lsum + qc_exp_f32(qc_att_m(c0 + j * QL_KS, tk)[h] - mx) * qc_att_l(c0 + j * QL_KS, tk)[h];
   for (uint32_t e = 0; e < QC_ATT_TB; ++e) {
     float ref = qc_f32_imm(0u);
     for (uint32_t j = 0; j < QL_A_CPP; ++j)
-      ref = ref + qc_exp_f32(qc_att_m(c0 + j, tk)[h] - mx) *
-                      (float)((const _Float16 *)qc_att_res(QC_ATT_ACC + h * 8u + s, c0 + j))[e];
+      ref = ref + qc_exp_f32(qc_att_m(c0 + j * QL_KS, tk)[h] - mx) *
+                      (float)((const _Float16 *)qc_att_res(QC_ATT_ACC + h * 8u + s, c0 + j * QL_KS))[e];
     ref = ref / lsum;
     const float g = (float)got[e], dd = g > ref ? g - ref : ref - g, r = ref > 0 ? ref : -ref;
     if (dd > qc_f32_imm(0x3ca3d70au) * r + qc_f32_imm(0x3a83126fu)) ++ql_bad_cmb[cid];  // 2% + 1e-3
@@ -325,7 +355,7 @@ static __attribute__((noinline)) void ql_cmp_piece(uint32_t cid, uint32_t c0, ui
 }
 #endif
 static __attribute__((noinline)) void ql_combine_out(uint32_t cid, uint32_t part) {
-  const uint32_t c0 = cid - part, k0 = part * QL_A_NPC / QL_A_CPP;
+  const uint32_t c0 = cid - part * QL_KS, k0 = part * QL_A_NPC / QL_A_CPP;
   const uint32_t k1 = (part + 1u) * QL_A_NPC / QL_A_CPP;
   const ql_a_id_t d = ql_a_id(cid, 0);
   const qc_k_t qck = qc_k();
@@ -349,18 +379,18 @@ static __attribute__((noinline)) void ql_combine_out(uint32_t cid, uint32_t part
       const uint8_t *mp, *lp, *ap;
       uint32_t n, stride;
       if (QL_A_NSUB > 1u) {
-        const uint32_t ci = c0 + k / QL_A_P1, o = k % QL_A_P1;
+        const uint32_t ci = c0 + k / QL_A_P1 * QL_KS, o = k % QL_A_P1;
         mp = (const uint8_t *)((const float *)ql_resp(QL_A_RES_C1M, ci) + o);
         lp = (const uint8_t *)((const float *)ql_resp(QL_A_RES_C1M + 1u, ci) + o);
         ap = ql_resp(QL_A_RES_C1 + o, ci);
         n = QL_A_NSUB;
-        stride = QL_A_SUB * QC_SLOT_B;
+        stride = QL_A_SUB * QL_KS * QC_SLOT_B;
       } else {
         mp = (const uint8_t *)&qc_att_m(c0, tk)[h];
         lp = (const uint8_t *)&qc_att_l(c0, tk)[h];
         ap = qc_att_res(QC_ATT_ACC + h * 8u + s, c0);
         n = QL_A_CPP;
-        stride = QC_SLOT_B;
+        stride = QL_KS * QC_SLOT_B;
       }
       if (tk * QC_ATT_QPK + h != hc) {
         float mx;
@@ -390,8 +420,17 @@ static __attribute__((noinline)) void ql_combine_out(uint32_t cid, uint32_t part
 // The DMA's last transfer (dma.h defines non-inline functions: one translation unit only).
 void ql_mixer_dma_wait(void) { dma_wait(); }
 
+// Mixer-only builds: no in-projection ran, and the RTL DMA's done flag reads 0 until a first
+// transfer completes, so the mixer's first dma_wait() would never return (GVSoC starts at 1).
+// One small transfer before the timed region leaves the DMA as the in-projection would: idle.
+// In the small initialised .l2 section: an .l2_bss object here would shift the big streamed
+// buffers off their sweep alignment (that halves the DMA rate).
+static const uint8_t ql_dma_prime_l2[64] __attribute__((section(".l2"), aligned(64))) = {0};
+void ql_mixer_dma_prime(void) { dma_memcpy_blocking(ql_scr, ql_dma_prime_l2, 64u); }
+
 void ql_mixer_setup(uint32_t cid) {
   ql_bad_knew[cid] = 0u;  // .bss is not cleared
+  ql_ins_cnt[cid] = 0u;
   qc_att_setup(cid);  // its zero slot
   for (uint32_t i = 0; i < QC_SLOT_F16; ++i) ((uint16_t *)ql_scr_at(1, cid))[i] = 0u;
   // RoPE cos / sin per token of the step (synthetic: 0.6 / 0.8) and its causal mask on the block
@@ -420,10 +459,11 @@ void ql_mixer_run(uint32_t cid) {
   QL_STAGE("start");
   QL_DBG_STAGE(cid, 1);
   qc_rne();
-  const uint32_t active = cid < QL_A_ACTIVE, part = cid % QL_A_CPP;
+  const uint32_t active = cid < QL_A_ACTIVE, part = ql_a_part(cid);
+  const uint32_t c0 = cid - part * QL_KS;  // the problem's part 0 (its parts are QL_KS apart)
   if (cid == 0) {  // the in-projection's last transfer, then K tile 0 under the prep
     dma_wait();
-    dma_memcpy_nonblocking(ql_kvbuf, ql_kv_l2, QC_ATT_TILE_B);
+    dma_memcpy_nonblocking(ql_kvbuf, ql_kv_l2, QL_A_TILE_B);
   }
   QL_DBG_STAGE(cid, 40);
   QL_PROF_AT(cid, 0);
@@ -438,14 +478,14 @@ void ql_mixer_run(uint32_t cid) {
         const uint32_t rt = t0 + hh / QC_ATT_QPK;
         // to every part core (one level), or to core hh % SUB of every sub-problem (two levels)
         if (QL_A_NSUB > 1u)
-          ql_head_norm_rope(cid, cid - part, sw, cid - part + hh % QL_A_SUB, QL_A_NSUB, QL_A_SUB, rt);
+          ql_head_norm_rope(cid, c0, sw, c0 + hh % QL_A_SUB * QL_KS, QL_A_NSUB, QL_A_SUB * QL_KS, rt);
         else
-          ql_head_norm_rope(cid, cid - part, sw, cid - part, QL_A_CPP, 1u, rt);
+          ql_head_norm_rope(cid, c0, sw, c0, QL_A_CPP, QL_KS, rt);
         QL_DBG_STAGE(cid, 41 + hh);
       }
       // the step's new k (every token: the last block holds all of them), core CPP-1-t, into
       // the last part core's slots
-      const uint32_t lastc = cid - part + QL_A_CPP - 1u;
+      const uint32_t lastc = c0 + (QL_A_CPP - 1u) * QL_KS;
       for (uint32_t t = 0; t < QL_TOK; ++t)
         if (part == QL_A_CPP - 1u - t % QL_A_CPP)
           ql_head_norm_rope(cid, lastc, QL_A_RES_KNEW + (qp * QL_TOK + t) * 8u, lastc, 1u, 1u, t);
@@ -459,7 +499,7 @@ void ql_mixer_run(uint32_t cid) {
     const uint32_t j = part % QL_A_SUB;
     for (uint32_t qp = 0; qp < QL_A_PPC; ++qp)
       for (uint32_t hh = j; hh < QL_TG * QC_ATT_QPK; hh += QL_A_SUB)
-        ql_head_bcast(cid, QL_A_RES_Q + (qp * QL_TG * QC_ATT_QPK + hh) * 8u, cid - j, QL_A_SUB);
+        ql_head_bcast(cid, QL_A_RES_Q + (qp * QL_TG * QC_ATT_QPK + hh) * 8u, cid - j * QL_KS, QL_A_SUB);
   }
   QL_PROF_AT(cid, 2);
   QL_STAGE("prep barrier");
@@ -478,25 +518,27 @@ void ql_mixer_run(uint32_t cid) {
 #endif
   for (uint32_t i = 0; i < 2u * QL_A_T; ++i) {
     if (cid == 0 && i + 1u < 2u * QL_A_T)
-      dma_memcpy_nonblocking(ql_kvbuf + ((i + 1u) & 1u) * QC_ATT_TILE_B,
-                             ql_kv_l2 + (i + 1u) * QC_ATT_TILE_B, QC_ATT_TILE_B);
-    const uint32_t r = i / 2u;
+      dma_memcpy_nonblocking(ql_kvbuf + ((i + 1u) & 1u) * QL_A_TILE_B,
+                             ql_kv_l2 + (i + 1u) * QL_A_TILE_B, QL_A_TILE_B);
+    const uint32_t r = i / 2u, kvc = cid - cid % QL_KS;  // kvc: the K/V set's first core
     if (active) {
       const ql_a_id_t d = ql_a_id(cid, r);
       const uint32_t last = d.blk == QL_A_NBP - 1u;
       // the group's tokens one after the other on the tile in L1 (one K/V stream for all)
       if ((i & 1u) == 0u) {
         if (last) ql_insert_k(cid, &d);
+        if (QL_KS > 1u && last) ql_ins_sync(cid);
         for (uint32_t j = 0; j < QL_TG; ++j) {
           if (r % QL_A_RPP == 0u) qc_att_part_reset(cid, j);
-          qc_att_qk_softmax((uint8_t *)qc_slot(ql_kvbuf, 0, cid), cid,
+          qc_att_qk_softmax((uint8_t *)qc_slot(ql_kvbuf, 0, kvc), cid,
                             QL_A_RES_Q + (d.qp * QL_TG + j) * 48u, j,
                             last ? ql_resp(QL_A_RES_MASK + d.t0 + j, cid) : 0);
         }
       } else {
         if (last) ql_insert_v(cid, &d, r);
+        if (QL_KS > 1u && last) ql_ins_sync(cid);
         for (uint32_t j = 0; j < QL_TG; ++j) {
-          qc_att_pv((uint8_t *)qc_slot(ql_kvbuf + QC_ATT_TILE_B, 0, cid), cid, j);
+          qc_att_pv((uint8_t *)qc_slot(ql_kvbuf + QL_A_TILE_B, 0, kvc), cid, j);
           if (QL_A_CPP == 1u && r % QL_A_RPP == QL_A_RPP - 1u) ql_gate_out(cid, &d, cid, 0u, 1u, j);
         }
       }
@@ -518,7 +560,7 @@ void ql_mixer_run(uint32_t cid) {
 #if QL_CHECK
   if (active && part == QL_A_CPP - 1u) {  // the last round's K tile: column 31 = the new k
     const ql_a_id_t d = ql_a_id(cid, QL_A_T - 1u);
-    const uint8_t *l2 = ql_kv_l2 + 2u * (QL_A_T - 1u) * QC_ATT_TILE_B + cid * QC_SLOT_B + (QC_ATT_TB - 1u) * 2u;
+    const uint8_t *l2 = ql_kv_l2 + 2u * (QL_A_T - 1u) * QL_A_TILE_B + cid * QC_SLOT_B + (QC_ATT_TB - 1u) * 2u;
     uint32_t bad = 0;
     for (uint32_t dd = 0; dd < QC_ATT_D; ++dd)
       bad += *(const volatile uint16_t *)(l2 + dd * QC_SWEEP_B) !=
@@ -562,7 +604,7 @@ void ql_op_prime(uint32_t cid) {
 uint32_t ql_check_aux(uint32_t cid) {
   uint32_t bad = 0;
   if (cid >= QL_A_ACTIVE) return 0;
-  const uint32_t part = cid % QL_A_CPP;
+  const uint32_t part = ql_a_part(cid);
   for (uint32_t qp = 0; qp < QL_A_PPC; ++qp) {
     const ql_a_id_t d = ql_a_id(cid, qp * QL_A_RPP);
     for (uint32_t dd = 0; dd < QC_ATT_D; ++dd) {
@@ -608,11 +650,11 @@ void ql_mixer_report(uint32_t cid) {
   for (uint32_t c = 0; c < 16u && c < NUM_CORES; c += 5u)
     printf("[ATTP] core %u rounds: compute=%u wait=%u\n", c, ql_rprof[c][0], ql_rprof[c][1]);
 #endif
-  printf("[ATTL] mixer S=%u T=%u TG=%u problems=%u cores/problem=%u rounds=%u%s: total=%u prep=%u "
+  printf("[ATTL] mixer S=%u T=%u TG=%u KS=%u problems=%u cores/problem=%u rounds=%u%s: total=%u prep=%u "
          "rounds=%u per_round=%u combine+gate=%u kv_bytes=%u\n",
-         QL_S, QL_TOK, QL_TG, QL_A_NPRB, QL_A_CPP, QL_A_T,
+         QL_S, QL_TOK, QL_TG, QL_KS, QL_A_NPRB, QL_A_CPP, QL_A_T,
          QL_STATE_W ? " (KV tiles in the W area)" : "",
          ql_t_end - ql_t_start, ql_t_prep - ql_t_start, ql_t_rounds - ql_t_prep,
          (ql_t_rounds - ql_t_prep) / QL_A_T, ql_t_end - ql_t_rounds,
-         QL_A_NPRB * QL_S * QC_ATT_D * 4u);
+         QL_A_NPRB / QL_KS * QL_S * QC_ATT_D * 4u);
 }

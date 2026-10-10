@@ -60,8 +60,29 @@ typedef _Float16 ql_elem_t;
 
 #if !QL_ATTN
 // ---- mixer ---------------------------------------------------------------------------------
+// QL_GCK=1: the chunked delta rule (qc_gdn.h, QC_GDN_NT = QL_TOK tokens per state pass), each
+// chunk's 128 state columns split over QL_CS adjacent cores (chunk part u = chunk * QL_CS + p on
+// core u % cores, round u / cores; part p holds columns p * QL_GW ..). QL_CS defaults to the
+// widest split that keeps every chunk part in one round. QL_GCK=0: the per-token kernel, QL_CS=1.
+#ifndef QL_GCK
+#define QL_GCK 1
+#endif
+#if !QL_GCK
+#define QL_CS 1u
+#elif defined(QL_CS_KNOB) && QL_CS_KNOB
+#define QL_CS QL_CS_KNOB
+#elif QC_GDN_CPS * QL_B * 4 <= NUM_CORES
+#define QL_CS 4u
+#elif QC_GDN_CPS * QL_B * 2 <= NUM_CORES
+#define QL_CS 2u
+#else
+#define QL_CS 1u
+#endif
+#define QL_GW (QC_GDN_D / QL_CS)                     // state columns per core
+#define QL_GTILE_B (QL_GW * QC_SWEEP_B)              // one state tile (every core's columns)
 #define QL_NC (QC_GDN_CPS * QL_B)                    // chunks per step
-#define QL_T ((QL_NC + NUM_CORES - 1) / NUM_CORES)   // rounds; chunk c on core c % cores
+#define QL_NU (QL_NC * QL_CS)                        // chunk parts per step
+#define QL_T ((QL_NU + NUM_CORES - 1) / NUM_CORES)   // rounds; part u on core u % cores
 #if QL_STREAM
 #define QL_NBUF (QL_T < 3u ? QL_T : 3u)
 #else
@@ -72,10 +93,10 @@ typedef _Float16 ql_elem_t;
 #define QL_AUX_SS (QC_GDN_AUX_SW + 1u)
 #define QL_AUX_SW (QC_GDN_AUX_SW + 2u)
 // AB slot elements: [0] alpha, [1] beta (the kernel's), [2] a, [3] b (raw, from the ab stage)
-#define QL_SCR_SW 2u  // per-core scratch: 64 fp16 in the core's own slots
+#define QL_SCR_SW 27u  // per-core scratch: slot 0 data, 1 zeros, 2.. the chunked kernel's dot rows
 
 // The mixer's L1 (gen_reserve.c reports it to the joint tiling chooser).
-#define QL_L1_STATE ((uint32_t)QL_NBUF * QC_GDN_TILE_B)
+#define QL_L1_STATE ((uint32_t)QL_NBUF * QL_GTILE_B)
 #define QL_L1_AUX ((uint32_t)QL_T * QL_TOK * QL_AUX_SW * QC_SWEEP_B)  // per round and token
 #define QL_L1_SCR (QL_SCR_SW * QC_SWEEP_B)
 #define QL_L1_CONV ((QL_B * 3u + QL_CONV_K) * QL_CONV_CH * 2u)
@@ -99,8 +120,18 @@ typedef _Float16 ql_elem_t;
 #define QL_A_TGRP (QL_TOK / QL_TG)
 #define QL_A_NPRB (QC_ATT_KVH * QL_B * QL_A_TGRP)
 #define QL_A_NBP (QL_S / QC_ATT_TB)
-#define QL_A_CPP QL_A_MIN(QL_A_MAX(1u, NUM_CORES / QL_A_NPRB), QL_A_NBP)
-#define QL_A_PPC QL_A_MAX(1u, QL_A_NPRB / NUM_CORES)
+// KV sharing (QL_KS > 1): the QL_KS token groups of a (sequence, KV head) sit on QL_KS adjacent
+// cores -- core c is token group c % QL_KS of "plane" core c / QL_KS -- and share one K/V copy:
+// core j of the set holds head dims [j, j + 1) * 256 / QL_KS of the set's blocks (QC_ATT_KS).
+// Every mapping below is per plane: QL_A_NV plane cores run QL_A_NPRB / QL_KS problems, and the
+// part cores of a problem are QL_KS apart.
+#ifndef QL_KS
+#define QL_KS 1u
+#endif
+#define QL_A_NV (NUM_CORES / QL_KS)
+#define QL_A_NPRBV (QL_A_NPRB / QL_KS)
+#define QL_A_CPP QL_A_MIN(QL_A_MAX(1u, QL_A_NV / QL_A_NPRBV), QL_A_NBP)
+#define QL_A_PPC QL_A_MAX(1u, QL_A_NPRBV / QL_A_NV)
 #define QL_A_ACTIVE QL_A_MIN(NUM_CORES, QL_A_NPRB * QL_A_CPP)
 #define QL_A_RPP (QL_A_NBP / QL_A_CPP)
 #define QL_A_T (QL_A_PPC * QL_A_RPP)
@@ -119,7 +150,7 @@ typedef _Float16 ql_elem_t;
 #define QL_A_RES_MASK (QL_A_RES_ROPE + 2u * QL_TOK)  // token t's causal mask on the last block
 // Above 16 part cores a problem spans several groups: the q broadcast and the split-S combine run
 // in two levels, within each 16-core sub-problem (one group) and across the sub-problems.
-#define QL_A_SUB QL_A_MIN(QL_A_CPP, 16u)  // part cores per sub-problem
+#define QL_A_SUB QL_A_MIN(QL_A_CPP, 16u / QL_KS)  // part cores per sub-problem (one group)
 #define QL_A_NSUB (QL_A_CPP / QL_A_SUB)   // sub-problems per problem
 #define QL_A_NPC (48u * QL_TG)           // combine pieces per problem: (token, head, 32 dims)
 #define QL_A_P1 (QL_A_NPC / QL_A_SUB)     // level-1 combine pieces per core
@@ -128,7 +159,8 @@ typedef _Float16 ql_elem_t;
 #define QL_A_RES_SW (QL_A_RES_C1M + (QL_A_NSUB > 1u ? 2u : 0u))
 #define QL_SCR_SW 3u  // + the split-S combine's weights (fp16, at most 32: one slot)
 
-#define QL_L1_STATE (2u * QC_ATT_TILE_B)  // the K and the V tile buffer
+#define QL_A_TILE_B (QC_ATT_TILE_B / QL_KS)  // one K or V tile (every core's share of a round)
+#define QL_L1_STATE (2u * QL_A_TILE_B)       // the K and the V tile buffer
 #define QL_L1_SCR (QL_SCR_SW * QC_SWEEP_B)
 #define QL_L1_STATE_W QL_L1_STATE
 #define QL_L1_MIXER (QL_A_RES_SW * QC_SWEEP_B + QL_L1_SCR + 4u * QC_SWEEP_B)
@@ -150,6 +182,7 @@ static inline uint8_t *ql_resp(uint32_t sw, uint32_t cid) {
   return (uint8_t *)qc_slot(ql_res, sw, cid);
 }
 // Problem p (= b * 4 + g): its first and last part's core and the core's problem index.
+// (Whole layer: QL_TOK == 1, so QL_KS == 1 and planes are cores.)
 static inline uint32_t ql_a_core(uint32_t p, uint32_t part) {
   return QL_A_NPRB <= NUM_CORES ? p * QL_A_CPP + part : p % NUM_CORES;
 }
@@ -240,7 +273,12 @@ void ql_mixer_setup(uint32_t cid);  // outside the timed region
 void ql_mixer_run(uint32_t cid);    // the mixer core, o' into op's A
 void ql_mixer_report(uint32_t cid);
 void ql_mixer_dma_wait(void);      // the DMA idle (main has no dma.h)
+void ql_mixer_dma_prime(void);     // mixer-only: one transfer so the DMA reads idle (core 0)
 void ql_op_prime(uint32_t cid);     // o-proj tiles 0 (landed) and 1 (in flight), core 0
+#if !QL_ATTN && QL_GCHK
+void ql_gchk_refill(uint32_t cid);  // the GDN self-test's inputs again (between its two steps)
+void ql_gchk_check(uint32_t cid);   // o' against the reference
+#endif
 #endif
 
 #endif

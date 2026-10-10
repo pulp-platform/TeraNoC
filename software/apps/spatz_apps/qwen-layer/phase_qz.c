@@ -32,24 +32,28 @@ _Static_assert(QWEN_STAGES_N == 1 && QWEN_K == QL_H && QWEN_P == QL_P_QZ && QWEN
 _Static_assert((QWEN_SEQ_TOTAL % 2) == 0, "o-proj's tile 0 must land in region 0");
 #endif
 
-// One value of sequence b, channel col (after conv/SiLU for q k v) to its reader(s).
+// One value of sequence b, channel col (after conv/SiLU for q k v) to its reader(s): chunk part
+// u = chunk * QL_CS + p (layer.h) is on core u % cores, round u / cores.
 static inline void ql_scatter(uint32_t b, uint32_t col, uint16_t v) {
-  if (col < QL_COL_V) {  // q or k of key head kh: the 12 chunks (3 value heads x 4 blocks)
+  if (col < QL_COL_V) {  // q or k of key head kh: every part of its 12 chunks (3 value heads x 4)
     const uint32_t k = col >= QL_COL_K, ch = col - (k ? QL_COL_K : 0u);
     const uint32_t kh = ch / QC_GDN_D, d = ch % QC_GDN_D;
     const uint32_t sw = (k ? QC_GDN_AUX_K : QC_GDN_AUX_Q) + d / QC_GDN_RC;
-    const uint32_t c0 = (b * QC_GDN_KH + kh) * QC_GDN_VPK * QC_GDN_RB;
-    for (uint32_t u = 0; u < QC_GDN_VPK * QC_GDN_RB; ++u) {
-      const uint32_t c = c0 + u;
-      ((uint16_t *)ql_auxp(c / NUM_CORES, sw, c % NUM_CORES))[d % QC_GDN_RC] = v;
+    const uint32_t u0 = (b * QC_GDN_KH + kh) * QC_GDN_VPK * QC_GDN_RB * QL_CS;
+    for (uint32_t i = 0; i < QC_GDN_VPK * QC_GDN_RB * QL_CS; ++i) {
+      const uint32_t u = u0 + i;
+      ((uint16_t *)ql_auxp(u / NUM_CORES, sw, u % NUM_CORES))[d % QC_GDN_RC] = v;
     }
-  } else {  // v or z of value head vh: one chunk
+  } else {  // v of value head vh: every part of one chunk; z: the part writing the token (0)
     const uint32_t z = col >= QL_COL_Z, ch = col - (z ? QL_COL_Z : QL_COL_V);
     const uint32_t vh = ch / QC_GDN_D, i = ch % QC_GDN_D;
     const uint32_t c = ((b * QC_GDN_KH + vh / QC_GDN_VPK) * QC_GDN_VPK + vh % QC_GDN_VPK) *
                            QC_GDN_RB + i / QC_GDN_RC;
-    ((uint16_t *)ql_auxp(c / NUM_CORES, z ? QL_AUX_Z : QC_GDN_AUX_V, c % NUM_CORES))
-        [i % QC_GDN_RC] = v;
+    for (uint32_t p = 0; p < (z ? 1u : QL_CS); ++p) {
+      const uint32_t u = c * QL_CS + p;
+      ((uint16_t *)ql_auxp(u / NUM_CORES, z ? QL_AUX_Z : QC_GDN_AUX_V, u % NUM_CORES))
+          [i % QC_GDN_RC] = v;
+    }
   }
 }
 

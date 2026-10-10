@@ -11,6 +11,7 @@
 //            with q[h][d] scalars (6 accumulators, one per query head), no reductions;
 //   V block: row-major in 8 slices of 32 dims, slot (slice * 32 + token): the PV product is
 //            vfmacc.vf over 32 dims with p[h][t] scalars.
+//   With QC_ATT_KS > 1 both are split by slices over adjacent cores (below).
 // Online softmax per query head: running max m and sum l in fp32 (D7), fp16 accumulator.
 //
 // The app defines, before including this file:
@@ -46,6 +47,16 @@
 #ifndef QC_ATT_TOKS
 #define QC_ATT_TOKS 1u  // tokens per core (each its own softmax state, one K/V tile)
 #endif
+// KV sharing: a block's K and V tiles spread over QC_ATT_KS adjacent cores, core j holding slices
+// [j, j + 1) * QC_ATT_NSLC (32 dims each) at its sweeps 0.. (the kernels get the set's first core's
+// tile slot and read the other slices from the neighbours' tiles, same group).
+#ifndef QC_ATT_KS
+#define QC_ATT_KS 1u
+#endif
+#define QC_ATT_NSLC (QC_ATT_NSL / QC_ATT_KS)
+#define QC_ATT_SLICE_OFF(s) \
+  (((s) % QC_ATT_NSLC) * QC_ATT_TB * QC_SWEEP_B + ((s) / QC_ATT_NSLC) * QC_SLOT_B)
+_Static_assert(QC_ATT_NSL % QC_ATT_KS == 0, "QC_ATT_KS: whole slices per core");
 // Per token tk (a variable named tk must be in scope):
 #define QC_ATT_ACC (QC_ATT_K0 + (tk) * QC_ATT_TSW)  // acc[h][d]: slot h * 8 + d / 32
 #define QC_ATT_P (QC_ATT_ACC + 48u)       // p[h][t]: slot h
@@ -192,7 +203,7 @@ static __attribute__((noinline)) void qc_att_qk_softmax(const uint8_t *kt, uint3
     const _Float16 *q3 = (const _Float16 *)(qb + (3u * 8u + s) * QC_SWEEP_B);
     const _Float16 *q4 = (const _Float16 *)(qb + (4u * 8u + s) * QC_SWEEP_B);
     const _Float16 *q5 = (const _Float16 *)(qb + (5u * 8u + s) * QC_SWEEP_B);
-    const uint8_t *kr = kt + s * QC_ATT_TB * QC_SWEEP_B;
+    const uint8_t *kr = kt + QC_ATT_SLICE_OFF(s);
     for (uint32_t i = 0; i < QC_ATT_TB; i += 8u) {
       QC_ATT_QK8(0, "v8");
       QC_ATT_QK8(1, "v9");
@@ -256,7 +267,7 @@ static __attribute__((noinline)) void qc_att_pv(const uint8_t *vt, uint32_t cid,
     const _Float16 *p3 = (const _Float16 *)qc_att_res(QC_ATT_P + 3u, cid);
     const _Float16 *p4 = (const _Float16 *)qc_att_res(QC_ATT_P + 4u, cid);
     const _Float16 *p5 = (const _Float16 *)qc_att_res(QC_ATT_P + 5u, cid);
-    const uint8_t *vr = vt + s * QC_ATT_TB * QC_SWEEP_B;
+    const uint8_t *vr = vt + QC_ATT_SLICE_OFF(s);
     for (uint32_t t = 0; t < QC_ATT_TB; t += 8u) {
       QC_ATT_PV8(0, "v8");
       QC_ATT_PV8(1, "v9");
