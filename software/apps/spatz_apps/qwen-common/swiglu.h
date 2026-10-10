@@ -29,6 +29,18 @@
 #include <stddef.h>
 #include <stdint.h>
 
+// The exponential, as qwen-common/qc_vec.h's QC_EXP_FAKE: 1 (default) -- one vector FPU op stands
+// in for an exponent instruction in the Spatz FPU (values wrong, timing only); 0 -- the
+// Cody-Waite / Taylor sequence below. Builds that check values get 0: QWEN_CHECK != 0, or the
+// app defines it (qwen-ffn ffn_check=1).
+#ifndef QC_EXP_FAKE
+#if defined(QWEN_CHECK) && QWEN_CHECK
+#define QC_EXP_FAKE 0
+#else
+#define QC_EXP_FAKE 1
+#endif
+#endif
+
 // An fp32 value from its bit pattern, WITHOUT fmv.w.x and without touching L2.
 //
 // fmv.w.x cannot be used on this RTL: MemPool's Snitch (hardware/deps/snitch/src/snitch.sv, the
@@ -78,6 +90,11 @@ __attribute__((noinline)) static void swiglu_f16(const _Float16 *g, const _Float
     // x = max(-|g|, -87)
     __asm__ volatile("vfsgnjx.vv v12, v4, v4");
     __asm__ volatile("vfsgnjn.vv v12, v12, v12");
+#if QC_EXP_FAKE
+    // one vector FPU op stands in for an exponent instruction: e = "exp(x)" in v20 (timing only)
+    __asm__ volatile("vfmul.vf v20, v12, %0" ::"f"(one));
+    (void)xmin, (void)log2e, (void)ln2_hi, (void)ln2_lo, (void)c5, (void)c4, (void)c3, (void)c2;
+#else
     __asm__ volatile("vfmax.vf v12, v12, %0" ::"f"(xmin));
     // n = round(x log2e) (int in v16), nf = float(n) (v20), r = x - nf ln2 (v12)
     __asm__ volatile("vfmul.vf v16, v12, %0" ::"f"(log2e));
@@ -100,6 +117,7 @@ __attribute__((noinline)) static void swiglu_f16(const _Float16 *g, const _Float
     __asm__ volatile("vadd.vx v16, v16, %0" ::"r"(127));
     __asm__ volatile("vsll.vi v16, v16, 23");
     __asm__ volatile("vfmul.vv v20, v24, v16");
+#endif
     // y = 1 / (1 + e): seed + two Newton steps (d in v12, y in v16, t in v24)
     __asm__ volatile("vfadd.vf v12, v20, %0" ::"f"(one));
     __asm__ volatile("vfmv.v.f v16, %0" ::"f"(s0));

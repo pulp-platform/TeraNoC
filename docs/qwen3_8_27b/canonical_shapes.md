@@ -32,9 +32,10 @@ Contraction lengths `K` only need to split into an even number of K tiles, so th
 | GDN value heads x dim (v, z) | 48 x 128 = 6144 | same | |
 | GDN a, b | 48 each | same | |
 | GDN conv kernel | 4 | same | depthwise causal over the 10240 qkv channels |
-| vocab | 248,320 | **deferred** | lm_head alone is 1.9 GiB at d=4096; > the 512 MiB simulated L2 |
+| GDN recurrent state | fp32 (reference) | **fp16** | 1.5 MiB per sequence per layer (D7) |
+| vocab | 248,320 | **deferred** | lm_head alone is 1.9 GiB at d=4096; > the simulated L2 (512 MiB) |
 | weights / activations | bf16 | **fp16** | bf16 is masked off in the compiled fpnew (T4) |
-| accumulation | (reference: fp32) | **fp16** | open: validate against a host reference before any model-level claim |
+| accumulation | (reference: fp32) | **fp16** | decided 2026-10-08 (`mixer_plan.md` D7): fp32 only for the RMSNorm sum of squares and the softmax running max / sum; everything else fp16, values not a goal |
 
 ## Projections (decode: `[B, K] x [K, P]`, B = independent sequences)
 
@@ -74,15 +75,15 @@ both o-projections are **long K, narrow P** (the `qwen-ffn-down` regime -- the K
 | KV append + GQA attention (QK^T, online softmax, PV) | 24 q / 4 kv heads x 256, history S | attention |
 | output gate `ctx * sigmoid(gate)` | `[B, 6144]` | attention |
 
-## Capacity at canonical dims (simulated: L1 16 MiB 4x4 / 64 MiB 8x8, L2 512 MiB)
+## Capacity at canonical dims (simulated: L1 16 MiB 4x4 / 64 MiB 8x8, L2 512 MiB -- the most the address map allows below the boot ROM at 0xA000_0000)
 
 | item | size |
 |---|---:|
 | FFN weights (gate + up + down) | 384 MiB -- fit L2 together |
 | attention-layer weights (without FFN) | 160 MiB |
 | GDN-layer weights (without FFN) | 177 MiB |
-| **one full decoder layer incl. FFN** | **544 MiB (attention) / 561 MiB (GDN) -- does NOT fit 512 MiB L2** |
-| GDN recurrent state, per sequence per layer | 3 MiB (fp32) |
+| **one full decoder layer incl. FFN** | **544 MiB (attention) / 561 MiB (GDN) -- does NOT fit 512 MiB L2; perf builds share one weight region (`ql_wshare`)** |
+| GDN recurrent state, per sequence per layer | 1.5 MiB (fp16; 3 MiB in fp32) |
 | GDN conv state, per sequence per layer | 60 KiB |
 | KV cache, per sequence per attention layer per token | 4 KiB (fp16 K + V) |
 
@@ -93,3 +94,6 @@ larger `l2_size` when a kernel needs it** (a new RTL image and GVSoC profile at 
 
 - 2026-09-28 -- created. hidden 5120 -> 4096, FFN intermediate 17408 -> 16384; all head counts and
   head dims unchanged; lm_head deferred. Same day: L2 will be enlarged when a layer needs it.
+- 2026-10-08 -- precision decided (fp16 everywhere except RMSNorm sums and softmax max/sum; GDN
+  state fp16). Mixer plan: `mixer_plan.md`. (L2 was set to 1 GiB in the configs but cannot be
+  built: the address map caps it at 512 MiB -- `mixer_plan.md` D3.)

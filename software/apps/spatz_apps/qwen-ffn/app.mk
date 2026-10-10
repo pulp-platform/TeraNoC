@@ -30,6 +30,7 @@ endif
 QWEN_EXTRA_OBJS += qwen-ffn/phase_gu.c.o qwen-ffn/phase_dn.c.o
 ifeq ($(ffn_check),1)
 QWEN_EXTRA_OBJS += qwen-ffn/data/ffn_operands.S.o
+DEFINES += -DQC_EXP_FAKE=0  # the end-to-end check needs the real exponential (swiglu.h)
 endif
 endif
 

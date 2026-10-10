@@ -39,6 +39,7 @@ endif
 # before $(BINARIES) below, whose prerequisites (QWEN_EXTRA_OBJS) are expanded at parse time.
 -include $(APPS_DIR)/qwen-ffn-down/app.mk
 -include $(APPS_DIR)/qwen-ffn/app.mk
+-include $(APPS_DIR)/qwen-layer/app.mk
 
 # Make all applications
 all: $(ALL_GCC)

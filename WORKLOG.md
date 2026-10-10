@@ -19151,3 +19151,296 @@ two-loads-in-flight window against RT + reorder wait is the wall (needs MaxInfli
 SW item: stage each K tile's activation slice into the core's own tile banks (+~14% at B<=2).
 Clean-up 2026-10-02: 280 node job dirs of finished batches deleted (1.18 TB); 29 build images deleted
 (26 GB; kept 8x8_p2/p3 for live runs, 8x8_yx/mr4 used by the FFN arms, pr1/rpt2 = current RTL).
+
+## 2026-10-08 22:15 — mixer plan; qwen-common fp16 vector library; qwen-gdn delta rule (steps 0-2)
+
+**Purpose.** Next SW stage after the FFN (user, 2026-10-08): the token mixers. Decisions D1-D7 agreed
+point by point and recorded in `docs/qwen3_8_27b/mixer_plan.md` (GDN state streamed from L2 by
+default, L1-resident as a knob; flash-decoding attention S = 512/2048/8192; L2 1 GiB; fuse by default;
+short-vl wedge avoided in software; producer writes where the consumer reads; fp16 everywhere except
+the RMSNorm sums and softmax max/sum). `canonical_shapes.md` precision and L2 rows updated.
+
+**Implementation.**
+- `software/apps/spatz_apps/qwen-common/`: `qc_layout.h` (tile slot 64 B / group slice 1 KiB /
+  sweep, derived from the runtime geometry), `qc_sync.h` (the FFN's log barrier), `qc_vec.h` (fp16
+  exp / sigmoid / SiLU / softplus, FP-ONLY: exp = p(x/32)^32, no integer vector op, so no short-vl
+  wedge; register-level macros for fused epilogues; fp32 sumsq via vfwmacc; scalar rsqrt),
+  `script/vec_ref.py` (op-by-op host model), `script/build_app.sh` (deletes app + shared runtime
+  objects before every build: they are compiled with NUM_CORES), `script/gvsoc_run.sh`.
+- `qwen-vec-test`: bit-exact check of every routine against the host model, incl. n = 1..5.
+- `qwen-gdn`: delta-rule decode step. Chunk = 32 rows of one value head, column-major in the core's
+  own tile slots (column j = slot of sweep j), GEMM-like (vfmacc.vf over rows, k_j / q_j scalars),
+  two passes. Option B streams 2 MiB state tiles (one per round) with one contiguous DMA each way,
+  3 L1 buffers; the cluster DMA holds one transfer at a time (`mempool_dma.sv`: a launch clears
+  `done`, a launch while busy is not stalled), so core 0 sequences write-back and prefetch by
+  polling between column groups. Check builds: exact small-integer pattern, expected o / c from
+  `script/gen_check.py`.
+
+**Results (GVSoC 4x4).** qwen-vec-test PASS (bit-exact incl. n=1..5); in-register cost per 64
+elements: exp 112, SiLU 192, softplus 176 cycles (host accuracy: exp 2.6%, SiLU 2.1% worst).
+qwen-gdn checks PASS for A/B at B=1 and B=4. Cycles (GVSoC timing, not evidence at B<8):
+A B=1 6.5k, A B=4 19.7k (ideal 6.2k); B B=1 15.3k, B B=4 34.0k (DMA ~485 B/cycle, DMA-bound).
+
+**Trap found (GVSoC; RTL being checked).** Zeroing accumulators with `vfmv.v.f` (executed by the
+SLIDE unit) right before the FPU `vfmacc` chain: when a core runs chunks back to back, whole chunks'
+o come out wrong (option A B=4: ~2.2k mismatches on ~50 cores, count varies between builds); a
+fence after the chunk does not help. Starting each sum with `vfmul` (FPU only) passes. RTL runs
+mx2 (old code / new A / new B, B=4, pr1 image) decide whether the RTL has the same hazard.
+
+**Status.** Steps 0-1 done (RTL confirmation of qwen-vec-test: mx1 running). Step 2/3 RTL checks
+running (mx2); then perf arms over B for A and B.
+
+## 2026-10-09 00:30 — qwen-gdn-block: GDN mixer block in one timed region (step 4); qwen-attn core (step 6a)
+
+**Purpose.** Step 4 of `docs/qwen3_8_27b/mixer_plan.md`: the whole GDN mixer block on the shared
+projection engine (`qwen-common/qwen_phase.c`, moved there by the FFN effort, a3cf62de).
+
+**Implementation (`software/apps/spatz_apps/qwen-gdn-block/`).**
+- `phase_qz.c`: x . Wqkvz (4096 -> 16384, q|k|v|z); epilogue = conv1d (4 taps, state in L1) + SiLU
+  on q k v, then every value scattered to the aux slots of the chunk core(s) that read it (v, z: one;
+  q, k: the 12 chunks of their (sequence, key head)).
+- `mixer.c`: per chunk q/k L2-norm, alpha = exp(-softplus(a)), beta = sigmoid(b), the delta rule
+  (`qwen-common/qc_gdn.h`, shared with qwen-gdn), sum of o^2; after each round's barrier the gated
+  RMSNorm of the round's heads (4 consecutive cores) writes o' straight into every replica of the
+  o-projection's A. a, b (96 dot products per sequence) run one task per core per round, for the
+  NEXT round, in the shadow of the state DMA (the rounds are DMA-bound).
+- `phase_op.c`: o' . Wo (6144 -> 4096); epilogue = residual, written into every replica of x
+  (the next layer's qz input layout).
+- The streamed state's tile buffers live in the W double buffer's second region (idle during the
+  mixer): freed ~6 MiB, qkvz K tile 64 -> 128 rows; o-proj tile 0 loads during round 0's a,b stage.
+- `script/gen_joint.c` = qwen-ffn's chooser plus the mixer's L1 reserve; `gen_a.c` exports each
+  phase's A layout; `gen_reserve.c` the mixer's L1. `gdnb_check=1`: identity values through the
+  scatter and the o' hand-off.
+
+**Results (GVSoC 4x4, cycles; B < 8 GVSoC timing is not evidence).**
+| B | total | qkvz | mixer | o-proj | note |
+|---:|---:|---:|---:|---:|---|
+| 1 | 404k | 276k | 29k | 99k | before the a,b overlap |
+| 4 | 357k | 229k (57%) | 51k | 75k (66%) | a,b stage 13.6k exposed |
+| 16 | 1,056k | 665k (79%) | 175k | 216k (91%) | a,b stage 38k exposed; rounds 130k DMA-bound |
+
+**qwen-attn (step 6a).** Flash-decoding core: K block transposed (scores = vfmacc.vf over 32 tokens),
+V row-major in 8 slices, online softmax (m, l fp32), split-S across a problem's cores + pairwise
+tree combine; K/V tiles streamed from L2 (2 x 256 sweeps per round). GVSoC: B=1 S=512/2048 and B=4
+S=512/2048 PASS (exact 0/1 pattern); multi-round cases at B=16 S=1024, B=1 S=8192, B=128 S=128 fail
+on GVSoC with timing-dependent errors (a different problem fails each build) -- RTL runs mx3 decide.
+Same family as the GDN finding: GVSoC mis-orders slide-unit vfmv.v.f, and reduction results read
+back early, against the FPU; FPU-only zeroing and store-then-load readout fixed the single-round cases.
+
+**RTL (pr1 image, 4x4).** qwen-vec-test PASS bit-exact incl. n = 1..5; in-register cost identical to
+GVSoC (exp 112, SiLU 192, softplus 177 cycles / 64 elements). qwen-gdn B=4: option A 20,775 cycles
+(GVSoC 19,669), option B 44,473 (GVSoC 34,022): the RTL DMA moves ~395 B/cycle (2 MiB in 5,306).
+
+**Status.** GVSoC structural checks of the block running; then RTL B = 1, 4, 16.
+
+## 2026-10-09 02:15 — qwen-layer: full GDN layer and the attention block (steps 5, 6b); RTL confirms the GVSoC ordering bug
+
+**Implementation.** `qwen-gdn-block` became `software/apps/spatz_apps/qwen-layer` (`ql_mixer=gdn|attn`,
+`ql_ffn=1` for the whole layer, `ql_s` the attention history):
+- shared: o-projection (residual epilogue into x's replicas), the FFN phases (gate+up with the
+  pre-FFN 1/rms scale and qwen-ffn's SwiGLU into H; down with the residual), both RMSNorms folded
+  (fp32 sums of squares: the o-proj epilogue's per-core partials, B cores reduce; the pre-mixer
+  norm's partials come from the previous layer, so they are computed before the region),
+  `script/gen_joint.c` now N phases + mixer reserve, `script/gen_cands.c` any even K-tile count
+  (6144 / 12 = 512 gives o-proj a 4 MiB slot), `ql_wshare=1` (default with the FFN): every phase
+  streams ONE shared L2 weight region -- a layer's ~560 MiB does not fit the 512 MiB RTL images,
+  and the values are never used (L2 is flat SRAM: same timing).
+- attention (`phase_qa.c`, `mixer_attn.c`): in-projection q|gate|k|v (4096 -> 14336) scatters q and
+  gate to each problem's part-0 core, the new token's k, v to the last-part core; q/k RMSNorm +
+  partial RoPE there; flash-decoding (`qwen-common/qc_attn.h`, moved out of qwen-attn) with the K/V
+  tiles in the W area; the new token written into its block (and L2); split-S tree; part 0 writes
+  o' = ctx * sigmoid(gate) into the o-projection's A.
+
+**Traps.**
+1. A pre-region pass that runs AFTER `<phase>_prime` (MSHR on): every one-reader remote load waits
+   out a hold window -- the pre-mixer norm pass cost 381k cycles at 8x8 B=16. Moved before prime.
+2. `pkill -f <pattern>` with the pattern in the same shell command kills that shell (twice).
+
+**RTL (pr1, 4x4).** qwen-gdn B=4: the OLD code (accumulators zeroed with vfmv.v.f) PASSES on RTL
+while it fails on GVSoC -> GVSoC model bug (memory: reference-gvsoc-cross-unit-ordering). New code
+option A / B pass too. GVSoC workarounds kept (FPU-only init, per-head readout slots).
+
+**GVSoC 8x8 B=16 GDN block (before the norm fix):** qkvz 208k, mixer 94k (state DMA ~830 B/cycle,
+prologue 22k for an 8 MiB tile), o-proj 73k.
+
+**Status.** GVSoC: 4x4 / 8x8 GDN layer, 4x4 attention block perf + structural check running. RTL
+(mx3: attention kernel checks; mx4: GDN block check + B=1/4/16 perf) running.
+
+## 2026-10-09 07:45 — qwen-layer: attention hang = stack overflow into the barrier word; scratch-slot overruns
+
+**Purpose.** The attention layer (and single-round attention) hung on GVSoC; the GDN B=4 check had
+233 o' mismatches.
+
+**Root causes.**
+1. **Stack overflow.** Each core's stack is its 512 B sequential region (crt0: sp = 0x1fc), and the
+   log-barrier counter (qc_sync.h, qwen_phase.c) sits at word 1 of that same region. With every
+   kernel inlined, `main (128-192 B) + ql_mixer_run (352-384 B)` reached 528-560 B: sp wrapped to
+   0xffff_fffc, a scalar access there never answered on GVSoC and core 0's next `fence`
+   re-executed forever (all other cores asleep in WFI). Found from a group-0 instruction trace
+   (`--trace=.../group_0_0/tile_.*/pe0/insn`, stopped with SIGINT so it flushes): `sp:fffffffc`
+   at ql_mixer_run entry. The attention block at S=2048 was at 496 B (worked by 4 B); the GDN
+   layer is at 480-496 B.
+2. **Scratch-slot overruns.** Reduction zero loads / read-back stores ran at full vl (128-256 B)
+   through a 64 B per-core slot, overwriting the next cores' slots. This was the GDN check's 233
+   mismatches.
+
+**Implementation.** `__attribute__((noinline))` on the per-round kernels (qc_attn.h, qc_gdn.h,
+mixer_attn.c, mixer_gdn.c): their frames no longer nest, so main + mixer = 400 B and the deepest
+chain is the final report's printf (448-464 B). `QC_VL1` (qc_vec.h) at every zero load / read-back
+store. New `qwen-common/script/stack_depth.py` (call graph + frames from the disassembly; exits 1
+over 500 B), run by `build_app.sh` on every build.
+
+**Result.** GDN B=4 structural check on GVSoC: PASS (0 mismatches, was 233).
+
+**Also.** fenga9's /scratch2 hit 100% and killed three RTL jobs (mx3 att_ck_b1_s8192, mx4
+gdnb_ck_b4, mx5 gdnl_b4) before any result; their trace files were removed. Resubmitted as mx6
+(att_ck_b1_s8192, gdnb_ck2_b4) with `--disk-gb 40`. The mx5 attention-layer ELF is over the stack
+budget, so its result will be invalid.
+
+## 2026-10-09 09:45 — qwen-layer attention mixer: -16% (S=2048) / -33% (S=512)
+
+**Purpose.** With the attention layer running, cut the mixer's non-round overheads.
+
+**Implementation** (`mixer_attn.c`, measured one at a time on GVSoC 4x4 B=4; per-core
+[ATTP] timers under `-DQL_PROF`):
+1. Split-S combine: one flat pass, every core of the problem takes a contiguous share of the 48
+   (head, slice) pieces, weights exp(m_j - M) / L in fp32 (`ql_head_weights`, into scratch), fused
+   with sigmoid(gate) -> o'. Replaces the 4-level tree + separate gate pass: 17.4k -> 7.3k.
+2. K tile 0 DMA started at mixer entry; o-proj tile 0 started after the rounds (under the
+   combine).
+3. Prep: each of the 6 norm cores writes its finished head into every part core's slots (writes
+   spread over 16 tiles). Before, 15 parts copied from part 0 and serialised on its tile: 11.5k of
+   the 16.4k prep. Now 6.4k.
+4. New token's k: L1 insert by 8 strided vector stores (`vsse16`); the L2 write-back moved after
+   the rounds and split over up to 16 cores. The last part had held every barrier ~7.5k.
+
+**Result.** Mixer S=2048 160.1k -> 131.3k, S=512 77.7k -> 52.3k. Layer (4x4 B=4 S=2048, before
+step 4) 1,034,902 -> 1,012,110. Checks pass (o' structural; new k in the KV cache) at 16 and 4
+cores per problem. Rounds are now compute-bound (~45% FPU).
+
+**Status.** Final-code layers running on GVSoC (4x4 B=4, 8x8 B=16). RTL: mx7 (qlal4 layer,
+qla4 single-round block, gdnl4 GDN layer) at ~40k bench cycles/hour -- days for a layer.
+
+## 2026-10-09 10:20 — qc_attn.h: QK / PV inner loops at 14 instructions per row
+
+**Purpose.** A core-1 GVSoC trace of one round (S=512): QK loop 11.7k cycles for 6,477
+instructions (1,778 vector) against a 6.1k FPU ideal; PV 11.4k. The six q (p) scalars of a row
+are 8 sweeps apart, so every `flh` needed `lui + add` -- ~25 instructions per row.
+
+**Implementation.** Six per-head pointers, 8-row unroll with immediate offsets, the K / V row
+pointer advanced by one sweep (`QC_ATT_QK8`, `QC_ATT_PV8`); accumulators zeroed from the zero
+slot (VLSU only) so every QK row is a vfmacc. Old row macros removed.
+
+**Result.** qwen-attn exact check PASS (B=4, B=1, S=512). qwen-layer block B=4 S=2048: round compute
+110k -> 96k, mixer 131.3k -> 117.8k (GVSoC). Final-kernel layers (4x4 B=4, 8x8 B=16) running.
+
+## 2026-10-09 11:40 — attention layer sweep (GVSoC 4x4); qwen-layer cands.txt mesh dependency
+
+**Result** (final code, whole layer, 4x4): B=4 S=512 / 2048 / 8192: 921,687 / 992,221 /
+1,268,177 cycles (mixer 5% / 12% / 31%); B=1 S=8192 1,306,176; B=16 S=2048 2,916,298. At S=8192
+the rounds stream 358 B/cycle, close to the DMA. 8x8 B=16 S=2048 before the loop rewrite: 966,571
+(mixer 160k, rounds DMA-bound at ~1 KB/cycle).
+
+**Fix.** `qwen-layer/app.mk`: a phase's `cands.txt` (whose first line is the L1 size) depended on
+its shape header only, so an 8x8 build right after a 4x4 build with the same B reused the 4x4
+candidates (16 MiB L1) and gen_joint found no tiling. It now also depends on `data/ql_knobs.h`,
+which records the mesh. No earlier result was affected (each 8x8 build followed a different B;
+the reverse mix would overflow L1 at link time).
+
+**Status.** 8x8 final-code runs on GVSoC: B=16 S=2048, B=16 S=512, B=4 S=8192 (B >= 8 at S=8192
+overflows the 512 MiB L2). RTL mx6/mx7/mx8 in flight (9 seats).
+
+## 2026-10-09 13:50 — attention layer at 8x8 (GVSoC); RTL kernel checks
+
+**Result (GVSoC 8x8, final code).** B=16 S=2048 959,652 cycles (first build 990,983; mixer
+184k -> 152k), B=16 S=512 874,898 (mixer 66k), B=4 S=8192 727,251 (mixer 154k, 64 cores per
+problem). At 8x8 the rounds are DMA-bound (32 MiB per round at ~1.1 KB/cycle) and prep waits on
+the 16 MiB K tile 0.
+
+**RTL.** qwen-attn exact checks PASS: B=16 S=1024 (8 rounds, 286,908 cycles) and B=1 S=8192
+(64 cores per problem, 172,311). GDN block B=4 435,633 (GVSoC 362,039: RTL 1.20x at B=4; 0.90x at
+B=1). Layer arms in flight (4x4 attention old/final, S=512 blocks, 4x4/8x8 GDN layers).
+
+## 2026-10-09 16:45 — Qwen layer performance dashboard
+
+**Purpose.** One place to read FPU utilisation and DMA data movement per run and per stage, for
+GVSoC and RTL runs, and to check each stage against its roofline.
+
+**Implementation.** `qwen-common/script/perf_dash.py`: `fetch` pulls RTL transcripts (finished:
+badist gather archive; running: node-local, filtered to [FPU] bench / [DMAP] / app lines) into
+`hardware/elf_mixer/dash_cache/`; `build` writes perf_runs / perf_stages / perf_timeline /
+perf_peaks JSON (stage cycles from the app timers; analytic MACs and DMA bytes; RTL measured
+windows aggregated per stage). Published as the "Qwen layer performance" dashboard
+(claude.ai/artifact/SRh41jzHZUinoQAur7k5KR); refresh = fetch + build + re-upload the JSON.
+
+**First readings.** RTL measured FPU busy matches the analytic utilisation per stage (in-proj
+48.6% vs 48.4%, o-proj 48.3% vs 48.3%, GDN block B=4); measured DMA bytes match the expected
+weight bytes (in-proj 0.97x; o-proj 0.86x because its first tiles are prefetched under the
+mixer). At B=4 the 4x4 projections sit exactly on the roofline ridge (B/2 = 2 MAC/B).
+
+## 2026-10-09 22:30 — qwen-layer `ql_mixer_only=1` (waveform runs of the mixers alone)
+
+**Purpose.** GUI runs of the GDN and attention mixers at 8x8 without simulating the in-projection
+first (100-210k cycles at 8x8 before the mixer starts). The projections are the FFN's streamed
+GEMM engine with the same behaviour (measured above), so they are not part of this GUI round.
+
+**Implementation.** `app.mk` knob `ql_mixer_only` (needs ql_ffn=0, ql_check=0): main skips the
+in-projection prime and run (the MSHR stays off, as the in-projection leaves it), times
+`ql_mixer_run` + `ql_op_prime` only, prints the same [QL] line with zero projection stages.
+`ql_mixer_dma_wait()` wraps dma_wait for main (dma.h defines non-inline functions).
+
+**Result (GVSoC).** 4x4 B=4: mixer-only vs the mixer inside the layer: attention S=2048 116,741
+vs 115,559, GDN 53,919 vs 53,419 (within 1%). 8x8 mixer-only: GDN B=1 52,468 / B=16 89,849;
+attention S=2048 B=1 75,116 / B=16 158,567. ELFs for the GUI round: hardware/elf_gui8/gui8_*_mix_*.
+
+## 2026-10-10 — attention: two-level q broadcast / split-S combine; ql_t (MTP tokens per step)
+
+**Two-level split.** Above 16 part cores a problem spans groups. The q broadcast now goes first to
+head hh's core of every 16-core sub-problem (`QL_A_SUB`), then each fans out inside its group; the
+combine merges the 16 partials of each sub-problem inside its group (`ql_combine_l1`, all cores
+busy), then one cross-group pass of NSUB results per piece, fused with the gate as before
+(`ql_wts` / `ql_wsum` generic over the partials' location). GVSoC mixer-only, B=1: 8x8 S=8192
+172k -> 72k (prep 77k -> 13k, combine 57k -> 22k); 8x8 S=2048 75k -> 69k; 4x4 S=8192 prep 16.5k ->
+7.4k, combine 14.8k -> 10.5k. One-level cases unchanged. 8x8 structural check PASS.
+Debug: `-DQL_COMBINE_CMP` fills synthetic partials and compares every combined value with a flat
+fp32 recomputation.
+
+**ql_t / ql_tg.** Qwen3.8 MTP verifies 1 + k drafts per step (SGLang default 4 tokens, vLLM recipe
+3); we benchmark T = 4. Projections and norms run B*T rows (`QL_ROWS`); the mixers take B
+sequences of T tokens:
+- GDN: the T tokens go one after the other through the state tile in L1 (state streamed once per
+  round); aux slots, a,b dot products, chunk prep, gated norm per token (`ql_auxt`).
+- attention: problems (sequence, token group of QL_TG, KV head); per-token softmax state in
+  qc_attn.h (`tk` parameter, `QC_ATT_SWT(n)`), causal mask on the block holding the step's new
+  tokens (last T positions; -1000 added to the scaled scores), all T new k / v inserted, RoPE per
+  token. QL_TG=4 does not fit L1 (q + accumulators of 4 tokens next to a 32 KiB K/V tile pair);
+  QL_TG=2 halves the KV stream but is slower at 4x4 (compute-bound): 127k vs 123k for B=1 S=2048.
+- whole blocks/layers with T > 1 still need the in-projection's per-token scatter (asserted).
+GVSoC 4x4 mixer-only: attention B=1 T=4 S=2048 123,174; GDN B=1 T=4 58,811; T=1 regressions
+unchanged. qwen-attn exact check still PASS.
+
+## 2026-10-10 — QC_EXP_FAKE: exponent instruction stand-in (default on)
+
+**Purpose.** Assume the Spatz FPU gets an exponent instruction; benchmark with one FPU op in place
+of the polynomial exp (values wrong, timing only).
+
+**Implementation.** `qc_vec.h` `QC_EXP_FAKE` (default 1): `QC_EXP` / `QC_ENEG` are one
+`vfmul.vv` (FMA pipeline, a MAC's latency, reads only x -- a vfmacc would add a false dependency on
+its destination), `qc_exp_f32` one `fmadd.s`; sigmoid / SiLU / softplus keep their non-exp parts.
+`swiglu.h` has the same switch only when the includer defines it (the FFN agent's apps unchanged);
+qwen-layer knob `ql_exp_fake` (default 1; forced 0 under QL_COMBINE_CMP). qwen-vec-test and
+qwen-attn ATT_CHECK pin the polynomial.
+
+**Result (GVSoC, mixer-only T=4).** 4x4 B=1: attention 123,174 -> 116,752, GDN 58,811 -> 57,016;
+8x8: GDN B=1 / B=4 77,716 / 83,135 -> 76,225 / 81,943, attention S=2048 B=1 / B=4 69,713 / 159,597
+-> 66,408 / 155,249. qwen-attn exact check PASS (polynomial). qwen-vec-test: its data header was
+stale since the XMIN -18 change (exp(-18) -> 0 vs the old denormal); regenerated, PASS.
+
+## 2026-10-10 — FFN SwiGLU: fake exponent by default too
+
+`qwen-common/swiglu.h`: `QC_EXP_FAKE` defaults to 1 (one `vfmul.vf` in place of the Cody-Waite /
+Taylor exp) unless the build checks values: 0 when `QWEN_CHECK != 0` (qwen-ffn-down checks) or
+when the app sets it (`qwen-ffn/app.mk`: `-DQC_EXP_FAKE=0` under `ffn_check=1`, whose gate+up unit
+has QWEN_CHECK=0). Verified on GVSoC 4x4: qwen-ffn ffn_check=1 success; qwen-ffn-down check=3
+(SwiGLU vs host) 2033/2048 bit-exact, max 1 ulp; perf build's swiglu_f16 108 -> 89 instructions.
+FFN agent session notified. Pin QC_EXP_FAKE when comparing with earlier (real-exp) FFN numbers.
