@@ -19519,3 +19519,26 @@ RTL evidence on the QK loop's per-row load bubble.
 keep the hang-fix ELFs.
 
 **Status.** Committed with the DMA-prime fix.
+
+## 2026-10-10 19:13 — mempool_tile: real register on the remote slave request path
+
+**Purpose.** Block PnR of the split-MSHR group (`mshr64split`, eeddded8, route_opt) closed at
+WNS -0.238 / TNS -469. Segmenting the top-50 paths (cell vs wire, and RTL stage boundaries from the
+surviving net names): 31 are router out-FIFO / source master spill -> SRAM pins at 1.13-1.21 ns of
+data, failing by 0.14-0.28 ns even with CCD help. The WNS family (regfile -> master spill) is mostly
+skew: 0.67-0.99 ns of data with the capture clocked 0.28-0.50 ns early, positive at zero skew.
+Cause: the tile's slave request "register" was a `fall_through_register`, which passes data and
+valid combinationally when empty, so nothing cut router/LIC -> expander -> bank xbar -> adapter -> SRAM.
+
+**Implementation.** `gen_tcdm_registers_req_slv`: `fall_through_register` -> `spill_register`
+(data, valid and ready registered). Same instance and net names. +1 cycle on remote requests into a
+tile; one more slot on 144 ports per group (~12k flop bits). Predicted split ~0.73 / ~0.47 ns.
+
+**Result, 4x4** (VCS, images identical but for mempool_tile.sv, private 4x4 generated set,
+l1_bank_size=1024, shipped defaults): prefill fp32 512x128x128 11,494 -> **11,175** benchmark
+cycles (-2.8 %); decode fp16 16x128x4096 8,175 -> **7,971** (-2.5 %). [SPOT] bit-identical; timeout,
+bankfull, RH STUCK, CMS WARN and assertion counts identical between images. Likely mechanism
+(unverified): two slots instead of one absorb bank conflicts at the tile input.
+
+**Status.** Committed. 8x8 A/B (prefill fp32 1024x64x128, decode fp16 16x128x4096; private 8x8 set
+at the committed 32 MiB L2) in progress. Timing win to be confirmed by the next block PnR.

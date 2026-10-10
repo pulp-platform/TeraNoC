@@ -865,20 +865,20 @@ module mempool_tile
     );
   end: gen_tcdm_registers_req_mst
 
+  // A real register, not fall-through: a remote request otherwise reaches the SRAM pins in the
+  // same cycle it leaves a router FIFO or another tile's master spill.
   for (genvar h = 0; unsigned'(h) < NumRemoteReqPortsExpanded; h++) begin: gen_tcdm_registers_req_slv
-    fall_through_register #(
+    spill_register #(
       .T(tcdm_slave_req_t)
     ) i_tcdm_slave_req_register (
-      .clk_i     (clk_i                             ),
-      .rst_ni    (rst_ni                            ),
-      .clr_i     (1'b0                              ),
-      .testmode_i(1'b0                              ),
-      .data_i    (tcdm_slave_req_remapped[h]        ),
-      .valid_i   (tcdm_slave_req_exp_valid[h]       ),
-      .ready_o   (tcdm_slave_req_exp_ready[h]       ),
-      .data_o    (postreg_tcdm_slave_req[h]         ),
-      .valid_o   (postreg_tcdm_slave_req_valid[h]   ),
-      .ready_i   (postreg_tcdm_slave_req_ready[h]   )
+      .clk_i  (clk_i                          ),
+      .rst_ni (rst_ni                         ),
+      .data_i (tcdm_slave_req_remapped[h]     ),
+      .valid_i(tcdm_slave_req_exp_valid[h]    ),
+      .ready_o(tcdm_slave_req_exp_ready[h]    ),
+      .data_o (postreg_tcdm_slave_req[h]      ),
+      .valid_o(postreg_tcdm_slave_req_valid[h]),
+      .ready_i(postreg_tcdm_slave_req_ready[h])
     );
   end: gen_tcdm_registers_req_slv
 
