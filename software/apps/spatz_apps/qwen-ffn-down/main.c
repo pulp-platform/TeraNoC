@@ -49,6 +49,13 @@ _Static_assert(sizeof(qwen_hash_sel) / sizeof(qwen_hash_sel[0]) == NUM_GROUPS,
 #include "kernel/qwen-fmatmul.c"
 #if QWEN_SWIGLU
 #include "swiglu.h"
+#ifndef QC_EXP_FAKE
+#define QC_EXP_FAKE 0  // a swiglu.h without the fake-exponent option runs the real one
+#endif
+// Which exponential the SwiGLU prologue ran, for the report: fake = timing only (swiglu.h).
+#define FFN_EXP_NAME (QC_EXP_FAKE ? "fake" : "real")
+#else
+#define FFN_EXP_NAME "none"
 #endif
 
 #include "printf.h"
@@ -1315,8 +1322,9 @@ int main(void) {
     printf("[QWEN] ksplit=%u kt/core=%u (cores per output patch, K rows per core per tile)\n",
            (unsigned)QWEN_KSPLIT, (unsigned)QWEN_KT_CORE);
 #endif
-    printf("[QWEN] acc=fp%u prime_split=%u gu_early=%u kgroup=%u\n", QWEN_ACC32 ? 32u : 16u,
-           (unsigned)FFN_PRIME_SPLIT, (unsigned)FFN_GU_EARLY, (unsigned)FFN_KSPLIT_XGROUP);
+    printf("[QWEN] acc=fp%u prime_split=%u gu_early=%u kgroup=%u exp=%s\n",
+           QWEN_ACC32 ? 32u : 16u, (unsigned)FFN_PRIME_SPLIT, (unsigned)FFN_GU_EARLY,
+           (unsigned)FFN_KSPLIT_XGROUP, FFN_EXP_NAME);
     // The dashboard reads the shape from this line, so --shape is not needed on
     // the generator command line. One B x K x P projection (stages stacked on M).
     // shape is the USEFUL work (roofline); workload.executed_fmac is what the

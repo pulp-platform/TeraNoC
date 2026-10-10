@@ -73,9 +73,9 @@ int main(void) {
     const uint64_t ideal = macs / ((uint64_t)num_cores * 2u * N_FPU);
     printf("\n----- qwen ffn (fused) -----\n");
     printf("The execution took %u cycles.\n", (unsigned)(t3 - t0));
-    printf("[FFN] gate+up=%u handover=%u down=%u total=%u cycles; ideal=%u eff=%u%%o\n",
+    printf("[FFN] gate+up=%u handover=%u down=%u total=%u cycles; ideal=%u eff=%u%%o exp=%s\n",
            (unsigned)(t1 - t0), (unsigned)(t2 - t1), (unsigned)(t3 - t2), (unsigned)(t3 - t0),
-           (unsigned)ideal, (unsigned)(ideal * 1000ull / (t3 - t0)));
+           (unsigned)ideal, (unsigned)(ideal * 1000ull / (t3 - t0)), gu_exp_name());
   }
   gu_report(cid, t1 - t0);
   dn_report(cid, t3 - t2);

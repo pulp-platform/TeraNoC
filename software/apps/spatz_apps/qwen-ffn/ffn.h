@@ -39,5 +39,6 @@ uint64_t dn_macs(void);
 int dn_verify(uint32_t cid);                     // check builds: 0 = pass
 void gu_barrier(uint32_t cid);                   // global log barrier, vector stores drained
 void dn_mshr_off(void);                          // this group's MSHR off
+const char *gu_exp_name(void);                   // SwiGLU exponential: "real" or "fake" (timing)
 
 #endif

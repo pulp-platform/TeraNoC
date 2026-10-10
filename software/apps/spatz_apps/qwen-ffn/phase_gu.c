@@ -16,6 +16,12 @@ static void ffn_swiglu_epilogue(uint32_t cid, uint32_t strip, const qp_patch_t *
 #define QP_EPILOGUE ffn_swiglu_epilogue
 #include "qwen_phase.c"
 #include "swiglu.h"
+#ifndef QC_EXP_FAKE
+#define QC_EXP_FAKE 0  // a swiglu.h without the fake-exponent option runs the real one
+#endif
+
+// Which exponential the SwiGLU epilogue ran (swiglu.h QC_EXP_FAKE), for the report.
+const char *gu_exp_name(void) { return QC_EXP_FAKE ? "fake" : "real"; }
 
 _Static_assert(QWEN_STAGES_N == 2 && QWEN_P == FFN_DN_K && QWEN_LDP == QWEN_P,
                "gate+up: two projections whose output width is down's K, unpadded");
