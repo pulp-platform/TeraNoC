@@ -19542,3 +19542,19 @@ bankfull, RH STUCK, CMS WARN and assertion counts identical between images. Like
 
 **Status.** Committed. 8x8 A/B (prefill fp32 1024x64x128, decode fp16 16x128x4096; private 8x8 set
 at the committed 32 MiB L2) in progress. Timing win to be confirmed by the next block PnR.
+
+## 2026-10-11 05:40 — mempool_tile slave-req register (513a52dd): 8x8 A/B result
+
+**Setup.** Same method as the 4x4 A/B: two VCS images identical but for `mempool_tile.sv`
+(baseline = pre-513a52dd), private 8x8 generated set from the committed config (yx, linkload,
+32 MiB L2; the committed 8x8 yml is stale since a8debb11, the regenerated perimeter map and route
+table match the live 8x8 set), `l1_bank_size=1024`, shipped MSHR defaults.
+
+**Result.** Prefill fp32 1024x64x128: 7,368 -> **7,109** benchmark cycles (-3.5 %; kernel counter
+7,958 -> 7,710). Decode fp16 16x128x4096: 6,362 -> **6,357** (-0.08 %; kernel 6,747 -> 6,757,
++0.15 %). retval 0 on all four, [SPOT] 4/4 bit-identical on both pairs, mshr_timeout / RH STUCK /
+bankfull / slice-assertion counts identical between images. CMS WARN differs in both directions
+(6,894/6,181 prefill, 2,327/2,374 decode): timing-dependent epilogue noise. The extra cycle of
+remote-request latency costs nothing measurable at 8x8 either.
+
+**Status.** Done for simulation. Timing win still to be confirmed by the next block PnR.
