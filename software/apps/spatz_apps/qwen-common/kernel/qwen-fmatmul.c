@@ -281,10 +281,32 @@ static inline void gbar_sync_drain(uint32_t a) {
 #define QWEN_CBYPASS_BARRIER_ONLY 0
 #endif
 #if (QWEN_CBYPASS || QWEN_CBYPASS_BARRIER_ONLY) && GBAR_PLOOP && MSHR_RUNTIME_CFG
+// QP_MSHR_ON=0 (qwen-proj proj_mshr=0): the MSHR stays off, the toggles write 0 (qwen_phase.c).
+#ifndef QP_MSHR_ON
+#define QP_MSHR_ON 1
+#endif
+#ifndef QP_MSHR_EN
+#if !defined(QP_MSHR_ABL)
+#define QP_MSHR_EN(on) (on)
+#else
+// Ablation builds (qwen-proj proj_mshr=0|1 given explicitly): BOTH arms route every enable
+// value through a register the compiler cannot see into, so the MSHR-on and MSHR-off programs
+// have the same code and layout; only the immediate (QP_MSHR_ON) differs.
+// One uncompressed addi whose immediate is the arm's value: the same 4 bytes in both programs.
+static inline uint32_t qp_mshr_val(void) {
+  uint32_t v;
+  __asm__ volatile(".option push\n.option norvc\naddi %0, x0, %1\n.option pop"
+                   : "=r"(v) : "i"(QP_MSHR_ON));
+  return v;
+}
+#define QP_MSHR_EN(on) ((on) ? qp_mshr_val() : 0u)
+#endif
+#endif
 static inline void qwen_mshr_enable(uint32_t on) {
 #if QWEN_CBYPASS
   if (mshr_cfg_is_group_writer())
-    mshr_cfg_write(mshr_cfg_my_group(), mshr_cfg_peer_tile(), MSHR_CSR_ENABLE, on);
+    mshr_cfg_write(mshr_cfg_my_group(), mshr_cfg_peer_tile(), MSHR_CSR_ENABLE,
+                   QP_MSHR_EN(on));
 #else
   (void)on;
 #endif

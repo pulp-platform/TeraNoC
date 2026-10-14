@@ -38,6 +38,11 @@
 //   QP_PREV_BANK_SEL optional: uint32_t QP_PREV_BANK_SEL(uint32_t g) -- the previous phase's
 //                    packed bank-hash triple; enables QP_PFX(mshr_handover).
 //
+// QWEN_STEPS_RUN (data/qwen_shape.h, optional): timing runs stream only the first QWEN_STEPS_RUN
+// K tiles of every (strip, projection) -- same layout, split, tiling and MSHR tuning as the full
+// shape, the results are partial sums. Default: all QWEN_STEPS (qwen-proj, linear benchmark).
+// QWEN_STRIPS_RUN (optional, likewise): only the first QWEN_STRIPS_RUN output strips. Default: all.
+//
 // Exported (each prefixed): setup, prime (the first phase: tiles 0/1 + full MSHR tuning), run,
 // refill_head, mshr_handover, bank_sel, barrier, mshr_off, macs, report.
 //
@@ -74,6 +79,12 @@ _Static_assert(sizeof(qwen_hash_sel) / sizeof(qwen_hash_sel[0]) == NUM_GROUPS,
 #include "qwen_phase.h"
 
 #define QWEN_STEPS ((QWEN_K) / (QWEN_KT))
+#ifndef QWEN_STEPS_RUN
+#define QWEN_STEPS_RUN QWEN_STEPS
+#endif
+#ifndef QWEN_STRIPS_RUN
+#define QWEN_STRIPS_RUN QWEN_NSTRIPS
+#endif
 #define QWEN_GROUP_HELPER 1u
 #ifndef QWEN_DMA_CORE
 #define QWEN_DMA_CORE 0u
@@ -106,6 +117,9 @@ _Static_assert((QWEN_LDP % QWEN_STRIPE_E) == 0 && (QWEN_WPAD % QWEN_STRIPE_E) ==
 _Static_assert(QWEN_PT_LEGAL_K(QWEN_KT, QWEN_PT), "Illegal strip width for this phase");
 _Static_assert(QWEN_WSLOT <= QP_WREG_ELEMS, "This phase's W slot does not fit the W region");
 _Static_assert((QWEN_STEPS % 2) == 0, "The continuous stream needs an even K-tile count");
+_Static_assert((QWEN_STEPS_RUN % 2) == 0 && QWEN_STEPS_RUN >= 2 && QWEN_STEPS_RUN <= QWEN_STEPS,
+               "A truncated run streams an even number of K tiles, at most all of them");
+_Static_assert(QWEN_STRIPS_RUN >= 1 && QWEN_STRIPS_RUN <= QWEN_NSTRIPS, "1 <= strips run <= strips");
 #ifdef QP_A_EXT
 _Static_assert(QWEN_X_ELEMS == QP_A_EXT_ELEMS && QWEN_LDX == QP_A_EXT_LDX &&
                    QWEN_X_REPLICAS == QP_A_EXT_REPLICAS && QWEN_X_STRIDE_E == QP_A_EXT_STRIDE_E,
@@ -219,10 +233,35 @@ static inline void qp_sync(uint32_t cid) {
   qwen_barrier(cid);
 }
 
+// QP_MSHR_ON=0 (qwen-proj proj_mshr=0, ablation): every enable writes 0, so the MSHR stays off
+// for the whole run and every remote load bypasses it; the CSR traffic is otherwise unchanged.
+// Defined here and in kernel/qwen-fmatmul.c (whichever is included first wins; same text).
+#ifndef QP_MSHR_ON
+#define QP_MSHR_ON 1
+#endif
+#ifndef QP_MSHR_EN
+#if !defined(QP_MSHR_ABL)
+#define QP_MSHR_EN(on) (on)
+#else
+// Ablation builds (qwen-proj proj_mshr=0|1 given explicitly): BOTH arms route every enable
+// value through a register the compiler cannot see into, so the MSHR-on and MSHR-off programs
+// have the same code and layout; only the immediate (QP_MSHR_ON) differs.
+// One uncompressed addi whose immediate is the arm's value: the same 4 bytes in both programs.
+static inline uint32_t qp_mshr_val(void) {
+  uint32_t v;
+  __asm__ volatile(".option push\n.option norvc\naddi %0, x0, %1\n.option pop"
+                   : "=r"(v) : "i"(QP_MSHR_ON));
+  return v;
+}
+#define QP_MSHR_EN(on) ((on) ? qp_mshr_val() : 0u)
+#endif
+#endif
+
 static inline void qp_mshr_enable(uint32_t on) {
 #if MSHR_RUNTIME_CFG
   if (mshr_cfg_is_group_writer())
-    mshr_cfg_write(mshr_cfg_my_group(), mshr_cfg_peer_tile(), MSHR_CSR_ENABLE, on);
+    mshr_cfg_write(mshr_cfg_my_group(), mshr_cfg_peer_tile(), MSHR_CSR_ENABLE,
+                   QP_MSHR_EN(on));
   __asm__ volatile("fence" ::: "memory");
 #else
   (void)on;
@@ -240,10 +279,11 @@ static void qwen_refill(uint32_t slot, uint32_t stage, uint32_t strip, uint32_t 
                          (size_t)(QWEN_KT * QWEN_LDW) * GEMM_ELEM_BYTES);
 }
 
-// seq = (strip * STAGES + stage) * STEPS + step; tile seq lives in region seq & 1 (even STEPS).
-#define QWEN_SEQ_TOTAL ((uint32_t)(QWEN_NSTRIPS * QWEN_STAGES_N * QWEN_STEPS))
+// seq = (strip * STAGES + stage) * STEPS_RUN + step; tile seq lives in region seq & 1 (even
+// STEPS_RUN).
+#define QWEN_SEQ_TOTAL ((uint32_t)(QWEN_STRIPS_RUN * QWEN_STAGES_N * QWEN_STEPS_RUN))
 static void qwen_refill_seq(uint32_t seq) {
-  const uint32_t step = seq % (uint32_t)QWEN_STEPS, proj = seq / (uint32_t)QWEN_STEPS;
+  const uint32_t step = seq % (uint32_t)QWEN_STEPS_RUN, proj = seq / (uint32_t)QWEN_STEPS_RUN;
   qwen_refill(step & 1u, proj % (uint32_t)QWEN_STAGES_N, proj / (uint32_t)QWEN_STAGES_N, step);
 }
 
@@ -353,7 +393,7 @@ static void qwen_project(uint32_t stage, uint32_t strip, uint32_t cid, const ele
   elem_t *c = qwen_c[stage];
   (void)kpart;
 #endif
-  for (uint32_t step = 0; step < (uint32_t)QWEN_STEPS; ++step) {
+  for (uint32_t step = 0; step < (uint32_t)QWEN_STEPS_RUN; ++step) {
     const uint32_t slot = step & 1u;
     const elem_t *a = x + step * (uint32_t)QWEN_KT + kpart * (uint32_t)QWEN_KT_CORE;
     const elem_t *w = QWEN_W(slot) + kpart * (uint32_t)(QWEN_KT_CORE * QWEN_LDW);
@@ -361,9 +401,9 @@ static void qwen_project(uint32_t stage, uint32_t strip, uint32_t cid, const ele
     // the tile boundary (qwen-ffn-down); not across projections.
     qwen_kernel(c, a, w, m_start, m_end, QWEN_KT_CORE, p_start, p_end, step != 0u,
                 (step & 1u) | ((step != 0u) ? 2u : 0u) |
-                    ((step + 1u < (uint32_t)QWEN_STEPS) ? 4u : 0u));
+                    ((step + 1u < (uint32_t)QWEN_STEPS_RUN) ? 4u : 0u));
 
-    const uint32_t seq = (strip * (uint32_t)QWEN_STAGES_N + stage) * (uint32_t)QWEN_STEPS + step;
+    const uint32_t seq = (strip * (uint32_t)QWEN_STAGES_N + stage) * (uint32_t)QWEN_STEPS_RUN + step;
 #ifdef QP_NEXT_REFILL
     // The stream does not stop at the end of this phase: its last two barriers wait for and
     // launch the next phase's tiles 0 and 1.
@@ -372,7 +412,7 @@ static void qwen_project(uint32_t stage, uint32_t strip, uint32_t cid, const ele
     const uint32_t pending = (seq + 1u < QWEN_SEQ_TOTAL);
     const uint32_t launch = (seq + 2u < QWEN_SEQ_TOTAL);
 #if !defined(QP_EPILOGUE) && QWEN_NSTRIPS > 1
-    const uint32_t wb = (stage + 1u == (uint32_t)QWEN_STAGES_N) && (step + 1u == (uint32_t)QWEN_STEPS);
+    const uint32_t wb = (stage + 1u == (uint32_t)QWEN_STAGES_N) && (step + 1u == (uint32_t)QWEN_STEPS_RUN);
     if (wb) __asm__ volatile("fence" ::: "memory");
 #else
     const uint32_t wb = 0u;
@@ -569,6 +609,10 @@ static void qp_mshr_apply(uint32_t cid, uint32_t prev_sel, uint32_t at_handover)
   cfg.bank_burst_bits = qwen_hash_sel[gid][2];
   if (!at_handover) {
     ph_mshr_status[gid] = mshr_cfg_apply_group(&cfg);
+#if defined(QP_MSHR_ABL)
+    // apply_group arms the MSHR; the ablation re-writes the arm's value (1 on, 0 off).
+    mshr_cfg_write(mshr_cfg_my_group(), mshr_cfg_peer_tile(), MSHR_CSR_ENABLE, QP_MSHR_EN(1u));
+#endif
     __asm__ volatile("fence" ::: "memory");
     return;
   }
@@ -601,7 +645,7 @@ static void qp_mshr_apply(uint32_t cid, uint32_t prev_sel, uint32_t at_handover)
       }
     }
   }
-  mshr_cfg_write(g, tile, MSHR_CSR_ENABLE, 1);
+  mshr_cfg_write(g, tile, MSHR_CSR_ENABLE, QP_MSHR_EN(1u));
   __asm__ volatile("fence" ::: "memory");
   ph_mshr_status[gid] = st;
 }
@@ -631,6 +675,9 @@ void QP_PFX(mshr_off)(void) { qp_mshr_enable(0u); }
 // The first phase of a region: tiles 0 and 1 of the stream (before the region: nothing to
 // overlap) and this phase's MSHR tuning on the still-empty MSHR.
 void QP_PFX(prime)(uint32_t cid) {
+  // Core 0 writes the tuning (ph_cfg) at the END of setup, after its X copies and warm-up; the
+  // group helpers must not read it before (GVSoC: cache_timeout=0x57575757, uninitialised L1).
+  qwen_barrier(cid);
   if (cid == (uint32_t)QWEN_DMA_CORE) {
     qwen_refill(0, 0, 0, 0);
     dma_wait();
@@ -644,12 +691,12 @@ void QP_PFX(prime)(uint32_t cid) {
 void QP_PFX(run)(uint32_t cid, const qp_split_t *sp) {
   const elem_t *x_use =
       qwen_x + (uint32_t)QWEN_X_REPLICA_OF(cid / (NUM_CORES / NUM_GROUPS)) * (uint32_t)QWEN_X_STRIDE_E;
-  ph_t_pass = mempool_get_timer();
-  for (uint32_t strip = 0; strip < (uint32_t)QWEN_NSTRIPS; ++strip) {
+  if (cid == 0) ph_t_pass = mempool_get_timer();  // one L2 word: 1024 stores cost ~1.6k cycles
+  for (uint32_t strip = 0; strip < (uint32_t)QWEN_STRIPS_RUN; ++strip) {
     for (uint32_t stage = 0; stage < (uint32_t)QWEN_STAGES_N; ++stage)
       qwen_project(stage, strip, cid, x_use, sp);
 #ifdef QP_EPILOGUE
-    qp_epilogue_strip(cid, strip, strip + 1u == (uint32_t)QWEN_NSTRIPS, sp);
+    qp_epilogue_strip(cid, strip, strip + 1u == (uint32_t)QWEN_STRIPS_RUN, sp);
 #endif
   }
 }
@@ -671,6 +718,11 @@ void QP_PFX(report)(uint32_t cid, uint32_t cycles) {
          (unsigned)QWEN_KT, (unsigned)QWEN_PT, (unsigned)QWEN_NSTRIPS, (unsigned)QWEN_STEPS,
          (unsigned)KERNEL_SIZE, (unsigned)QWEN_KSPLIT, (unsigned)FFN_KSPLIT_XGROUP,
          (unsigned)QWEN_X_REPLICAS);
+#if QWEN_STEPS_RUN != QWEN_STEPS || QWEN_STRIPS_RUN != QWEN_NSTRIPS
+  printf("[FFN] %s TRUNCATED steps_run=%u of %u strips_run=%u of %u (timing only)\n", QP_NAME,
+         (unsigned)QWEN_STEPS_RUN, (unsigned)QWEN_STEPS, (unsigned)QWEN_STRIPS_RUN,
+         (unsigned)QWEN_NSTRIPS);
+#endif
 #if MSHR_RUNTIME_CFG
   uint32_t bad = 0;
   for (uint32_t g = 0; g < (uint32_t)NUM_GROUPS; ++g) bad |= ph_mshr_status[g];

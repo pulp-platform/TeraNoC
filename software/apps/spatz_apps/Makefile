@@ -40,6 +40,7 @@ endif
 -include $(APPS_DIR)/qwen-ffn-down/app.mk
 -include $(APPS_DIR)/qwen-ffn/app.mk
 -include $(APPS_DIR)/qwen-layer/app.mk
+-include $(APPS_DIR)/qwen-proj/app.mk
 
 # Make all applications
 all: $(ALL_GCC)

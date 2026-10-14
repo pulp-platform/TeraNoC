@@ -25,7 +25,8 @@ case $mesh in
 esac
 GV=${GVSOC_DIR:-/usr/scratch/fenga1/zexifu/TeraNoC_Spatz/TeraNoC_gvsoc/gvsoc}
 shim=/tmp/teranoc-gvsoc-py312
-mkdir -p "$shim" && ln -sf /usr/bin/python3.12 "$shim/python3"
+mkdir -p "$shim" && py=${QC_PY:-/usr/bin/python3.12}  # QC_PY: another 3.12 (fleet nodes without /usr/bin/python3.12)
+ln -sf "$py" "$shim/python3"
 mkdir -p "$(dirname "$run")"
 run=$(readlink -f "$run")
 
@@ -34,7 +35,7 @@ run=$(readlink -f "$run")
 # model runs from its own tree, where a relative one would land.
 unset TERANOC_MSHR_HB_PATH
 if [ "${QC_HB:-0}" = 1 ]; then mkdir -p "$run.d"; export TERANOC_MSHR_HB_PATH="$run.d/hb.log"; fi
-cmd=(/usr/bin/python3.12 -m gvrun "--target=teranoc_spatz:system_config=$prof"
+cmd=("$py" -m gvrun "--target=teranoc_spatz:system_config=$prof"
      "--work-dir=$run.d" --parameter "binary=$elf" run)
 t0=$(date +%s)
 (
