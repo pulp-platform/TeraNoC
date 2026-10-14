@@ -76,6 +76,9 @@ static uint8_t ql_kv_l2[QL_A_KV_RND * 2u * QL_A_TILE_B] __attribute__((section("
 static volatile uint32_t ql_ins_cnt[NUM_CORES];
 // Stage timers, written by core 0 only (one L2 word stored by every core: ~1.6k cycles on RTL).
 static uint32_t ql_t_start, ql_t_prep, ql_t_rounds, ql_t_comb, ql_t_end;
+#if QL_A_TRUN != QL_A_T
+static uint32_t ql_t_rnd[QL_A_TRUN];  // window: core 0's timer at the end of every round
+#endif
 static uint32_t ql_bad_knew[NUM_CORES];  // check mode: the new k in the KV cache (L2) vs its slots
 
 static inline uint8_t *ql_scr_at(uint32_t k, uint32_t cid) {
@@ -574,6 +577,9 @@ void ql_mixer_run(uint32_t cid) {
 #endif
     if (cid == 0) dma_wait();
     qc_barrier(cid);
+#if QL_A_TRUN != QL_A_T
+    if (cid == 0 && (i & 1u)) ql_t_rnd[i / 2u] = mempool_get_timer();
+#endif
 #ifdef QL_PROF
     const uint32_t tw = mempool_get_timer();
     ql_rprof[cid][0] += tc - tr, ql_rprof[cid][1] += tw - tc, tr = tw;
@@ -681,8 +687,13 @@ void ql_mixer_report(uint32_t cid) {
          ql_t_end - ql_t_start, ql_t_prep - ql_t_start, ql_t_rounds - ql_t_prep,
          (ql_t_rounds - ql_t_prep) / QL_A_TRUN, ql_t_end - ql_t_rounds,
          QL_A_NPRB / QL_KS * QL_S * QC_ATT_D * 4u);
-  if (QL_A_TRUN != QL_A_T)
-    printf("[ATTL] window: rounds_run=%u of %u, per_round=%u, extrapolated total=%u\n", QL_A_TRUN,
-           QL_A_T, (ql_t_rounds - ql_t_prep) / QL_A_TRUN,
-           ql_t_end - ql_t_start + (ql_t_rounds - ql_t_prep) / QL_A_TRUN * (QL_A_T - QL_A_TRUN));
+#if QL_A_TRUN != QL_A_T
+  // Round 0 carries the pipeline fill: the rounds not run are charged at the steady rate of
+  // rounds 1 .. k-1.
+  _Static_assert(QL_A_TRUN >= 2u, "ql_rounds_run: at least 2 rounds (round 0 is not steady)");
+  const uint32_t r0 = ql_t_rnd[0] - ql_t_prep;
+  const uint32_t steady = (ql_t_rnd[QL_A_TRUN - 1u] - ql_t_rnd[0]) / (QL_A_TRUN - 1u);
+  printf("[ATTL] window: rounds_run=%u of %u, round0=%u steady_round=%u, extrapolated total=%u\n",
+         QL_A_TRUN, QL_A_T, r0, steady, ql_t_end - ql_t_start + steady * (QL_A_T - QL_A_TRUN));
+#endif
 }
