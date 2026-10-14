@@ -72,7 +72,7 @@ int main(void) {
   const uint32_t num_cores = mempool_get_core_count();
   mempool_barrier_init(cid);
   qc_sync_init(cid);
-  mempool_barrier(num_cores);
+  mempool_barrier(num_cores);  // the last flat (one-counter) barrier: the log barrier from here
 
   // ---- setup, outside the timed region ----------------------------------------------------
   qp_split_t s_qz, s_op;  // on this core's stack: local, never through the MSHR
@@ -85,7 +85,7 @@ int main(void) {
 #endif
   if (e_qz || e_op || e_ffn) {
     if (cid == 0) printf("[QL] split error: qkvz %d, o-proj %d, ffn %d\n", e_qz, e_op, e_ffn);
-    mempool_barrier(num_cores);
+    qc_barrier(cid);
     return -1;
   }
   for (uint32_t i = cid; i < QL_X_ELEMS; i += num_cores) ((uint16_t *)ql_x)[i] = 0x2000u;
@@ -95,9 +95,9 @@ int main(void) {
   // region here -- and before qz_prime turns the MSHR on (one-reader loads would each wait out a
   // hold window).
   ql_rms_x_partials(cid);
-  mempool_barrier(num_cores);
+  qc_barrier(cid);
   ql_rms_reduce(cid, 0u);
-  mempool_barrier(num_cores);
+  qc_barrier(cid);
   _Static_assert(QL_TOK == 1u || QL_MIXER_ONLY,
                  "ql_t > 1: whole blocks/layers need the in-projection's per-token scatter (not yet)");
   _Static_assert(QL_TOK == 1u || !QL_CHECK, "ql_check: ql_t = 1 only");
@@ -106,13 +106,13 @@ int main(void) {
   _Static_assert(!QL_FFN && !QL_CHECK, "ql_mixer_only needs ql_ffn=0 and ql_check=0");
   {
     if (cid == 0) ql_mixer_dma_prime();  // the DMA as the in-projection leaves it (RTL: done = 1)
-    mempool_barrier(num_cores);
+    qc_barrier(cid);
 #if !QL_ATTN && QL_GCHK  // the self-test's first step (untimed); the state carries over
     ql_mixer_run(cid);
     if (cid == 0) ql_mixer_dma_wait();
-    mempool_barrier(num_cores);
+    qc_barrier(cid);
     ql_gchk_refill(cid);
-    mempool_barrier(num_cores);
+    qc_barrier(cid);
 #endif
     const uint32_t m0 = mempool_get_timer();
     mempool_start_benchmark();
@@ -121,10 +121,10 @@ int main(void) {
     const uint32_t m1 = mempool_get_timer();
     mempool_stop_benchmark();
     if (cid == 0) ql_mixer_dma_wait();
-    mempool_barrier(num_cores);
+    qc_barrier(cid);
 #if !QL_ATTN && QL_GCHK
     ql_gchk_check(cid);
-    mempool_barrier(num_cores);
+    qc_barrier(cid);
 #endif
     if (cid == 0) {
       printf("\n----- qwen %s mixer only (B=%u, T=%u) -----\n", QL_ATTN ? "attention" : "gdn", QL_B,
@@ -135,12 +135,12 @@ int main(void) {
              (unsigned)(m1 - m0), (unsigned)(m1 - m0), QC_EXP_FAKE ? "fake" : "real");
     }
     ql_mixer_report(cid);
-    mempool_barrier(num_cores);
+    qc_barrier(cid);
     return 0;
   }
 #endif
   QL_IN(prime)(cid);
-  mempool_barrier(num_cores);
+  qc_barrier(cid);
 
   // ---- the block ----------------------------------------------------------------------------
   const uint32_t t0 = mempool_get_timer();
@@ -187,7 +187,7 @@ int main(void) {
 #else
   op_mshr_off();
 #endif
-  mempool_barrier(num_cores);
+  qc_barrier(cid);
   if (cid == 0) {
     uint64_t macs = QL_IN(macs)() + op_macs();
 #if QL_FFN
@@ -207,7 +207,7 @@ int main(void) {
 #if QL_CHECK
   // qz scattered identities (aux) and the mixer wrote identities as o' (ql_pat): both landed?
   ql_bad_o[cid] = ql_check_o(cid);
-  mempool_barrier(num_cores);
+  qc_barrier(cid);
   if (cid == 0) {
     uint32_t ba = 0, bo = 0;
     for (uint32_t k = 0; k < NUM_CORES; ++k) ba += ql_bad_aux[k], bo += ql_bad_o[k];
@@ -224,6 +224,6 @@ int main(void) {
   gu_report(cid, t6 - t5);
   dn_report(cid, t8 - t7);
 #endif
-  mempool_barrier(num_cores);
+  qc_barrier(cid);
   return 0;
 }

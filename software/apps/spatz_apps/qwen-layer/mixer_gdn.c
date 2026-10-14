@@ -63,6 +63,8 @@ static uint8_t ql_s_l2[QL_T * QL_GTILE_B] __attribute__((section(".l2_bss"), ali
 static volatile uint32_t ql_gsync[NUM_CORES];  // chunk parts: partials stored, per call
 #endif
 static ql_elem_t ql_wab[QL_AB * QL_H] __attribute__((section(".l1_prio"), aligned(64)));
+// Stage timers, written by core 0 only: they sit in L2, and one word stored by every core costs
+// each core ~1.6k cycles on RTL (1024 stores serialised on one bank).
 static uint32_t ql_t_start, ql_t_ab, ql_t_rounds, ql_t_end;
 
 static inline uint8_t *ql_buf(uint32_t t) { return ql_s + (t % QL_NBUF) * QL_GTILE_B; }
@@ -342,6 +344,11 @@ void ql_mixer_setup(uint32_t cid) {
   }
 #define QL_AB_C 32u  // elements per chunk (e16 m1)
 _Static_assert(QL_AB_KLEN % (2u * QL_AB_C) == 0u, "a,b: whole chunk pairs per task");
+_Static_assert((QL_AB_KLEN & (QL_AB_KLEN - 1u)) == 0u, "a,b: the start rotation wraps by a mask");
+// Each task walks its K range from a start chunk hashed from cid, wrapping round. A 64 B chunk is
+// one tile and the W rows are 8 KiB apart, so at a common chunk index all 96 rows (and the x rows)
+// sit on a handful of tiles: in lockstep, hundreds of cores load from the same few tiles at once.
+#define QL_AB_ROT(K) (((K) + rot) & (QL_AB_KLEN - 1u))
 static __attribute__((noinline)) void ql_ab_round(uint32_t t, uint32_t cid) {
   const uint32_t hl = cid / (2u * QL_AB_KP), ab = (cid / QL_AB_KP) % 2u, part = cid % QL_AB_KP;
   const uint32_t h = t * QL_HEADS_PER_ROUND + hl;
@@ -349,16 +356,17 @@ static __attribute__((noinline)) void ql_ab_round(uint32_t t, uint32_t cid) {
   const uint32_t b = h / QC_GDN_VH, vh = h % QC_GDN_VH, k0 = part * QL_AB_KLEN;
   const ql_elem_t *x = ql_x_at(ql_x_replica(cid), b * QL_TOK, k0);
   const ql_elem_t *w = ql_wab + (2u * vh + ab) * QL_H + k0;
+  const uint32_t rot = QL_ABROT ? (((cid * 0x9E3779B1u) >> 16) * QL_AB_C) & (QL_AB_KLEN - 1u) : 0u;
   size_t vl;
   __asm__ volatile("vsetvli %0, %1, e16, m1, ta, ma" : "=r"(vl) : "r"(QC_SLOT_F16));
   __asm__ volatile("vle16.v v24, (%0)" ::"r"(ql_scr_at(1, cid)) : "memory");  // zeros
-  QL_AB_LD_(0u, QL_AB_SETA);
-  QL_AB_LD_(QL_AB_C, QL_AB_SETB);
+  QL_AB_LD_(QL_AB_ROT(0u), QL_AB_SETA);
+  QL_AB_LD_(QL_AB_ROT(QL_AB_C), QL_AB_SETB);
   QL_AB_MAC_("vfmul.vv", QL_AB_SETA);
   for (uint32_t k = 2u * QL_AB_C; k < QL_AB_KLEN; k += 2u * QL_AB_C) {
-    QL_AB_LD_(k, QL_AB_SETA);
+    QL_AB_LD_(QL_AB_ROT(k), QL_AB_SETA);
     QL_AB_MAC_("vfmacc.vv", QL_AB_SETB);
-    QL_AB_LD_(k + QL_AB_C, QL_AB_SETB);
+    QL_AB_LD_(QL_AB_ROT(k + QL_AB_C), QL_AB_SETB);
     QL_AB_MAC_("vfmacc.vv", QL_AB_SETA);
   }
   QL_AB_MAC_("vfmacc.vv", QL_AB_SETB);
@@ -378,11 +386,12 @@ static __attribute__((noinline)) void ql_ab_round(uint32_t t, uint32_t cid) {
 }
 #undef QL_AB_LD
 #undef QL_AB_MAC
+#undef QL_AB_ROT
 #undef QL_AB_RED
 _Static_assert(QL_TOK <= 4u, "a,b: at most 4 tokens per task");
 
 void ql_mixer_run(uint32_t cid) {
-  ql_t_start = mempool_get_timer();
+  if (cid == 0) ql_t_start = mempool_get_timer();
   const qc_k_t qck = qc_k();
   qc_rne();
   // One round (QL_T = 1): state tile 0 loads under the a,b stage and the o-projection's tile 0
@@ -399,7 +408,7 @@ void ql_mixer_run(uint32_t cid) {
   }
   ql_ab_round(0, cid);
   qc_barrier(cid);
-  ql_t_ab = mempool_get_timer();
+  if (cid == 0) ql_t_ab = mempool_get_timer();
   {
     size_t vl;  // SiLU's constant registers, once
     __asm__ volatile("vsetvli %0, %1, e16, m1, ta, ma" : "=r"(vl) : "r"(QC_SLOT_F16));
@@ -418,7 +427,7 @@ void ql_mixer_run(uint32_t cid) {
   }
   qc_barrier(cid);
 #endif
-  ql_t_rounds = mempool_get_timer();
+  if (cid == 0) ql_t_rounds = mempool_get_timer();
   for (uint32_t t = 0; t < QL_T; ++t) {
     const uint32_t c = t * NUM_CORES + cid;  // the chunk part (= the chunk at QL_CS = 1)
 #if QL_STREAM
@@ -460,7 +469,7 @@ void ql_mixer_run(uint32_t cid) {
   }
 #endif
   qc_barrier(cid);
-  ql_t_end = mempool_get_timer();
+  if (cid == 0) ql_t_end = mempool_get_timer();
 }
 
 //==============================================================================

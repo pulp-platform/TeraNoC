@@ -51,6 +51,7 @@ static uint8_t ql_kv_l2[QL_A_T * 2u * QL_A_TILE_B] __attribute__((section(".l2_b
 // KV sharing: inserts of the step's new k / v done by each core (its slices of the last block);
 // the set's other cores wait for them before reading the block.
 static volatile uint32_t ql_ins_cnt[NUM_CORES];
+// Stage timers, written by core 0 only (one L2 word stored by every core: ~1.6k cycles on RTL).
 static uint32_t ql_t_start, ql_t_prep, ql_t_rounds, ql_t_comb, ql_t_end;
 static uint32_t ql_bad_knew[NUM_CORES];  // check mode: the new k in the KV cache (L2) vs its slots
 
@@ -455,7 +456,7 @@ static uint32_t ql_prof[NUM_CORES][4], ql_rprof[NUM_CORES][2];  // rounds: compu
 #define QL_STAGE(x) do { } while (0)
 #endif
 void ql_mixer_run(uint32_t cid) {
-  ql_t_start = mempool_get_timer();
+  if (cid == 0) ql_t_start = mempool_get_timer();
   QL_STAGE("start");
   QL_DBG_STAGE(cid, 1);
   qc_rne();
@@ -509,7 +510,7 @@ void ql_mixer_run(uint32_t cid) {
   qc_barrier(cid);
   QL_STAGE("tile 0 in");
   QL_DBG_STAGE(cid, 4);
-  ql_t_prep = mempool_get_timer();
+  if (cid == 0) ql_t_prep = mempool_get_timer();
 
   // ---- rounds: K tile, then V tile; the DMA brings tile i+1 during tile i -------------------
 #ifdef QL_PROF
@@ -570,13 +571,13 @@ void ql_mixer_run(uint32_t cid) {
 #endif
   QL_STAGE("rounds done");
   QL_DBG_STAGE(cid, 20);
-  ql_t_rounds = mempool_get_timer();
+  if (cid == 0) ql_t_rounds = mempool_get_timer();
 
   // ---- split-S partials: one flat pass over all parts, fused with the gate -----------------
   // The KV buffers are dead: the o-projection's tile 0 loads under the combine.
   if (cid == 0) op_refill_head(0);
   QL_DBG_STAGE(cid, 21);
-  ql_t_comb = mempool_get_timer();
+  if (cid == 0) ql_t_comb = mempool_get_timer();
 #ifdef QL_COMBINE_CMP
   ql_bad_cmb[cid] = ql_n_cmb[cid] = 0u;
   if (active) ql_cmp_fill(cid, part);
@@ -589,7 +590,7 @@ void ql_mixer_run(uint32_t cid) {
   if (QL_A_CPP > 1u && active) ql_combine_out(cid, part);
   qc_barrier(cid);
   QL_DBG_STAGE(cid, 22);
-  ql_t_end = mempool_get_timer();
+  if (cid == 0) ql_t_end = mempool_get_timer();
 }
 
 // The KV tiles used the W area: the o-projection's tile 0 loaded under the combine, tile 1 now.
