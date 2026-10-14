@@ -58,10 +58,41 @@ static inline void ql_scatter(uint32_t b, uint32_t col, uint16_t v) {
   }
 }
 
+#if QL_VSCAT
+// ql_scatter for a strip of n <= 32 channels from col that stays inside one 32-row block (so in
+// one aux slot of every reader): one vse16 of vector register v14 (vl = n set) per reader.
+static inline void ql_vscatter(uint32_t b, uint32_t col) {
+  if (col < QL_COL_V) {
+    const uint32_t k = col >= QL_COL_K, ch = col - (k ? QL_COL_K : 0u);
+    const uint32_t kh = ch / QC_GDN_D, d = ch % QC_GDN_D;
+    const uint32_t sw = (k ? QC_GDN_AUX_K : QC_GDN_AUX_Q) + d / QC_GDN_RC;
+    const uint32_t u0 = (b * QC_GDN_KH + kh) * QC_GDN_VPK * QC_GDN_RB * QL_CS;
+    for (uint32_t i = 0; i < QC_GDN_VPK * QC_GDN_RB * QL_CS; ++i) {
+      const uint32_t u = u0 + i;
+      uint16_t *dst = (uint16_t *)ql_auxp(u / NUM_CORES, sw, u % NUM_CORES) + d % QC_GDN_RC;
+      __asm__ volatile("vse16.v v14, (%0)" ::"r"(dst) : "memory");
+    }
+  } else {
+    const uint32_t z = col >= QL_COL_Z, ch = col - (z ? QL_COL_Z : QL_COL_V);
+    const uint32_t vh = ch / QC_GDN_D, i = ch % QC_GDN_D;
+    const uint32_t c = ((b * QC_GDN_KH + vh / QC_GDN_VPK) * QC_GDN_VPK + vh % QC_GDN_VPK) *
+                           QC_GDN_RB + i / QC_GDN_RC;
+    for (uint32_t p = 0; p < (z ? 1u : QL_CS); ++p) {
+      const uint32_t u = c * QL_CS + p;
+      uint16_t *dst =
+          (uint16_t *)ql_auxp(u / NUM_CORES, z ? QL_AUX_Z : QC_GDN_AUX_V, u % NUM_CORES) +
+          i % QC_GDN_RC;
+      __asm__ volatile("vse16.v v14, (%0)" ::"r"(dst) : "memory");
+    }
+  }
+}
+#endif
+
 static void ql_qz_epilogue(uint32_t cid, uint32_t strip, const qp_patch_t *pt) {
   (void)strip;
   const qc_k_t qck = qc_k();
   uint16_t *scr = (uint16_t *)qc_slot(ql_scr, 0, cid);  // 2 slots = 64 fp16, this core's tile
+  (void)scr;
   qc_rne();
   {
     size_t vl;  // the constant registers once, at the widest strip (vfmv.v.f: slide unit)
@@ -78,9 +109,19 @@ static void ql_qz_epilogue(uint32_t cid, uint32_t strip, const qp_patch_t *pt) {
       const uint32_t edge = col < QL_COL_V ? (col < QL_COL_K ? QL_COL_K : QL_COL_V)
                                              : (col < QL_COL_Z ? QL_COL_Z : QL_P_QZ);
       if (col + n > edge) n = edge - col;
+      // Vector scatter: no strip crosses a 32-row block (each section starts on one).
+      const uint32_t blk = QC_GDN_RC - col % QC_GDN_RC;
+      if (QL_VSCAT && n > blk) n = blk;
       const _Float16 *x = pt->c[0] + r * pt->ldc + c;
       const _Float16 rinv = (_Float16)ql_rinv[0][r];
-      if (QL_CHECK) {
+      if (QL_CHECK && QL_VSCAT) {  // the identities through the vector scatter
+        for (uint32_t e = 0; e < n; ++e) scr[e] = ql_pat(r, col + e);
+        __asm__ volatile("fence" ::: "memory");
+        size_t vl;
+        __asm__ volatile("vsetvli %0, %1, e16, m1, ta, ma" : "=r"(vl) : "r"(n));
+        __asm__ volatile("vle16.v v14, (%0)" ::"r"(scr) : "memory");
+        ql_vscatter(r, col);
+      } else if (QL_CHECK) {
         for (uint32_t e = 0; e < n; ++e) ql_scatter(r, col + e, ql_pat(r, col + e));
       } else if (col < QL_COL_Z) {
         // y = w3 x + w0 h0 + w1 h1 + w2 h2 ; state <- (h1, h2, x) ; out = SiLU(y)
@@ -105,11 +146,25 @@ static void ql_qz_epilogue(uint32_t cid, uint32_t strip, const qp_patch_t *pt) {
         __asm__ volatile("vfmacc.vv v8, v2, v5");
         __asm__ volatile("vfmacc.vv v8, v3, v6");
         QC_SILU("v8", "v9", "v10", "v11", "v14", "v12", "v13");
+#if QL_VSCAT
+        // Not drained per strip: the parts split issue time, the epilogue part is exact.
+        QL_PT_LAP(cid, QL_PT_QZ_CONV, qt);
+        ql_vscatter(r, col);
+        QL_PT_LAP(cid, QL_PT_QZ_SCAT, qt);
+#else
         __asm__ volatile("vse16.v v14, (%0)" ::"r"(scr) : "memory");
         __asm__ volatile("fence" ::: "memory");
         QL_PT_LAP(cid, QL_PT_QZ_CONV, qt);
         for (uint32_t e = 0; e < n; ++e) ql_scatter(r, col + e, scr[e]);
         QL_PT_LAP(cid, QL_PT_QZ_SCAT, qt);
+#endif
+      } else if (QL_VSCAT) {  // z: scaled, no conv
+        size_t vl;
+        __asm__ volatile("vsetvli %0, %1, e16, m1, ta, ma" : "=r"(vl) : "r"(n));
+        __asm__ volatile("vle16.v v14, (%0)" ::"r"(x) : "memory");
+        __asm__ volatile("vfmul.vf v14, v14, %0" ::"f"(rinv));
+        ql_vscatter(r, col);
+        QL_PT_LAP(cid, QL_PT_QZ_Z, qt);
       } else {  // z: scaled, no conv
         for (uint32_t e = 0; e < n; ++e) {
           const _Float16 zv = x[e] * rinv;
