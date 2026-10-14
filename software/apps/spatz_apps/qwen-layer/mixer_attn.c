@@ -56,7 +56,21 @@ static uint8_t ql_kvbuf[2u * QL_A_TILE_B] QC_L1_SWEEP;
 #define QL_A_TRUN QL_A_T
 #endif
 _Static_assert(QL_A_TRUN % QL_A_RPP == 0, "ql_rounds_run: a whole number of problems per core");
-static uint8_t ql_kv_l2[QL_A_T * 2u * QL_A_TILE_B] __attribute__((section(".l2_bss"), aligned(QC_SWEEP_B)));
+// The rounds' K/V tiles in L2. At large B x S they exceed the 512 MiB L2: then the rounds share
+// QL_A_KV_RND tile pairs (round r uses pair r % QL_A_KV_RND). Timing only -- the L2 is uncached
+// SRAM, so where a tile sits does not change what reading it costs.
+#ifndef QL_A_KV_CAP_B
+#define QL_A_KV_CAP_B (64u << 20)
+#endif
+#define QL_A_KV_RND                                                                           \
+  (QL_A_T * 2u * QL_A_TILE_B <= QL_A_KV_CAP_B ? QL_A_T                                        \
+                                              : QL_A_MAX(1u, QL_A_KV_CAP_B / (2u * QL_A_TILE_B)))
+#if QL_A_T * 2u * QL_A_TILE_B <= QL_A_KV_CAP_B
+#define QL_KV_AT(j) (ql_kv_l2 + (j) * QL_A_TILE_B)  // no sharing: the original addressing
+#else
+#define QL_KV_AT(j) (ql_kv_l2 + ((((j) / 2u) % QL_A_KV_RND) * 2u + (j) % 2u) * QL_A_TILE_B)
+#endif
+static uint8_t ql_kv_l2[QL_A_KV_RND * 2u * QL_A_TILE_B] __attribute__((section(".l2_bss"), aligned(QC_SWEEP_B)));
 // KV sharing: inserts of the step's new k / v done by each core (its slices of the last block);
 // the set's other cores wait for them before reading the block.
 static volatile uint32_t ql_ins_cnt[NUM_CORES];
@@ -189,7 +203,7 @@ static __attribute__((noinline)) void ql_put_k_l2(uint32_t cid, uint32_t part) {
   for (uint32_t qp = 0; qp < QL_A_PPC; ++qp) {
     const uint32_t r = qp * QL_A_RPP + QL_A_RPP - 1u;  // the round of the problem's last block
     for (uint32_t t = 0; t < QL_TOK; ++t) {
-      uint8_t *l2 = ql_kv_l2 + (2u * r) * QL_A_TILE_B + last * QC_SLOT_B + QL_NEWPOS(t) * 2u -
+      uint8_t *l2 = QL_KV_AT(2u * r) + last * QC_SLOT_B + QL_NEWPOS(t) * 2u -
                     d0 * QC_SWEEP_B;
       for (uint32_t dd = d0 + part * n; dd < d0 + (part + 1u) * n; dd += m) {
         __asm__ volatile("vle16.v v0, (%0)" ::"r"(ql_resp(QL_A_RES_KNEW + (qp * QL_TOK + t) * 8u + dd / 32u, last) +
@@ -211,7 +225,7 @@ static __attribute__((noinline)) void ql_insert_v(uint32_t cid, const ql_a_id_t 
       __asm__ volatile("vle16.v v0, (%0)" ::"r"(ql_resp(QL_A_RES_VNEW + (d->qp * QL_TOK + t) * 8u + s, cid)) : "memory");
       __asm__ volatile("vse16.v v0, (%0)" ::"r"(qc_slot(ql_kvbuf + QL_A_TILE_B, sw, cid)) : "memory");
       if (d->kw)  // one token group (set) writes the cache
-        __asm__ volatile("vse16.v v0, (%0)" ::"r"(ql_kv_l2 + (2u * r + 1u) * QL_A_TILE_B + sw * QC_SWEEP_B +
+        __asm__ volatile("vse16.v v0, (%0)" ::"r"(QL_KV_AT(2u * r + 1u) + sw * QC_SWEEP_B +
                                                    cid * QC_SLOT_B)
                          : "memory");
     }
@@ -529,7 +543,7 @@ void ql_mixer_run(uint32_t cid) {
   for (uint32_t i = 0; i < 2u * QL_A_TRUN; ++i) {
     if (cid == 0 && i + 1u < 2u * QL_A_TRUN)
       dma_memcpy_nonblocking(ql_kvbuf + ((i + 1u) & 1u) * QL_A_TILE_B,
-                             ql_kv_l2 + (i + 1u) * QL_A_TILE_B, QL_A_TILE_B);
+                             QL_KV_AT(i + 1u), QL_A_TILE_B);
     const uint32_t r = i / 2u, kvc = cid - cid % QL_KS;  // kvc: the K/V set's first core
     if (active) {
       const ql_a_id_t d = ql_a_id(cid, r);
@@ -570,7 +584,7 @@ void ql_mixer_run(uint32_t cid) {
 #if QL_CHECK
   if (active && part == QL_A_CPP - 1u) {  // the last round's K tile: column 31 = the new k
     const ql_a_id_t d = ql_a_id(cid, QL_A_T - 1u);
-    const uint8_t *l2 = ql_kv_l2 + 2u * (QL_A_T - 1u) * QL_A_TILE_B + cid * QC_SLOT_B + (QC_ATT_TB - 1u) * 2u;
+    const uint8_t *l2 = QL_KV_AT(2u * (QL_A_T - 1u)) + cid * QC_SLOT_B + (QC_ATT_TB - 1u) * 2u;
     uint32_t bad = 0;
     for (uint32_t dd = 0; dd < QC_ATT_D; ++dd)
       bad += *(const volatile uint16_t *)(l2 + dd * QC_SWEEP_B) !=
