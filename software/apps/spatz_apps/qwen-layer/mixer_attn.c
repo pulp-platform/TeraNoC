@@ -47,15 +47,15 @@ _Static_assert(QL_KS == 1u || (QL_A_TGRP % QL_KS == 0 && NUM_TILES_PER_GROUP % Q
 static uint8_t ql_kvbuf[2u * QL_A_TILE_B] QC_L1_SWEEP;
 #endif
 // Sweep-aligned (a 4 KiB shift of an L2 tile source halved the GVSoC DMA rate).
-// ql_rounds_run=k (timing window, long contexts / large B): only the first k rounds run, k a
-// whole number of problems per core (every problem's last block does the KV insert and the gate),
-// and the report extrapolates prep + rounds x per-round + combine.
+// ql_rounds_run=k (timing window, long contexts / large B): only the first k rounds run and the
+// report extrapolates prep + rounds x per-round + combine. A window that ends inside a problem
+// skips that problem's last block -- the new token's K/V insert (one token) and, at one core per
+// problem, the gate: both small next to a round.
 #if QL_ROUNDS_RUN && QL_ROUNDS_RUN < QL_A_T
 #define QL_A_TRUN QL_ROUNDS_RUN
 #else
 #define QL_A_TRUN QL_A_T
 #endif
-_Static_assert(QL_A_TRUN % QL_A_RPP == 0, "ql_rounds_run: a whole number of problems per core");
 // The rounds' K/V tiles in L2. At large B x S they exceed the 512 MiB L2: then the rounds share
 // QL_A_KV_RND tile pairs (round r uses pair r % QL_A_KV_RND). Timing only -- the L2 is uncached
 // SRAM, so where a tile sits does not change what reading it costs.
