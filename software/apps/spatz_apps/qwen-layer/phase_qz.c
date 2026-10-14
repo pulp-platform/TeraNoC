@@ -23,6 +23,7 @@
 #endif
 static void ql_qz_epilogue(uint32_t cid, uint32_t strip, const qp_patch_t *pt);
 #define QP_EPILOGUE ql_qz_epilogue
+#define QP_PT_BASE QL_PT_IN_PRE
 #include "qwen_phase.c"
 #include "../qwen-common/qc_vec.h"
 
@@ -67,6 +68,7 @@ static void ql_qz_epilogue(uint32_t cid, uint32_t strip, const qp_patch_t *pt) {
     __asm__ volatile("vsetvli %0, %1, e16, m1, ta, ma" : "=r"(vl) : "r"(QC_SLOT_F16));
     QC_SET_CONST_REGS("v12", "v13");
   }
+  uint32_t qt = QL_PT_T0();
   for (uint32_t r = pt->r0; r < pt->r1; ++r)
     for (uint32_t c = pt->c0; c < pt->c1;) {
       const uint32_t col = pt->col0 + c;
@@ -105,12 +107,15 @@ static void ql_qz_epilogue(uint32_t cid, uint32_t strip, const qp_patch_t *pt) {
         QC_SILU("v8", "v9", "v10", "v11", "v14", "v12", "v13");
         __asm__ volatile("vse16.v v14, (%0)" ::"r"(scr) : "memory");
         __asm__ volatile("fence" ::: "memory");
+        QL_PT_LAP(cid, QL_PT_QZ_CONV, qt);
         for (uint32_t e = 0; e < n; ++e) ql_scatter(r, col + e, scr[e]);
+        QL_PT_LAP(cid, QL_PT_QZ_SCAT, qt);
       } else {  // z: scaled, no conv
         for (uint32_t e = 0; e < n; ++e) {
           const _Float16 zv = x[e] * rinv;
           ql_scatter(r, col + e, *(const uint16_t *)&zv);
         }
+        QL_PT_LAP(cid, QL_PT_QZ_Z, qt);
       }
       c += n;
     }

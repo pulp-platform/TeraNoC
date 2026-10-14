@@ -95,6 +95,25 @@ _Static_assert(sizeof(qwen_hash_sel) / sizeof(qwen_hash_sel[0]) == NUM_GROUPS,
 #ifndef QP_SETUP_GBAR
 #define QP_SETUP_GBAR 0
 #endif
+// QWEN_PROJ_SKIP (qwen-layer ql_proj_skip): run the phase without its projection -- no W stream,
+// no MACs, no K-split reduce -- so only the epilogues, their rendezvous and the MSHR toggles are
+// timed. C holds a constant (QP_PFX(fill_c)).
+#ifndef QWEN_PROJ_SKIP
+#define QWEN_PROJ_SKIP 0
+#endif
+// Optional part timers (qwen-layer, proj-skip builds): QP_PT_ADD(cid, part, cycles), parts
+// QP_PT_BASE + 0 (rendezvous + MSHR off before the epilogue), + 1 (the epilogue, drained),
+// + 2 (rendezvous + MSHR on after it).
+#ifdef QP_PT_ADD
+#define QP_PT_MARK(cid, k, t)                                                                 \
+  do {                                                                                        \
+    const uint32_t qn_ = mempool_get_timer();                                                 \
+    QP_PT_ADD((cid), QP_PT_BASE + (k), qn_ - (t));                                            \
+    (t) = qn_;                                                                                \
+  } while (0)
+#else
+#define QP_PT_MARK(cid, k, t) ((void)(t))
+#endif
 
 _Static_assert(GEMM_ELEM_BYTES == 2, "fp16 only");
 _Static_assert(!QWEN_ACC32 && !QWEN_SWIGLU && FFN_PRIME_SPLIT == 1,
@@ -456,15 +475,26 @@ static void qp_epilogue_strip(uint32_t cid, uint32_t strip, uint32_t last, const
   pt.c[1] = QWEN_STAGES_N > 1 ? qwen_c[QWEN_STAGES_N > 1 ? 1 : 0] : (const elem_t *)0;
   pt.ldc = (uint32_t)QWEN_LDW;
   pt.col0 = strip * (uint32_t)QWEN_PT;
+#ifdef QP_PT_ADD
+  uint32_t qt = mempool_get_timer();
+#else
+  uint32_t qt = 0u;
+#endif
   qp_sync(cid);
-  qp_mshr_enable(0u);
+  if (!QWEN_PROJ_SKIP) qp_mshr_enable(0u);  // proj-skip: the MSHR is never on
   qp_sync(cid);
+  QP_PT_MARK(cid, 0, qt);
   QP_EPILOGUE(cid, strip, &pt);
+#ifdef QP_PT_ADD
+  __asm__ volatile("fence" ::: "memory");  // the epilogue's vector tail inside its own part
+#endif
+  QP_PT_MARK(cid, 1, qt);
   qp_sync(cid);
-  if (!last) {
+  if (!last && !QWEN_PROJ_SKIP) {
     qp_mshr_enable(1u);
     qp_sync(cid);
   }
+  QP_PT_MARK(cid, 2, qt);
 }
 #endif
 
@@ -678,22 +708,30 @@ void QP_PFX(prime)(uint32_t cid) {
   // Core 0 writes the tuning (ph_cfg) at the END of setup, after its X copies and warm-up; the
   // group helpers must not read it before (GVSoC: cache_timeout=0x57575757, uninitialised L1).
   qwen_barrier(cid);
-  if (cid == (uint32_t)QWEN_DMA_CORE) {
+  if (!QWEN_PROJ_SKIP && cid == (uint32_t)QWEN_DMA_CORE) {
     qwen_refill(0, 0, 0, 0);
     dma_wait();
     if (QWEN_SEQ_TOTAL > 1u) qwen_refill_seq(1);
   }
 #if MSHR_RUNTIME_CFG
-  qp_mshr_apply(cid, 0u, 0u);
+  if (!QWEN_PROJ_SKIP) qp_mshr_apply(cid, 0u, 0u);
 #endif
 }
+
+#if QWEN_PROJ_SKIP
+// C as a projection would leave it: a constant (any finite fp16), every stage's slot.
+void QP_PFX(fill_c)(uint32_t cid) {
+  for (uint32_t s = 0; s < (uint32_t)QWEN_STAGES_N; ++s)
+    for (uint32_t i = cid; i < (uint32_t)QWEN_CSLOT; i += NUM_CORES) ((uint16_t *)qwen_c[s])[i] = 0x2000u;
+}
+#endif
 
 void QP_PFX(run)(uint32_t cid, const qp_split_t *sp) {
   const elem_t *x_use =
       qwen_x + (uint32_t)QWEN_X_REPLICA_OF(cid / (NUM_CORES / NUM_GROUPS)) * (uint32_t)QWEN_X_STRIDE_E;
   if (cid == 0) ph_t_pass = mempool_get_timer();  // one L2 word: 1024 stores cost ~1.6k cycles
   for (uint32_t strip = 0; strip < (uint32_t)QWEN_STRIPS_RUN; ++strip) {
-    for (uint32_t stage = 0; stage < (uint32_t)QWEN_STAGES_N; ++stage)
+    for (uint32_t stage = 0; stage < (uint32_t)QWEN_STAGES_N && !QWEN_PROJ_SKIP; ++stage)
       qwen_project(stage, strip, cid, x_use, sp);
 #ifdef QP_EPILOGUE
     qp_epilogue_strip(cid, strip, strip + 1u == (uint32_t)QWEN_STRIPS_RUN, sp);

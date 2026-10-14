@@ -22,6 +22,7 @@
 #define QP_SETUP_GBAR 1
 static void ql_qa_epilogue(uint32_t cid, uint32_t strip, const qp_patch_t *pt);
 #define QP_EPILOGUE ql_qa_epilogue
+#define QP_PT_BASE QL_PT_IN_PRE
 #include "qwen_phase.c"
 
 // 14336 is a whole number of the phase's pad unit at 4x4 (2048) but not at 8x8 (4096): there the

@@ -20,6 +20,7 @@
 #define QP_NEXT_REFILL dn_refill_head
 static void ql_swiglu_epilogue(uint32_t cid, uint32_t strip, const qp_patch_t *pt);
 #define QP_EPILOGUE ql_swiglu_epilogue
+#define QP_PT_BASE QL_PT_GU_PRE
 #include "qwen_phase.c"
 #include "swiglu.h"
 
@@ -31,6 +32,7 @@ static void ql_swiglu_epilogue(uint32_t cid, uint32_t strip, const qp_patch_t *p
   (void)cid;
   (void)strip;
   if (pt->c1 <= pt->c0) return;
+  uint32_t qt = QL_PT_T0();
   for (uint32_t r = pt->r0; r < pt->r1; ++r) {
     _Float16 *g = (_Float16 *)pt->c[0] + r * pt->ldc + pt->c0;
     _Float16 *u = (_Float16 *)pt->c[1] + r * pt->ldc + pt->c0;
@@ -47,7 +49,12 @@ static void ql_swiglu_epilogue(uint32_t cid, uint32_t strip, const qp_patch_t *p
       c += (uint32_t)vl;
     }
     __asm__ volatile("fence" ::: "memory");
+    QL_PT_LAP(cid, QL_PT_GU_SCALE, qt);
     swiglu_f16(g, u, ql_fh + r * (uint32_t)QL_FH_LDX + pt->col0 + pt->c0, pt->c1 - pt->c0,
                (uint32_t)QL_FH_REPLICAS, (uint32_t)QL_FH_STRIDE_E);
+#if QL_PROJ_SKIP
+    __asm__ volatile("fence" ::: "memory");
+#endif
+    QL_PT_LAP(cid, QL_PT_GU_SWIGLU, qt);
   }
 }

@@ -21,6 +21,7 @@
 #endif
 static void ql_residual_epilogue(uint32_t cid, uint32_t strip, const qp_patch_t *pt);
 #define QP_EPILOGUE ql_residual_epilogue
+#define QP_PT_BASE QL_PT_OP_PRE
 #include "qwen_phase.c"
 
 _Static_assert(QWEN_STAGES_N == 1 && QWEN_K == QL_VZ && QWEN_P == QL_H,
@@ -34,6 +35,7 @@ _Static_assert((QWEN_SEQ_TOTAL % 2) == 0, "gate+up's tile 0 must land in region 
 static void ql_residual_epilogue(uint32_t cid, uint32_t strip, const qp_patch_t *pt) {
   (void)strip;
   const uint32_t rep = ql_x_replica(cid);
+  uint32_t qt = QL_PT_T0();
 #if QL_FFN
   for (uint32_t r = 0; r < QL_ROWS; ++r) ql_rms_part[r * NUM_CORES + cid] = 0.0f;
 #endif
@@ -52,8 +54,10 @@ static void ql_residual_epilogue(uint32_t cid, uint32_t strip, const qp_patch_t 
 #if QL_FFN
     if (pt->c1 > pt->c0) {
       __asm__ volatile("fence" ::: "memory");
+      QL_PT_LAP(cid, QL_PT_OP_RES, qt);
       ql_rms_part[r * NUM_CORES + cid] =
           ql_sumsq_seg(ql_x_at(rep, r, pt->col0 + pt->c0), pt->c1 - pt->c0, cid);
+      QL_PT_LAP(cid, QL_PT_OP_SSQ, qt);
     }
 #endif
   }

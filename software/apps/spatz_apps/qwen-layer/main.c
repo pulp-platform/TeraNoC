@@ -39,6 +39,12 @@ ql_elem_t ql_conv_w[QL_CONV_K * QL_CONV_CH] __attribute__((section(".l1_prio"), 
 #else
 uint8_t ql_res[QL_A_RES_SW * QC_SWEEP_B] QC_L1_SWEEP;
 #endif
+#if QL_PROJ_SKIP
+uint32_t ql_pt[NUM_CORES][QL_PT_N] QC_L1_SWEEP;
+// Part reduction: core j < QL_PT_N * QL_PT_CH folds part j % QL_PT_N over its chunk of cores.
+#define QL_PT_CH 8u
+static uint32_t ql_pt_max[QL_PT_CH][QL_PT_N], ql_pt_sum[QL_PT_CH][QL_PT_N];
+#endif
 #if QL_FFN
 ql_elem_t ql_fh[QL_FH_ELEMS] QC_L1_SWEEP;
 #endif
@@ -139,13 +145,40 @@ int main(void) {
     return 0;
   }
 #endif
+#if QL_PROJ_SKIP
+  _Static_assert(QL_FFN && !QL_CHECK && !QL_MIXER_ONLY, "ql_proj_skip: the whole layer (ql_ffn=1)");
+  QL_IN(fill_c)(cid);
+  op_fill_c(cid);
+  gu_fill_c(cid);
+  dn_fill_c(cid);
+  for (uint32_t i = 0; i < QL_PT_N; ++i) ql_pt[cid][i] = 0u;
+#endif
   QL_IN(prime)(cid);
   qc_barrier(cid);
+#if QL_PROJ_SKIP
+  QL_IN(mshr_off)();  // never enabled in proj-skip builds; off for certain
+  qc_barrier(cid);
+#endif
 
   // ---- the block ----------------------------------------------------------------------------
   const uint32_t t0 = mempool_get_timer();
   mempool_start_benchmark();
+#if QL_PROJ_SKIP
+  // The pre-mixer RMSNorm: in a stack of layers its sums of squares come from the previous
+  // layer's down epilogue; timed here on its own (sums, rendezvous, reduction, rendezvous).
+  uint32_t qt = QL_PT_T0();
+  ql_rms_x_partials(cid);
+  QL_PT_LAP(cid, QL_PT_NORM0_SSQ, qt);
+  QL_IN(barrier)(cid);
+  const uint32_t t0s = mempool_get_timer();
+  qt = t0s;
+  ql_rms_reduce(cid, 0u);
+  QL_PT_LAP(cid, QL_PT_NORM0_RED, qt);
+  QL_IN(barrier)(cid);
+  const uint32_t t0n = mempool_get_timer();
+#else
   const uint32_t t0n = t0;
+#endif
   QL_IN(run)(cid, &s_qz);  // ends with the MSHR off and op's tiles 0 (landed) and 1 (in flight)
   QL_DBG_STAGE(cid, 30);
   const uint32_t t1 = mempool_get_timer();
@@ -153,12 +186,18 @@ int main(void) {
   ql_bad_aux[cid] = ql_check_aux(cid);  // before the mixer rewrites q, k in place
   QL_IN(barrier)(cid);
 #endif
+#if !QL_PROJ_SKIP  // the mixer is benchmarked on its own (ql_mixer_only)
   ql_mixer_run(cid);
   ql_op_prime(cid);
+#endif
   QL_DBG_STAGE(cid, 23);  // only when the state tiles used the W area
   const uint32_t t2 = mempool_get_timer();
+  // The MSHR handovers (next projection's tuning, MSHR on, rendezvous) belong to the projections:
+  // proj-skip builds keep the MSHR off throughout and skip them.
+#if !QL_PROJ_SKIP
   op_mshr_handover(cid);
-  QL_IN(barrier)(cid);  // op's tuning in force everywhere before any op load
+  QL_IN(barrier)(cid);
+#endif  // op's tuning in force everywhere before any op load
   const uint32_t t3 = mempool_get_timer();
   QL_DBG_STAGE(cid, 24);
   op_run(cid, &s_op);
@@ -166,14 +205,22 @@ int main(void) {
   const uint32_t t4 = mempool_get_timer();
 #if QL_FFN
   // The pre-FFN RMSNorm: the o-proj epilogue left fp32 partials of y^2.
-  ql_rms_reduce(cid, 1u);
+  {
+    uint32_t q = QL_PT_T0();
+    ql_rms_reduce(cid, 1u);
+    QL_PT_LAP(cid, QL_PT_FFN_RED, q);
+  }
+#if !QL_PROJ_SKIP
   gu_mshr_handover(cid);
-  op_barrier(cid);  // 1/rms and gate+up's tuning in force everywhere
+#endif
+  op_barrier(cid);  // 1/rms (and gate+up's tuning) in force everywhere  // 1/rms and gate+up's tuning in force everywhere
   const uint32_t t5 = mempool_get_timer();
   gu_run(cid, &s_gu);  // ends with the MSHR off and down's tiles 0 (landed) and 1 (in flight)
   const uint32_t t6 = mempool_get_timer();
+#if !QL_PROJ_SKIP
   dn_mshr_handover(cid);
   gu_barrier(cid);
+#endif
   const uint32_t t7 = mempool_get_timer();
   dn_run(cid, &s_dn);
   const uint32_t t8 = mempool_get_timer();
@@ -188,6 +235,44 @@ int main(void) {
   op_mshr_off();
 #endif
   qc_barrier(cid);
+#if QL_PROJ_SKIP
+  // One hex line (decimal printing costs the RTL ~90 cycles a character): the barrier-delimited
+  // stages of core 0, then every part's max and mean over the cores (script/nonlin_parts.py).
+  if (cid < QL_PT_N * QL_PT_CH) {
+    const uint32_t i = cid % QL_PT_N, k = cid / QL_PT_N, n = NUM_CORES / QL_PT_CH;
+    uint32_t mx = 0u, sm = 0u;
+    for (uint32_t c = k * n; c < (k + 1u) * n; ++c) {
+      const uint32_t v = ql_pt[c][i];
+      mx = v > mx ? v : mx;
+      sm += v;
+    }
+    ql_pt_max[k][i] = mx;
+    ql_pt_sum[k][i] = sm;
+  }
+  qc_barrier(cid);
+  if (cid == 0) {
+    printf("\n----- qwen %s layer, projections and mixer skipped (B=%u) -----\n",
+           QL_ATTN ? "attention" : "gdn", QL_B);
+    printf("The execution took %u cycles.\n", (unsigned)(t8 - t0));
+    printf("[QLP] v1 rows=%x cores=%x exp=%s st=%x,%x,%x,%x,%x,%x,%x,%x,%x,%x\n[QLP] max=", QL_ROWS,
+           NUM_CORES, QC_EXP_FAKE ? "fake" : "real", t0s - t0, t0n - t0s, t1 - t0n, t2 - t1,
+           t3 - t2, t4 - t3, t5 - t4, t6 - t5, t7 - t6, t8 - t7);
+    for (uint32_t i = 0; i < QL_PT_N; ++i) {
+      uint32_t mx = 0u;
+      for (uint32_t k = 0; k < QL_PT_CH; ++k) mx = ql_pt_max[k][i] > mx ? ql_pt_max[k][i] : mx;
+      printf(i ? ",%x" : "%x", mx);
+    }
+    printf("\n[QLP] sum=");
+    for (uint32_t i = 0; i < QL_PT_N; ++i) {
+      uint32_t sm = 0u;
+      for (uint32_t k = 0; k < QL_PT_CH; ++k) sm += ql_pt_sum[k][i];
+      printf(i ? ",%x" : "%x", sm);
+    }
+    printf("\n");
+  }
+  qc_barrier(cid);
+  return 0;
+#endif
   if (cid == 0) {
     uint64_t macs = QL_IN(macs)() + op_macs();
 #if QL_FFN

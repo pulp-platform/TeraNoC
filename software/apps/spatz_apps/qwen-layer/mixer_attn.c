@@ -47,6 +47,15 @@ _Static_assert(QL_KS == 1u || (QL_A_TGRP % QL_KS == 0 && NUM_TILES_PER_GROUP % Q
 static uint8_t ql_kvbuf[2u * QL_A_TILE_B] QC_L1_SWEEP;
 #endif
 // Sweep-aligned (a 4 KiB shift of an L2 tile source halved the GVSoC DMA rate).
+// ql_rounds_run=k (timing window, long contexts / large B): only the first k rounds run, k a
+// whole number of problems per core (every problem's last block does the KV insert and the gate),
+// and the report extrapolates prep + rounds x per-round + combine.
+#if QL_ROUNDS_RUN && QL_ROUNDS_RUN < QL_A_T
+#define QL_A_TRUN QL_ROUNDS_RUN
+#else
+#define QL_A_TRUN QL_A_T
+#endif
+_Static_assert(QL_A_TRUN % QL_A_RPP == 0, "ql_rounds_run: a whole number of problems per core");
 static uint8_t ql_kv_l2[QL_A_T * 2u * QL_A_TILE_B] __attribute__((section(".l2_bss"), aligned(QC_SWEEP_B)));
 // KV sharing: inserts of the step's new k / v done by each core (its slices of the last block);
 // the set's other cores wait for them before reading the block.
@@ -517,8 +526,8 @@ void ql_mixer_run(uint32_t cid) {
   uint32_t tr = mempool_get_timer();
   ql_rprof[cid][0] = ql_rprof[cid][1] = 0u;
 #endif
-  for (uint32_t i = 0; i < 2u * QL_A_T; ++i) {
-    if (cid == 0 && i + 1u < 2u * QL_A_T)
+  for (uint32_t i = 0; i < 2u * QL_A_TRUN; ++i) {
+    if (cid == 0 && i + 1u < 2u * QL_A_TRUN)
       dma_memcpy_nonblocking(ql_kvbuf + ((i + 1u) & 1u) * QL_A_TILE_B,
                              ql_kv_l2 + (i + 1u) * QL_A_TILE_B, QL_A_TILE_B);
     const uint32_t r = i / 2u, kvc = cid - cid % QL_KS;  // kvc: the K/V set's first core
@@ -656,6 +665,10 @@ void ql_mixer_report(uint32_t cid) {
          QL_S, QL_TOK, QL_TG, QL_KS, QL_A_NPRB, QL_A_CPP, QL_A_T,
          QL_STATE_W ? " (KV tiles in the W area)" : "",
          ql_t_end - ql_t_start, ql_t_prep - ql_t_start, ql_t_rounds - ql_t_prep,
-         (ql_t_rounds - ql_t_prep) / QL_A_T, ql_t_end - ql_t_rounds,
+         (ql_t_rounds - ql_t_prep) / QL_A_TRUN, ql_t_end - ql_t_rounds,
          QL_A_NPRB / QL_KS * QL_S * QC_ATT_D * 4u);
+  if (QL_A_TRUN != QL_A_T)
+    printf("[ATTL] window: rounds_run=%u of %u, per_round=%u, extrapolated total=%u\n", QL_A_TRUN,
+           QL_A_T, (ql_t_rounds - ql_t_prep) / QL_A_TRUN,
+           ql_t_end - ql_t_start + (ql_t_rounds - ql_t_prep) / QL_A_TRUN * (QL_A_T - QL_A_TRUN));
 }

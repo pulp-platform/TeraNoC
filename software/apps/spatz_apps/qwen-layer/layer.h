@@ -34,6 +34,42 @@
 // (idle during the mixer).
 #define QL_STATE_W (QL_STATE_IN_W && QL_STREAM)
 #endif
+// ql_proj_skip=1 (non-linear benchmark): the projections' tiles are skipped (qwen_phase.c
+// QWEN_PROJ_SKIP) and the mixer is not run; the pre-mixer norm, the epilogues, the pre-FFN norm
+// and the MSHR handovers run as in the layer, timed in parts (QL_PT_*, per core).
+#define QWEN_PROJ_SKIP QL_PROJ_SKIP
+enum {
+  QL_PT_IN_PRE, QL_PT_IN_EPI, QL_PT_IN_POST,  // per phase: QP_PT_BASE + 0, 1, 2 (qwen_phase.c)
+  QL_PT_OP_PRE, QL_PT_OP_EPI, QL_PT_OP_POST,
+  QL_PT_GU_PRE, QL_PT_GU_EPI, QL_PT_GU_POST,
+  QL_PT_DN_PRE, QL_PT_DN_EPI, QL_PT_DN_POST,
+  QL_PT_QZ_CONV,   // in-proj epilogue (GDN): 1/rms, conv1d, SiLU on q k v (vector, drained)
+  QL_PT_QZ_SCAT,   //   q k v to the mixer's aux slots
+  QL_PT_QZ_Z,      //   z: 1/rms and scatter
+  QL_PT_OP_RES,    // o-proj epilogue: residual into every x replica (drained)
+  QL_PT_OP_SSQ,    //   the pre-FFN norm's sums of squares
+  QL_PT_GU_SCALE,  // gate+up epilogue: 1/rms on G and U (drained)
+  QL_PT_GU_SWIGLU, //   SiLU(G) * U into H's replicas
+  QL_PT_NORM0_SSQ, // pre-mixer norm: sums of squares
+  QL_PT_NORM0_RED, //   reduction to 1/rms
+  QL_PT_FFN_RED,   // pre-FFN norm reduction
+  QL_PT_N
+};
+#if QL_PROJ_SKIP
+extern uint32_t ql_pt[NUM_CORES][QL_PT_N];
+#define QP_PT_ADD(cid, i, d) (ql_pt[(cid)][(i)] += (d))
+#define QL_PT_T0() mempool_get_timer()
+#define QL_PT_LAP(cid, i, t)                                                                  \
+  do {                                                                                        \
+    const uint32_t qn_ = mempool_get_timer();                                                 \
+    ql_pt[(cid)][(i)] += qn_ - (t);                                                           \
+    (t) = qn_;                                                                                \
+  } while (0)
+#else
+#define QL_PT_T0() 0u
+#define QL_PT_LAP(cid, i, t) ((void)(t))
+#endif
+
 // The in-projection phase's prefix.
 #if QL_ATTN
 #define QL_IN(x) qa_##x
@@ -254,6 +290,12 @@ QL_PHASE_PROTOS(gu_)
 QL_PHASE_PROTOS(dn_)
 void gu_mshr_handover(uint32_t cid);
 void dn_mshr_handover(uint32_t cid);
+#endif
+#if QL_PROJ_SKIP
+void QL_IN(fill_c)(uint32_t cid);
+void op_fill_c(uint32_t cid);
+void gu_fill_c(uint32_t cid);
+void dn_fill_c(uint32_t cid);
 #endif
 
 // Debug: QL_DBG_EXIT=k ends the simulation (EOC, retval k) when core 0 reaches stage k.

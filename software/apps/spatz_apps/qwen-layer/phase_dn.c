@@ -18,6 +18,7 @@
 #define QP_PREV_BANK_SEL gu_bank_sel
 static void ql_dn_residual(uint32_t cid, uint32_t strip, const qp_patch_t *pt);
 #define QP_EPILOGUE ql_dn_residual
+#define QP_PT_BASE QL_PT_DN_PRE
 #include "qwen_phase.c"
 
 _Static_assert(QWEN_STAGES_N == 1 && QWEN_K == 16384u && QWEN_P == QL_H, "down: 16384 -> 4096");
