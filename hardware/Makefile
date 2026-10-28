@@ -391,6 +391,11 @@ group_mshr_slice_cuts ?=
 ifneq ($(strip $(group_mshr_slice_cuts)),)
   vlog_defs += -DGROUP_MSHR_SLICE_CUTS=$(group_mshr_slice_cuts)
 endif
+# L1-to-L0 icache refill register. Unset = off in simulation, on under TARGET_SYNTHESIS.
+icache_l0_refill_reg ?=
+ifneq ($(strip $(icache_l0_refill_reg)),)
+  vlog_defs += -DICACHE_L0_REFILL_REG=$(icache_l0_refill_reg)
+endif
 # Split-MSHR class steering reset value (CSR 12): 0 = singles -> column slice, bursts -> row slice.
 group_mshr_steer_single_row ?=
 ifneq ($(strip $(group_mshr_steer_single_row)),)

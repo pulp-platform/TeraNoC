@@ -85,6 +85,13 @@ module mempool_tile
   localparam int unsigned BurstXpdrContexts =
     `ifdef TCDM_BURST_INTERLEAVE ((`TCDM_BURST_INTERLEAVE != 0) ? 2 : 1)
     `else 1 `endif;
+  // Register the L1-to-L0 icache refill (snitch_icache L0_REFILL_REG): it keeps the refill from
+  // borrowing the L0 latch's transparent phase, but costs a cycle per L0 refill (2-4% on the GEMM
+  // kernels). Default: on for synthesis (TARGET_SYNTHESIS), off for simulation.
+  localparam bit ICacheL0RefillReg =
+    `ifdef ICACHE_L0_REFILL_REG `ICACHE_L0_REFILL_REG
+    `elsif TARGET_SYNTHESIS 1'b1
+    `else 1'b0 `endif;
   // ---------------------------------------------------------------------------------------
   // BURST LANE RETAG -- implemented. Beat b of a burst reaches core data port
   // core_id + (b % NrMemPorts) carrying meta_id = base + (b / NrMemPorts), which is what lets
@@ -392,7 +399,7 @@ module mempool_tile
       .EARLY_LATCH        (1                                                   ),
       .L0_EARLY_TAG_WIDTH (11                                                  ),
       .ISO_CROSSING       (0                                                   ),
-      .L0_REFILL_REG      (1                                                   ),
+      .L0_REFILL_REG      (ICacheL0RefillReg                                   ),
       .axi_req_t          (axi_core_req_t                                      ),
       .axi_rsp_t          (axi_core_resp_t                                     )
     ) i_snitch_icache (
