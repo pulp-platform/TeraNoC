@@ -123,6 +123,23 @@ a kernel that does not program the MSHR.
 - Response crossbar (`i_local_resp_interco`, 16×16 per port, unchanged size) select:
   `hdr.tile_id`, as without the split (§3, "Response face"). `mshr_noc_lane` is request-side only.
 
+### 6a. Placement cuts (`group_mshr_slice_cuts`, 2026-10-28, default 0)
+
+In the `mshr64split_l1m` PnR the eight slices sat in the group centre. Every slice face had one
+register, and the request face (slice `req_out` spill → `floo_remapper` → router input spill) was
+already failing (−0.249 ns), so the central NoC logic held each slice in place. With the knob at 1,
+every path between a slice and group-level NoC logic crosses **two** registers:
+
+| Face | Register 1 | Register 2 (added) |
+|---|---|---|
+| NoC request | core `req_out` spill (in the slice) | `i_noc_req_spill` per lane/port in `mempool_group`, outside the slice |
+| NoC response | `i_resp_spill` per tile lane in `mempool_group` | core `resp_in` spill (`SpillRespIn`) |
+| Runtime config | `cfg_q` in `i_group_mshr_cfg` | one copy per slice, plus one for the steer demuxes so both switch together (none when `group_mshr_cfg_runtime=0`) |
+
+The tile faces keep their one register on purpose, so the tiles stay the only timing anchor and pull
+each slice to its row or column. `mshr_busy_o` stays unregistered: it gates the bank-hash and steer
+CSR writes. Cost: +1 cycle per request and per response through a slice.
+
 ## 7. Software
 
 - `MSHR_CFG_SPLIT` (from `group_mshr_split`) caps every derived merge target at

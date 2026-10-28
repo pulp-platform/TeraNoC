@@ -997,13 +997,28 @@ module mempool_group
     logic              [NumSlices-1:0][NumTilesPerSlice-1:0][NumRemoteRespPortsPerTile-1:1] sl_resp_ready;
     logic              [NumSlices-1:0]                                 sl_busy;
 
+    // Config as the steer demuxes and the slices see it. With MshrSliceCuts each slice gets its own
+    // copy of the runtime config register, and the steering one more, so all switch on the same
+    // cycle (a constant config needs no copy). FFNR: the copy samples cfg_q's reset value in reset.
+    mshr_cfg_t                 steer_cfg;
+    mshr_cfg_t [NumSlices-1:0] sl_cfg;
+    if (MshrSliceCuts && MshrCfgRuntime) begin : gen_cfg_copy
+      `FFNR(steer_cfg, mshr_cfg, clk_i)
+      for (genvar m = 0; m < NumSlices; m++) begin : gen_sl_cfg
+        `FFNR(sl_cfg[m], mshr_cfg, clk_i)
+      end
+    end else begin : gen_cfg_direct
+      assign steer_cfg = mshr_cfg;
+      assign sl_cfg    = {NumSlices{mshr_cfg}};
+    end
+
     // Class bypass decisions, shared by all 32 steer demuxes (same terms as the core's
     // cfg_bypass_single / cfg_bypass_burst).
     logic cfg_bypass_single, cfg_bypass_burst;
-    assign cfg_bypass_single = !mshr_cfg.enable || !SplitSingleMerge ||
-                               (mshr_cfg.hold_subs_single == MshrCfgSubsW'(1));
-    assign cfg_bypass_burst  = !mshr_cfg.enable ||
-                               (mshr_cfg.hold_subs_burst  == MshrCfgSubsW'(1));
+    assign cfg_bypass_single = !steer_cfg.enable || !SplitSingleMerge ||
+                               (steer_cfg.hold_subs_single == MshrCfgSubsW'(1));
+    assign cfg_bypass_burst  = !steer_cfg.enable ||
+                               (steer_cfg.hold_subs_burst  == MshrCfgSubsW'(1));
     assign mshr_busy = |sl_busy;
 
     // ---- Tile request steer: (t, r) -> row slice lane or column slice lane -------------------
@@ -1029,8 +1044,8 @@ module mempool_group
         assign is_burst = is_load && (|tcdm_master_req[r][t].burst_len[BurstLenWidth-1:1]);
         always_comb begin
           if (!is_load)                          to_col = BypCol;                    // store / AMO
-          else if (is_burst)                     to_col = cfg_bypass_burst  ? BypCol :  mshr_cfg.steer_single_row;
-          else                                   to_col = cfg_bypass_single ? BypCol : !mshr_cfg.steer_single_row;
+          else if (is_burst)                     to_col = cfg_bypass_burst  ? BypCol :  steer_cfg.steer_single_row;
+          else                                   to_col = cfg_bypass_single ? BypCol : !steer_cfg.steer_single_row;
         end
 
         stream_demux #(
@@ -1083,9 +1098,25 @@ module mempool_group
             $error("[mempool_group] split-MSHR NoC lane for slice %0d lane %0d disagrees with mempool_pkg", m, k);
         end
         for (genvar r = 1; r < NumRemoteReqPortsPerTile; r++) begin : gen_noc_req_r
-          assign tcdm_master_req_o[Lane][r]       = sl_noc_req[m][k][r];
-          assign tcdm_master_req_valid_o[Lane][r] = sl_noc_req_valid[m][k][r];
-          assign sl_noc_req_ready[m][k][r]        = tcdm_master_req_ready_i[Lane][r];
+          if (MshrSliceCuts) begin : gen_lane_spill
+            // Second request register after the slice's req_out spill, outside the slice.
+            spill_register #(
+              .T(tcdm_master_req_t)
+            ) i_noc_req_spill (
+              .clk_i  (clk_i                           ),
+              .rst_ni (rst_ni                          ),
+              .valid_i(sl_noc_req_valid[m][k][r]       ),
+              .ready_o(sl_noc_req_ready[m][k][r]       ),
+              .data_i (sl_noc_req[m][k][r]             ),
+              .valid_o(tcdm_master_req_valid_o[Lane][r]),
+              .ready_i(tcdm_master_req_ready_i[Lane][r]),
+              .data_o (tcdm_master_req_o[Lane][r]      )
+            );
+          end else begin : gen_lane_direct
+            assign tcdm_master_req_o[Lane][r]       = sl_noc_req[m][k][r];
+            assign tcdm_master_req_valid_o[Lane][r] = sl_noc_req_valid[m][k][r];
+            assign sl_noc_req_ready[m][k][r]        = tcdm_master_req_ready_i[Lane][r];
+          end
         end
       end
     end
@@ -1153,7 +1184,8 @@ module mempool_group
         .NumTilesPerGroup         (NumTilesPerGroup         ),
         .NumRemoteReqPortsPerTile (NumRemoteReqPortsPerTile ),
         .NumRemoteRespPortsPerTile(NumRemoteRespPortsPerTile),
-        .SliceId                  (m                        )
+        .SliceId                  (m                        ),
+        .SpillRespIn              (MshrSliceCuts            )
       ) i_slice (
         .clk_i             (clk_i                ),
         .rst_ni            (rst_ni               ),
@@ -1174,7 +1206,7 @@ module mempool_group
         .tile_resp_o       (sl_resp[m]           ),
         .tile_resp_valid_o (sl_resp_valid[m]     ),
         .tile_resp_ready_i (sl_resp_ready[m]     ),
-        .cfg_i             (mshr_cfg             ),
+        .cfg_i             (sl_cfg[m]            ),
         .mshr_busy_o       (sl_busy[m]           )
       );
     end

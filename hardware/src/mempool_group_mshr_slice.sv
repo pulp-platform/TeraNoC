@@ -32,6 +32,8 @@ module mempool_group_mshr_slice
   parameter int unsigned NumRemoteReqPortsPerTile  = 3,
   parameter int unsigned NumRemoteRespPortsPerTile = 3,
   parameter int unsigned SliceId                   = 0,    // 0..3 row R_k, 4..7 column C_k
+  // Register each response lane after mempool_group's per-tile i_resp_spill (MshrSliceCuts).
+  parameter bit          SpillRespIn               = 1'b0,
   // Dependent, do not override.
   parameter int unsigned LaneTiles                 = MshrSliceTiles,   // 4
   parameter int unsigned NocLanes                  = LaneTiles / 2     // 2 per port class
@@ -98,7 +100,7 @@ module mempool_group_mshr_slice
     .SliceFamily              ((SliceId < 4) ? 1 : 2    ),
     .NumRemoteReqPortsPerTile (NumRemoteReqPortsPerTile ),
     .NumRemoteRespPortsPerTile(NumRemoteRespPortsPerTile),
-    .SpillRespIn              (1'b0                     )   // registered per tile lane in mempool_group
+    .SpillRespIn              (SpillRespIn              )   // after mempool_group's i_resp_spill
   ) i_core (
     .clk_i                    (clk_i               ),
     .rst_ni                   (rst_ni              ),

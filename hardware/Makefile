@@ -385,6 +385,12 @@ group_mshr_split ?=
 ifneq ($(strip $(group_mshr_split)),)
   vlog_defs += -DGROUP_MSHR_SPLIT=$(group_mshr_split)
 endif
+# Split MSHR: two registers between each slice and the group-level NoC logic (request lanes,
+# response lanes, runtime config) for backend placement freedom. +1 cycle per request and response.
+group_mshr_slice_cuts ?=
+ifneq ($(strip $(group_mshr_slice_cuts)),)
+  vlog_defs += -DGROUP_MSHR_SLICE_CUTS=$(group_mshr_slice_cuts)
+endif
 # Split-MSHR class steering reset value (CSR 12): 0 = singles -> column slice, bursts -> row slice.
 group_mshr_steer_single_row ?=
 ifneq ($(strip $(group_mshr_steer_single_row)),)

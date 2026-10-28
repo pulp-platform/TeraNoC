@@ -317,6 +317,11 @@ package mempool_pkg;
   localparam int unsigned MshrNumSlices  = MshrSplit ? 8 : 1;
   localparam int unsigned MshrSliceTiles = MshrSplit ? 4 : NumTilesPerGroup; // lane-tiles per slice
   localparam int unsigned MshrSliceIdW   = 3;
+  // GROUP_MSHR_SLICE_CUTS=1: two registers between every slice and the group-level NoC logic
+  // (request lanes, response lanes, runtime config), so a slice's placement is anchored only by
+  // its tiles. +1 cycle per request and per response through a slice.
+  localparam bit          MshrSliceCuts  =
+    `ifdef GROUP_MSHR_SLICE_CUTS `GROUP_MSHR_SLICE_CUTS `else 1'b0 `endif;
   // +1 so tag value 0 is a reserved "no MSHR entry" sentinel (bypass / store / non-mergeable); a real
   // entry id e is carried as (e+1) and a pool entry p as (MshrTagNum+1+p). The response path uses
   // this to tell MSHR-routed beats from bypass. Local width covers the pool too (the legacy
