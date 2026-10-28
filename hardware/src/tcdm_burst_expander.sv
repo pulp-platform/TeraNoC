@@ -15,11 +15,12 @@
 //   contexts issue round-robin. Two same-address bursts then finish within ~1 cycle
 //   of each other instead of a full drain-time apart -- removing the pair-skew
 //   injection that intra-group same-line bursts otherwise suffer (they bypass the
-//   group MSHR, so this expander is their only convergence point). Loads only:
-//   a store/AMO never enters the shadow context, so no write can reorder around
-//   un-issued beats of the draining burst; between two loads, every response
-//   consumer (MSHR beat_seen bitmap, bypass-retag range match, VLSU ROB) is
-//   order-insensitive by construction.
+//   group MSHR, so this expander is their only convergence point). Only loads
+//   interleave: a store/AMO may be accepted into the shadow context, but it does
+//   not issue until the draining load has issued every beat, so no write can
+//   reorder around it; between two loads, every response consumer (MSHR beat_seen
+//   bitmap, bypass-retag range match, VLSU ROB) is order-insensitive by construction.
+//   ready_o depends on registered state only.
 
 module tcdm_burst_expander
   import mempool_pkg::*;
@@ -214,11 +215,12 @@ module tcdm_burst_expander
     end
   end else begin : gen_dual_ctx
     // ------------------------------------------------------------------
-    // Dual-context expander: while context A drains, a second LOAD is accepted
-    // into context B; active contexts issue round-robin, one context per cycle
-    // (the lane-prefix issue logic is reused unchanged on the selected context).
-    // A store/AMO arriving while any context is active waits for full drain,
-    // exactly as the legacy expander (no write reordering introduced).
+    // Dual-context expander: while a load drains in one context, the next request
+    // is accepted into the other; two loads issue round-robin, one context per
+    // cycle (the lane-prefix issue logic is reused unchanged on the selected
+    // context). A store/AMO behind a load is held (ctx_blocked) until that load has
+    // issued every beat, so writes keep their order. ready_o depends on registered
+    // state only.
     // ------------------------------------------------------------------
     req_t                     ctx_req_q  [2];
     logic [1:0]               ctx_active_q;
@@ -229,6 +231,8 @@ module tcdm_burst_expander
     logic [BurstLenWidth-1:0] ctx_beat_d [2];
     logic [BurstLenWidth-1:0] ctx_len_d  [2];
     logic                     issue_ctx_q, issue_ctx_d;
+    logic [1:0]               ctx_is_load;
+    logic [1:0]               ctx_blocked;
 
     logic                     sel;
     logic                     any_active, both_active;
@@ -243,6 +247,12 @@ module tcdm_burst_expander
     logic issue_prefix_ready;
     logic have_req;
     req_t req_base;
+
+    // Both contexts active with one of them a write means the write is the younger one.
+    for (genvar c = 0; c < 2; c++) begin : gen_ctx_order
+      assign ctx_is_load[c] = !ctx_req_q[c].wen && (ctx_req_q[c].wdata.amo == '0);
+      assign ctx_blocked[c] = ctx_active_q[c] && !ctx_is_load[c] && ctx_active_q[1-c];
+    end
 
     always_comb begin
       ctx_req_d    = ctx_req_q;
@@ -259,9 +269,9 @@ module tcdm_burst_expander
 
       any_active  = |ctx_active_q;
       both_active = &ctx_active_q;
-      // Issuing context: the RR pointer if that context is active, else the other
+      // Issuing context: the RR pointer if that context can issue, else the other
       // active one (no idle cycle when only one context is active).
-      sel = ctx_active_q[issue_ctx_q] ? issue_ctx_q : ~issue_ctx_q;
+      sel = (ctx_active_q[issue_ctx_q] && !ctx_blocked[issue_ctx_q]) ? issue_ctx_q : ~issue_ctx_q;
 
       // Source of this cycle's beats: the selected active context, or -- when the
       // expander is idle -- the input itself (combinational passthrough, so a lone
@@ -328,23 +338,19 @@ module tcdm_burst_expander
             ctx_len_d[sel]    = '0;
           end
         end
-        // Shadow acceptance: one context busy, the other free, incoming is a LOAD
-        // (single or burst), AND the resident context is itself a load. The
-        // resident check is required: a stalled single STORE (or AMO) can occupy a
-        // context via the idle-path activation exactly as the legacy expander
-        // latches a stalled single. Opening a shadow onto it would run a store
-        // concurrently with a load from the same in-order input stream, allowing a
-        // write to reorder around the load's beats. When the resident is not a
-        // load we hold it alone (legacy behavior) until it drains. Two concurrent
-        // LOADS never conflict (read-after-read), so their beats may interleave.
-        resident_is_load = !ctx_req_q[sel].wen && (ctx_req_q[sel].wdata.amo == '0);
-        if (!both_active && valid_i && req_is_load && resident_is_load) begin
-          ready_o                 = 1'b1;
-          accept_shadow           = 1'b1;
-          ctx_req_d[shadow_idx]   = req_i;
-          ctx_active_d[shadow_idx] = 1'b1;
-          ctx_len_d[shadow_idx]   = len_i;
-          ctx_beat_d[shadow_idx]  = '0;
+        // Shadow acceptance: one context busy, the other free, AND the resident is a
+        // load. A resident store/AMO (a stalled single latched via the idle path) is
+        // held alone until it drains, so nothing behind it can overtake it.
+        resident_is_load = ctx_is_load[sel];
+        if (!both_active && resident_is_load) begin
+          ready_o = 1'b1;
+          if (valid_i) begin
+            accept_shadow            = 1'b1;
+            ctx_req_d[shadow_idx]    = req_i;
+            ctx_active_d[shadow_idx] = 1'b1;
+            ctx_len_d[shadow_idx]    = len_i;
+            ctx_beat_d[shadow_idx]   = '0;
+          end
         end
         // Round-robin: hand the next cycle to the other context ONLY after the
         // current context served every beat it offered this cycle
@@ -382,13 +388,19 @@ module tcdm_burst_expander
     end
 
 `ifndef SYNTHESIS
-    // Both contexts occupied implies both hold loads (the shadow-acceptance rule).
-    dual_ctx_loads_only: assert property(
+    // Both contexts occupied implies at most one write (the shadow-acceptance rule).
+    dual_ctx_one_write: assert property(
       @(posedge clk_i) disable iff (!rst_ni)
-        !(&ctx_active_q) ||
-        (!ctx_req_q[0].wen && (ctx_req_q[0].wdata.amo == '0) &&
-         !ctx_req_q[1].wen && (ctx_req_q[1].wdata.amo == '0)))
-      else $fatal(1, "Burst expander: store/AMO in a concurrent context.");
+        !(&ctx_active_q) || (ctx_is_load[0] || ctx_is_load[1]))
+      else $fatal(1, "Burst expander: two writes in concurrent contexts.");
+
+    // A blocked write never issues.
+    for (genvar c = 0; c < 2; c++) begin : gen_blocked_silent
+      blocked_ctx_no_issue: assert property(
+        @(posedge clk_i) disable iff (!rst_ni)
+          !(ctx_blocked[c] && (sel == c) && (|valid_o)))
+        else $fatal(1, "Burst expander: blocked write context %0d issued.", c);
+    end
 
     // An active context's beat pointer stays within its length.
     for (genvar c = 0; c < 2; c++) begin : gen_beat_bound

@@ -42,6 +42,10 @@ module snitch_icache #(
     parameter int L0_EARLY_TAG_WIDTH = -1,
     /// Operate L0 cache in slower clock-domain
     parameter bit ISO_CROSSING      = 1,
+    /// Register the L1-to-L0 refill response (+1 cycle per L0 refill). With
+    /// EARLY_LATCH the refill otherwise borrows the L0 latch's whole transparent
+    /// phase, leaving the fetch path behind the latch only half a cycle.
+    parameter bit L0_REFILL_REG     = 0,
     parameter type axi_req_t = logic,
     parameter type axi_rsp_t = logic
 ) (
@@ -257,21 +261,38 @@ module snitch_icache #(
             .dst_data_o  ( prefetch_req [i]         )
         );
 
-        isochronous_spill_register  #(
-            .T      ( prefetch_resp_t ),
-            .Bypass ( !ISO_CROSSING   )
-        ) i_spill_register_prefetch_resp (
-            .src_clk_i   ( clk_i                    ),
-            .src_rst_ni  ( rst_ni                   ),
-            .src_valid_i ( prefetch_rsp_valid [i]   ),
-            .src_ready_o ( prefetch_rsp_ready [i]   ),
-            .src_data_i  ( prefetch_rsp [i]         ),
-            .dst_clk_i   ( clk_d2_i                 ),
-            .dst_rst_ni  ( rst_ni                   ),
-            .dst_valid_o ( local_prefetch_rsp_valid ),
-            .dst_ready_i ( local_prefetch_rsp_ready ),
-            .dst_data_o  ( local_prefetch_rsp       )
-        );
+        if (L0_REFILL_REG && !ISO_CROSSING) begin : gen_refill_reg
+            stream_register #(
+                .T ( prefetch_resp_t )
+            ) i_refill_register_prefetch_resp (
+                .clk_i      ( clk_i                    ),
+                .rst_ni     ( rst_ni                   ),
+                .clr_i      ( 1'b0                     ),
+                .testmode_i ( 1'b0                     ),
+                .valid_i    ( prefetch_rsp_valid [i]   ),
+                .ready_o    ( prefetch_rsp_ready [i]   ),
+                .data_i     ( prefetch_rsp [i]         ),
+                .valid_o    ( local_prefetch_rsp_valid ),
+                .ready_i    ( local_prefetch_rsp_ready ),
+                .data_o     ( local_prefetch_rsp       )
+            );
+        end else begin : gen_refill_iso
+            isochronous_spill_register  #(
+                .T      ( prefetch_resp_t ),
+                .Bypass ( !ISO_CROSSING   )
+            ) i_spill_register_prefetch_resp (
+                .src_clk_i   ( clk_i                    ),
+                .src_rst_ni  ( rst_ni                   ),
+                .src_valid_i ( prefetch_rsp_valid [i]   ),
+                .src_ready_o ( prefetch_rsp_ready [i]   ),
+                .src_data_i  ( prefetch_rsp [i]         ),
+                .dst_clk_i   ( clk_d2_i                 ),
+                .dst_rst_ni  ( rst_ni                   ),
+                .dst_valid_o ( local_prefetch_rsp_valid ),
+                .dst_ready_i ( local_prefetch_rsp_ready ),
+                .dst_data_o  ( local_prefetch_rsp       )
+            );
+        end
 
     end
 

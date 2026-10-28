@@ -389,8 +389,12 @@ module snitch
   `ifdef SNITCH_ENABLE_PERF
   logic [63:0] cycle_q;
   logic [63:0] instret_q;
+  logic        retire_q;
   `FFAR(cycle_q, cycle_q + 1, '0, clk_i, rst_i);
-  `FFLAR(instret_q, instret_q + 1, !stall, '0, clk_i, rst_i);
+  // Count retirements a cycle late: !stall is the core's deepest signal and is too late for
+  // the 64-bit counter's clock-gate enable.
+  `FFAR(retire_q, !stall, '0, clk_i, rst_i);
+  `FFLAR(instret_q, instret_q + 1, retire_q, '0, clk_i, rst_i);
   `endif
 
   `ifdef SNITCH_ENABLE_STALL_COUNTER

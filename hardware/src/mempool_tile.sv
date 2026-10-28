@@ -392,6 +392,7 @@ module mempool_tile
       .EARLY_LATCH        (1                                                   ),
       .L0_EARLY_TAG_WIDTH (11                                                  ),
       .ISO_CROSSING       (0                                                   ),
+      .L0_REFILL_REG      (1                                                   ),
       .axi_req_t          (axi_core_req_t                                      ),
       .axi_rsp_t          (axi_core_resp_t                                     )
     ) i_snitch_icache (

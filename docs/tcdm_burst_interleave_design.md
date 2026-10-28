@@ -58,14 +58,20 @@ today's registers). One RR toggle `issue_ctx_q` selects the issuing context each
 ### 2.3 Acceptance rule (`ready_o`)
 - No context active: exactly today's behavior — singles pass through combinationally
   (zero added latency), bursts latch into context 0.
-- One context active (draining): accept a new request into the free context **only if the
-  incoming request is a load** (`!wen && amo == '0`; the existing `req_is_load` signal).
-  Stores and AMOs wait for full drain, exactly as today.
-- Both contexts active: `ready_o = 0`.
+- One context active (draining): accept a new request into the free context if the
+  **resident** context is a load. A load interleaves with it; a store/AMO is accepted but
+  blocked (`ctx_blocked`) from issuing until the resident load has issued every beat, so it
+  leaves the expander in the same order as when it waited at the input.
+- Resident is a store/AMO, or both contexts active: `ready_o = 0`.
 
-The loads-only rule kills the only ordering hazard interleaving could introduce: a store
-entering the shadow context could overtake un-issued beats of the draining load burst to an
-overlapping address. Between *different* masters no ordering guarantee exists today (bank
+`ready_o` is a function of registered state only (2026-10-28). The first version accepted
+only incoming loads, which made `ready_o` depend on `valid_i`/`req_i`; at group level that put
+the group crossbar on one path twice (master spill -> arbiter -> slave expander -> arbiter ->
+master spill clock gate), the -0.385 ns WNS of the `mshr64split_l1m` route_opt run.
+
+Only loads interleave, which kills the only ordering hazard interleaving could introduce: a
+store issuing from the shadow context could overtake un-issued beats of the draining load
+burst to an overlapping address. Between *different* masters no ordering guarantee exists today (bank
 arbitration already races them), and a *single* master cannot have a dependent store in
 flight concurrently with its own load burst (the VLSU serializes per-instruction; scalar
 same-address traffic is fence-synchronized; the MSHR additionally holds same-address traffic
