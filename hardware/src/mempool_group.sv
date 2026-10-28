@@ -844,6 +844,10 @@ module mempool_group
 
     reqrsp_req_t dma_reqrsp_req;
     reqrsp_rsp_t dma_reqrsp_rsp;
+    reqrsp_req_t dma_demux_req;
+    reqrsp_rsp_t dma_demux_rsp;
+    reqrsp_rsp_chan_t dma_rsp_q;
+    logic dma_rsp_q_valid, dma_rsp_ready;
     reqrsp_req_t [NumTilesPerDma-1:0] dma_tile_req;
     reqrsp_rsp_t [NumTilesPerDma-1:0] dma_tile_rsp;
 
@@ -871,6 +875,26 @@ module mempool_group
       .tile_id_remap_o  (tile_id_remap[d])
     );
 
+    // Register the response between the tile demux and axi_to_reqrsp, whose p_ready depends on
+    // p_valid: otherwise a tile's response ready depended on the responding tile's valid, a
+    // round trip from the tiles to the DMA and back.
+    spill_register #(
+      .T(reqrsp_rsp_chan_t)
+    ) i_dma_rsp_spill (
+      .clk_i  (clk_i                 ),
+      .rst_ni (rst_ni                ),
+      .valid_i(dma_demux_rsp.p_valid ),
+      .ready_o(dma_rsp_ready         ),
+      .data_i (dma_demux_rsp.p       ),
+      .valid_o(dma_rsp_q_valid       ),
+      .ready_i(dma_reqrsp_req.p_ready),
+      .data_o (dma_rsp_q             )
+    );
+    assign dma_demux_req  = '{q: dma_reqrsp_req.q, q_valid: dma_reqrsp_req.q_valid,
+                              p_ready: dma_rsp_ready};
+    assign dma_reqrsp_rsp = '{p: dma_rsp_q, p_valid: dma_rsp_q_valid,
+                              q_ready: dma_demux_rsp.q_ready};
+
     if (NumTilesPerDma > 1) begin: gen_dma_reqrsp_demux
       reqrsp_demux #(
         .NrPorts  (NumTilesPerDma        ),
@@ -881,14 +905,14 @@ module mempool_group
           .clk_i       (clk_i            ),
           .rst_ni      (rst_ni           ),
           .slv_select_i(tile_id_remap[d] ),
-          .slv_req_i   (dma_reqrsp_req   ),
-          .slv_rsp_o   (dma_reqrsp_rsp   ),
+          .slv_req_i   (dma_demux_req    ),
+          .slv_rsp_o   (dma_demux_rsp    ),
           .mst_req_o   (dma_tile_req     ),
           .mst_rsp_i   (dma_tile_rsp     )
       );
     end else begin: gen_dma_reqrsp_bypass
-      assign dma_tile_req = dma_reqrsp_req;
-      assign dma_reqrsp_rsp = dma_tile_rsp;
+      assign dma_tile_req  = dma_demux_req;
+      assign dma_demux_rsp = dma_tile_rsp;
     end
 
     // Assignment to TCDM interconnect

@@ -893,24 +893,19 @@ module mempool_tile
   // so when a LIC response is waiting on a stalled crossbar and bar_rel_vec then rises, valid
   // stays high through the OR while the payload switches underneath it.
   //
-  // This register absorbs that: fall_through_register is always ready when empty, so valid && !ready
-  // is rare at this input. MEASURED 2026-09-06 on vg_fp16_256x32x256 -- removing it fires
-  // stream_xbar's input_data_unstable / input_sel_unstable (20 hits; 0 with it present, across five
-  // arms). The throughput effect is separately small and shape-dependent (fp16 256x32x256 +4.4%,
-  // fp32 -0.6%, 1024x256x256 -2.1%, 2048x256x256 +1.0%), so it was never the reason to keep it.
+  // This register absorbs that: it is ready while not full, so valid && !ready is rare at this
+  // input. MEASURED 2026-09-06 on vg_fp16_256x32x256 -- removing it fires stream_xbar's
+  // input_data_unstable / input_sel_unstable (20 hits; 0 with it present, across five arms).
   //
-  // NOTE: this only makes the violation RARE, not impossible -- the buffer is DEPTH 1, so under
-  // sustained backpressure ready_o still drops with a beat pending. The real fix is to hold the
-  // port-0 mux select stable until the beat is accepted, in mempool_group.sv. Until that lands,
-  // this register must stay.
+  // NOTE: this only makes the violation RARE, not impossible -- under sustained backpressure
+  // ready_o still drops with a beat pending. The real fix is to hold the port-0 mux select stable
+  // until the beat is accepted, in mempool_group.sv. Until that lands, this register must stay.
   for (genvar h = 0; unsigned'(h) < NumRemoteRespPortsPerTile; h++) begin: gen_tcdm_registers_resp
-    fall_through_register #(
+    spill_register #(
       .T(tcdm_master_resp_t)
     ) i_tcdm_master_resp_register (
       .clk_i     (clk_i                            ),
       .rst_ni    (rst_ni                           ),
-      .clr_i     (1'b0                             ),
-      .testmode_i(1'b0                             ),
       .data_i    (tcdm_master_resp_i[h]            ),
       .valid_i   (tcdm_master_resp_valid_i[h]      ),
       .ready_o   (tcdm_master_resp_ready_o[h]      ),
