@@ -188,7 +188,7 @@ ifeq ($(strip $(group_mshr_split)),1)
   group_mshr_steer_single_row ?= 0
   # 1 = two registers between every slice and the group-level NoC logic, so only its tiles anchor
   # a slice's placement (+1 cycle per request and per response through a slice).
-  group_mshr_slice_cuts ?= 0
+  group_mshr_slice_cuts ?= 1
 else
   # --- legacy: ONE module per group ---
   group_mshr_num           ?= 64

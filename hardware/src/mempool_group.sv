@@ -857,7 +857,7 @@ module mempool_group
       .AddrWidth   (AddrWidth      ),
       .DataWidth   (AxiDataWidth   ),
       .IdWidth     (AxiTileIdWidth ),
-      .BufDepth    (2              ),
+      .BufDepth    (4              ),   // covers the request and response registers below
       .reqrsp_req_t(reqrsp_req_t   ),
       .reqrsp_rsp_t(reqrsp_rsp_t   )
     ) i_axi_to_reqrsp (
@@ -900,7 +900,7 @@ module mempool_group
         .NrPorts  (NumTilesPerDma        ),
         .req_t    (reqrsp_req_t          ),
         .rsp_t    (reqrsp_rsp_t          ),
-        .RespDepth(2                     )
+        .RespDepth(4                     )   // covers the per-tile request register
       ) i_reqrsp_demux (
           .clk_i       (clk_i            ),
           .rst_ni      (rst_ni           ),
@@ -918,15 +918,28 @@ module mempool_group
     // Assignment to TCDM interconnect
     // TODO: Reordering might be problematic
     for (genvar t = 0; unsigned'(t) < NumTilesPerDma; t++) begin: gen_dma_tile_connection
-      assign tcdm_dma_req[d*NumTilesPerDma+t] = '{
+      tcdm_dma_req_t dma_req;
+      assign dma_req = '{
                 wdata: dma_tile_req[t].q.data,
                 wen: dma_tile_req[t].q.write,
                 be: dma_tile_req[t].q.strb,
                 tgt_addr: {dma_tile_req[t].q.addr[ByteOffset + idx_width(NumBanksPerTile) + $clog2(NumTilesPerGroup) + $clog2(NumGroups)+:TCDMAddrMemWidth],
                           dma_tile_req[t].q.addr[ByteOffset+:idx_width(NumBanksPerTile)]}
               };
-      assign tcdm_dma_req_valid[d*NumTilesPerDma+t]  = dma_tile_req[t].q_valid;
-      assign dma_tile_rsp[t].q_ready = tcdm_dma_req_ready[d*NumTilesPerDma+t];
+      // Register the request towards the tile: the demux's q_ready and ID FIFO push otherwise
+      // depended on the tile's ready, a round trip from the DMA to the tile and back.
+      spill_register #(
+        .T(tcdm_dma_req_t)
+      ) i_dma_req_spill (
+        .clk_i  (clk_i                                   ),
+        .rst_ni (rst_ni                                  ),
+        .valid_i(dma_tile_req[t].q_valid                 ),
+        .ready_o(dma_tile_rsp[t].q_ready                 ),
+        .data_i (dma_req                                 ),
+        .valid_o(tcdm_dma_req_valid[d*NumTilesPerDma+t]  ),
+        .ready_i(tcdm_dma_req_ready[d*NumTilesPerDma+t]  ),
+        .data_o (tcdm_dma_req[d*NumTilesPerDma+t]        )
+      );
       assign dma_tile_rsp[t].p = '{
                 data: tcdm_dma_resp[d*NumTilesPerDma+t].rdata,
                 error: '0

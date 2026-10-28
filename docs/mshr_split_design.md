@@ -123,7 +123,7 @@ a kernel that does not program the MSHR.
 - Response crossbar (`i_local_resp_interco`, 16×16 per port, unchanged size) select:
   `hdr.tile_id`, as without the split (§3, "Response face"). `mshr_noc_lane` is request-side only.
 
-### 6a. Placement cuts (`group_mshr_slice_cuts`, 2026-10-28, default 0)
+### 6a. Placement cuts (`group_mshr_slice_cuts`, 2026-10-28, default 1)
 
 In the `mshr64split_l1m` PnR the eight slices sat in the group centre. Every slice face had one
 register, and the request face (slice `req_out` spill → `floo_remapper` → router input spill) was
