@@ -1,0 +1,4 @@
+# Prepared netlists (GBs, regenerate with prep_netlist.py), build logs and run directories.
+netlists/
+logs/
+runs/

@@ -637,6 +637,78 @@ vlog_defs += -DNOC_ROUTER_REMAP_GROUP_SIZE=$(noc_router_remap_group_size)
 # Extra defines injected from command line (e.g. sweep scripts) without clobbering base config.
 extra_vlog_defs ?=
 vlog_defs += $(extra_vlog_defs)
+# --------------------------
+# Post-layout Simulation
+# --------------------------
+# postlayout=1 replaces group (0,0) with mempool_group_floonoc_wrapper_postlayout and compiles the
+# TB probes out (hardware/postlayout/README.md). VCS flow only, zero-delay: no SDF, and every delay
+# in the cell and SRAM models is removed (postlayout_lib_defs, plus the SRAM parameter overrides
+# that postlayout/prep_netlist.py writes into the netlist).
+#   postlayout_netlist   the group's netlist after postlayout/prep_netlist.py (.v). Empty = the RTL stand-in,
+#                        which must reproduce the plain RTL cycle count.
+#   postlayout_libs      Verilog models of the standard cells and SRAM macros the netlist uses.
+#   generated_dir        (any build, not only postlayout) a private copy of the three FlooNoC
+#                        packages matching the netlist's mesh and L2 map. Replaces the shared,
+#                        mesh-specific hardware/generated/ in this build's compilevcs.sh only.
+#   postlayout_init      0 | 1 | random: start value of every flop and memory INSIDE the netlist.
+#                        RTL elsewhere is untouched. Reset still has to clear what matters.
+#   postlayout_zero_l1   1 = the RTL groups' L1 banks start at 0 (SIM_ZERO_L1), as the netlist's
+#                        SRAMs do under initreg. Otherwise a read of a never-written word in an RTL
+#                        group ships an X data word across the mesh, into the netlist.
+#   postlayout_xzero_l2  1 = never-written L2 words read as 0 instead of X (SIM_XZERO_L2). The L0
+#                        icache decodes refilled words for static branch prediction, and gate-level
+#                        logic turns an X there into an X fetch address where RTL picks a branch.
+#   postlayout_bootaddr_fix  1 = load BOOT_ADDR into the netlist's PC flops during reset
+#                        (tb/tb_postlayout_bootaddr.svh). The backend elaborates the cluster wrapper
+#                        with its default BootAddr = 0, so its netlists boot from 0x0. Netlist only.
+#   postlayout_saif      1 = write a SAIF of the netlist group over the [PWR] window
+#                        (tb/tb_postlayout_saif.svh; file pl_group.saif, or +pl_saif=<file>).
+#   tb_clock_period_ps   (any build) TB clock period in ps; empty = 2000. Power runs use the
+#                        target period so the SAIF's time axis is the silicon's.
+postlayout          ?= 0
+postlayout_netlist  ?=
+postlayout_libs     ?=
+generated_dir       ?=
+postlayout_init     ?= 0
+postlayout_zero_l1  ?= 1
+postlayout_xzero_l2 ?= 1
+postlayout_bootaddr_fix ?= 1
+postlayout_saif     ?= 0
+# Defines for the netlist + library vlogan. TSMC_CM_UNIT_DELAY selects the tsn7 SRAM models'
+# functional variant (no timing-check block, no 1 ps X pulse on every Q change, which would land
+# in the power activity); delay_flush=0 zeroes their Q-flush tasks.
+postlayout_lib_defs ?= +define+TSMC_CM_UNIT_DELAY +define+delay_flush=0
+tb_clock_period_ps ?=
+ifneq ($(strip $(tb_clock_period_ps)),)
+  vlog_defs += -DTB_CLOCK_PERIOD_PS=$(tb_clock_period_ps)
+endif
+ifeq ($(postlayout),1)
+  vlog_defs += -DPOSTLAYOUT -DPOSTLAYOUTGR=1
+  # The netlist was synthesised under TARGET_SYNTHESIS, which turns the L0 refill register on
+  # (mempool_tile.sv). Give the RTL groups the same unless the knob is set explicitly.
+  ifeq ($(strip $(icache_l0_refill_reg)),)
+    vlog_defs += -DICACHE_L0_REFILL_REG=1
+  endif
+  ifeq ($(postlayout_zero_l1),1)
+    vlog_defs += -DSIM_ZERO_L1
+  endif
+  ifeq ($(postlayout_xzero_l2),1)
+    vlog_defs += -DSIM_XZERO_L2
+  endif
+  ifneq ($(strip $(postlayout_netlist)),)
+    ifeq ($(postlayout_bootaddr_fix),1)
+      vlog_defs += -DPOSTLAYOUT_BOOTADDR_FIX
+    endif
+    ifeq ($(postlayout_saif),1)
+      vlog_defs += -DPOSTLAYOUT_SAIF
+    endif
+  endif
+  postlayout_sv := $(if $(strip $(postlayout_netlist)),,$(ROOT_DIR)/postlayout/mempool_group_floonoc_wrapper_postlayout_standin.sv)
+  postlayout_v  := $(abspath $(postlayout_netlist) $(postlayout_libs))
+  vcs_postlayout_args := +nospecify +notimingcheck \
+                         +vcs+initreg+config+$(abspath $(buildpath))/postlayout_initreg.cfg \
+                         -msg_config=$(ROOT_DIR)/postlayout/postlayout_msg.cfg
+endif
 
 # ============================================================================
 # Verilator: C++ Preprocessor Defines ##
@@ -866,8 +938,27 @@ $(buildpath)/$(dpi_library)/mempool_dpi.so: $(dpi)
 # Elaboration
 .PHONY: elabvcs
 elabvcs: dpivcs $(buildpath) $(buildpath)/compilevcs.sh update_opcodes
-$(buildpath)/compilevcs.sh: $(bender) $(config_mk) Makefile $(MEMPOOL_DIR)/Bender.yml $(shell find {src,tb,deps} -type f)
+$(buildpath)/compilevcs.sh: $(bender) $(config_mk) Makefile $(MEMPOOL_DIR)/Bender.yml $(shell find {src,tb,deps} -type f) $(postlayout_sv) $(postlayout_v)
 	$(bender) script vcs --vlogan-bin="$(vcs_cmd) vlogan" --vlog-arg="$(vlogan_args)" $(vlog_defs) -t rtl -t mempool_vsim $(bender_defs) > $(buildpath)/compilevcs.sh
+ifneq ($(strip $(generated_dir)),)
+	@# Point this build, and only this build, at its own mesh/L2-map packages.
+	sed -i 's#"[^"]*/hardware/generated/\([^"/]*\.sv\)"#"$(abspath $(generated_dir))/\1"#' $(buildpath)/compilevcs.sh
+	@test `grep -c '$(abspath $(generated_dir))/' $(buildpath)/compilevcs.sh` -eq 3 || \
+	  { echo "generated_dir: expected 3 FlooNoC packages redirected to $(generated_dir)"; exit 1; }
+endif
+ifeq ($(postlayout),1)
+	@# Compile-time default; a run can override it with its own +vcs+initreg+config+<file>.
+	echo "modtree mempool_group_floonoc_wrapper_postlayout 0 $(postlayout_init)" > $(buildpath)/postlayout_initreg.cfg
+ifneq ($(strip $(postlayout_sv)),)
+	@# The stand-in needs the TB vlogan call's defines and include dirs: add it to that call.
+	sed -i 's#^\( *\)"\$$ROOT/hardware/tb/mempool_tb.sv"#\1"$(postlayout_sv)" \\\n&#' $(buildpath)/compilevcs.sh
+	@grep -q '$(postlayout_sv)' $(buildpath)/compilevcs.sh || { echo "postlayout: stand-in not added"; exit 1; }
+endif
+ifneq ($(strip $(postlayout_v)),)
+	@# +delay_mode_zero is a parse option in the three-step flow: vcs rejects it (PRS_OPT).
+	echo '$(vcs_cmd) vlogan -full64 +v2k +delay_mode_zero -override_timescale=1ns/1ps $(vcs_kdb) $(postlayout_lib_defs) $(postlayout_v)' >> $(buildpath)/compilevcs.sh
+endif
+endif
 	echo "exit" >> $(buildpath)/compilevcs.sh
 	# Call VCS
 	cd $(buildpath) && \
@@ -880,12 +971,12 @@ $(buildpath)/compilevcs.sh: $(bender) $(config_mk) Makefile $(MEMPOOL_DIR)/Bende
 compile_vcs_simv: update-floogen elabvcs $(buildpath)/mempool_simv
 $(buildpath)/mempool_simv: $(buildpath)/compilevcs.sh $(buildpath)/$(dpi_library)/mempool_vcs_dpi.so
 	cd $(buildpath) && \
-	$(vcs_cmd) vcs -full64 -j$(vcs_jobs) $(top_level) -cc $(CC) -cpp $(CXX) -ld $(CXX) $(dpi_library)/mempool_vcs_dpi.so $(vcs_config) -debug_access+all -kdb -assert disable_cover -o mempool_simv
+	$(vcs_cmd) vcs -full64 -j$(vcs_jobs) $(top_level) -cc $(CC) -cpp $(CXX) -ld $(CXX) $(dpi_library)/mempool_vcs_dpi.so $(vcs_config) $(vcs_postlayout_args) -debug_access+all -kdb -assert disable_cover -o mempool_simv
 
 compile_vcs_simvopt: update-floogen elabvcs $(buildpath)/mempool_simvopt
 $(buildpath)/mempool_simvopt: $(buildpath)/compilevcs.sh $(buildpath)/$(dpi_library)/mempool_vcs_dpi.so
 	cd $(buildpath) && \
-	$(vcs_cmd) vcs -full64 -j$(vcs_jobs) $(top_level) -cc $(CC) -cpp $(CXX) -ld $(CXX) $(dpi_library)/mempool_vcs_dpi.so $(vcs_config) -assert disable_cover -o mempool_simvopt
+	$(vcs_cmd) vcs -full64 -j$(vcs_jobs) $(top_level) -cc $(CC) -cpp $(CXX) -ld $(CXX) $(dpi_library)/mempool_vcs_dpi.so $(vcs_config) $(vcs_postlayout_args) -assert disable_cover -o mempool_simvopt
 
 # Simulation
 simvcs: compile_vcs_simv

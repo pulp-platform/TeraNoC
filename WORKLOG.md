@@ -19621,6 +19621,48 @@ on): off 7,409 / 6,587 -> on 7,562 (+2.1 %) / 6,442 (-2.2 %).
 and the L0 register through the package / TARGET_SYNTHESIS defaults); SRAM channels planned on the
 floorplan side.
 
+### 2026-10-28/29 — Post-layout simulation of one group (hardware/postlayout/)
+
+**Purpose.** Run group (0,0) as the Fusion netlist (`mshr64split_l1m`, RTL `mempool_261015`) inside
+the RTL cluster on VCS, zero-delay, as the activity source for PrimeTime power. User: no SDF, no
+delay of any kind, SRAM delays removed by parameter; first fix width mismatches and X.
+
+**Implementation.** `postlayout=1` Makefile mode (README in `hardware/postlayout/`):
+`prep_netlist.py` (rename top / `pl_` prefix / SRAM delay params = 0), `check_unconnected.py`
+(no SYNOPSYS_UNCONNECTED net feeds logic: rc=0), `gen_postly_group` in
+`terapool_cluster_floonoc_wrapper.sv` with a time-0 `$bits` check per port and PCWM/TFIPC promoted
+to errors, `tb_postlayout_xmon` on all 21 ports, `SIM_ZERO_L1` / `SIM_XZERO_L2`, initreg 0 inside
+the netlist only, private `gen_backend_4x4/` FlooNoC set, RTL stand-in for harness validation.
+
+**Result.**
+- Widths: netlist == RTL on every port; a 1-bit-short stand-in fails elaboration (PCWM-W error).
+- Stand-in == plain RTL cycle for cycle (7,690-cycle kernel, all [SPOT] identical, EOC 0).
+- X: stand-in without SIM_ZERO_L1 had X on floo_tcdm_rsp_i/o (never-written RTL L1 words); with it
+  every port is clean (netlist run: 21/21 clean over 2.1 M cycles).
+- **Netlist run hung at boot** (2.1 M cycles, no UART, no remote traffic anywhere). Root cause:
+  the backend's synthesis top is `terapool_cluster_floonoc_wrapper` (`tsmc7/fusion/design_planning/
+  dp.tcl:10-11,88`, plain `elaborate`), whose default is `BootAddr = 32'h0`. Every Snitch PC flop
+  in the netlist is a reset-to-0 cell and the debug sim shows all 30 PC bits at 0 from reset on,
+  while the bootrom is at 0xA000_0000. The backend `mempool` checkout has the same default, so the
+  next netlist will too unless the flow passes BootAddr.
+- Workaround (`postlayout_bootaddr_fix=1`, default for netlist builds): `tb_postlayout_bootaddr.svh`
+  `$deposit`s BootAddr onto the 16 cores' PC flop nets at every falling edge during reset. BootAddr
+  is used only as the PC reset value (snitch.sv:317), so this is equivalent to a correctly
+  synthesised netlist; no delay, no netlist edit. Depositing after reset is wrong (a capture on the
+  reset-release edge leaves the flop and its net disagreeing; shown on a toy design).
+
+- **Netlist run with the boot fix PASSES** (fp16 512x128x128, `runs/nl_fp16_512x128x128`, 61 min
+  on fenga1): EOC retval 0, all 4 `[SPOT]` checksum lines identical to the RTL run, 21/21 netlist
+  ports X-clean over 166,730 cycles, no error/fatal, same single floo_route_select warning as RTL.
+  Kernel 7,634 cycles vs 7,690 RTL (-0.7%) and the `[PWR]` window opens 6.6k cycles earlier
+  (cycle 92,710 vs 99,276): expected, the netlist's RTL lacks HEAD's four register-cut commits
+  (L0 refill reg, tile remote-resp reg, DMA req reg, MSHR slice cuts), all of which add latency.
+  Matching results under zero delay also means no functional clock-tree race showed up.
+
+**Status.** Post-layout sim working for `mshr64split_l1m`. Not yet done: cycle-exact check against
+the netlist's own RTL (`mempool_261015`), PrimeTime power (needs a dump over the `[PWR]` window).
+Backend fix needed: elaborate with `BootAddr=32'hA000_0000` (or `BOOT_ADDR`).
+
 ### 2026-10-29 — Mergecast on/off software knob for the post-layout power A/B
 **Purpose.** Compare power/energy of the group MSHR mergecast (merge + response fan-out) on vs off
 on the post-layout group, with the same netlist and the same kernel.
@@ -19654,3 +19696,19 @@ comparable: the new printf argument shifts all later code by 4 B, which alone mo
 
 **Status.** Done; seats released. Next: activity dump of the netlist group over the [PWR] window
 for both arms -> PrimeTime.
+
+### 2026-10-29 — SAIF of the netlist group for PrimeTime, mergecast on/off
+**Purpose.** Switching activity of the post-layout group over the benchmark window, for both
+mergecast arms, as PrimeTime input.
+
+**Implementation.** `postlayout_saif=1` -> `-DPOSTLAYOUT_SAIF` -> `tb/tb_postlayout_saif.svh`:
+`$set_gate_level_monitoring("on")` + `$set_toggle_region(<netlist>)` at time 0, `$toggle_start`
+/ `$toggle_stop` + `$toggle_report` on the [PWR] window edges, file `pl_group.saif`
+(`+pl_saif=`). `tb_clock_period_ps` (any build) -> `-DTB_CLOCK_PERIOD_PS`, so the SAIF time
+axis is the 1 GHz target. Validated on a toy UDP design first: works without debug access,
+"on" records nets + cell pins + cell-internal nets ("rtl_on" drops primitive-driven nets),
+one transition max per net per time step. SAIF not VCD: ~400k clock cells toggle every cycle.
+Build `build_pl_saif` (1260 s compile + 174 s elab, same warnings as build_pl_nl).
+
+**Status.** Fleet batch plsaif-20261029-161743-69b3 (nl_mc1, nl_mc0; ~12 GB RSS each), SAIFs
+collected to `hardware/plsaif_<arm>/`.

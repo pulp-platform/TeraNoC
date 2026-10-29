@@ -11,6 +11,10 @@ import "DPI-C" context function byte read_section(input longint address, inout b
     @(posedge clk); \
   while (!signal);
 
+`ifdef POSTLAYOUTGR
+`include "tb_postlayout_xmon.svh"
+`endif
+
 module mempool_tb;
 
   /*****************
@@ -32,7 +36,13 @@ module mempool_tb;
   localparam BootAddr = 0;
   `endif
 
+  // TB_CLOCK_PERIOD_PS (Makefile tb_clock_period_ps) sets the clock for power runs: the design
+  // is cycle-based, so only the time axis changes.
+  `ifdef TB_CLOCK_PERIOD_PS
+  localparam ClockPeriod = `TB_CLOCK_PERIOD_PS * 1ps;
+  `else
   localparam ClockPeriod = 2ns;
+  `endif
   localparam TA          = 0.2ns;
   localparam TT          = 0.8ns;
 
@@ -398,6 +408,122 @@ module mempool_tb;
 
 `endif
 `endif
+`endif
+`endif
+
+`ifdef POSTLAYOUT
+  // Benchmark window in a post-layout run: the csr_trace OR above, which spatz_vlsu also reads
+  // upward (vperf_win), taken over the RTL groups only -- the netlist has no csr_trace_q to probe.
+  // Its edges are printed as the window to dump activity over for power analysis.
+  logic [NumGroups-1:0] csr_trace_grp;
+  logic                 csr_trace_any_global, csr_trace_any_global_q;
+  logic [63:0]          pl_cycle;
+  for (genvar g = 0; g < NumGroups; g++) begin : gen_pl_trace_groups
+    if (PostLayoutGr && (g == 0)) begin : gen_netlist
+      assign csr_trace_grp[g] = 1'b0;
+    end else begin : gen_rtl
+      logic [NumTilesPerGroup*NumCoresPerTile-1:0] core_trace;
+      for (genvar t = 0; t < NumTilesPerGroup; t++) begin : gen_tiles
+        for (genvar c = 0; c < NumCoresPerTile; c++) begin : gen_cores
+          assign core_trace[t*NumCoresPerTile + c] =
+              |dut.i_mempool_cluster.gen_groups_x[g/NumY].gen_groups_y[g%NumY].gen_rtl_group
+                  .i_group.i_mempool_group.gen_tiles[t].i_tile.gen_cores[c].gen_mempool_cc
+                  .riscv_core.i_snitch.csr_trace_q;
+        end
+      end
+      assign csr_trace_grp[g] = |core_trace;
+    end
+  end
+  assign csr_trace_any_global = |csr_trace_grp;
+
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      pl_cycle               <= '0;
+      csr_trace_any_global_q <= 1'b0;
+    end else begin
+      pl_cycle               <= pl_cycle + 1;
+      csr_trace_any_global_q <= csr_trace_any_global;
+      if (csr_trace_any_global != csr_trace_any_global_q)
+        // $realtime, not %t: the TB's $timeformat call changes what %t prints mid-run.
+        $display("[PWR] benchmark window %s at %0.3f ns (cycle %0d)",
+                 csr_trace_any_global ? "opens" : "closes", $realtime, pl_cycle);
+    end
+  end
+
+`ifdef POSTLAYOUTGR
+  // Every port of the netlist group, watched for X/Z from the end of reset: an X on an output
+  // came out of the netlist, one on an input came from the surrounding RTL.
+  `define PL_GROUP dut.i_mempool_cluster.gen_groups_x[0].gen_groups_y[0].gen_postly_group.i_group
+  tb_postlayout_xmon #(.Name("scan_data_o")) i_xmon_scan_data_o (
+    .clk_i(clk), .enable_i(rst_n), .sig_i(16384'(`PL_GROUP.scan_data_o))
+  );
+  tb_postlayout_xmon #(.Name("floo_tcdm_req_o")) i_xmon_floo_tcdm_req_o (
+    .clk_i(clk), .enable_i(rst_n), .sig_i(16384'(`PL_GROUP.floo_tcdm_req_o))
+  );
+  tb_postlayout_xmon #(.Name("floo_tcdm_rsp_o")) i_xmon_floo_tcdm_rsp_o (
+    .clk_i(clk), .enable_i(rst_n), .sig_i(16384'(`PL_GROUP.floo_tcdm_rsp_o))
+  );
+  tb_postlayout_xmon #(.Name("floo_axi_req_o")) i_xmon_floo_axi_req_o (
+    .clk_i(clk), .enable_i(rst_n), .sig_i(16384'(`PL_GROUP.floo_axi_req_o))
+  );
+  tb_postlayout_xmon #(.Name("floo_axi_rsp_o")) i_xmon_floo_axi_rsp_o (
+    .clk_i(clk), .enable_i(rst_n), .sig_i(16384'(`PL_GROUP.floo_axi_rsp_o))
+  );
+  tb_postlayout_xmon #(.Name("floo_axi_wide_o")) i_xmon_floo_axi_wide_o (
+    .clk_i(clk), .enable_i(rst_n), .sig_i(16384'(`PL_GROUP.floo_axi_wide_o))
+  );
+  tb_postlayout_xmon #(.Name("dma_req_ready_o")) i_xmon_dma_req_ready_o (
+    .clk_i(clk), .enable_i(rst_n), .sig_i(16384'(`PL_GROUP.dma_req_ready_o))
+  );
+  tb_postlayout_xmon #(.Name("dma_meta_o_backend_idle_")) i_xmon_dma_meta_o_backend_idle_ (
+    .clk_i(clk), .enable_i(rst_n), .sig_i(16384'(`PL_GROUP.dma_meta_o_backend_idle_))
+  );
+  tb_postlayout_xmon #(.Name("dma_meta_o_trans_complete_")) i_xmon_dma_meta_o_trans_complete_ (
+    .clk_i(clk), .enable_i(rst_n), .sig_i(16384'(`PL_GROUP.dma_meta_o_trans_complete_))
+  );
+  tb_postlayout_xmon #(.Name("rst_ni")) i_xmon_rst_ni (
+    .clk_i(clk), .enable_i(rst_n), .sig_i(16384'(`PL_GROUP.rst_ni))
+  );
+  tb_postlayout_xmon #(.Name("group_id_i")) i_xmon_group_id_i (
+    .clk_i(clk), .enable_i(rst_n), .sig_i(16384'(`PL_GROUP.group_id_i))
+  );
+  tb_postlayout_xmon #(.Name("floo_id_i")) i_xmon_floo_id_i (
+    .clk_i(clk), .enable_i(rst_n), .sig_i(16384'(`PL_GROUP.floo_id_i))
+  );
+  tb_postlayout_xmon #(.Name("floo_tcdm_req_i")) i_xmon_floo_tcdm_req_i (
+    .clk_i(clk), .enable_i(rst_n), .sig_i(16384'(`PL_GROUP.floo_tcdm_req_i))
+  );
+  tb_postlayout_xmon #(.Name("floo_tcdm_rsp_i")) i_xmon_floo_tcdm_rsp_i (
+    .clk_i(clk), .enable_i(rst_n), .sig_i(16384'(`PL_GROUP.floo_tcdm_rsp_i))
+  );
+  tb_postlayout_xmon #(.Name("floo_axi_req_i")) i_xmon_floo_axi_req_i (
+    .clk_i(clk), .enable_i(rst_n), .sig_i(16384'(`PL_GROUP.floo_axi_req_i))
+  );
+  tb_postlayout_xmon #(.Name("floo_axi_rsp_i")) i_xmon_floo_axi_rsp_i (
+    .clk_i(clk), .enable_i(rst_n), .sig_i(16384'(`PL_GROUP.floo_axi_rsp_i))
+  );
+  tb_postlayout_xmon #(.Name("floo_axi_wide_i")) i_xmon_floo_axi_wide_i (
+    .clk_i(clk), .enable_i(rst_n), .sig_i(16384'(`PL_GROUP.floo_axi_wide_i))
+  );
+  tb_postlayout_xmon #(.Name("wake_up_i")) i_xmon_wake_up_i (
+    .clk_i(clk), .enable_i(rst_n), .sig_i(16384'(`PL_GROUP.wake_up_i))
+  );
+  tb_postlayout_xmon #(.Name("ro_cache_ctrl_i")) i_xmon_ro_cache_ctrl_i (
+    .clk_i(clk), .enable_i(rst_n), .sig_i(16384'(`PL_GROUP.ro_cache_ctrl_i))
+  );
+  tb_postlayout_xmon #(.Name("dma_req_i")) i_xmon_dma_req_i (
+    .clk_i(clk), .enable_i(rst_n), .sig_i(16384'(`PL_GROUP.dma_req_i))
+  );
+  tb_postlayout_xmon #(.Name("dma_req_valid_i")) i_xmon_dma_req_valid_i (
+    .clk_i(clk), .enable_i(rst_n), .sig_i(16384'(`PL_GROUP.dma_req_valid_i))
+  );
+`ifdef POSTLAYOUT_BOOTADDR_FIX
+  `include "tb_postlayout_bootaddr.svh"
+`endif
+`ifdef POSTLAYOUT_SAIF
+  `include "tb_postlayout_saif.svh"
+`endif
+  `undef PL_GROUP
 `endif
 `endif
 
@@ -780,6 +906,10 @@ module mempool_tb;
 `endif
 `endif
 
+// Every probe below reaches into the groups' internal hierarchy, which a post-layout netlist does
+// not have. A post-layout run needs only EOC and the power window, so they are compiled out.
+`ifndef POSTLAYOUT
+
 /*****************
  * NoC Profiling *
  ****************/
@@ -885,5 +1015,7 @@ module mempool_tb;
   );
 `endif
 `endif
+
+`endif // POSTLAYOUT
 
 endmodule : mempool_tb

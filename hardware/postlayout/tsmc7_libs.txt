@@ -1,0 +1,16 @@
+/usr/pack/tsmc-7-kgf/tsmc/digital/Front_End/verilog/tcbn07_bwph240l11p57pd_base_lvt_130a/tcbn07_bwph240l11p57pd_base_lvt.v
+/usr/pack/tsmc-7-kgf/tsmc/digital/Front_End/verilog/tcbn07_bwph240l11p57pd_base_svt_130a/tcbn07_bwph240l11p57pd_base_svt.v
+/usr/pack/tsmc-7-kgf/tsmc/digital/Front_End/verilog/tcbn07_bwph240l11p57pd_base_ulvt_130a/tcbn07_bwph240l11p57pd_base_ulvt.v
+/usr/pack/tsmc-7-kgf/tsmc/digital/Front_End/verilog/tcbn07_bwph240l11p57pd_mb_lvt_120b/tcbn07_bwph240l11p57pd_mb_lvt.v
+/usr/pack/tsmc-7-kgf/tsmc/digital/Front_End/verilog/tcbn07_bwph240l11p57pd_mb_svt_120b/tcbn07_bwph240l11p57pd_mb_svt.v
+/usr/pack/tsmc-7-kgf/tsmc/digital/Front_End/verilog/tcbn07_bwph240l11p57pd_mb_ulvt_120b/tcbn07_bwph240l11p57pd_mb_ulvt.v
+/usr/pack/tsmc-7-kgf/tsmc/digital/Front_End/verilog/tcbn07_bwph240l8p57pd_base_lvt_130a/tcbn07_bwph240l8p57pd_base_lvt.v
+/usr/pack/tsmc-7-kgf/tsmc/digital/Front_End/verilog/tcbn07_bwph240l8p57pd_base_svt_130a/tcbn07_bwph240l8p57pd_base_svt.v
+/usr/pack/tsmc-7-kgf/tsmc/digital/Front_End/verilog/tcbn07_bwph240l8p57pd_base_ulvt_130a/tcbn07_bwph240l8p57pd_base_ulvt.v
+/usr/pack/tsmc-7-kgf/tsmc/digital/Front_End/verilog/tcbn07_bwph240l8p57pd_mb_lvt_120b/tcbn07_bwph240l8p57pd_mb_lvt.v
+/usr/pack/tsmc-7-kgf/tsmc/digital/Front_End/verilog/tcbn07_bwph240l8p57pd_mb_svt_120b/tcbn07_bwph240l8p57pd_mb_svt.v
+/usr/pack/tsmc-7-kgf/tsmc/digital/Front_End/verilog/tcbn07_bwph240l8p57pd_mb_ulvt_120b/tcbn07_bwph240l8p57pd_mb_ulvt.v
+/usr/pack/tsmc-7-kgf/tsmc/sram/Compiler/tsn7_l1cache_20151201_130a/verilog.dz/tsn7_l1cache_512x32m4.v
+/usr/pack/tsmc-7-kgf/tsmc/sram/Compiler/tsn7_l1cache_20151201_130a/verilog.dz/tsn7_l1cache_64x128m2.v
+/usr/pack/tsmc-7-kgf/tsmc/sram/Compiler/tsn7_l1cache_20151201_130a/verilog.dz/tsn7_l1cache_128x128m2.v
+/usr/pack/tsmc-7-kgf/tsmc/sram/Compiler/tsn7_l1cache_20151201_130a/verilog.dz/tsn7_l1cache_64x46m2.v

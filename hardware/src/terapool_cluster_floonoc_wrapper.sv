@@ -261,12 +261,13 @@ module terapool_cluster_floonoc_wrapper
       end
 
       if (PostLayoutGr & (x == 0) & (y == 0)) begin : gen_postly_group
+        // Tied, not left open: a floating input is Z into the netlist's scan muxes.
         mempool_group_floonoc_wrapper_postlayout i_group (
           .clk_i              (clk_i),
           .rst_ni             (rst_ni),
           .testmode_i         (testmode_i),
           .scan_enable_i      (scan_enable_i),
-          .scan_data_i        (/* Unconnected */),
+          .scan_data_i        (1'b0),
           .scan_data_o        (/* Unconnected */),
           .group_id_i         (group_id_t'({group_id.x, group_id.y})),
           .floo_id_i          (id_t'(GroupX0Y0 + x*NumY + y)),
@@ -292,6 +293,94 @@ module terapool_cluster_floonoc_wrapper
           .floo_axi_rsp_i     (floo_axi_rsp_in[x][y]),
           .floo_axi_wide_i    (floo_axi_wide_in[x][y])
         );
+
+`ifndef TARGET_SYNTHESIS
+        // The netlist's ports are flat vectors, so a netlist built from a different config (e.g.
+        // another MetaIdWidth) still connects: simulators only warn, then truncate or zero-extend
+        // every flit. Compare each port against the RTL type it stands in for and stop at time 0.
+        initial begin : check_postly_port_widths
+          logic [4:0] mismatches;
+          mismatches = '0;
+          if ($bits(i_group.group_id_i) != $bits(group_id_t)) begin
+            $error("[POSTLAYOUT] group_id_i: netlist %0d b, RTL %0d b",
+                   $bits(i_group.group_id_i), $bits(group_id_t));
+            mismatches++;
+          end
+          if ($bits(i_group.floo_id_i) != $bits(id_t)) begin
+            $error("[POSTLAYOUT] floo_id_i: netlist %0d b, RTL %0d b",
+                   $bits(i_group.floo_id_i), $bits(id_t));
+            mismatches++;
+          end
+          if ($bits(i_group.floo_tcdm_req_o) != $bits(floo_tcdm_req_out[x][y])) begin
+            $error("[POSTLAYOUT] floo_tcdm_req_o: netlist %0d b, RTL %0d b",
+                   $bits(i_group.floo_tcdm_req_o), $bits(floo_tcdm_req_out[x][y]));
+            mismatches++;
+          end
+          if ($bits(i_group.floo_tcdm_rsp_o) != $bits(floo_tcdm_rsp_out[x][y])) begin
+            $error("[POSTLAYOUT] floo_tcdm_rsp_o: netlist %0d b, RTL %0d b",
+                   $bits(i_group.floo_tcdm_rsp_o), $bits(floo_tcdm_rsp_out[x][y]));
+            mismatches++;
+          end
+          if ($bits(i_group.floo_tcdm_req_i) != $bits(floo_tcdm_req_in[x][y])) begin
+            $error("[POSTLAYOUT] floo_tcdm_req_i: netlist %0d b, RTL %0d b",
+                   $bits(i_group.floo_tcdm_req_i), $bits(floo_tcdm_req_in[x][y]));
+            mismatches++;
+          end
+          if ($bits(i_group.floo_tcdm_rsp_i) != $bits(floo_tcdm_rsp_in[x][y])) begin
+            $error("[POSTLAYOUT] floo_tcdm_rsp_i: netlist %0d b, RTL %0d b",
+                   $bits(i_group.floo_tcdm_rsp_i), $bits(floo_tcdm_rsp_in[x][y]));
+            mismatches++;
+          end
+          if ($bits(i_group.wake_up_i) != NumCoresPerGroup) begin
+            $error("[POSTLAYOUT] wake_up_i: netlist %0d b, RTL %0d b",
+                   $bits(i_group.wake_up_i), NumCoresPerGroup);
+            mismatches++;
+          end
+          if ($bits(i_group.ro_cache_ctrl_i) != $bits(ro_cache_ctrl_t)) begin
+            $error("[POSTLAYOUT] ro_cache_ctrl_i: netlist %0d b, RTL %0d b",
+                   $bits(i_group.ro_cache_ctrl_i), $bits(ro_cache_ctrl_t));
+            mismatches++;
+          end
+          if ($bits(i_group.dma_req_i) != $bits(dma_req_t)) begin
+            $error("[POSTLAYOUT] dma_req_i: netlist %0d b, RTL %0d b",
+                   $bits(i_group.dma_req_i), $bits(dma_req_t));
+            mismatches++;
+          end
+          if ($bits(i_group.floo_axi_req_o) != $bits(floo_axi_req_out[x][y])) begin
+            $error("[POSTLAYOUT] floo_axi_req_o: netlist %0d b, RTL %0d b",
+                   $bits(i_group.floo_axi_req_o), $bits(floo_axi_req_out[x][y]));
+            mismatches++;
+          end
+          if ($bits(i_group.floo_axi_rsp_o) != $bits(floo_axi_rsp_out[x][y])) begin
+            $error("[POSTLAYOUT] floo_axi_rsp_o: netlist %0d b, RTL %0d b",
+                   $bits(i_group.floo_axi_rsp_o), $bits(floo_axi_rsp_out[x][y]));
+            mismatches++;
+          end
+          if ($bits(i_group.floo_axi_wide_o) != $bits(floo_axi_wide_out[x][y])) begin
+            $error("[POSTLAYOUT] floo_axi_wide_o: netlist %0d b, RTL %0d b",
+                   $bits(i_group.floo_axi_wide_o), $bits(floo_axi_wide_out[x][y]));
+            mismatches++;
+          end
+          if ($bits(i_group.floo_axi_req_i) != $bits(floo_axi_req_in[x][y])) begin
+            $error("[POSTLAYOUT] floo_axi_req_i: netlist %0d b, RTL %0d b",
+                   $bits(i_group.floo_axi_req_i), $bits(floo_axi_req_in[x][y]));
+            mismatches++;
+          end
+          if ($bits(i_group.floo_axi_rsp_i) != $bits(floo_axi_rsp_in[x][y])) begin
+            $error("[POSTLAYOUT] floo_axi_rsp_i: netlist %0d b, RTL %0d b",
+                   $bits(i_group.floo_axi_rsp_i), $bits(floo_axi_rsp_in[x][y]));
+            mismatches++;
+          end
+          if ($bits(i_group.floo_axi_wide_i) != $bits(floo_axi_wide_in[x][y])) begin
+            $error("[POSTLAYOUT] floo_axi_wide_i: netlist %0d b, RTL %0d b",
+                   $bits(i_group.floo_axi_wide_i), $bits(floo_axi_wide_in[x][y]));
+            mismatches++;
+          end
+          if (mismatches != 0)
+            $fatal(1, "[POSTLAYOUT] %0d netlist port(s) do not match this RTL config", mismatches);
+          $display("[POSTLAYOUT] group (0,0) is the netlist; all port widths match the RTL");
+        end
+`endif
 
       end else begin : gen_rtl_group
         mempool_group_floonoc_wrapper #(

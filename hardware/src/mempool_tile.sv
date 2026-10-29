@@ -92,6 +92,10 @@ module mempool_tile
     `ifdef ICACHE_L0_REFILL_REG `ICACHE_L0_REFILL_REG
     `elsif TARGET_SYNTHESIS 1'b1
     `else 1'b0 `endif;
+  // Simulation contents of the L1 banks before their first write: X by default, zeros with
+  // SIM_ZERO_L1. A post-layout run sets it so the RTL groups match the netlist group, whose SRAM
+  // macros start at 0 (initreg), and a read of a never-written word does not ship an X into it.
+  localparam L1SimInit = `ifdef SIM_ZERO_L1 "zeros" `else "none" `endif;
   // ---------------------------------------------------------------------------------------
   // BURST LANE RETAG -- implemented. Beat b of a burst reaches core data port
   // core_id + (b % NrMemPorts) carrying meta_id = base + (b / NrMemPorts), which is what lets
@@ -784,7 +788,8 @@ module mempool_tile
     tc_sram #(
       .DataWidth(DataWidth          ),
       .NumWords (2**TCDMAddrMemWidth),
-      .NumPorts (1                  )
+      .NumPorts (1                  ),
+      .SimInit  (L1SimInit          )
     ) mem_bank (
       .clk_i  (clk_i     ),
       .rst_ni (rst_ni    ),
