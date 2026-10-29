@@ -19558,3 +19558,65 @@ bankfull / slice-assertion counts identical between images. CMS WARN differs in 
 remote-request latency costs nothing measurable at 8x8 either.
 
 **Status.** Done for simulation. Timing win still to be confirmed by the next block PnR.
+
+## 2026-10-29 00:30 — Group timing cuts from the mshr64split_l1m route_opt report (938fe530..1b2d6d93)
+
+**Purpose.** `mshr64split_l1m` (4x L1: two 1024x32 cuts per bank, 549 macros) closed route_opt at
+WNS -0.385 / TNS -11,851 ns over 212k violating paths. Classifying every path of
+`analyze_design_violations.setup.txt` by start/end family and segmenting the worst of each family
+(`report_timing -physical` into `route_opt/rtl_families/`) found five RTL causes, all handshakes
+crossing the group without a register:
+- dual-context `tcdm_burst_expander` ready depended on valid_i/req_i: master spill -> group xbar ->
+  expander -> xbar -> master spill clock gate (WNS -0.385), and router out-FIFO -> wrapper xbar ->
+  expander -> router out-FIFO (-0.320);
+- L0 icache latches borrowed their whole transparent phase (0.35-0.50 ns on all 200 tightest D pins)
+  because the L1->L0 refill select net was badly buffered once it "met" the close edge; 56.7k
+  downstream paths (44 % of TNS) paid for it;
+- the tile's remote-response input register was a fall_through_register (remote spill / MSHR slice
+  -> core regfile in one cycle, 28k paths, -1,486);
+- DMA response and request handshakes looped DMA -> tile -> DMA (`axi_to_reqrsp` joins p_valid
+  into p_ready; demux ID FIFO push on the tile's q_ready);
+- MSHR slices sat in the group centre: the slice -> remapper -> router input face was failing
+  (-0.249), so the NoC logic anchored them.
+
+**Implementation.**
+- 938fe530: expander ready_o from registered state (a store/AMO behind a draining load is
+  accepted and held, `ctx_blocked`); snitch_icache `L0_REFILL_REG`; instret counts a registered
+  retire pulse.
+- 142f7776: `group_mshr_slice_cuts` -- second register on every slice <-> group NoC path (lane
+  spill outside the slice, slice resp_in spill, per-slice runtime-config copy); tile faces keep one
+  register on purpose so the tiles anchor the slices.
+- 46164817: remote-response input register -> spill_register; DMA response spill before
+  axi_to_reqrsp.
+- 6905855f: DMA request spill per tile, axi_to_reqrsp BufDepth / demux RespDepth 2 -> 4; slice cuts
+  default 1 (config, package fallback, slice SpillRespIn).
+- 1b2d6d93: L0 refill register follows TARGET_SYNTHESIS unless ICACHE_L0_REFILL_REG is set (on for
+  the backend, off in simulation).
+Projected on the report: TNS -11,851 -> about -4,850, WNS -> about -0.27; what remains is mostly
+core <-> local bank and Spatz internal (physical, 4x L1 floorplan).
+
+**Result, 4x4** (VCS on the badile fleet, private 4x4 generated set, l1_bank_size=1024; benchmark
+cycles, prefill fp32 512x128x128 / decode fp16 16x128x4096; retval 0, [SPOT] identical, RH counts
+identical on every arm):
+
+| image | prefill | decode |
+|---|---|---|
+| A: before 938fe530 | 11,175 | 7,971 |
+| C: expander + instret only | 10,694 | 7,965 |
+| B: 938fe530 (L0 reg on) | 10,928 | 8,310 |
+| S1: + slice cuts | 11,437 | 8,055 |
+| R: 46164817 without slice cuts | 11,883 | 8,042 |
+| F: 6905855f, L0 reg on (= backend config) | 11,632 (+4.1 % vs A) | 8,039 (+0.9 %) |
+| K: 1b2d6d93 simulation default (L0 reg off) | **11,096 (-0.7 %)** | **8,111 (+1.8 %)** |
+
+The expander change alone is worth -4.3 % on prefill (stores leave the input earlier). The L0
+refill register costs +2.2 % prefill, +4.3 % decode and ~8 % on scalar code (benchmark starts at
+~109k instead of ~101k cycles). The remote-response spill costs +8.7 % on prefill without the slice
+cuts but only +1.7 % with them.
+
+**Result, 8x8 slice cuts** (142f7776, prefill fp32 1024x64x128 / decode fp16 16x128x4096, L0 reg
+on): off 7,409 / 6,587 -> on 7,562 (+2.1 %) / 6,442 (-2.2 %).
+
+**Status.** Committed. Timing to be confirmed by the next block PnR (backend picks up the slice cuts
+and the L0 register through the package / TARGET_SYNTHESIS defaults); SRAM channels planned on the
+floorplan side.
