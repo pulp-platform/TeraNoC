@@ -39,6 +39,7 @@ if (cd "$APPS" && timeout 3600 make "$APP" \
       config=${CONFIG:-terapool_spatz4_fpu} \
       gemm_m=$M gemm_n=$N gemm_p=$P \
       group_mshr_merge_reqs=${MERGE_REQS:-16} \
+      mshr_mergecast=${MERGECAST:-1} \
       EXTRA_DEFINES="${EXTRA_DEFINES:-}" >"$LOG" 2>&1) \
    && [ -s "$ROOT/software/bin/apps/spatz_apps/$APP" ]; then
   OUT="$ROOT/hardware/${OUT_PREFIX:-}${PFX#sp-}_$S.elf"

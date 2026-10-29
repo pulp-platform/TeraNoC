@@ -140,6 +140,10 @@ DEFINES += -DICACHE_WARMUP=$(if $(icache_warmup),$(icache_warmup),1)
 # V5a negative test of the MSHR CSR reject path. DEBUG ONLY -- default 0, and it lands in the
 # compile line so a sweep gate cannot confuse a negtest binary with a perf one.
 DEFINES += -DMSHR_CFG_NEGTEST=$(if $(mshr_cfg_negtest),$(mshr_cfg_negtest),0)
+# Mergecast on/off for A/B comparisons (e.g. power). 0 programs the MSHR exactly as 1 does but
+# leaves it disabled, so every remote load bypasses it: no merging and no response fan-out. Lands
+# in the compile line for the same reason as the knobs above.
+DEFINES += -DMSHR_MERGECAST=$(if $(mshr_mergecast),$(mshr_mergecast),1)
 DEFINES += -DMSHR_CFG_HOLD_SUBS_SINGLE=$(if $(group_mshr_hold_subs_single),$(group_mshr_hold_subs_single),2)
 DEFINES += -DMSHR_CFG_HOLD_SUBS_BURST=$(if $(group_mshr_hold_subs_burst),$(group_mshr_hold_subs_burst),2)
 DEFINES += -DMSHR_CFG_HOLD_WINDOW_SINGLE=$(if $(group_mshr_hold_window_single),$(group_mshr_hold_window_single),0)

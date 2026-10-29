@@ -19620,3 +19620,37 @@ on): off 7,409 / 6,587 -> on 7,562 (+2.1 %) / 6,442 (-2.2 %).
 **Status.** Committed. Timing to be confirmed by the next block PnR (backend picks up the slice cuts
 and the L0 register through the package / TARGET_SYNTHESIS defaults); SRAM channels planned on the
 floorplan side.
+
+### 2026-10-29 — Mergecast on/off software knob for the post-layout power A/B
+**Purpose.** Compare power/energy of the group MSHR mergecast (merge + response fan-out) on vs off
+on the post-layout group, with the same netlist and the same kernel.
+
+**Implementation.** `mshr_mergecast` make knob (`software/runtime/runtime.mk`, default 1) ->
+`-DMSHR_MERGECAST`; `mshr_cfg_apply_group()` programs every CSR as before and writes ENABLE=0
+instead of 1 when it is 0, so the MSHR stays in its reset bypass state (`mempool_group.sv:1055`
+`cfg_bypass_* = !enable`; the netlist's RTL has the identical CSR block). `[GEMM_HASH]` prints
+`mergecast=`. `gen_gemm_shape_app.sh` passes `MERGECAST=`. ELFs
+`hardware/pl_mc{1,0}_fp16_512x128x128.elf`: the disassembly differs in two instructions only
+(the ENABLE store value and the printf argument), so code layout is identical.
+
+**Merge targets of fp16 512x128x128 (backend 4x4, MERGE_REQS=4, split MSHR).** 4 row chunks x 4
+p-blocks per group -> share_a = share_b = 4 -> hold_subs_single = hold_subs_burst = 4 (the per-slice
+cap), cache_reuse_target = 8 (fp16 half-word aliasing). RTL run: 480 burst entries per group =
+exactly 2048 B-bursts x 15/16 remote / 4; single entries = one per unique remote A word (2048, or
+~1790 where 4 A rows are group-local). Both classes merge at the full 4-way target.
+
+**Result** (fleet batch plmc-20261029-132438-8fdf, `hardware/plmc_<arm>/transcript`):
+
+| arm | design | mergecast | kernel cyc | [PWR] window (cyc) | EOC | [SPOT] | PL-X |
+|---|---|---|---:|---|---|---|---|
+| nl_mc1  | netlist | on  | 7,749 | 91,619-99,000 (7,381) | 0 | = RTL | 21/21 clean |
+| nl_mc0  | netlist | off | 8,954 | 91,629-100,215 (8,586) | 0 | = RTL | 21/21 clean |
+| rtl_mc0 | RTL     | off | 8,971 | 98,519-107,091 | 0 | = RTL | (no netlist) |
+
+Mergecast off costs +15.6% kernel cycles on the netlist. The mergecast-off path works on the
+netlist (same checksums as every other run). The earlier on run (old ELF, 7,634) is NOT
+comparable: the new printf argument shifts all later code by 4 B, which alone moves the kernel by
+115 cycles; nl_mc1/nl_mc0 are the matched pair (2-instruction difference, same layout).
+
+**Status.** Done; seats released. Next: activity dump of the netlist group over the [PWR] window
+for both arms -> PrimeTime.

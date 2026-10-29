@@ -729,11 +729,12 @@ int main() {
   if (mshr_cfg_is_group_writer()) {
     mshr_cfg_tune_gemm(&mshr_cfg, a_use, b, gid);
     if (gid == 0) {
-      printf("[GEMM_HASH] group=0 single=%u burst=%u bits=%u search=%u\n",
+      printf("[GEMM_HASH] group=0 single=%u burst=%u bits=%u search=%u mergecast=%u\n",
              (unsigned)mshr_cfg.bank_shift_single,
              (unsigned)mshr_cfg.bank_shift_burst,
              (unsigned)mshr_cfg.bank_burst_bits,
-             (unsigned)(MSHR_HASH_SEARCH && MSHR_CFG_HASH_MODE == 3));
+             (unsigned)(MSHR_HASH_SEARCH && MSHR_CFG_HASH_MODE == 3),
+             (unsigned)MSHR_MERGECAST);
     }
   }
   // Hash selection changes only the designated writer's local configuration.

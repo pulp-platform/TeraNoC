@@ -40,6 +40,9 @@
 #ifndef MSHR_CFG_SPLIT
 #define MSHR_CFG_SPLIT 0
 #endif
+#ifndef MSHR_MERGECAST
+#define MSHR_MERGECAST 1
+#endif
 #define MSHR_SPLIT_TILES 4u
 #if MSHR_CFG_SPLIT
 #define MSHR_MERGE_CAP ((int)MSHR_MERGE_REQS < (int)MSHR_SPLIT_TILES ? (int)MSHR_MERGE_REQS : (int)MSHR_SPLIT_TILES)
@@ -162,7 +165,8 @@ static inline uint32_t mshr_cfg_apply_group(const mshr_cfg_t *c) {
   mshr_cfg_write(g, tile, MSHR_CSR_STEER_SINGLE_ROW, c->steer_single_row);
 #endif
 
-  mshr_cfg_write(g, tile, MSHR_CSR_ENABLE, 1);          // arm last
+  // arm last; MSHR_MERGECAST=0 (runtime.mk mshr_mergecast) leaves it bypassed for an off baseline
+  mshr_cfg_write(g, tile, MSHR_CSR_ENABLE, MSHR_MERGECAST ? 1 : 0);
   __asm__ volatile("fence" ::: "memory");
   return mshr_cfg_status(g, tile);
 }
