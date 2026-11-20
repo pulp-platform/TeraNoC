@@ -21,7 +21,7 @@ num_x          ?= 8           # 4x4: 4
 # 32 banks of 1 MiB. l2_size MUST be set here too: the base assigns it with `?=` to a literal, so
 # leaving it unset would take the 4x4 simulation default of 512 MiB against this file's 32 banks.
 l2_banks       ?= 32          # 4x4: 16
-l2_size        ?= $(shell echo $$((1048576 * $(l2_banks))))
+l2_size        ?= $(shell echo $$((16777216 * $(l2_banks))))
 
 # ---- AXI/L2 mesh routing (root Makefile, update-floonoc) -----------------------------------
 # Y-first dimension-ordered AXI tables + L2 channels reassigned to the same perimeter points to

@@ -50,7 +50,7 @@ boot_addr ?= 2684354560 # A0000000
 l2_base  ?= 2147483648 # 80000000
 
 # L1 size per bank (in dec)
-l1_bank_size ?= 1024
+l1_bank_size ?= 4096
 
 # Size of sequential memory per core (in bytes)
 # (must be a power of two)

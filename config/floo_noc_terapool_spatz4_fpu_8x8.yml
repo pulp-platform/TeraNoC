@@ -53,7 +53,7 @@ endpoints:
     array: [32]
     addr_range:
       base: 0x8000_0000
-      size: 0x0010_0000
+      size: 0x0100_0000
     sbr_port_protocol:
       - "wide_out"
   - name: "periphs"
@@ -85,11 +85,6 @@ connections:
     - [0, 7]
     dst_dir: "Eject"
   - src: "hbm"
-    src_idx: [0]
-    dst: "group_router"
-    dst_idx: [0, 0]
-    dst_dir: "West"
-  - src: "hbm"
     src_idx: [1]
     dst: "group_router"
     dst_idx: [0, 2]
@@ -117,7 +112,7 @@ connections:
   - src: "hbm"
     src_idx: [6]
     dst: "group_router"
-    dst_idx: [0, 5]
+    dst_idx: [0, 6]
     dst_dir: "West"
   - src: "hbm"
     src_idx: [7]
@@ -127,57 +122,62 @@ connections:
   - src: "hbm"
     src_idx: [8]
     dst: "group_router"
-    dst_idx: [2, 0]
-    dst_dir: "South"
+    dst_idx: [0, 0]
+    dst_dir: "West"
   - src: "hbm"
     src_idx: [9]
     dst: "group_router"
-    dst_idx: [0, 1]
-    dst_dir: "West"
+    dst_idx: [2, 0]
+    dst_dir: "South"
   - src: "hbm"
     src_idx: [10]
     dst: "group_router"
-    dst_idx: [0, 6]
-    dst_dir: "West"
+    dst_idx: [2, 7]
+    dst_dir: "North"
   - src: "hbm"
     src_idx: [11]
     dst: "group_router"
-    dst_idx: [2, 7]
-    dst_dir: "North"
+    dst_idx: [0, 7]
+    dst_dir: "West"
   - src: "hbm"
     src_idx: [12]
     dst: "group_router"
     dst_idx: [3, 0]
     dst_dir: "South"
   - src: "hbm"
+    src_idx: [13]
+    dst: "group_router"
+    dst_idx: [0, 1]
+    dst_dir: "West"
+  - src: "hbm"
     src_idx: [14]
+    dst: "group_router"
+    dst_idx: [0, 5]
+    dst_dir: "West"
+  - src: "hbm"
+    src_idx: [15]
     dst: "group_router"
     dst_idx: [3, 7]
     dst_dir: "North"
   - src: "hbm"
-    src_idx: [15]
-    dst: "group_router"
-    dst_idx: [0, 7]
-    dst_dir: "West"
-  - src: "hbm"
     src_idx: [16]
     dst: "group_router"
-    dst_idx: [4, 0]
+    dst_idx: [6, 0]
     dst_dir: "South"
   - src: "hbm"
     src_idx: [17]
     dst: "group_router"
-    dst_idx: [7, 1]
-    dst_dir: "East"
+    dst_idx: [4, 0]
+    dst_dir: "South"
   - src: "hbm"
     src_idx: [18]
     dst: "group_router"
-    dst_idx: [4, 7]
-    dst_dir: "North"
+    dst_idx: [7, 4]
+    dst_dir: "East"
   - src: "hbm"
     src_idx: [19]
     dst: "group_router"
-    dst_idx: [5, 7]
+    dst_idx: [4, 7]
     dst_dir: "North"
   - src: "hbm"
     src_idx: [20]
@@ -187,13 +187,13 @@ connections:
   - src: "hbm"
     src_idx: [21]
     dst: "group_router"
-    dst_idx: [7, 0]
-    dst_dir: "South"
+    dst_idx: [7, 3]
+    dst_dir: "East"
   - src: "hbm"
     src_idx: [22]
     dst: "group_router"
-    dst_idx: [7, 6]
-    dst_dir: "East"
+    dst_idx: [5, 7]
+    dst_dir: "North"
   - src: "hbm"
     src_idx: [23]
     dst: "group_router"
@@ -202,12 +202,12 @@ connections:
   - src: "hbm"
     src_idx: [24]
     dst: "group_router"
-    dst_idx: [6, 0]
-    dst_dir: "South"
+    dst_idx: [7, 0]
+    dst_dir: "East"
   - src: "hbm"
     src_idx: [25]
     dst: "group_router"
-    dst_idx: [7, 3]
+    dst_idx: [7, 2]
     dst_dir: "East"
   - src: "hbm"
     src_idx: [26]
@@ -223,16 +223,16 @@ connections:
     src_idx: [28]
     dst: "group_router"
     dst_idx: [7, 0]
-    dst_dir: "East"
+    dst_dir: "South"
   - src: "hbm"
     src_idx: [29]
     dst: "group_router"
-    dst_idx: [7, 2]
+    dst_idx: [7, 1]
     dst_dir: "East"
   - src: "hbm"
     src_idx: [30]
     dst: "group_router"
-    dst_idx: [7, 4]
+    dst_idx: [7, 6]
     dst_dir: "East"
   - src: "hbm"
     src_idx: [31]
@@ -240,14 +240,14 @@ connections:
     dst_idx: [7, 7]
     dst_dir: "North"
   # The periph router occupies one perimeter point and carries the peripherals,
-  # the host, and L2 channel 13.
+  # the host, and L2 channel 0.
   - src: "periph_router"
     dst: "group_router"
     dst_idx: [0, 0]
     dst_dir: "South"
   - src: "periph_router"
     dst: "hbm"
-    dst_idx: [13]
+    dst_idx: [0]
   - src: "periph_router"
     dst: "periphs"
   - src: "periph_router"
