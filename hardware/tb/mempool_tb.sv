@@ -906,6 +906,10 @@ module mempool_tb;
 `endif
 `endif
 
+// L1 SRAM accesses per group over the benchmark window, for L1 power estimates. Only with
+// +define+L1_BANK_PROF. Outside the POSTLAYOUT guard: it reads only the RTL groups' banks.
+`include "tb_l1_bank_access.svh"
+
 // Every probe below reaches into the groups' internal hierarchy, which a post-layout netlist does
 // not have. A post-layout run needs only EOC and the power window, so they are compiled out.
 `ifndef POSTLAYOUT
