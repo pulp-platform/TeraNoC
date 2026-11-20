@@ -258,9 +258,44 @@ FLOO_NOC  ?= $(addprefix $(FLOO_GEN_OUTDIR)/,$(subst .yml,_floo_noc.sv,$(notdir 
 $(info FLOO_DIR: $(FLOO_DIR))
 
 # Generates the sources for FlooNoC
-.PHONY: update-floonoc install-floogen clean-floonoc
-install-floogen:
-	$(MAKE) -C $(FLOO_DIR) install-floogen
+#
+# floogen is run IN PLACE from this repo's own checkout ($(FLOO_DIR)/floogen) -- never from a
+# pip-installed `floogen` on PATH. Other projects on this machine install a different floogen
+# (e.g. ManyRVData's, a subcommand CLI that rejects `-c ... --only-pkg` outright), and a bare
+# `floogen` or `pip install .` would pick up or clobber whichever was installed last.
+# PYTHONPATH puts $(FLOO_DIR) ahead of every site-packages / editable-install entry, and
+# check-floogen proves `import floogen` resolves there before anything is generated.
+#
+# FLOOGEN_PYTHON: the first interpreter >= 3.10 (floogen's requires-python) among python3,
+# python3.12, python3.11, python3.10. It needs floogen's dependencies (pydantic, networkx, mako,
+# ruamel.yaml, hjson, matplotlib) but NOT floogen itself. Override if needed.
+# VERIBLE_BIN: floogen formats its output through verible-verilog-format found on PATH; we prepend
+# its directory for the floogen call only, so nothing else on that PATH leaks in. Defaults to the
+# one on PATH, else the documented terapool_noc conda env's copy.
+FLOOGEN_PYTHON ?= $(shell for p in python3 python3.12 python3.11 python3.10; do \
+                    command -v $$p >/dev/null 2>&1 && \
+                    $$p -c 'import sys; sys.exit(sys.version_info < (3, 10))' 2>/dev/null && \
+                    { command -v $$p; break; }; done)
+VERIBLE_BIN    ?= $(or $(shell command -v verible-verilog-format 2>/dev/null),\
+                    $(wildcard /home/dishen/.conda/envs/terapool_noc/bin/verible-verilog-format))
+FLOO_PYENV      = PYTHONPATH=$(FLOO_DIR)$(if $(PYTHONPATH),:$(PYTHONPATH))
+FLOOGEN         = $(FLOO_PYENV) PATH=$(dir $(VERIBLE_BIN)):$$PATH $(FLOOGEN_PYTHON) -m floogen.floo_gen
+
+.PHONY: update-floonoc install-floogen check-floogen clean-floonoc
+check-floogen:
+	@test -n "$(FLOOGEN_PYTHON)" || { echo "[floogen] no python >= 3.10 found (tried python3, python3.12, python3.11, python3.10); set FLOOGEN_PYTHON=/path/to/python3.x"; exit 1; }
+	@test -x "$(VERIBLE_BIN)" || { echo "[floogen] verible-verilog-format not found; set VERIBLE_BIN=/path/to/verible-verilog-format"; exit 1; }
+	@$(FLOO_PYENV) $(FLOOGEN_PYTHON) -c 'import os, sys, floogen; \
+	  src = os.path.realpath(os.path.dirname(floogen.__file__)); \
+	  want = os.path.realpath(os.path.join("$(FLOO_DIR)", "floogen")); \
+	  sys.exit(0) if src == want else sys.exit("[floogen] import floogen resolves to %s, expected %s" % (src, want))' \
+	  || exit 1
+	@$(FLOO_PYENV) $(FLOOGEN_PYTHON) -c 'import pydantic, networkx, mako, ruamel.yaml, hjson' 2>/dev/null \
+	  || { echo "[floogen] $(FLOOGEN_PYTHON) lacks floogen dependencies (pydantic networkx mako ruamel.yaml hjson matplotlib)"; exit 1; }
+	@echo "[floogen] using $(FLOO_DIR)/floogen under $(FLOOGEN_PYTHON), verible $(VERIBLE_BIN)"
+
+# Kept for old command lines: there is nothing to install any more -- the source is used in place.
+install-floogen: check-floogen
 
 # Per-router IdTable routing tables for the AXI/L2 network. floogen does not emit
 # usable ones: `gen_router_tables` covers SUBORDINATE endpoints only (so responses
@@ -268,14 +303,7 @@ install-floogen:
 # nx.shortest_path, whose turn model is neither XY nor YX and can therefore
 # deadlock. gen_floo_route_tables.py computes strictly XY dimension-ordered tables
 # and verifies every (router, destination) pair before emitting.
-# It imports floogen, so it must run under the interpreter floogen is installed in:
-# take it from floogen's own shebang. `cut -c3-` strips the "#!" -- do NOT use a sed
-# expression containing '#', which make reads as the start of a comment and which
-# leaves the $(shell ...) call unterminated.
-FLOOGEN_PYTHON ?= $(shell head -1 "$$(command -v floogen)" 2>/dev/null | cut -c3-)
-ifeq ($(strip $(FLOOGEN_PYTHON)),)
-FLOOGEN_PYTHON := python3
-endif
+# It imports floogen, so it runs under FLOOGEN_PYTHON with the same in-repo PYTHONPATH as floogen.
 FLOO_RT_GEN = $(ROOT_DIR)/hardware/scripts/gen_floo_route_tables.py
 # Turn model for the AXI/L2 network. `shortest` reproduces the historical
 # source-routed paths exactly (measured cycle-identical); `xy` is acyclic by
@@ -290,13 +318,13 @@ FLOO_TURN_MODEL ?= shortest
 FLOO_PLACEMENT ?= hops
 
 update-floonoc: $(FLOO_NOC)
-$(FLOO_NOC): install-floogen $(FLOO_CFG) $(FLOO_RT_GEN) \
+$(FLOO_NOC): check-floogen $(FLOO_CFG) $(FLOO_RT_GEN) \
              $(ROOT_DIR)/hardware/scripts/gen_perimeter_map.py $(ROOT_DIR)/config/$(config).mk
 	python3 $(ROOT_DIR)/hardware/scripts/gen_perimeter_map.py --num-x $(num_x) --num-y $$(( $(num_groups) / $(num_x) )) -o $(FLOO_GEN_OUTDIR) \
 	  --l2-size $(l2_size) --emit-yml $(FLOO_CFG) \
 	  --objective $(FLOO_PLACEMENT) --link-turn-model $(FLOO_TURN_MODEL)
-	floogen -c $(FLOO_CFG) -o $(FLOO_GEN_OUTDIR) --only-pkg
-	$(FLOOGEN_PYTHON) $(FLOO_RT_GEN) -c $(FLOO_CFG) -o $(FLOO_GEN_OUTDIR) --turn-model $(FLOO_TURN_MODEL)
+	$(FLOOGEN) -c $(FLOO_CFG) -o $(FLOO_GEN_OUTDIR) --only-pkg
+	$(FLOO_PYENV) $(FLOOGEN_PYTHON) $(FLOO_RT_GEN) -c $(FLOO_CFG) -o $(FLOO_GEN_OUTDIR) --turn-model $(FLOO_TURN_MODEL)
 
 #############################
 # Control-register file     #
