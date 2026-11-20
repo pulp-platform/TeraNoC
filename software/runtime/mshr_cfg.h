@@ -115,6 +115,8 @@ static inline int mshr_cfg_is_group_writer(void) {
 
 /// Write one CSR of the caller's group. Any tile in that group is valid.
 static inline void mshr_cfg_write(uint32_t group, uint32_t tile, uint32_t csr, uint32_t val) {
+  // MSHR_MERGECAST=0 holds the MSHR bypassed through every enable an app writes itself
+  if (!MSHR_MERGECAST && csr == MSHR_CSR_ENABLE) val = 0;
   volatile uint32_t *p = (volatile uint32_t *)(uintptr_t)(
       GROUP_CONTROL_BASE + ((GROUP_BARRIER_WORD + csr) * MSHR_WORD_STRIDE) +
       (group * MSHR_GROUP_STRIDE) + (tile * MSHR_TILE_STRIDE) +
